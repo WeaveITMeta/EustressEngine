@@ -22,8 +22,12 @@ use bevy::reflect::Reflect;
 /// Website Height slider endpoints.
 pub const MIN_HEIGHT_M: f32 = 1.45;
 pub const MAX_HEIGHT_M: f32 = 2.05;
-/// Matches `client/src/main.rs:68` — the Client already used real gravity;
-/// this makes it the shared constant rather than a coincidence.
+/// Standard gravity, m/s²: the value of `eustress_common::units::STANDARD_GRAVITY`,
+/// which this crate sits below and cannot name. A test in `common` pins the two.
+///
+/// It defines a jump, not a fall: [`ResolvedMotion::jump_velocity`] turns an
+/// authored apex into a take-off speed at this gravity, while the controller
+/// falls under the Space's live gravity.
 pub const GRAVITY_MPS2: f32 = 9.80665;
 /// Leg length of the reference body the shipped Mixamo clips were authored
 /// against. `stride_scale` is measured relative to this.
@@ -155,13 +159,17 @@ pub struct ResolvedMotion {
     pub walk_speed: f32,
     pub run_speed: f32,
     pub sprint_multiplier: f32,
-    /// Metres above the take-off point. Converted to an impulse via
-    /// `v = sqrt(2·g·apex)` so "jump 0.95 m" is a descriptor number rather
-    /// than the magic 50.0 (`Humanoid` schema) or 5.5 that shipped before.
+    /// Metres above the take-off point, at standard gravity. Converted to an
+    /// impulse via `v = sqrt(2·g₀·apex)` so "jump 0.95 m" is a descriptor
+    /// number rather than the magic 50.0 (`Humanoid` schema) or 5.5 that
+    /// shipped before. The take-off speed is what stays fixed, so under a
+    /// Space's gravity `g` the jump peaks at `apex · g₀ / g`.
     pub jump_apex_m: f32,
 }
 
 impl ResolvedMotion {
+    /// Take-off speed, m/s, that peaks at [`Self::jump_apex_m`] under
+    /// standard gravity ([`GRAVITY_MPS2`]).
     pub fn jump_velocity(&self) -> f32 {
         (2.0 * GRAVITY_MPS2 * self.jump_apex_m.max(0.0)).sqrt()
     }

@@ -602,6 +602,8 @@ fn complete_steps(
         ),
         With<SpawnedByAvatarRuntime>,
     >,
+    animator_driven: Query<(), With<eustress_common::animation::AnimatorDriven>>,
+    live: Option<Res<eustress_common::animation::LiveTree>>,
 ) {
     let finished = {
         let Ok(mut comms) = agent.comms.lock() else { return };
@@ -724,7 +726,40 @@ fn complete_steps(
         }
     }
 
-    if let Some(g) = graphs.iter().next() {
+    // Once an Animator drives the avatar, its tracks are the blend: the
+    // default Animate's idle, walk, run and jump. Before that, the avatar's
+    // own motion graph is.
+    if let (false, Some(live)) = (animator_driven.is_empty(), live.as_deref()) {
+        use eustress_common::datamodel::{DmValue, InstanceId};
+        let g = live.dm.lock();
+        let animator = g
+            .local_player
+            .and_then(|p| match g.get_prop(p, "Character") {
+                Some(DmValue::Instance(c)) => Some(c),
+                _ => None,
+            })
+            .and_then(|c| g.find_first_child_of_class(c, "Humanoid", false))
+            .and_then(|h| g.find_first_child_of_class(h, "Animator", false));
+        if let Some(animator) = animator {
+            let tracks = g.tracks_of(animator);
+            let track = |name: &str| tracks.iter().copied().find(|t| g.name_of(*t) == Some(name));
+            let num = |t: Option<InstanceId>, prop: &str, missing: f32| {
+                t.and_then(|t| g.get_prop(t, prop)).and_then(|v| v.as_number()).map_or(missing, |n| n as f32)
+            };
+            let (idle, walk, run, jump) = (track("idle"), track("walk"), track("run"), track("jump"));
+            obs.clip_elapsed = num(idle, "TimePosition", 0.0);
+            obs.walk_elapsed = num(walk, "TimePosition", -1.0);
+            obs.walk_speed_mult = num(walk, "Speed", -1.0);
+            obs.clip_weights = [
+                num(idle, "WeightCurrent", -1.0),
+                num(walk, "WeightCurrent", -1.0),
+                num(run, "WeightCurrent", -1.0),
+                num(jump, "WeightCurrent", -1.0),
+            ];
+            obs.ground_weight = obs.clip_weights[..3].iter().map(|w| w.max(0.0)).sum();
+            obs.air_weight = obs.clip_weights[3].max(0.0);
+        }
+    } else if let Some(g) = graphs.iter().next() {
         if let Ok(p) = players.get(g.player) {
             // Player weights are pinned to 1.0 and act as an on/off gate; the
             // real blend lives in the graph asset, so report that.

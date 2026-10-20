@@ -5,6 +5,19 @@
 **Date:** 2026-05-26
 **Scope:** Lighting subsystem audit + Rust backing plan for Waves 2–4.
 
+> **Where the light classes live now (2026-09-24).** This audit records the
+> state of May 2026. PointLight, SpotLight, SurfaceLight and DirectionalLight
+> are built for Studio and the Player alike by
+> `eustress/crates/common/src/plugins/light_classes.rs`: the display-referred
+> brightness model, Range as reach, the Roblox cone Angle, SpotLight and
+> SurfaceLight shining out of their part's Face (a SpotLight on an emitter
+> child; RectLight is not used, since it needs the `area_light_luts` feature,
+> caps at eight lights and casts no shadows), the `[light]` TOML section and
+> the Player's Space light reader. Studio's Properties rows, edits and insert
+> placement are `engine/src/ui/light_panel.rs`; the culler is
+> `engine/src/light_cull.rs`; selection gizmos, markers and picking are
+> `engine/src/light_sync.rs`.
+
 > **Cross-reference notice:** This document references `CLASS_REGISTRY.md` and `RENDER_CASCADE.md` per the task brief. Neither file currently exists under `E:/Workspace/EustressEngine/docs/architecture/` (verified). The plan below specifies the contracts these documents are expected to define. Wave 2 must produce those prerequisites or this plan loses its anchors.
 
 ---

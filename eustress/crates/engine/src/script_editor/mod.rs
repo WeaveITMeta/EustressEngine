@@ -32,7 +32,9 @@
 //! the same API can be added later (Phase 8) for external editors.
 
 pub mod analyzer;
+pub mod language;
 pub mod plugin;
+pub mod rune_service;
 pub mod runtime_snapshot;
 pub mod workspace;
 #[cfg(feature = "lsp")]

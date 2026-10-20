@@ -27,7 +27,7 @@ const LIFT_PX: f64 = 10.0;
 
 /// Whether the visitor asked for reduced motion. Checked per interaction
 /// rather than cached, so a mid-session preference change is honoured.
-fn prefers_reduced_motion() -> bool {
+pub fn prefers_reduced_motion() -> bool {
     web_sys::window()
         .and_then(|w| w.match_media("(prefers-reduced-motion: reduce)").ok().flatten())
         .map(|m| m.matches())

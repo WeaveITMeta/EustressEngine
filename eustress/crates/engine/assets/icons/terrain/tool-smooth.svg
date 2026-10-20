@@ -1,0 +1,5 @@
+<!-- Terrain Smooth: a jagged line on the left that becomes a smooth curve
+     on the right. Lucide-style, 24x24, currentColor. -->
+<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+  <path d="M2 14L4.5 7.5L7.25 16.5L10 9L12 13C14.25 13 15 10 17.25 10S20.75 12.5 22 12.5"/>
+</svg>

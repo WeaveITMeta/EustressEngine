@@ -402,7 +402,7 @@ pub fn hot_recompile_one_script(
 
 /// The callback names any Eustress Rune program may define as an entrypoint.
 /// Kept in lock-step with `engine::soul::kernel::laws::EntrypointContract`.
-pub const RUNE_ENTRYPOINTS: &[&str] = &["main", "on_init", "on_update", "on_ready", "on_exit"];
+pub const RUNE_ENTRYPOINTS: &[&str] = &["main", "on_init", "on_update", "on_ready", "on_exit", "process_receipt"];
 
 /// Wrap a bare command-bar snippet in `pub fn main() { … }` so it is a valid
 /// Rune *program*.

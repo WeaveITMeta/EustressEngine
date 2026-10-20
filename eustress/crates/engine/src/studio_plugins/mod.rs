@@ -137,6 +137,10 @@ impl Plugin for StudioPluginSystem {
             .register_type::<SimMode>()
             .add_message::<PluginMenuActionEvent>()
             .add_message::<PluginActionEvent>()
+            // The UI Builder's panel and systems. Added here, with the other
+            // built-in Studio plugins, so every app that has the plugin system
+            // has it too; `setup_builtin_plugins` adds its Plugins-tab button.
+            .add_plugins(crate::ui_builder::UiBuilderPlugin)
             .add_systems(Startup, setup_builtin_plugins)
             .add_systems(Update, (
                 advance_sim_clock,
@@ -156,11 +160,19 @@ impl Plugin for StudioPluginSystem {
 
 /// Advance the simulation clock and sync with LightingService.
 /// Only advances when PlayModeState is Playing — sun stays static during editing.
+///
+/// The clock follows other writers of the time of day rather than overriding
+/// them. A script setting `Lighting.ClockTime` moves `LightingService` between
+/// this system's writes; when the service no longer holds the value written
+/// here last, the clock adopts the new time and keeps ticking from it.
+/// Overwriting it instead put the sun back every frame, so a scripted dusk
+/// flipped between day and night several times a second and never stuck.
 fn advance_sim_clock(
     time: Res<Time>,
     mut clock: ResMut<SimClock>,
     lighting: Option<ResMut<eustress_common::services::LightingService>>,
     play_state: Option<Res<State<crate::play_mode::PlayModeState>>>,
+    mut last_written: Local<Option<f32>>,
 ) {
     // Only tick the simulation clock during play mode
     let is_playing = play_state.as_ref()
@@ -180,6 +192,9 @@ fn advance_sim_clock(
         if clock.current == 0.0 && clock.frame_count == 0 {
             clock.current = lighting.time_of_day as f64 * 24.0 * 3600.0;
         }
+        if last_written.is_some_and(|v| (lighting.time_of_day - v).abs() > 0.0001) {
+            clock.current = lighting.time_of_day as f64 * 24.0 * 3600.0;
+        }
         clock.tick(time.delta_secs());
 
         let sim_hours = (clock.current / 3600.0) % 24.0;
@@ -190,7 +205,9 @@ fn advance_sim_clock(
         } else {
             lighting.bypass_change_detection();
         }
+        *last_written = Some(lighting.time_of_day);
     } else {
+        *last_written = None;
         lighting.bypass_change_detection();
     }
 }
@@ -219,6 +236,13 @@ fn setup_builtin_plugins(
     registry.register(crate::script_plugin_host::PluginHostControlsPlugin::default());
     if let Err(e) = manager.enable_plugin(&mut registry, "plugin-host-controls") {
         warn!("🔌 Failed to enable plugin-host-controls plugin: {}", e);
+    }
+
+    // UI Builder: a whole game UI from one line (`ui_builder/`). The button
+    // fires the same `uibuilder:toggle` action as the UI ribbon tab's.
+    registry.register(crate::ui_builder::UiBuilderStudioPlugin::default());
+    if let Err(e) = manager.enable_plugin(&mut registry, "ui-builder") {
+        warn!("🔌 Failed to enable ui-builder plugin: {}", e);
     }
 
     info!("🔌 Plugin system ready. {} plugins loaded, {} custom tabs.",
@@ -262,7 +286,13 @@ fn handle_plugin_action_events(
     child_of_query: Query<&ChildOf>,
     mut notifications: ResMut<crate::notifications::NotificationManager>,
     mut file_registry: Option<ResMut<crate::space::file_loader::SpaceFileRegistry>>,
-    loaded_from_file: Query<&crate::space::LoadedFromFile>,
+    // Space files: which file each entity loaded from, and the open Space new
+    // folders are written into. Bundled because this system is at Bevy's
+    // 16-param ceiling.
+    space_files: (
+        Query<&crate::space::LoadedFromFile>,
+        Option<Res<crate::space::SpaceRoot>>,
+    ),
     mut instance_files: Query<&mut crate::space::instance_loader::InstanceFile>,
     mut explorer_state: Option<ResMut<crate::ui::slint_ui::UnifiedExplorerState>>,
     // Mark our own writes so the file watcher's debounce skips them.
@@ -279,6 +309,7 @@ fn handle_plugin_action_events(
     }
     let Some(selection_manager) = selection_manager else { return };
     use crate::classes::{Instance, ClassName, BillboardGui, TextLabel};
+    let (loaded_from_file, space_root_res) = (&space_files.0, &space_files.1);
 
     for event in events.read() {
         info!("🔌 Processing plugin action: {}", event.action_id);
@@ -417,7 +448,7 @@ fn handle_plugin_action_events(
                     if lff.path.is_dir() { lff.path.clone() }
                     else { lff.path.parent().unwrap_or(lff.path.as_path()).to_path_buf() }
                 } else {
-                    crate::space::default_space_root().join("Workspace")
+                    crate::space::open_space_root(space_root_res.as_deref()).join("Workspace")
                 };
 
                 let bb_dir = part_dir.join(&safe_name);
@@ -688,7 +719,7 @@ fn handle_plugin_action_events(
             }
             "mindspace:save" => {
                 // Save all BillboardGui entities to TOML on disk
-                let space_root = crate::space::default_space_root();
+                let space_root = crate::space::open_space_root(space_root_res.as_deref());
                 let starter_gui = space_root.join("StarterGui");
                 if let Err(e) = std::fs::create_dir_all(&starter_gui) {
                     warn!("Failed to create StarterGui directory: {}", e);
@@ -790,17 +821,70 @@ fn handle_plugin_action_events(
                     notifications.info("No BillboardGui entities to save");
                 }
             }
-            "mindspace:set_source" => {
-                notifications.info("Set source for connection");
-            }
             "mindspace:connect" => {
-                notifications.info("Connect nodes not yet implemented");
+                // Click order is selection order: the first node picked is
+                // the hub each other selected node is joined to. With one
+                // node selected it takes two clicks: the first marks the
+                // source, the next joins the then-selected node to it.
+                let selected_ids = selection_manager.0.read().get_selected();
+                let mut nodes: Vec<Entity> = Vec::new();
+                for id in &selected_ids {
+                    let Some(mut node) = instance_query.iter()
+                        .find(|(e, i)| format!("{}v{}", e.index(), e.generation()) == *id || i.name == *id)
+                        .map(|(e, _)| e)
+                    else {
+                        continue;
+                    };
+                    // A picked label stands for the node it floats over.
+                    while let Ok((_, inst)) = instance_query.get(node) {
+                        if !matches!(inst.class_name, ClassName::BillboardGui | ClassName::TextLabel) {
+                            break;
+                        }
+                        let Ok(parent) = child_of_query.get(node) else { break };
+                        node = parent.parent();
+                    }
+                    if !nodes.contains(&node) {
+                        nodes.push(node);
+                    }
+                }
+                let pairs: Vec<(Entity, Entity)> = match nodes.as_slice() {
+                    [] => {
+                        notifications.warning("Select two or more nodes to connect");
+                        continue;
+                    }
+                    [only] => match studio_state.mindspace_link_source.take() {
+                        Some(source) if source != *only => vec![(source, *only)],
+                        _ => {
+                            studio_state.mindspace_link_source = Some(*only);
+                            notifications.info("Source set. Select the other node and click Connect again.");
+                            continue;
+                        }
+                    },
+                    [hub, rest @ ..] => {
+                        studio_state.mindspace_link_source = None;
+                        rest.iter().map(|target| (*hub, *target)).collect()
+                    }
+                };
+                commands.queue(move |world: &mut World| connect_mindspace_nodes(world, pairs));
             }
-            "mindspace:billboard-larger" | "mindspace:billboard-smaller" => {
+            "mindspace:import" | "mindspace:export" | "mindspace:ai_suggest"
+            | "mindspace:ai_layout" | "mindspace:ai_summarize" => {
+                let what = match event.action_id.as_str() {
+                    "mindspace:import" => "Importing a mind map",
+                    "mindspace:export" => "Exporting a mind map",
+                    "mindspace:ai_suggest" => "AI suggestions",
+                    "mindspace:ai_layout" => "Auto layout",
+                    _ => "AI summaries",
+                };
+                notifications.info(format!("{what} is not built yet"));
+            }
+            // Ids arrive with dashes turned into underscores (the Slint
+            // bridge normalizes every plugin action id).
+            "mindspace:billboard_larger" | "mindspace:billboard_smaller" => {
                 // 5% per click, compounding. Shrink uses 1/1.05 rather than
                 // 0.95 so Larger→Smaller returns to the original size exactly
                 // instead of drifting down 0.25% per round trip.
-                let grow = event.action_id == "mindspace:billboard-larger";
+                let grow = event.action_id == "mindspace:billboard_larger";
                 let factor: f32 = if grow { 1.05 } else { 1.0 / 1.05 };
 
                 let selected_ids = selection_manager.0.read().get_selected();
@@ -869,89 +953,6 @@ fn handle_plugin_action_events(
                     count,
                     if grow { "grown" } else { "shrunk" }
                 ));
-            }
-            "mindspace:link" => {
-                // Link two entities using Attachments and a Beam
-                // First click sets source, second click creates the beam connection
-                let selected_ids = selection_manager.0.read().get_selected();
-                
-                if selected_ids.is_empty() {
-                    notifications.warning("Select an entity to start linking");
-                    continue;
-                }
-                
-                // Find the selected entity
-                let selected_id = selected_ids[0].clone();
-                let selected_entity = instance_query.iter()
-                    .find(|(entity, instance)| {
-                        let entity_id = format!("{}v{}", entity.index(), entity.generation());
-                        entity_id == selected_id || instance.name == selected_id
-                    })
-                    .map(|(entity, _)| entity);
-                
-                if let Some(entity) = selected_entity {
-                    if let Some(source) = studio_state.mindspace_link_source {
-                        if source != entity {
-                            // We have source and target - create Beam connection
-                            use crate::classes::{Attachment, Beam};
-                            use crate::spawn::{spawn_attachment, spawn_beam};
-                            
-                            // Create attachment on source entity
-                            let source_attachment_instance = Instance {
-                                name: "LinkAttachment0".to_string(),
-                                class_name: ClassName::Attachment,
-                                ..Default::default()
-                            };
-                            let source_attachment = Attachment::default();
-                            let source_att_entity = spawn_attachment(&mut commands, source_attachment_instance, source_attachment, source);
-                            commands.entity(source_att_entity).insert(ChildOf(source));
-                            
-                            // Create attachment on target entity
-                            let target_attachment_instance = Instance {
-                                name: "LinkAttachment1".to_string(),
-                                class_name: ClassName::Attachment,
-                                ..Default::default()
-                            };
-                            let target_attachment = Attachment::default();
-                            let target_att_entity = spawn_attachment(&mut commands, target_attachment_instance, target_attachment, entity);
-                            commands.entity(target_att_entity).insert(ChildOf(entity));
-                            
-                            // Create Beam connecting the two attachments
-                            let beam_instance = Instance {
-                                name: "MindSpaceLink".to_string(),
-                                class_name: ClassName::Beam,
-                                ..Default::default()
-                            };
-                            let mut beam = Beam::default();
-                            // Use entity index as u32 ID for attachment references
-                            beam.attachment0 = Some(source_att_entity.index().index());
-                            beam.attachment1 = Some(target_att_entity.index().index());
-                            // Green color sequence for the beam
-                            beam.color_sequence = vec![(0.0, bevy::color::Color::srgb(0.3, 0.8, 0.3))];
-                            beam.width0 = 0.1;
-                            beam.width1 = 0.1;
-                            beam.enabled = true;
-                            
-                            let beam_entity = spawn_beam(&mut commands, beam_instance, beam);
-                            commands.entity(beam_entity).insert(ChildOf(source));
-                            
-                            notifications.success("Created link between entities");
-                            info!("✅ Created Beam link from {:?} to {:?}", source, entity);
-                            
-                            // Clear source
-                            studio_state.mindspace_link_source = None;
-                        } else {
-                            notifications.warning("Cannot link entity to itself");
-                        }
-                    } else {
-                        // Set as source
-                        studio_state.mindspace_link_source = Some(entity);
-                        notifications.info("Source set. Select another entity and click Link again.");
-                        info!("🔗 MindSpace: Link source set to {:?}", entity);
-                    }
-                } else {
-                    notifications.error("Could not find selected entity");
-                }
             }
             "soul:build_all" => {
                 // Queue a build for every entity that has SoulScriptData — we
@@ -1411,4 +1412,114 @@ fn sync_mindspace_selection(
     
     // No TextLabel found - clear buffer for new label creation
     studio_state.mindspace_edit_buffer.clear();
+}
+
+/// One edge per (source, target) pair: a Beam folder beside the source node
+/// whose [beam] table names both nodes by `Instance.uuid`, the form the
+/// SpatialIntelligenceMindMap edges use, styled like those edges. The file
+/// watcher spawns it as it does for Insert; the loader gives it its
+/// endpoints and `sync_beam_transforms` keeps it stretched between the nodes.
+fn connect_mindspace_nodes(world: &mut World, pairs: Vec<(Entity, Entity)>) {
+    use crate::classes::Instance;
+    use crate::spawners::audio_vfx::BeamSegmentLink;
+
+    let space_root = crate::space::open_space_root(world.get_resource::<crate::space::SpaceRoot>());
+    // Edges that already exist, both directions, so Connect never doubles one.
+    let mut linked: std::collections::HashSet<(String, String)> = Default::default();
+    let mut edges = world.query::<&BeamSegmentLink>();
+    for link in edges.iter(world) {
+        if let (Some(a), Some(b)) = (&link.attachment0_uuid, &link.attachment1_uuid) {
+            linked.insert((a.clone(), b.clone()));
+            linked.insert((b.clone(), a.clone()));
+        }
+    }
+    // The folder a node lives in on disk (its parent folder for a folder
+    // instance, the file's folder for a flat one).
+    let node_home = |world: &World, e: Entity| -> Option<std::path::PathBuf> {
+        let path = world
+            .get::<crate::space::instance_loader::InstanceFile>(e)
+            .map(|f| f.toml_path.clone())
+            .or_else(|| world.get::<crate::space::LoadedFromFile>(e).map(|l| l.path.clone()))?;
+        let own = if path.file_name().is_some_and(|n| n == "_instance.toml") {
+            path.parent()?.to_path_buf()
+        } else {
+            path
+        };
+        own.parent().map(|p| p.to_path_buf())
+    };
+    // Node names can be whole sentences; keep folder names short and plain.
+    let short = |s: &str| -> String {
+        s.chars().filter(|c| c.is_alphanumeric() || *c == '_').take(32).collect()
+    };
+
+    let (mut created, mut problems) = (Vec::new(), Vec::new());
+    for (source, target) in pairs {
+        let (Some(a), Some(b)) = (world.get::<Instance>(source).cloned(), world.get::<Instance>(target).cloned()) else {
+            continue;
+        };
+        if a.uuid.is_empty() || b.uuid.is_empty() {
+            problems.push(format!("'{}' or '{}' has no uuid yet; save the Space and try again", a.name, b.name));
+            continue;
+        }
+        if linked.contains(&(a.uuid.clone(), b.uuid.clone())) {
+            continue;
+        }
+        let dir = node_home(world, source).unwrap_or_else(|| space_root.join("Workspace"));
+        let name = format!("Edge_{}_{}", short(&a.name), short(&b.name));
+        match crate::space::instance_create::create_instance(&dir, "Beam", Some(&name), Default::default()) {
+            Ok(edge) => {
+                if let Err(e) = write_edge_endpoints(&edge.toml_path, &a.uuid, &b.uuid) {
+                    problems.push(format!("{}: {e}", edge.toml_path.display()));
+                }
+                linked.insert((a.uuid.clone(), b.uuid.clone()));
+                linked.insert((b.uuid, a.uuid));
+                created.push(edge.folder_path);
+            }
+            Err(e) => problems.push(e.to_string()),
+        }
+    }
+
+    if !created.is_empty() {
+        if let Some(mut stack) = world.get_resource_mut::<crate::undo::UndoStack>() {
+            stack.push_labeled(
+                format!("Connect {} node pair(s)", created.len()),
+                crate::undo::Action::spawn_folders(&space_root, &created),
+            );
+        }
+    }
+    if let Some(mut notes) = world.get_resource_mut::<crate::notifications::NotificationManager>() {
+        if let Some(problem) = problems.first() {
+            notes.warning(format!("Connect: {problem}"));
+        }
+        if !created.is_empty() {
+            notes.success(format!("Connected {} pair(s)", created.len()));
+        } else if problems.is_empty() {
+            notes.info("Those nodes are already connected");
+        }
+    }
+}
+
+/// Write both endpoints into a new edge's [beam] table, plus the look of the
+/// SpatialIntelligenceMindMap edges (warm, thin, glowing, slightly clear).
+fn write_edge_endpoints(path: &std::path::Path, a: &str, b: &str) -> Result<(), String> {
+    use toml::Value;
+    let text = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
+    let mut doc: toml::Table = text.parse().map_err(|e: toml::de::Error| e.to_string())?;
+    let beam = doc
+        .entry("beam")
+        .or_insert_with(|| Value::Table(Default::default()))
+        .as_table_mut()
+        .ok_or("[beam] is not a table")?;
+    beam.insert("attachment0_uuid".into(), Value::String(a.to_string()));
+    beam.insert("attachment1_uuid".into(), Value::String(b.to_string()));
+    beam.insert("color".into(), Value::Array(vec![Value::Integer(255), Value::Integer(190), Value::Integer(120)]));
+    beam.insert("width0".into(), Value::Float(0.34));
+    beam.insert("width1".into(), Value::Float(0.34));
+    beam.insert("light_emission".into(), Value::Float(1.0));
+    beam.insert("light_influence".into(), Value::Float(0.0));
+    beam.insert("transparency".into(), Value::Float(0.15));
+    beam.insert("face_camera".into(), Value::Boolean(false));
+    beam.insert("segments".into(), Value::Integer(2));
+    let out = toml::to_string(&doc).map_err(|e| e.to_string())?;
+    std::fs::write(path, out).map_err(|e| e.to_string())
 }

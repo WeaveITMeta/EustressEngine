@@ -46,6 +46,12 @@ pub struct ProcurementFocus {
     pub order: Option<String>,
     /// A `Manufacturer` id to preselect in the RFQ Builder's vendor picker.
     pub vendor: Option<String>,
+    /// The RFQ Builder's selected row, by reference. A row index would point
+    /// at a different record after every rebuild (a confirm, a new RFQ).
+    pub selected_rfq: Option<String>,
+    /// The Tracker's selected row, by reference, for the same reason (and a
+    /// filter change reorders it).
+    pub selected_order: Option<String>,
 }
 
 impl ProcurementFocus {

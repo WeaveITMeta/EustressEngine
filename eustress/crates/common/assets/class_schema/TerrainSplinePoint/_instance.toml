@@ -1,0 +1,15 @@
+# TerrainSplinePoint: one control point of its parent TerrainSpline. Its
+# position, under the spline's, places the point, and its Y is the
+# spline's elevation there. Points join in ascending index, then by name.
+
+[transform]
+position = [0.0, 0.0, 0.0]
+rotation = [0.0, 0.0, 0.0, 1.0]
+scale = [1.0, 1.0, 1.0]
+
+[terrain_spline_point]
+index = 0.0
+
+[metadata]
+class_name = "TerrainSplinePoint"
+archivable = true

@@ -1,9 +1,8 @@
 // =============================================================================
 // Eustress Web - Rune LSP Documentation Page
 // =============================================================================
-// The Rune language server bundled inside Eustress Engine. Powers both the
-// in-engine Problems panel AND the @eustress/rune-lsp VS Code extension.
-// Same binary, two transports.
+// Rune LSP: the eustress-lsp language server. How to run it, how Studio starts
+// it, what the shared analyzer checks, and how to point any editor at it.
 // =============================================================================
 
 use leptos::prelude::*;
@@ -25,55 +24,124 @@ struct TocSubsection {
 fn get_toc() -> Vec<TocSection> {
     vec![
         TocSection {
-            id: "intro",
-            title: "Introduction",
+            id: "overview",
+            title: "Overview",
             subsections: vec![
-                TocSubsection { id: "intro-what", title: "What It Does" },
-                TocSubsection { id: "intro-why", title: "Why It's Useful" },
+                TocSubsection { id: "overview-what", title: "One Analyzer, Every Editor" },
+                TocSubsection { id: "overview-binary", title: "Getting the Binary" },
             ],
         },
         TocSection {
-            id: "how-to",
-            title: "How to Use It",
+            id: "running",
+            title: "Running It",
             subsections: vec![
-                TocSubsection { id: "how-bundled", title: "Bundled with the Engine" },
-                TocSubsection { id: "how-stdio", title: "Standalone stdio" },
-                TocSubsection { id: "how-tcp", title: "Standalone TCP" },
-                TocSubsection { id: "how-editor", title: "Point an Editor at It" },
+                TocSubsection { id: "running-flags", title: "Command Line" },
+                TocSubsection { id: "running-stdio", title: "stdio" },
+                TocSubsection { id: "running-tcp", title: "TCP" },
             ],
         },
         TocSection {
-            id: "api",
-            title: "API Reference",
+            id: "studio",
+            title: "Inside Studio",
             subsections: vec![
-                TocSubsection { id: "api-cli", title: "Command-Line Flags" },
-                TocSubsection { id: "api-capabilities", title: "Capabilities" },
-                TocSubsection { id: "api-requests", title: "Request Handlers" },
-                TocSubsection { id: "api-notifications", title: "Notifications" },
-                TocSubsection { id: "api-diagnostics", title: "Diagnostics Pipeline" },
+                TocSubsection { id: "studio-launch", title: "How Studio Starts It" },
+                TocSubsection { id: "studio-lifecycle", title: "Restarts and Logs" },
             ],
         },
         TocSection {
-            id: "use-cases",
-            title: "Use Cases",
+            id: "diagnostics",
+            title: "Diagnostics",
             subsections: vec![
-                TocSubsection { id: "uc-engine", title: "In-Engine Problems Panel" },
-                TocSubsection { id: "uc-external", title: "External IDE Backend" },
-                TocSubsection { id: "uc-ci", title: "CI Lint Checks" },
-                TocSubsection { id: "uc-custom", title: "Custom Editors" },
+                TocSubsection { id: "diagnostics-passes", title: "Three Passes" },
+                TocSubsection { id: "diagnostics-sources", title: "Sources and Timing" },
             ],
         },
         TocSection {
-            id: "conclusion",
-            title: "Conclusion",
-            subsections: vec![],
+            id: "features",
+            title: "Language Features",
+            subsections: vec![
+                TocSubsection { id: "features-capabilities", title: "Capabilities" },
+                TocSubsection { id: "features-navigation", title: "Hover and Navigation" },
+                TocSubsection { id: "features-editing", title: "Completion and Editing" },
+                TocSubsection { id: "features-index", title: "The Universe Index" },
+            ],
+        },
+        TocSection {
+            id: "setup",
+            title: "Editor Setup",
+            subsections: vec![
+                TocSubsection { id: "setup-vscode", title: "VS Code and Its Forks" },
+                TocSubsection { id: "setup-neovim", title: "Neovim" },
+                TocSubsection { id: "setup-helix", title: "Helix" },
+            ],
+        },
+        TocSection {
+            id: "roadmap",
+            title: "What's Next",
+            subsections: vec![
+                TocSubsection { id: "roadmap-symbols", title: "Richer Symbols" },
+                TocSubsection { id: "roadmap-packages", title: "The Server in Every Package" },
+            ],
         },
     ]
 }
 
+/// The analysis pipeline: parse and compile always run; the dry run of the
+/// lifecycle functions runs only when neither pass found an error.
+#[component]
+fn AnalysisDiagram() -> impl IntoView {
+    view! {
+        <figure class="docs-figure">
+            <svg class="docs-diagram" viewBox="0 0 640 180" role="img"
+                aria-label="A Rune file is parsed, then compiled against the engine modules. Only when neither pass found an error are its lifecycle functions dry-run. All diagnostics then go to the editor, the Problems panel and the Output panel.">
+                <defs>
+                    <marker id="lsp-arrow" viewBox="0 0 10 10" refX="9" refY="5"
+                        markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+                        <path d="M 0 0 L 10 5 L 0 10 z" class="dg-arrowhead"></path>
+                    </marker>
+                </defs>
+
+                // The path taken when parse or compile reported an error.
+                <line x1="235" y1="56" x2="235" y2="28" class="dg-line dg-line-dashed"></line>
+                <line x1="235" y1="28" x2="560" y2="28" class="dg-line dg-line-dashed"></line>
+                <line x1="560" y1="28" x2="560" y2="54" class="dg-line dg-line-dashed" marker-end="url(#lsp-arrow)"></line>
+                <text x="397" y="20" class="dg-note" text-anchor="middle">"errors found: skip the dry run"</text>
+
+                // The passes.
+                <rect x="10" y="56" width="130" height="56" rx="8" class="dg-box"></rect>
+                <text x="75" y="89" class="dg-label" text-anchor="middle">"Parse"</text>
+                <rect x="170" y="56" width="130" height="56" rx="8" class="dg-box"></rect>
+                <text x="235" y="89" class="dg-label" text-anchor="middle">"Compile"</text>
+                <rect x="330" y="56" width="130" height="56" rx="8" class="dg-box dg-box-violet"></rect>
+                <text x="395" y="89" class="dg-label" text-anchor="middle">"Dry run"</text>
+                <rect x="490" y="56" width="140" height="56" rx="8" class="dg-box dg-box-accent"></rect>
+                <text x="560" y="89" class="dg-label" text-anchor="middle">"Diagnostics"</text>
+                <line x1="140" y1="84" x2="168" y2="84" class="dg-line" marker-end="url(#lsp-arrow)"></line>
+                <line x1="300" y1="84" x2="328" y2="84" class="dg-line" marker-end="url(#lsp-arrow)"></line>
+                <line x1="460" y1="84" x2="488" y2="84" class="dg-line" marker-end="url(#lsp-arrow)"></line>
+
+                // What each pass does.
+                <text x="75" y="136" class="dg-note" text-anchor="middle">"Rune parser"</text>
+                <text x="75" y="152" class="dg-note" text-anchor="middle">"functions indexed"</text>
+                <text x="235" y="136" class="dg-note" text-anchor="middle">"engine modules"</text>
+                <text x="235" y="152" class="dg-note" text-anchor="middle">"names resolved"</text>
+                <text x="395" y="136" class="dg-note" text-anchor="middle">"lifecycle functions"</text>
+                <text x="395" y="152" class="dg-note" text-anchor="middle">"called once"</text>
+                <text x="560" y="136" class="dg-note" text-anchor="middle">"editor, Problems"</text>
+                <text x="560" y="152" class="dg-note" text-anchor="middle">"panel, Output"</text>
+            </svg>
+            <figcaption>
+                "Parse and compile always run. The dry run happens only when neither found an error,
+                so a file that does not compile is never executed."
+            </figcaption>
+        </figure>
+    }
+}
+
+/// Rune LSP documentation page.
 #[component]
 pub fn LearnLspPage() -> impl IntoView {
-    let active_section = RwSignal::new("intro".to_string());
+    let active_section = RwSignal::new("overview".to_string());
 
     view! {
         <div class="page page-docs">
@@ -81,13 +149,13 @@ pub fn LearnLspPage() -> impl IntoView {
 
             <div class="docs-bg">
                 <div class="docs-grid-overlay"></div>
-                <div class="docs-glow glow-networking"></div>
+                <div class="docs-glow glow-lsp"></div>
             </div>
 
             <div class="docs-layout">
                 <aside class="docs-toc">
                     <div class="toc-header">
-                        <img src="/assets/icons/brain.svg" alt="LSP" class="toc-icon" />
+                        <img src="/assets/icons/brain.svg" alt="Rune LSP" class="toc-icon" />
                         <h2>"Rune LSP"</h2>
                     </div>
                     <nav class="toc-nav">
@@ -137,350 +205,545 @@ pub fn LearnLspPage() -> impl IntoView {
                         </div>
                         <h1 class="docs-title">"Rune LSP"</h1>
                         <p class="docs-subtitle">
-                            "A standards-compliant Language Server for Rune scripts. Written in Rust,
-                            built on " <code>"tower-lsp"</code> ", and powered by the same analyzer
-                            that drives Eustress Engine's Problems panel. It ships inside the engine
-                            binary bundle — no separate install — and speaks stdio or TCP."
+                            <code>"eustress-lsp"</code>" is the language server for Rune scripts in
+                            Eustress. It runs the same analyzer as Studio's Problems panel and speaks the
+                            Language Server Protocol over stdio or TCP, so any editor with an LSP client
+                            gets diagnostics, hover, completion, navigation and rename."
                         </p>
                         <div class="docs-meta">
                             <span class="meta-item">
                                 <img src="/assets/icons/clock.svg" alt="Time" />
-                                "12 min read"
+                                "10 min read"
                             </span>
                             <span class="meta-item">
-                                <img src="/assets/icons/code.svg" alt="Level" />
+                                <img src="/assets/icons/cube.svg" alt="Level" />
                                 "Intermediate"
                             </span>
                             <span class="meta-item">
                                 <img src="/assets/icons/check.svg" alt="Updated" />
-                                "v0.1.0"
+                                "Updated Sep 2026"
                             </span>
                         </div>
                     </header>
 
-                    // ── Introduction ─────────────────────────────────────
-                    <section id="intro" class="docs-section">
-                        <h2 class="section-anchor">"Introduction"</h2>
+                    // =========================================================
+                    // OVERVIEW
+                    // =========================================================
+                    <section id="overview" class="docs-section">
+                        <h2 class="section-title">
+                            <span class="section-number">"01"</span>
+                            "Overview"
+                        </h2>
 
-                        <div id="intro-what" class="docs-block">
-                            <h3>"What It Does"</h3>
+                        <div id="overview-what" class="subsection">
+                            <h3>"One Analyzer, Every Editor"</h3>
                             <p>
-                                <code>"eustress-lsp"</code> " is the Rune language server. It parses
-                                Rune source, compiles it through " <code>"rune::prepare"</code> ", and
-                                exposes the resulting diagnostics, symbol index, and AST walker via the
-                                standard Language Server Protocol. It does not ship its own text editor
-                                and it does not embed the runtime — it's a pure analyzer behind an LSP
-                                adapter."
+                                <code>"eustress-lsp"</code>" is a small program that exposes the Rune
+                                analyzer built into Eustress Engine as a standard language server. Studio's
+                                script editor, its Problems panel and "<code>"eustress-lsp"</code>" all call
+                                the same analyzer functions, so a script shows the same errors, in the same
+                                words, wherever you open it."
                             </p>
+                            <p>
+                                "The server itself only translates. It turns editor positions into the
+                                analyzer's line and column numbers, calls the analyzer, and turns the results
+                                back into protocol messages, using the tower-lsp library. Improving the
+                                analyzer improves every editor at once."
+                            </p>
+                            <div class="feature-grid">
+                                <div class="feature-card">
+                                    <div class="feature-icon">
+                                        <img src="/assets/icons/shield.svg" alt="Diagnostics" />
+                                    </div>
+                                    <h4>"Diagnostics"</h4>
+                                    <p>"Parse, compile and dry-run errors, pushed on every edit."</p>
+                                </div>
+                                <div class="feature-card">
+                                    <div class="feature-icon">
+                                        <img src="/assets/icons/book.svg" alt="Hover" />
+                                    </div>
+                                    <h4>"Hover"</h4>
+                                    <p>"Signatures, descriptions and examples for the Eustress API."</p>
+                                </div>
+                                <div class="feature-card">
+                                    <div class="feature-icon">
+                                        <img src="/assets/icons/search.svg" alt="Navigation" />
+                                    </div>
+                                    <h4>"Navigation"</h4>
+                                    <p>"Definitions, references and an outline, across the Universe."</p>
+                                </div>
+                                <div class="feature-card">
+                                    <div class="feature-icon">
+                                        <img src="/assets/icons/edit.svg" alt="Editing" />
+                                    </div>
+                                    <h4>"Editing"</h4>
+                                    <p>"Completion, parameter hints, rename and a quick fix."</p>
+                                </div>
+                            </div>
                         </div>
 
-                        <div id="intro-why" class="docs-block">
-                            <h3>"Why It's Useful"</h3>
+                        <div id="overview-binary" class="subsection">
+                            <h3>"Getting the Binary"</h3>
                             <p>
-                                "Rune has first-class tooling inside Eustress Engine because the engine
-                                is the analyzer's primary consumer. Shipping that same analyzer as an
-                                LSP server means every editor — VS Code, Windsurf, Cursor, Zed, Neovim,
-                                Helix — can have identical intelligence without re-implementing the
-                                wheel. The server is also useful on its own in CI for typed lint checks
-                                without spinning up the full engine."
+                                <code>"eustress-lsp"</code>" is built from the engine package and carries the
+                                engine's version. The Windows installer places "<code>"eustress-lsp.exe"</code>
+                                " beside "<code>"eustress-engine.exe"</code>", where Studio finds it. The
+                                Windows zip, the macOS disk image and the Linux archive do not include it
+                                yet; on those, build the server from the Eustress source:"
                             </p>
-                            <div class="docs-callout info">
-                                <strong>"Single source of truth:"</strong>
-                                " the LSP and the in-engine Problems panel call the same analyzer
-                                functions. If diagnostics differ between surfaces, that's a bug, not a
-                                feature difference."
+                            <div class="code-block">
+                                <div class="code-header">
+                                    <span class="code-lang">"Terminal"</span>
+                                </div>
+                                <pre><code class="language-bash">{r#"# In the eustress/ folder of the repository
+cargo build --release -p eustress-engine --bin eustress-lsp
+
+# The binary lands in target/release/ (eustress-lsp.exe on Windows)"#}</code></pre>
+                            </div>
+                            <p>
+                                "The "<code>"lsp"</code>" feature that enables it is on by default. To see
+                                which version you have:"
+                            </p>
+                            <div class="code-block">
+                                <div class="code-header">
+                                    <span class="code-lang">"Terminal"</span>
+                                </div>
+                                <pre><code class="language-text">{r#"$ eustress-lsp --version
+eustress-lsp 0.3.6
+Usage: eustress-lsp [--tcp [--port <n>] [--port-file <path>]]"#}</code></pre>
                             </div>
                         </div>
                     </section>
 
-                    // ── How to Use It ────────────────────────────────────
-                    <section id="how-to" class="docs-section">
-                        <h2 class="section-anchor">"How to Use It"</h2>
+                    // =========================================================
+                    // RUNNING IT
+                    // =========================================================
+                    <section id="running" class="docs-section">
+                        <h2 class="section-title">
+                            <span class="section-number">"02"</span>
+                            "Running It"
+                        </h2>
 
-                        <div id="how-bundled" class="docs-block">
-                            <h3>"Bundled with the Engine (normal path)"</h3>
+                        <div id="running-flags" class="subsection">
+                            <h3>"Command Line"</h3>
+                            <table class="docs-table">
+                                <thead>
+                                    <tr><th>"Flag"</th><th>"Effect"</th></tr>
+                                </thead>
+                                <tbody>
+                                    <tr><td>"(none)"</td><td>"Serve one editor over stdin and stdout"</td></tr>
+                                    <tr><td><code>"--tcp"</code></td><td>"Serve over TCP on "<code>"127.0.0.1"</code>" instead, for any number of editors"</td></tr>
+                                    <tr><td><code>"--port <n>"</code></td><td>"With "<code>"--tcp"</code>", listen on port n. The default, 0, lets the operating system pick a free port"</td></tr>
+                                    <tr><td><code>"--port-file <path>"</code></td><td>"With "<code>"--tcp"</code>", write the port number to this file, creating its folders"</td></tr>
+                                    <tr><td><code>"-h"</code>", "<code>"--help"</code>", "<code>"--version"</code></td><td>"Print the version and usage, then exit"</td></tr>
+                                </tbody>
+                            </table>
                             <p>
-                                "For almost everyone this is the only section that matters. The Rune
-                                LSP is built into the Eustress Engine installer — there is no
-                                separate download. Install the engine, launch it on a Universe, and
-                                the LSP is automatically available to every IDE on your machine."
+                                "Any other argument is reported on stderr and ignored, and a "
+                                <code>"--port"</code>" value that is not a number counts as 0."
                             </p>
-                            <ol class="docs-list numbered">
-                                <li>"Install Eustress Engine from " <a href="/download">"/download"</a> "."</li>
-                                <li>"Launch the engine and open a Universe (first launch scaffolds one for you)."</li>
-                                <li>
-                                    "Install the "
-                                    <a href="https://open-vsx.org/extension/WeaveITMeta/rune-lsp" target="_blank" rel="noopener">
-                                        <code>"WeaveITMeta.rune-lsp"</code>
-                                    </a>
-                                    " extension from Open VSX (works in VS Code, Windsurf, Cursor) — it finds the LSP over TCP automatically."
-                                </li>
+                        </div>
+
+                        <div id="running-stdio" class="subsection">
+                            <h3>"stdio"</h3>
+                            <p>
+                                "With no flags, "<code>"eustress-lsp"</code>" reads protocol messages on stdin
+                                and writes replies on stdout. This is how editors usually run a language
+                                server: the editor starts the process, owns it, and is its only client."
+                            </p>
+                        </div>
+
+                        <div id="running-tcp" class="subsection">
+                            <h3>"TCP"</h3>
+                            <p>
+                                "With "<code>"--tcp"</code>", the server listens on the loopback address only,
+                                so it accepts connections from your own machine. Once it is listening, it
+                                prints "<code>"port=<n>"</code>" on stdout and writes the same number to the "
+                                <code>"--port-file"</code>" path, if you gave one. Each connection gets its
+                                own session, with its own open documents and Universe index, so several
+                                editors can share one server."
+                            </p>
+                            <p>
+                                <code>"Ctrl+C"</code>" stops the server and deletes the port file. Status
+                                lines, such as the listening address and each new connection, go to stderr."
+                            </p>
+                            <div class="code-block">
+                                <div class="code-header">
+                                    <span class="code-lang">"Terminal"</span>
+                                </div>
+                                <pre><code class="language-bash">{r#"# Let the operating system pick a port, and record it where editors look
+eustress-lsp --tcp --port-file MyUniverse/.eustress/lsp.port
+
+# Or listen on a port of your choosing
+eustress-lsp --tcp --port 7000"#}</code></pre>
+                            </div>
+                            <div class="callout callout-info">
+                                <img src="/assets/icons/help.svg" alt="Info" />
+                                <div>
+                                    <strong>"Same code either way"</strong>
+                                    <p>
+                                        "A server you start yourself and the one Studio starts run the same
+                                        code and read the same files, so their features are identical. TCP only
+                                        changes who starts the process and how many editors share it."
+                                    </p>
+                                </div>
+                            </div>
+                        </div>
+                    </section>
+
+                    // =========================================================
+                    // INSIDE STUDIO
+                    // =========================================================
+                    <section id="studio" class="docs-section">
+                        <h2 class="section-title">
+                            <span class="section-number">"03"</span>
+                            "Inside Studio"
+                        </h2>
+
+                        <div id="studio-launch" class="subsection">
+                            <h3>"How Studio Starts It"</h3>
+                            <p>
+                                "Studio starts "<code>"eustress-lsp"</code>" for you, so editors can connect
+                                without launching their own. As soon as the open Space resolves to a Universe
+                                (the nearest parent folder that contains "<code>"Spaces/"</code>"), Studio
+                                runs:"
+                            </p>
+                            <div class="code-block">
+                                <div class="code-header">
+                                    <span class="code-lang">"Launched by Studio"</span>
+                                </div>
+                                <pre><code class="language-text">{r#"eustress-lsp --tcp --port-file <Universe>/.eustress/lsp.port"#}</code></pre>
+                            </div>
+                            <p>"It uses the first copy of the program it finds:"</p>
+                            <ol class="numbered-list">
+                                <li>"The file named by the "<code>"EUSTRESS_LSP_BIN"</code>" environment variable"</li>
+                                <li><code>"eustress-lsp"</code>" beside the Studio executable, where the Windows installer puts it"</li>
+                                <li>"The "<code>"target/release"</code>" and "<code>"target/debug"</code>" folders of the source tree Studio was built from"</li>
                             </ol>
                             <p>
-                                "Under the hood: " <code>"cargo build --release"</code> " on the engine
-                                workspace produces two binaries — " <code>"eustress-engine"</code> "
-                                and " <code>"eustress-lsp"</code> " — and the installer ships both.
-                                When the engine starts, its " <code>"LspLauncherPlugin"</code>
-                                " spawns " <code>"eustress-lsp --tcp"</code> " as a child process
-                                and writes the listening port to " <code>".eustress/lsp.port"</code>
-                                " inside the active Universe. Closing the engine kills the child."
+                                "If there is none, Studio logs one message and stops looking until it
+                                restarts. Editors can still start their own server over stdio."
                             </p>
                         </div>
 
-                        <div id="how-stdio" class="docs-block">
-                            <h3>"Standalone stdio"</h3>
-                            <p>"Run directly for a classic LSP-over-stdin/stdout client:"</p>
-                            <pre class="code-block"><code>{"# Editors that expect a spawnable LSP
-eustress-lsp"}</code></pre>
-                            <p>
-                                "Useful when you want language intelligence without a running engine —
-                                CI, headless SSH sessions, or editors that refuse to speak TCP."
-                            </p>
-                        </div>
-
-                        <div id="how-tcp" class="docs-block">
-                            <h3>"Standalone TCP"</h3>
-                            <pre class="code-block"><code>{"# OS-assigned port, written to stdout and to a file
-eustress-lsp --tcp --port 0 --port-file /tmp/rune.port
-
-# Fixed port, accepts multiple concurrent clients
-eustress-lsp --tcp --port 8787"}</code></pre>
-                            <p>
-                                "TCP lets one server back many editors at once. The engine uses it so
-                                editor extensions can attach even though the engine itself already has
-                                the analyzer loaded internally."
-                            </p>
-                        </div>
-
-                        <div id="how-editor" class="docs-block">
-                            <h3>"Point an Editor at It"</h3>
-                            <p>
-                                "For VS Code / Windsurf / Cursor, install the "
-                                <a href="https://open-vsx.org/extension/WeaveITMeta/rune-lsp" target="_blank" rel="noopener">
-                                    <code>"WeaveITMeta.rune-lsp"</code>
-                                </a>
-                                " extension from "
-                                <a href="https://open-vsx.org/extension/WeaveITMeta/rune-lsp" target="_blank" rel="noopener">
-                                    "Open VSX"
-                                </a>
-                                " — it discovers the port file automatically. For other editors,
-                                configure Rune as a file type and set the LSP command to "
-                                <code>"eustress-lsp"</code> " (stdio) or a TCP dialer pointing at the port."
-                            </p>
+                        <div id="studio-lifecycle" class="subsection">
+                            <h3>"Restarts and Logs"</h3>
+                            <ul class="docs-list">
+                                <li><strong>"One server per Universe."</strong>" Moving to another Space in the same Universe keeps the server. Moving to a Space in a different Universe stops it, deletes its port file and starts a new one there."</li>
+                                <li><strong>"Clean exit."</strong>" Closing Studio stops the server and deletes "<code>".eustress/lsp.port"</code>"."</li>
+                                <li><strong>"Crash safety on Windows."</strong>" The server runs without a console window and is tied to Studio by a job object, so Windows ends it even if Studio crashes or is force-closed."</li>
+                                <li><strong>"Logs."</strong>" The server's stderr goes to "<code>"eustress-lsp.log"</code>", and the launcher's latest status to "<code>"eustress-lsp-launcher.log"</code>", both in the system temp folder ("<code>"%TEMP%"</code>" on Windows)."</li>
+                            </ul>
+                            <div class="callout callout-info">
+                                <img src="/assets/icons/help.svg" alt="Info" />
+                                <div>
+                                    <strong>"A port file left behind"</strong>
+                                    <p>
+                                        "After a crash, the port file can outlive the server, since only a
+                                        normal exit deletes it. Studio overwrites the file the next time it
+                                        starts the server, and the VS Code extension abandons a dead port after
+                                        1.5 seconds."
+                                    </p>
+                                </div>
+                            </div>
                         </div>
                     </section>
 
-                    // ── API Reference ────────────────────────────────────
-                    <section id="api" class="docs-section">
-                        <h2 class="section-anchor">"API Reference"</h2>
+                    // =========================================================
+                    // DIAGNOSTICS
+                    // =========================================================
+                    <section id="diagnostics" class="docs-section">
+                        <h2 class="section-title">
+                            <span class="section-number">"04"</span>
+                            "Diagnostics"
+                        </h2>
 
-                        <div id="api-cli" class="docs-block">
-                            <h3>"Command-Line Flags"</h3>
-                            <div class="api-table">
-                                <div class="api-row">
-                                    <code>"--tcp"</code>
-                                    <span>"Switch from stdio to TCP transport"</span>
-                                </div>
-                                <div class="api-row">
-                                    <code>"--port <N>"</code>
-                                    <span>"TCP port (0 = OS-assigned); defaults to 0"</span>
-                                </div>
-                                <div class="api-row">
-                                    <code>"--port-file <path>"</code>
-                                    <span>"Write the listening port to this path for client discovery"</span>
-                                </div>
-                                <div class="api-row">
-                                    <code>"--bind <addr>"</code>
-                                    <span>"TCP bind address; defaults to 127.0.0.1 (loopback only)"</span>
-                                </div>
-                                <div class="api-row">
-                                    <code>"--log <level>"</code>
-                                    <span>"\"off\" | \"info\" | \"debug\" | \"trace\" — tracing verbosity"</span>
+                        <div id="diagnostics-passes" class="subsection">
+                            <h3>"Three Passes"</h3>
+                            <p>"Each analysis runs up to three passes over the text of one file:"</p>
+                            <AnalysisDiagram />
+                            <ol class="numbered-list">
+                                <li><strong>"Parse."</strong>" Rune's own parser reads the file. A syntax error becomes a diagnostic, and each top-level function is recorded as a symbol for navigation."</li>
+                                <li><strong>"Compile."</strong>" The file is compiled against Rune's standard modules plus the engine's Rune modules (the "<code>"eustress"</code>" module, "<code>"event_bus"</code>" and the realism laws), the same set Play mode compiles against. This catches unknown names and bad imports that parsing cannot."</li>
+                                <li><strong>"Dry run."</strong>" If the first two passes found no errors, the analyzer calls each lifecycle function the script defines, once: "<code>"on_init"</code>", "<code>"on_ready"</code>", "<code>"on_update"</code>" and "<code>"on_tick"</code>" with a time step of 0.016 s, and "<code>"on_button_click"</code>" with the button name "<code>"TestButton"</code>". A failure is reported at the function's name, since it would fail the same way in Play. "<code>"on_exit"</code>" is never called."</li>
+                            </ol>
+                            <div class="callout callout-advanced">
+                                <img src="/assets/icons/settings.svg" alt="Advanced" />
+                                <div>
+                                    <strong>"The dry run executes your code"</strong>
+                                    <p>
+                                        "The dry run calls your functions for real, in Studio and in every
+                                        running "<code>"eustress-lsp"</code>", each time a file is analyzed: on
+                                        every edit in an external editor, and for every script in the Universe
+                                        when an editor connects. The HTTP functions in the Eustress API send
+                                        real requests when called this way, so keep network calls out of "
+                                        <code>"on_init"</code>" and "<code>"on_update"</code>", or guard them."
+                                    </p>
                                 </div>
                             </div>
                         </div>
 
-                        <div id="api-capabilities" class="docs-block">
+                        <div id="diagnostics-sources" class="subsection">
+                            <h3>"Sources and Timing"</h3>
+                            <p>"Each diagnostic names the pass that produced it:"</p>
+                            <table class="docs-table">
+                                <thead>
+                                    <tr><th>"Source"</th><th>"Severity"</th><th>"Meaning"</th></tr>
+                                </thead>
+                                <tbody>
+                                    <tr><td><code>"rune"</code></td><td>"Error"</td><td>"A syntax or compile error"</td></tr>
+                                    <tr><td><code>"rune-warning"</code></td><td>"Warning"</td><td>"A compiler warning"</td></tr>
+                                    <tr><td><code>"rune-link"</code></td><td>"Error"</td><td>"A link error, shown at the start of the file because the compiler gives it no location"</td></tr>
+                                    <tr><td><code>"rune-runtime"</code></td><td>"Error"</td><td>"A lifecycle function failed during the dry run"</td></tr>
+                                </tbody>
+                            </table>
+                            <p>
+                                <code>"eustress-lsp"</code>" analyzes a file when it opens, on every change and
+                                on every save, and pushes the results with "
+                                <code>"textDocument/publishDiagnostics"</code>". Document sync is Full: your
+                                editor sends the whole file with each change, and the server analyzes it right
+                                away."
+                            </p>
+                            <p>
+                                "Inside Studio, the script editor waits until 80 ms after your last keystroke,
+                                then feeds the same diagnostics to the squiggles, the Problems panel and the
+                                Output panel."
+                            </p>
+                        </div>
+                    </section>
+
+                    // =========================================================
+                    // LANGUAGE FEATURES
+                    // =========================================================
+                    <section id="features" class="docs-section">
+                        <h2 class="section-title">
+                            <span class="section-number">"05"</span>
+                            "Language Features"
+                        </h2>
+
+                        <div id="features-capabilities" class="subsection">
                             <h3>"Capabilities"</h3>
-                            <p>"The server advertises the following in its " <code>"initialize"</code> " response:"</p>
-                            <div class="api-table">
-                                <div class="api-row">
-                                    <code>"textDocumentSync"</code>
-                                    <span>"Incremental — clients send ranged edits, not full buffers"</span>
-                                </div>
-                                <div class="api-row">
-                                    <code>"hoverProvider"</code>
-                                    <span>"Enabled — returns symbol metadata or diagnostic-under-cursor"</span>
-                                </div>
-                                <div class="api-row">
-                                    <code>"definitionProvider"</code>
-                                    <span>"Enabled — single-file go-to-definition"</span>
-                                </div>
-                                <div class="api-row">
-                                    <code>"referencesProvider"</code>
-                                    <span>"Enabled — all usages within the open document"</span>
-                                </div>
-                                <div class="api-row">
-                                    <code>"completionProvider"</code>
-                                    <span>"Trigger characters: \".\" and \"::\""</span>
-                                </div>
-                                <div class="api-row">
-                                    <code>"renameProvider"</code>
-                                    <span>"prepareProvider = true; validates the target is an identifier"</span>
-                                </div>
-                                <div class="api-row">
-                                    <code>"codeActionProvider"</code>
-                                    <span>"Emits quick fixes scoped to the current diagnostic range"</span>
-                                </div>
-                                <div class="api-row">
-                                    <code>"documentSymbolProvider"</code>
-                                    <span>"Outline: functions, structs, constants, modules"</span>
-                                </div>
-                            </div>
-                        </div>
-
-                        <div id="api-requests" class="docs-block">
-                            <h3>"Request Handlers"</h3>
-                            <p>"Every handler delegates to " <code>"script_editor::analyzer"</code> ":"</p>
-                            <div class="api-table">
-                                <div class="api-row">
-                                    <code>"textDocument/hover"</code>
-                                    <span>"identifier_at → symbol lookup; falls back to diagnostic message"</span>
-                                </div>
-                                <div class="api-row">
-                                    <code>"textDocument/definition"</code>
-                                    <span>"identifier_at + SymbolIndex → Location"</span>
-                                </div>
-                                <div class="api-row">
-                                    <code>"textDocument/references"</code>
-                                    <span>"Whole-document scan for identifier matches (comment/string aware)"</span>
-                                </div>
-                                <div class="api-row">
-                                    <code>"textDocument/completion"</code>
-                                    <span>"prefix_at → complete(prefix, symbols, max_items)"</span>
-                                </div>
-                                <div class="api-row">
-                                    <code>"textDocument/rename"</code>
-                                    <span>"analyzer::rename → WorkspaceEdit with TextEdits"</span>
-                                </div>
-                                <div class="api-row">
-                                    <code>"textDocument/codeAction"</code>
-                                    <span>"Range-overlap check against published diagnostics; returns fixes"</span>
-                                </div>
-                            </div>
-                        </div>
-
-                        <div id="api-notifications" class="docs-block">
-                            <h3>"Notifications"</h3>
-                            <div class="api-table">
-                                <div class="api-row">
-                                    <code>"textDocument/publishDiagnostics"</code>
-                                    <span>"Pushed on open / change / save, debounced at 80 ms per document"</span>
-                                </div>
-                                <div class="api-row">
-                                    <code>"window/logMessage"</code>
-                                    <span>"Server-side tracing mirrored to the client log"</span>
-                                </div>
-                            </div>
-                        </div>
-
-                        <div id="api-diagnostics" class="docs-block">
-                            <h3>"Diagnostics Pipeline"</h3>
-                            <ol class="docs-list numbered">
-                                <li>"Client sends " <code>"didChange"</code> " with incremental edits"</li>
-                                <li>"Server reassembles the buffer in a " <code>"DashMap<Url, String>"</code></li>
-                                <li>"An 80 ms debounce coalesces rapid keystrokes"</li>
-                                <li>"After quiescence, " <code>"analyzer::analyze"</code> " runs: parse → compile → diagnostics"</li>
-                                <li>"Results convert to LSP " <code>"Diagnostic"</code> " values and publish"</li>
-                            </ol>
-                            <div class="docs-callout info">
-                                <strong>"Performance:"</strong>
-                                " analysis runs on a dedicated Tokio task, so typing never blocks the main
-                                IO loop. The 80 ms debounce is tuned to feel responsive without wasting
-                                cycles on transient parse errors mid-keystroke."
-                            </div>
-                        </div>
-                    </section>
-
-                    // ── Use Cases ────────────────────────────────────────
-                    <section id="use-cases" class="docs-section">
-                        <h2 class="section-anchor">"Use Cases"</h2>
-
-                        <div id="uc-engine" class="docs-block">
-                            <h3>"In-Engine Problems Panel"</h3>
                             <p>
-                                "Inside Eustress Engine, the Problems panel subscribes to the same
-                                analyzer output that the LSP publishes. Click a row — jump to the
-                                file and line. Click " <em>"Fix with Workshop"</em> " — the full
-                                problem list seeds a new Workshop conversation so Claude can resolve
-                                them."
+                                "The server's "<code>"initialize"</code>" response advertises these
+                                capabilities and names the server "<code>"eustress-lsp"</code>", with the
+                                engine's version:"
+                            </p>
+                            <table class="docs-table">
+                                <thead>
+                                    <tr><th>"Capability"</th><th>"Setting"</th><th>"What you get"</th></tr>
+                                </thead>
+                                <tbody>
+                                    <tr><td><code>"textDocumentSync"</code></td><td>"Full"</td><td>"The editor sends the whole file on every change"</td></tr>
+                                    <tr><td><code>"hoverProvider"</code></td><td>"On"</td><td>"API documentation, functions in the file, diagnostics"</td></tr>
+                                    <tr><td><code>"completionProvider"</code></td><td>"Also opens on a period or a double quote"</td><td>"Keywords, functions, API names, simulation keys"</td></tr>
+                                    <tr><td><code>"signatureHelpProvider"</code></td><td>"Opens on an opening parenthesis, advances on a comma"</td><td>"Parameter hints for Eustress API calls"</td></tr>
+                                    <tr><td><code>"semanticTokensProvider"</code></td><td>"Whole document"</td><td>"Colors for keywords, API functions and types, your functions, strings, numbers and comments"</td></tr>
+                                    <tr><td><code>"definitionProvider"</code></td><td>"On"</td><td>"The file, then the Universe, then an API page"</td></tr>
+                                    <tr><td><code>"referencesProvider"</code></td><td>"On"</td><td>"Declarations that share the name"</td></tr>
+                                    <tr><td><code>"documentSymbolProvider"</code></td><td>"On"</td><td>"The file's top-level functions"</td></tr>
+                                    <tr><td><code>"renameProvider"</code></td><td>"On"</td><td>"Edits in the open file and in files that declare the name"</td></tr>
+                                    <tr><td><code>"codeActionProvider"</code></td><td>"On"</td><td>"Insert missing semicolon"</td></tr>
+                                </tbody>
+                            </table>
+                            <p>
+                                "Anything not in the table, such as formatting, workspace symbols or inlay
+                                hints, is not implemented. After the handshake, the server logs "
+                                <code>"eustress-lsp ready"</code>" to the editor."
                             </p>
                         </div>
 
-                        <div id="uc-external" class="docs-block">
-                            <h3>"External IDE Backend"</h3>
-                            <p>
-                                "Every feature of the " <a href="/learn/ide">"IDE extension"</a>
-                                " is served by this LSP. The extension is a client, not a re-implementation."
-                            </p>
+                        <div id="features-navigation" class="subsection">
+                            <h3>"Hover and Navigation"</h3>
+                            <p>"Take a small script that reads and writes simulation values:"</p>
+                            <div class="code-block">
+                                <div class="code-header">
+                                    <span class="code-lang">"Rune"</span>
+                                </div>
+                                <pre><code class="language-rust">{r#"use eustress::{get_sim_value, log_info, set_sim_value};
+
+pub fn on_init() {
+    log_info("cycle_life ready");
+}
+
+pub fn on_update(dt) {
+    let soc = get_sim_value("battery.soc");
+    set_sim_value("battery.soc_safe", clamp(soc, 0.0, 1.0));
+}
+
+fn clamp(value, lo, hi) {
+    if value < lo { lo } else if value > hi { hi } else { value }
+}"#}</code></pre>
+                            </div>
+                            <ul class="docs-list">
+                                <li><strong>"Hover"</strong>" on "<code>"get_sim_value"</code>" shows its entry in the Eustress API catalog, which is built from the engine's own Rune module source: category, signature, description, and an example when there is one. On "<code>"clamp"</code>" it shows a function defined in this file and the line it starts on. On a name inside an error's range, it shows the error."</li>
+                                <li><strong>"Go to definition"</strong>" on "<code>"clamp"</code>" jumps to it in this file. A name the file does not declare resolves to functions with that name in other "<code>".rune"</code>" files of the Universe. On "<code>"get_sim_value"</code>" it opens a generated Markdown page for the API entry, written to "<code>"eustress-lsp-api"</code>" in the temp folder and deleted when the server shuts down."</li>
+                                <li><strong>"Find references"</strong>" on "<code>"clamp"</code>" lists the declarations named "<code>"clamp"</code>" in this file and across the Universe. Call sites are not listed yet."</li>
+                                <li><strong>"Outline"</strong>" shows "<code>"on_init"</code>", "<code>"on_update"</code>" and "<code>"clamp"</code>"."</li>
+                            </ul>
                         </div>
 
-                        <div id="uc-ci" class="docs-block">
-                            <h3>"CI Lint Checks"</h3>
-                            <p>
-                                "Pipe the server diagnostics into your CI pipeline. A small wrapper can
-                                " <code>"didOpen"</code> " every " <code>".rune"</code> " file and fail
-                                the build on any " <code>"Error"</code> "-severity diagnostic, with zero
-                                duplication of the analysis logic."
-                            </p>
-                            <pre class="code-block"><code>{"# pseudo-CI step
-eustress-lsp --tcp --port 9999 &
-LSP_PID=$!
-rune-lint-runner --port 9999 --fail-on error Spaces/
-kill $LSP_PID"}</code></pre>
+                        <div id="features-editing" class="subsection">
+                            <h3>"Completion and Editing"</h3>
+                            <ul class="docs-list">
+                                <li><strong>"Completion"</strong>" lists Rune keywords first, then functions from the open file, then Eustress API functions and types with their signatures, up to 50 items."</li>
+                                <li><strong>"Simulation keys."</strong>" Inside the quoted key of a "<code>"get_sim_value"</code>" or "<code>"set_sim_value"</code>" call, completion lists the keys in "<code>".eustress/runtime-snapshot.json"</code>", which Studio rewrites 4 times a second while it runs."</li>
+                                <li><strong>"Parameter hints"</strong>" appear for Eustress API calls and highlight the parameter you are typing."</li>
+                                <li><strong>"Rename"</strong>" replaces every occurrence of the name outside comments and strings, in the open file and in each other file that declares a function with that name. The new name must be a valid Rune identifier."</li>
+                                <li><strong>"Quick fix."</strong>" When a diagnostic says a semicolon is expected, "<strong>"Insert missing semicolon"</strong>" adds it."</li>
+                                <li><strong>"Suggestions."</strong>" Lines that call "<code>"get_sim_value"</code>", "<code>"set_sim_value"</code>", "<code>"http_request"</code>" or "<code>"datastore_get"</code>" also offer actions titled "<em>"Eustress: …"</em>". They run a command no editor implements yet, so choosing one leaves the file unchanged."</li>
+                            </ul>
+                            <div class="callout callout-advanced">
+                                <img src="/assets/icons/settings.svg" alt="Advanced" />
+                                <div>
+                                    <strong>"Rename matches names, not scripts"</strong>
+                                    <p>
+                                        "Each Rune script compiles on its own, yet a rename also edits every
+                                        other script in the Universe that declares a function with the same
+                                        name, including all uses of that name inside it. Before renaming a
+                                        common name such as "<code>"clamp"</code>", review the other files the
+                                        rename changed before you save them."
+                                    </p>
+                                </div>
+                            </div>
                         </div>
 
-                        <div id="uc-custom" class="docs-block">
-                            <h3>"Custom Editors"</h3>
+                        <div id="features-index" class="subsection">
+                            <h3>"The Universe Index"</h3>
                             <p>
-                                "Anyone can write a Zed, Helix, or Neovim client against this server.
-                                There's nothing Eustress-specific in the protocol — it's pure LSP. The
-                                repository's " <code>"infrastructure/extensions/"</code> " directory is
-                                organized so additional editor packages can live alongside the VS Code one."
+                                "When an editor connects, the server takes the editor's workspace folder (or
+                                its root path), walks up as many as 16 levels to the first folder that
+                                contains "<code>"Spaces/"</code>", and indexes every "<code>".rune"</code>
+                                " file below it, up to 12 folders deep. Folders whose names start with a dot, "
+                                <code>"target"</code>" and "<code>"node_modules"</code>" are skipped."
+                            </p>
+                            <p>
+                                "A file watcher with a 150 ms debounce keeps the index current when files
+                                change on disk, including edits from other tools and a git checkout, and every
+                                save re-indexes the saved file. With no Universe found, navigation stays
+                                within the open file."
                             </p>
                         </div>
                     </section>
 
-                    // ── Conclusion ───────────────────────────────────────
-                    <section id="conclusion" class="docs-section">
-                        <h2 class="section-anchor">"Conclusion"</h2>
-                        <p>
-                            "The Rune LSP is the connective tissue behind every Rune-editing experience
-                            Eustress offers — the in-engine panels, the VS Code extension, any future
-                            editor adapter. One analyzer, one binary, two transports, zero vendor
-                            lock-in. Run it bundled with Eustress Engine, run it standalone in CI, or
-                            run it behind your favorite editor — the semantics are always the same."
-                        </p>
-                        <div class="docs-callout info">
-                            <strong>"See also:"</strong>
-                            " the " <a href="/learn/ide">"IDE Integration"</a>
-                            " guide for editor-side setup, and the " <a href="/learn/mcp">"MCP Server"</a>
-                            " guide for exposing the full Universe (not just scripts) to AI clients."
+                    // =========================================================
+                    // EDITOR SETUP
+                    // =========================================================
+                    <section id="setup" class="docs-section">
+                        <h2 class="section-title">
+                            <span class="section-number">"06"</span>
+                            "Editor Setup"
+                        </h2>
+
+                        <div id="setup-vscode" class="subsection">
+                            <h3>"VS Code and Its Forks"</h3>
+                            <p>
+                                "Use the Eustress Rune LSP extension. It connects to the server Studio starts
+                                and falls back to launching "<code>"eustress-lsp"</code>" itself. "
+                                <a href="/learn/ide#extension">"IDE Integration"</a>" covers installing and
+                                configuring it."
+                            </p>
+                        </div>
+
+                        <div id="setup-neovim" class="subsection">
+                            <h3>"Neovim"</h3>
+                            <p>"Neovim 0.10 and newer can start the server from "<code>"init.lua"</code>" without plugins:"</p>
+                            <div class="code-block">
+                                <div class="code-header">
+                                    <span class="code-lang">"init.lua"</span>
+                                </div>
+                                <pre><code class="language-lua">{r#"-- Recognize .rune files, then start eustress-lsp for them.
+vim.filetype.add({ extension = { rune = 'rune' } })
+
+vim.api.nvim_create_autocmd('FileType', {
+  pattern = 'rune',
+  callback = function(args)
+    vim.lsp.start({
+      name = 'eustress-lsp',
+      cmd = { 'eustress-lsp' },
+      -- The Universe is the folder that contains Spaces/.
+      root_dir = vim.fs.root(args.buf, 'Spaces'),
+    })
+  end,
+})"#}</code></pre>
+                            </div>
+                        </div>
+
+                        <div id="setup-helix" class="subsection">
+                            <h3>"Helix"</h3>
+                            <p>
+                                "Add the server and a Rune language entry to "<code>"languages.toml"</code>"
+                                in your Helix configuration folder:"
+                            </p>
+                            <div class="code-block">
+                                <div class="code-header">
+                                    <span class="code-lang">"languages.toml"</span>
+                                </div>
+                                <pre><code class="language-toml">{r#"[language-server.eustress-lsp]
+command = "eustress-lsp"
+
+[[language]]
+name = "rune"
+scope = "source.rune"
+file-types = ["rune"]
+roots = ["Spaces"]
+language-servers = ["eustress-lsp"]"#}</code></pre>
+                            </div>
+                            <p>
+                                "In both editors, use the program's full path if its folder is not on "
+                                <code>"PATH"</code>". The Windows installer does not add its folder to "
+                                <code>"PATH"</code>"."
+                            </p>
+                        </div>
+                    </section>
+
+                    // =========================================================
+                    // WHAT'S NEXT
+                    // =========================================================
+                    <section id="roadmap" class="docs-section">
+                        <h2 class="section-title">
+                            <span class="section-number">"07"</span>
+                            "What's Next"
+                        </h2>
+
+                        <div id="roadmap-symbols" class="subsection">
+                            <h3>"Richer Symbols"</h3>
+                            <p>
+                                "The analyzer indexes functions today. Next it will record "<code>"use"</code>
+                                " declarations, structs, enums, constants, "<code>"impl"</code>" blocks and
+                                modules, so the outline, go to definition and rename cover them too, and a
+                                period after a value will complete its members."
+                            </p>
+                        </div>
+
+                        <div id="roadmap-packages" class="subsection">
+                            <h3>"The Server in Every Package"</h3>
+                            <p>
+                                "The Windows zip, the macOS disk image and the Linux archive will ship "
+                                <code>"eustress-lsp"</code>" beside the engine, as the Windows installer does,
+                                so Studio starts the server on every platform without a source build."
+                            </p>
+                            <div class="future-cta">
+                                <p><strong>"One analyzer. Every editor you like."</strong></p>
+                                <div class="cta-buttons">
+                                    <a href="/download" class="btn-primary-glow">"Download Eustress"</a>
+                                    <a href="/docs/scripting" class="btn-secondary-steel">"Scripting Docs"</a>
+                                </div>
+                            </div>
                         </div>
                     </section>
 
                     <nav class="docs-nav-footer">
-                        <a href="/learn/mcp" class="nav-prev">
+                        <a href="/learn/ide" class="nav-prev">
                             <img src="/assets/icons/arrow-left.svg" alt="Previous" />
                             <div>
                                 <span class="nav-label">"Previous"</span>
-                                <span class="nav-title">"MCP Server"</span>
+                                <span class="nav-title">"IDE Integration"</span>
                             </div>
                         </a>
-                        <a href="/docs/audio" class="nav-next">
+                        <a href="/docs/philosophy" class="nav-next">
                             <div>
                                 <span class="nav-label">"Next"</span>
-                                <span class="nav-title">"Audio"</span>
+                                <span class="nav-title">"Philosophy"</span>
                             </div>
                             <img src="/assets/icons/arrow-right.svg" alt="Next" />
                         </a>

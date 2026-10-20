@@ -22,25 +22,33 @@ use crate::commands::{SelectionManager, TransformManager};
 pub mod slint_ui;
 /// Data-driven Insert-menu catalog (ClassRegistry → grouped descriptors).
 pub mod insert_classes;
+pub mod particle_sim_panel;
+/// PointLight / SpotLight / SurfaceLight / DirectionalLight rows, edits and
+/// insert placement.
+pub mod light_panel;
+/// Sun (Star) / Moon / Sky / Atmosphere rows and edits, from their own
+/// `[star]`/`[moon]`/`[sky]`/`[atmosphere]` sections.
+pub mod celestial_panel;
+/// The editor camera's Perspective (2D/3D, projection, axis view) into the
+/// tab-bar ViewSelector and the View menu.
+pub mod perspective_hud;
+/// The dialog a script's purchase prompt shows in Play.
+pub mod purchase_prompt;
 pub mod explorer_query;
 pub mod slint_native;
 pub mod slint_bridge;
 pub mod viewport_context_menu;
 pub mod floating_windows;
-pub mod runtime_ui;
-pub mod rune_bindings;
 pub mod rune_ecs_bindings;
 
 // Core modules that don't depend on egui
-mod file_dialogs;
+pub mod file_dialogs;
 pub mod file_event_handler;
 mod spawn_events;
 mod menu_events;
-mod world_view;
 pub mod webview;
 pub mod file_icons;
 pub mod center_tabs;
-pub mod monaco_bridge;
 /// Purchase orders and RFQs into the Slint procurement panels, and the panel
 /// callbacks back into the Odoo state machine.
 pub mod procurement_bridge;
@@ -55,11 +63,9 @@ pub use spawn_events::{
     SpawnPartEvent, PastePartEvent, SpawnEventsPlugin,
     SpawnTerrainEvent, ToggleTerrainEditEvent, SetTerrainBrushEvent,
     ImportTerrainEvent, ExportTerrainEvent,
+    GenerateWorldEvent, GenerateFlatTerrainEvent, WorldgenTask,
 };
 pub use menu_events::MenuActionEvent;
-pub use world_view::{UIWorldSnapshot, UIActionQueue, UIAction, WorldViewPlugin};
-pub use runtime_ui::{RuntimeUIPlugin, RuntimeUIManager, UIEvent, GuiElement};
-pub use rune_bindings::{UIBindings, RuneUIBindingsPlugin};
 pub use rune_ecs_bindings::{ECSBindings, RuneECSBindingsPlugin};
 
 // ============================================================================
@@ -228,36 +234,7 @@ pub struct ServiceOwner(pub ServiceType);
 // UI State Resources
 // ============================================================================
 
-/// Viewport bounds reported by Slint layout (in PHYSICAL pixels from top-left).
-/// Used by the camera controller to clip 3D rendering to the viewport area.
-///
-/// IMPORTANT: these fields are physical pixels (logical × scale_factor). When
-/// comparing against `Window::cursor_position()` — which returns LOGICAL
-/// pixels — call `contains_logical` or divide by the window scale factor
-/// first. Forgetting this is the bug that made 3D click selection silently
-/// reject every click on any display with DPI scaling ≠ 1.0.
-#[derive(Resource, Default, Clone, Copy)]
-pub struct ViewportBounds {
-    pub x: f32,
-    pub y: f32,
-    pub width: f32,
-    pub height: f32,
-}
-
-impl ViewportBounds {
-    /// Test whether a cursor point (in LOGICAL pixels, as returned by
-    /// `Window::cursor_position()`) falls inside the viewport rectangle.
-    /// Converts physical bounds to logical using the provided scale factor.
-    pub fn contains_logical(&self, cursor: bevy::math::Vec2, scale_factor: f32) -> bool {
-        if self.width <= 0.0 || self.height <= 0.0 { return true; }
-        let s = scale_factor.max(0.0001);
-        let x = self.x / s;
-        let y = self.y / s;
-        let w = self.width / s;
-        let h = self.height / s;
-        cursor.x >= x && cursor.x <= x + w && cursor.y >= y && cursor.y <= y + h
-    }
-}
+pub use eustress_common::play_session::ViewportBounds;
 
 #[derive(Resource)]
 pub struct StudioState {
@@ -266,7 +243,6 @@ pub struct StudioState {
     pub show_output: bool,
     pub show_keybindings_window: bool,
     pub show_terrain_editor: bool,
-    pub show_soul_settings_window: bool,
     pub current_tool: Tool,
     pub transform_mode: TransformMode,
     pub play_solo_requested: bool,
@@ -305,6 +281,10 @@ pub struct StudioState {
     /// only tracks whether a git snapshot has recorded them since, which is
     /// what the title asterisk and the exit prompt mean.
     pub saved_undo_sequence: u64,
+    /// The user was told this Space's terrain edits cannot be saved yet (a
+    /// migrated Space), so autosave does not repeat the warning every
+    /// interval. A manual Save and a Space switch clear it.
+    pub terrain_unsaved_warned: bool,
     /// Short status shown in the File menu: "Snapshot 12:03", "Autosaved
     /// 12:08", or "No snapshot yet".
     pub snapshot_status: String,
@@ -339,8 +319,24 @@ pub struct StudioState {
     pub pending_build_entity: Option<Entity>,
     pub pending_close_tab: Option<i32>,
     pub pending_reorder: Option<(i32, i32)>,
+    /// Line (1-based) the Problems panel asked the script editor to show,
+    /// applied once the target tab's content is in the editor.
+    pub pending_script_jump_line: Option<i32>,
+    /// Bumped by Ctrl+K; `sync_bevy_to_slint` flips the command bar once
+    /// per bump.
+    pub toggle_command_bar_pulse: u32,
+    /// Bumped by Ctrl+F; `sync_bevy_to_slint` opens Find & Replace.
+    pub open_find_pulse: u32,
     pub script_editor_content: String,
     pub script_content_dirty: bool,
+    /// Bumped when an editor text change is applied. The analyzer compares
+    /// against it rather than consuming `script_content_dirty`, which belongs
+    /// to the highlighter.
+    pub script_content_revision: u64,
+    /// Highlight language for the active script tab, resolved from its
+    /// source file. A script folder's tab title has no extension, so the
+    /// title cannot say whether the script is Rune or Luau.
+    pub script_language: String,
 
     // ── Code completion ──────────────────────────────────────────────
     //
@@ -407,7 +403,6 @@ impl Default for StudioState {
             show_output: true,
             show_keybindings_window: false,
             show_terrain_editor: false,
-            show_soul_settings_window: false,
             current_tool: Tool::Select,
             transform_mode: TransformMode::World,
             play_solo_requested: false,
@@ -448,6 +443,7 @@ impl Default for StudioState {
             has_unsaved_changes: false,
             show_exit_confirmation: false,
             saved_undo_sequence: 0,
+            terrain_unsaved_warned: false,
             snapshot_status: "No snapshot yet".to_string(),
             show_insert_object_dialog: false,
             insert_target_name: "Workspace".to_string(),
@@ -470,8 +466,13 @@ impl Default for StudioState {
             pending_build_entity: None,
             pending_close_tab: None,
             pending_reorder: None,
+            pending_script_jump_line: None,
+            toggle_command_bar_pulse: 0,
+            open_find_pulse: 0,
             script_editor_content: String::new(),
             script_content_dirty: false,
+            script_content_revision: 0,
+            script_language: String::new(),
             completion_items: Vec::new(),
             completion_selected: 0,
             completion_prefix: String::new(),
@@ -658,6 +659,9 @@ pub struct SlintUIFocus {
     pub focused_entity: Option<Entity>,
     /// Name of ScreenGui button that was clicked this frame (consumed by script dispatch)
     pub gui_clicked_button: Option<String>,
+    /// The clicked button's entity, so Luau can fire `MouseButton1Click` on
+    /// the right instance when several buttons share a name.
+    pub gui_clicked_entity: Option<Entity>,
 }
 
 #[derive(Resource)]

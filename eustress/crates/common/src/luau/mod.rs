@@ -36,6 +36,8 @@ pub mod bridge;
 pub mod compat;
 pub mod raycast;
 pub mod types;
+/// The Play-mode VM: scripts run against the live [`crate::datamodel`] tree.
+pub mod play;
 
 pub use components::*;
 pub use runtime::*;
@@ -294,6 +296,32 @@ pub fn bevy_mouse_to_roblox(button: MouseButton) -> Option<&'static str> {
     })
 }
 
+/// The Bevy [`KeyCode`] for a Roblox `Enum.KeyCode` name: the inverse of
+/// [`bevy_keycode_to_roblox`], read from the same table so the two cannot
+/// disagree.
+pub fn roblox_to_bevy_keycode(name: &str) -> Option<KeyCode> {
+    use KeyCode::*;
+    const KEYS: &[KeyCode] = &[
+        KeyA, KeyB, KeyC, KeyD, KeyE, KeyF, KeyG, KeyH, KeyI, KeyJ, KeyK, KeyL, KeyM, KeyN, KeyO, KeyP, KeyQ, KeyR,
+        KeyS, KeyT, KeyU, KeyV, KeyW, KeyX, KeyY, KeyZ, Digit0, Digit1, Digit2, Digit3, Digit4, Digit5, Digit6,
+        Digit7, Digit8, Digit9, Space, Enter, Escape, Tab, Backspace, Delete, ArrowUp, ArrowDown, ArrowLeft,
+        ArrowRight, ShiftLeft, ShiftRight, ControlLeft, ControlRight, AltLeft, AltRight, SuperLeft, SuperRight, F1,
+        F2, F3, F4, F5, F6, F7, F8, F9, F10, F11, F12, Minus, Equal, BracketLeft, BracketRight, Backslash, Slash,
+        Semicolon, Quote, Comma, Period, Backquote, CapsLock,
+    ];
+    KEYS.iter().copied().find(|k| bevy_keycode_to_roblox(*k) == Some(name))
+}
+
+/// The Bevy [`MouseButton`] for a Roblox `MouseButton1`..`MouseButton3`.
+pub fn roblox_to_bevy_mouse(name: &str) -> Option<MouseButton> {
+    Some(match name {
+        "MouseButton1" => MouseButton::Left,
+        "MouseButton2" => MouseButton::Right,
+        "MouseButton3" => MouseButton::Middle,
+        _ => return None,
+    })
+}
+
 /// Route RemoteEvent fires through the bridge
 fn process_remote_events(
     mut bus: ResMut<RemoteEventBus>,
@@ -316,10 +344,6 @@ fn process_bindable_events(
     }
 }
 
-// The real Luau hot-reload lives in `engine::soul::rune_api::
-// hot_reload_dirty_luau_scripts` (Space-local Soul Scripts, driven by
-// `SpaceFileWatcher`) — this was a same-named, scheduled-every-frame no-op
-// stub that could confuse anyone looking for "the" Luau hot-reload system.
-// Removed rather than left as dead weight now that a real plugin host
-// (`engine::script_plugin_host`) landed nearby with its own reload path
-// (the "Reload Plugins" button, not a file watcher, per Phase 2 scope).
+// Space scripts run in the Play VM (`play`), which reads each script's
+// source when Play starts. Script plugins reload through
+// `engine::script_plugin_host` (the "Reload Plugins" button).

@@ -35,12 +35,12 @@ use eustress_engine::{
     light_cull, light_sync, lock_tool, manufacturing, material_sync, math_utils,
     measure_tool, mesh_import, mirror_link, modal_tool, move_handles, move_tool,
     network_benchmark, notifications, numeric_input, part_selection, part_to_terrain,
-    parts, photoreal, physics, pivot_mode, play_mode, play_mode_runtime, play_server,
+    parts, photoreal, physics, pivot_mode, play_mode, play_mode_runtime,
     plugins, profiler, properties, rendering, road_tool, rotate_handles, rotate_tool,
     rune_tool_sandbox, runtime, saved_viewpoints, scale_handles, scale_tool, scenes,
     script_plugin_host,
     seats, select_tool, selection_box, selection_sets, selection_sync, serialization,
-    shaders, simulation, smart_guides, soul, soul_script_migration, space,
+    simulation, smart_guides, soul, soul_script_migration, space,
     spatial_query_bridge, spawn, spawners, startup, studio_plugins, telemetry,
     terrain_plugin, timeline_animation, timeline_panel, timeline_slint_sync,
     toast_undo, toolbox, tools_smart, transform_constraints, transform_space,
@@ -137,6 +137,30 @@ fn prune_engine_logs(dir: &std::path::Path) {
     }
 }
 
+/// `LogPlugin`'s filter: Bevy's default, plus
+/// `bevy_ecs::schedule::executor=warn` under the `exec_spans` performance
+/// switch (`eustress_common::utils::perf_on`).
+///
+/// `bevy_ecs`'s `trace` feature is on in every build so the per-system
+/// profiler can attach without a rebuild. With it, the single-threaded
+/// executor creates an info-level `check_conditions` span, with a formatted
+/// system name, for every system on every run, and the render world runs
+/// `Core3d` on that executor once per shadow view: about 2,700 spans a frame
+/// on a scene with 62 shadow views. Nothing reads them. Log lines carry the
+/// enclosing `system` span, which has a different target and stays, as do
+/// the profiler's spans. A target directive like this one also outranks a
+/// plain `RUST_LOG=info`, which Bevy adds on top of this filter.
+fn log_filter() -> String {
+    let mut filter = bevy::log::DEFAULT_FILTER.to_string();
+    if eustress_common::utils::perf_on("exec_spans") {
+        if !filter.is_empty() && !filter.ends_with(',') {
+            filter.push(',');
+        }
+        filter.push_str("bevy_ecs::schedule::executor=warn");
+    }
+    filter
+}
+
 /// The `LogPlugin::fmt_layer` hook — console output PLUS a log file.
 ///
 /// Release builds set `windows_subsystem = "windows"`, which detaches the
@@ -231,21 +255,30 @@ fn main() {
     // asset watcher is gated on the `file_watcher` cargo feature (not enabled
     // here — hot-reload uses the engine's own `notify` watcher), so no
     // writer/watcher is needed.
-    let space_root = space::default_space_root();
+    //
+    // The launch Space is the one the arguments open (`--space`, `--open`, a
+    // `.eustress` launch file, `--universe`), else the one the settings
+    // remember. It becomes `SpaceRoot` before any plugin is built, so the
+    // streaming tier and the plugins that load Space files in `build`
+    // (purchase orders, manufacturing) read the Space that is actually open.
+    let space_root = args.launch_space_root().unwrap_or_else(space::default_space_root);
+    app.insert_resource(space::SpaceRoot(space_root.clone()));
     eustress_engine::app_core::register_asset_sources(&mut app, &space_root);
 
     app // Bevy plugins with optimized window settings
         .add_plugins(DefaultPlugins
             .set(WindowPlugin {
-                primary_window: Some(Window {
+                // Size, position and maximized state come from
+                // `window_placement`: maximized on first launch, then
+                // wherever the user left it, fitted to the work area.
+                primary_window: Some(eustress_engine::window_placement::startup_window(Window {
                     title: window_title,
-                    resolution: bevy::window::WindowResolution::new(1600, 900),
                     present_mode: bevy::window::PresentMode::AutoNoVsync,
                     mode: bevy::window::WindowMode::Windowed,
                     decorations: true,
                     resizable: true,
                     ..default()
-                }),
+                })),
                 close_when_requested: false,
                 ..default()
             })
@@ -323,10 +356,12 @@ fn main() {
             // usual stderr layer plus a second one over a log file, so the
             // diagnostics the engine already prints survive a release build
             // where `windows_subsystem = "windows"` hides the console.
-            // `filter`/`level` stay at their defaults.
+            // `level` stays at its default; `filter` is Bevy's default plus
+            // one directive (see `log_filter`).
             .set(bevy::log::LogPlugin {
                 custom_layer: profiler::custom_layer,
                 fmt_layer: engine_log_fmt_layer,
+                filter: log_filter(),
                 ..default()
             })
         )
@@ -377,10 +412,8 @@ fn main() {
         .add_plugins(PlayModeUiPlugin)
         // Script analyzer (Rune diagnostics + symbol index on AsyncComputeTaskPool)
         .add_plugins(script_editor::ScriptAnalysisPlugin)
-        // Runtime snapshot — writes live play-state + sim values to
-        // `<universe>/.eustress/runtime-snapshot.json` at 4 Hz so the
-        // LSP (separate process) can surface live values in hover.
-        .add_plugins(script_editor::runtime_snapshot::RuntimeSnapshotPlugin)
+        // (The runtime snapshot the LSP reads for live hover values comes in
+        // with add_core_sim_plugins above.)
         // LSP child-process launcher — spawns `eustress-lsp --tcp` so
         // external IDEs can connect to a live server while Studio is up.
         // No-op if the companion binary isn't on disk.
@@ -395,6 +428,9 @@ fn main() {
         .add_plugins(eustress_engine::moderation_dossier::PublishCapturePlugin)
         // Slint UI (software renderer overlay)
         .add_plugins(ui::slint_ui::SlintUiPlugin)
+        // Camera Perspective (2D/3D, projection, axis view) → tab-bar
+        // ViewSelector + View menu. After SlintUiPlugin: reads SlintUiState.
+        .add_plugins(ui::perspective_hud::PerspectiveHudPlugin)
         // Studio auth + Bliss node — starts the local Bliss node API.
         // Must come after SlintUiPlugin (which owns `auth_poll_system`;
         // this plugin deliberately does not re-register it).
@@ -406,6 +442,8 @@ fn main() {
         .add_plugins(bliss_tracker::BlissTrackerPlugin)
         // Floating windows
         .add_plugins(ui::floating_windows::FloatingWindowsPlugin)
+        // Forge cloud: connect, allocate a dedicated server, report back
+        .add_plugins(forge::ForgePlugin)
         // 3D rendering
         .add_plugins(PartRenderingPlugin {
             selection_manager: selection_manager.clone(),
@@ -425,8 +463,6 @@ fn main() {
         // hydrate_lighting_entities (attaches DirectionalLight, markers, etc.
         // to file-loaded Lighting/ Instance entities on each Space switch).
         .add_plugins(LightingPlugin)
-        // Analytical sun/moon disc shader (resolution-independent, replaces cubemap baking)
-        .add_plugins(shaders::SunDiscPlugin)
         // Default scene
         .add_plugins(DefaultScenePlugin)
         // Automatic .txt to .toml converter (file system workaround)
@@ -586,6 +622,9 @@ fn main() {
         // Timeline → Slint sync. Separate plugin so the timeline
         // feature iterates without touching the 8k-line slint_ui.rs.
         .add_plugins(timeline_slint_sync::TimelineSlintSyncPlugin)
+        // A script's purchase prompt in Play: Studio asks before its test
+        // purchase. Without this plugin (the headless engine) it buys unasked.
+        .add_plugins(ui::purchase_prompt::PurchasePromptUiPlugin)
         // Timeline animation (Phase 2+) — keyframed + procedural
         // tracks playback via AnimationClock.
         .add_plugins(timeline_animation::TimelineAnimationPlugin)
@@ -651,6 +690,8 @@ fn main() {
         .add_plugins(eustress_geo::GeoPlugin)
         // Window focus
         .add_plugins(WindowFocusPlugin)
+        // Window placement: restore the last size and position, save changes
+        .add_plugins(eustress_engine::window_placement::WindowPlacementPlugin)
         // (UniverseRegistryPlugin now comes in with add_core_sim_plugins.)
         // Startup
         .add_plugins(StartupPlugin)

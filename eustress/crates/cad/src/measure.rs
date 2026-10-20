@@ -471,6 +471,71 @@ pub fn min_distance(a: &EvalMesh, b: &EvalMesh) -> (f64, bool) {
 
 // ════════════════════════════════════════════════════════════════════
 
+// ── Rays ────────────────────────────────────────────────────────────
+
+/// Ray / triangle intersection (Moller-Trumbore): distance along `d`.
+fn ray_tri(o: [f64; 3], d: [f64; 3], a: [f64; 3], b: [f64; 3], c: [f64; 3]) -> Option<f64> {
+    let e1 = sub(b, a);
+    let e2 = sub(c, a);
+    let p = cross(d, e2);
+    let det = dot(e1, p);
+    if det.abs() < 1.0e-30 {
+        return None;
+    }
+    let inv = 1.0 / det;
+    let s = sub(o, a);
+    let u = dot(s, p) * inv;
+    if !(0.0..=1.0).contains(&u) {
+        return None;
+    }
+    let q = cross(s, e1);
+    let v = dot(d, q) * inv;
+    if v < 0.0 || u + v > 1.0 {
+        return None;
+    }
+    Some(dot(e2, q) * inv)
+}
+
+/// Nearest intersection of a ray with a mesh: distance along the unit
+/// direction `d`, and the index of the triangle hit.
+pub fn raycast(mesh: &EvalMesh, o: [f64; 3], d: [f64; 3]) -> Option<(f64, usize)> {
+    let l = len(d);
+    if !(l > 0.0) {
+        return None;
+    }
+    let d = mul(d, 1.0 / l);
+    let mut best: Option<(f64, usize)> = None;
+    for (i, t) in mesh.indices.chunks_exact(3).enumerate() {
+        let (a, b, c) = tri(mesh, t);
+        if let Some(h) = ray_tri(o, d, a, b, c) {
+            if h > 1.0e-12 && best.map_or(true, |(bt, _)| h < bt) {
+                best = Some((h, i));
+            }
+        }
+    }
+    best
+}
+
+/// Is `p` inside the closed surface `mesh`? Even-odd count of crossings
+/// along a ray in a deliberately irregular direction, so the ray does
+/// not graze the axis-aligned edges CAD geometry is full of.
+pub fn contains_point(mesh: &EvalMesh, p: [f64; 3]) -> bool {
+    let d = {
+        let v = [0.577_215_664_9, 0.302_775_637_7, 0.758_182_376_1];
+        mul(v, 1.0 / len(v))
+    };
+    let mut crossings = 0usize;
+    for t in mesh.indices.chunks_exact(3) {
+        let (a, b, c) = tri(mesh, t);
+        if let Some(h) = ray_tri(p, d, a, b, c) {
+            if h > 1.0e-12 {
+                crossings += 1;
+            }
+        }
+    }
+    crossings % 2 == 1
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -497,7 +562,7 @@ mod tests {
             3, 7, 6, 3, 6, 2, // +Y
             0, 1, 5, 0, 5, 4, // -Y
         ];
-        EvalMesh { positions: p, normals: vec![], uvs: vec![], indices: idx }
+        EvalMesh { positions: p, indices: idx, ..Default::default() }
     }
 
     #[test]
@@ -649,7 +714,7 @@ mod tests {
             idx.extend_from_slice(&[i, j, j + 6]);
             idx.extend_from_slice(&[i, j + 6, i + 6]);
         }
-        EvalMesh { positions: pos, normals: vec![], uvs: vec![], indices: idx }
+        EvalMesh { positions: pos, indices: idx, ..Default::default() }
     }
 
     #[test]

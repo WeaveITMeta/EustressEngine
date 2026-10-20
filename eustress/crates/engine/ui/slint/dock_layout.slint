@@ -33,32 +33,6 @@ export struct LayoutPreset {
 }
 
 // ============================================================================
-// Tab Definition for Advanced Tab Management
-// ============================================================================
-
-export struct DockTab {
-    id: string,
-    title: string,
-    icon: image,
-    color: color,
-    pinned: bool,
-    closable: bool,
-}
-
-// ============================================================================
-// Dock Zone for Context-Aware Docking
-// ============================================================================
-
-export enum DockZone {
-    left,
-    right,
-    top,
-    bottom,
-    center,
-    floating,
-}
-
-// ============================================================================
 // Layout Preset Selector Component
 // ============================================================================
 
@@ -267,7 +241,7 @@ export component LayoutDropdownMenu inherits Rectangle {
 
     callback preset-selected(int, LayoutPreset);
     callback load-layout-from-file();
-    callback reset-to-factory();
+    callback save-layout-to-file();
     callback close();
 
     width: 220px;
@@ -347,6 +321,32 @@ export component LayoutDropdownMenu inherits Rectangle {
                 background: Theme.border-color;
             }
             
+            // Save Layout
+            Rectangle {
+                height: 32px;
+                background: save-touch.has-hover ? Theme.explorer-item-hover : transparent;
+                border-radius: 4px;
+
+                save-touch := TouchArea {
+                    mouse-cursor: pointer;
+                    clicked => {
+                        root.save-layout-to-file();
+                        root.close();
+                    }
+                }
+
+                HorizontalLayout {
+                    padding-left: 10px;
+                    spacing: 8px;
+
+                    Rectangle {
+                        width: 20px;
+                        Image { x: 2px; y: 8px; width: 16px; height: 16px; source: @image-url("../../assets/icons/ui/save.svg"); image-fit: contain; }
+                    }
+                    Text { text: "Save Layout..."; color: Theme.text-primary; font-size: 12px; vertical-alignment: center; }
+                }
+            }
+
             // Import Layout
             Rectangle {
                 height: 32px;
@@ -379,10 +379,12 @@ export component LayoutDropdownMenu inherits Rectangle {
                 background: reset-touch.has-hover ? Theme.explorer-item-hover : transparent;
                 border-radius: 4px;
                 
+                // Reset applies the Default preset in full: panels, widths
+                // and tabs, exactly as picking it from the list does.
                 reset-touch := TouchArea {
                     mouse-cursor: pointer;
                     clicked => {
-                        root.reset-to-factory();
+                        root.preset-selected(0, root.presets[0]);
                         root.close();
                     }
                 }
@@ -400,248 +402,6 @@ export component LayoutDropdownMenu inherits Rectangle {
             }
         }
     }
-
-// ============================================================================
-// Advanced Tab Bar with Context Menu, Overflow, Color-Coding
-// ============================================================================
-
-export component AdvancedTabBar inherits Rectangle {
-    in-out property <[DockTab]> tabs: [];
-    in-out property <int> active-tab-index: 0;
-    in-out property <bool> show-context-menu: false;
-    in-out property <int> context-menu-tab-index: 0;
-    in-out property <length> context-menu-x: 0px;
-    in-out property <length> context-menu-y: 0px;
-    
-    callback tab-selected(int);
-    callback tab-closed(int);
-    callback tab-pinned(int);
-    callback tab-detached(int);
-    callback tabs-reordered(int, int);
-    
-    height: 32px;
-    background: Theme.header-background;
-    
-    HorizontalBox {
-        padding-left: 4px;
-        padding-right: 4px;
-        spacing: 2px;
-        
-        // Render tabs (max 8 visible, rest in overflow)
-        for tab[index] in root.tabs: Rectangle {
-            visible: index < 8;
-            min-width: 80px;
-            max-width: 160px;
-            background: index == root.active-tab-index ? Theme.tab-active : Theme.tab-inactive;
-            border-radius: 4px;
-            border-top-left-radius: 4px;
-            border-top-right-radius: 4px;
-            border-bottom-left-radius: 0px;
-            border-bottom-right-radius: 0px;
-            
-            // Color indicator bar
-            Rectangle {
-                y: 0px;
-                height: 3px;
-                width: 100%;
-                background: tab.color;
-                border-top-left-radius: 4px;
-                border-top-right-radius: 4px;
-            }
-            
-            TouchArea {
-                clicked => { 
-                    root.active-tab-index = index;
-                    root.tab-selected(index); 
-                }
-                pointer-event(event) => {
-                    if event.button == PointerEventButton.right && event.kind == PointerEventKind.up {
-                        root.context-menu-tab-index = index;
-                        root.context-menu-x = self.absolute-position.x + self.mouse-x;
-                        root.context-menu-y = self.absolute-position.y + self.mouse-y;
-                        root.show-context-menu = true;
-                    }
-                }
-                
-                HorizontalBox {
-                    padding: 6px;
-                    spacing: 4px;
-                    
-                    // Pin indicator
-                    if tab.pinned: Rectangle {
-                        width: 14px;
-                        Image {
-                            width: 12px;
-                            height: 12px;
-                            source: @image-url("../../assets/icons/ui/pin.svg");
-                            image-fit: contain;
-                            vertical-alignment: center;
-                        }
-                    }
-                    
-                    // Icon
-                    Rectangle {
-                        width: 16px;
-                        Image {
-                            width: 16px;
-                            height: 16px;
-                            source: tab.icon;
-                            image-fit: contain;
-                            vertical-alignment: center;
-                        }
-                    }
-                    
-                    // Title
-                    Text {
-                        text: tab.title;
-                        color: index == root.active-tab-index ? Theme.text-primary : Theme.text-secondary;
-                        vertical-alignment: center;
-                        overflow: elide;
-                        horizontal-stretch: 1;
-                    }
-                    
-                    // Close button (if closable and not pinned)
-                    if tab.closable && !tab.pinned: TouchArea {
-                        width: 16px;
-                        clicked => { root.tab-closed(index); }
-                        
-                        Rectangle {
-                            width: 16px;
-                            height: 16px;
-                            border-radius: 8px;
-                            background: parent.has-hover ? Theme.button-hover : transparent;
-                            
-                            Text {
-                                text: "×";
-                                color: Theme.text-secondary;
-                                horizontal-alignment: center;
-                                vertical-alignment: center;
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        
-        // Overflow dropdown (if more than 8 tabs)
-        if root.tabs.length > 8: Rectangle {
-            width: 32px;
-            background: Theme.tab-inactive;
-            border-radius: 4px;
-            
-            TouchArea {
-                // TODO: Show overflow dropdown
-                Text {
-                    text: "+" + (root.tabs.length - 8);
-                    color: Theme.text-secondary;
-                    horizontal-alignment: center;
-                    vertical-alignment: center;
-                }
-            }
-        }
-        
-        // Spacer
-        Rectangle { horizontal-stretch: 1; }
-    }
-    
-    // Context menu
-    if root.show-context-menu: Rectangle {
-        x: root.context-menu-x;
-        y: root.context-menu-y;
-        width: 180px;
-        height: 160px;
-        background: Theme.panel-background;
-        border-radius: 4px;
-        border-width: 1px;
-        border-color: Theme.border-color;
-        drop-shadow-blur: 8px;
-        drop-shadow-color: Theme.shadow-float;
-        
-        VerticalBox {
-            padding: 4px;
-            
-            Rectangle {
-                height: 28px;
-                TouchArea {
-                    clicked => {
-                        root.tab-closed(root.context-menu-tab-index);
-                        root.show-context-menu = false;
-                    }
-                    HorizontalBox {
-                        padding: 8px;
-                        Text { text: "Close"; color: Theme.text-primary; }
-                    }
-                }
-            }
-            
-            Rectangle {
-                height: 28px;
-                TouchArea {
-                    clicked => {
-                        // Close all but this
-                        root.show-context-menu = false;
-                    }
-                    HorizontalBox {
-                        padding: 8px;
-                        Text { text: "Close Others"; color: Theme.text-primary; }
-                    }
-                }
-            }
-            
-            Rectangle {
-                height: 28px;
-                TouchArea {
-                    clicked => {
-                        root.tab-pinned(root.context-menu-tab-index);
-                        root.show-context-menu = false;
-                    }
-                    HorizontalBox {
-                        padding: 8px;
-                        Text { 
-                            text: root.tabs[root.context-menu-tab-index].pinned ? "Unpin Tab" : "Pin Tab"; 
-                            color: Theme.text-primary; 
-                        }
-                    }
-                }
-            }
-            
-            Rectangle { height: 1px; background: Theme.border-color; }
-            
-            Rectangle {
-                height: 28px;
-                TouchArea {
-                    clicked => {
-                        root.tab-detached(root.context-menu-tab-index);
-                        root.show-context-menu = false;
-                    }
-                    HorizontalBox {
-                        padding: 8px;
-                        Text { text: "Detach to Window"; color: Theme.text-primary; }
-                    }
-                }
-            }
-            
-            Rectangle {
-                height: 28px;
-                TouchArea {
-                    clicked => {
-                        // Rename tab
-                        root.show-context-menu = false;
-                    }
-                    HorizontalBox {
-                        padding: 8px;
-                        Text { text: "Rename..."; color: Theme.text-primary; }
-                    }
-                }
-            }
-        }
-        
-        // Click outside to close
-        init => {
-            // Auto-close after a delay or on outside click
-        }
-    }
-}
 
 // ============================================================================
 // Performance Overlay (FPS, Memory, Auto-hide inactive)
@@ -709,45 +469,6 @@ export component PerformanceOverlay inherits Rectangle {
                 font-size: 13px;
                 vertical-alignment: center;
             }
-        }
-    }
-}
-
-// ============================================================================
-// Dock Zone Indicator (for drag-drop feedback)
-// ============================================================================
-
-export component DockZoneIndicator inherits Rectangle {
-    in-out property <bool> active: false;
-    in-out property <DockZone> zone: DockZone.center;
-    in-out property <float> highlight-intensity: 0.0;
-    
-    background: root.active ? Theme.accent-blue.with-alpha(0.3 + root.highlight-intensity * 0.3) : transparent;
-    border-width: root.active ? 2px : 0px;
-    border-color: Theme.accent-blue;
-    border-radius: 4px;
-    
-    animate background { duration: 150ms; }
-    animate border-width { duration: 150ms; }
-    
-    if root.active: Rectangle {
-        width: 60px;
-        height: 60px;
-        x: (parent.width - self.width) / 2;
-        y: (parent.height - self.height) / 2;
-        background: Theme.accent-blue.with-alpha(0.8);
-        border-radius: 8px;
-        
-        Text {
-            text: root.zone == DockZone.left ? "◀" :
-                  root.zone == DockZone.right ? "▶" :
-                  root.zone == DockZone.top ? "▲" :
-                  root.zone == DockZone.bottom ? "▼" :
-                  root.zone == DockZone.center ? "⊞" : "◇";
-            color: white;
-            font-size: 24px;
-            horizontal-alignment: center;
-            vertical-alignment: center;
         }
     }
 }

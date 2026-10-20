@@ -7,7 +7,7 @@
 // with a cumulative total.
 //
 // Balances are integer minor units server-side (1 BLS = 100), so every figure
-// here is rendered at exactly 2 decimals — never more.
+// here is rendered at exactly 2 decimals.
 // =============================================================================
 
 use leptos::prelude::*;
@@ -39,7 +39,7 @@ struct LedgerHistory {
     series: Vec<LedgerPoint>,
 }
 
-/// 2dp with thousands separators — matches the ledger's own precision.
+/// 2dp with thousands separators, the ledger's own precision.
 fn fmt_bls(v: f64) -> String {
     let neg = v < 0.0;
     let cents = (v.abs() * 100.0).round() as u64;
@@ -61,7 +61,28 @@ fn is_opening(p: &LedgerPoint) -> bool {
     p.date == "opening" || p.kinds.iter().any(|k| k == "migration_opening")
 }
 
-/// Cumulative area + line chart. Hand-built SVG — a charting library would be
+/// Did the nightly emission credit this day?
+fn has_emission(p: &LedgerPoint) -> bool {
+    p.kinds.iter().any(|k| k == "emission")
+}
+
+/// The label for a day's row: what kinds of entry it holds.
+fn day_kind(p: &LedgerPoint) -> &'static str {
+    let spend = p.kinds.iter().any(|k| k == "spend");
+    match (is_opening(p), has_emission(p), spend) {
+        (true, _, _) => "migrated",
+        (_, true, true) => "emission + spend",
+        (_, false, true) => "spend",
+        _ => "emission",
+    }
+}
+
+/// A change with its sign: +1.00 or -1.00.
+fn signed_bls(v: f64) -> String {
+    if v < 0.0 { fmt_bls(v) } else { format!("+{}", fmt_bls(v)) }
+}
+
+/// Cumulative area + line chart. Hand-built SVG: a charting library would be
 /// far more weight than a single series needs.
 fn chart_view(series: &[LedgerPoint]) -> impl IntoView {
     const W: f64 = 900.0;
@@ -111,7 +132,7 @@ fn chart_view(series: &[LedgerPoint]) -> impl IntoView {
         })
         .collect();
 
-    // X labels — first, last, and a few between so they never crowd.
+    // X labels: first, last, and a few between so they never crowd.
     let every = ((series.len() as f64 / 6.0).ceil() as usize).max(1);
     let xlabels: Vec<(f64, String)> = series
         .iter()
@@ -157,7 +178,7 @@ fn chart_view(series: &[LedgerPoint]) -> impl IntoView {
     .into_any()
 }
 
-/// Bliss wallet ledger — the signed-in contributor's own entry history.
+/// Bliss wallet ledger: the signed-in contributor's own entry history.
 #[component]
 pub fn BlissHistoryPage() -> impl IntoView {
     let app_state = expect_context::<AppState>();
@@ -205,8 +226,8 @@ pub fn BlissHistoryPage() -> impl IntoView {
                     <div>
                         <h1>"Wallet Ledger"</h1>
                         <p class="ledger-sub">
-                            "Every BLS credit to your account, newest first. Balances are exact to "
-                            "two decimals — the ledger stores whole cents, not floating point."
+                            "Every BLS credit and spend on your account, newest first. Balances are "
+                            "exact to two decimals: the ledger stores whole cents, not floating point."
                         </p>
                     </div>
                     <a href="/bliss" class="ledger-back">"Bliss overview"</a>
@@ -226,7 +247,7 @@ pub fn BlissHistoryPage() -> impl IntoView {
                             <div class="ledger-card ledger-error">
                                 <p>{msg}</p>
                                 <p class="ledger-hint">
-                                    "Your balance is safe — this only affects loading the view."
+                                    "Your balance is safe. This only affects loading the view."
                                 </p>
                             </div>
                         }.into_any();
@@ -248,15 +269,17 @@ pub fn BlissHistoryPage() -> impl IntoView {
                             </div>
                         }.into_any(),
                         Some(h) => {
-                            let emissions: Vec<LedgerPoint> =
-                                h.series.iter().filter(|p| !is_opening(p)).cloned().collect();
+                            let emissions: Vec<LedgerPoint> = h.series.iter()
+                                .filter(|p| !is_opening(p) && has_emission(p))
+                                .cloned()
+                                .collect();
                             let credited = emissions.len();
                             let avg = if credited > 0 {
                                 emissions.iter().map(|p| p.change).sum::<f64>() / credited as f64
                             } else { 0.0 };
                             let last_date = emissions.last()
                                 .map(|p| p.date.clone())
-                                .unwrap_or_else(|| "—".to_string());
+                                .unwrap_or_else(|| "none yet".to_string());
                             let opening = h.series.iter().find(|p| is_opening(p))
                                 .map(|p| p.change).unwrap_or(0.0);
                             let chart = chart_view(&h.series);
@@ -300,7 +323,7 @@ pub fn BlissHistoryPage() -> impl IntoView {
                                                 <tr>
                                                     <th>"Date"</th>
                                                     <th>"Type"</th>
-                                                    <th class="r">"Credit"</th>
+                                                    <th class="r">"Change"</th>
                                                     <th class="r">"Balance after"</th>
                                                 </tr>
                                             </thead>
@@ -308,7 +331,7 @@ pub fn BlissHistoryPage() -> impl IntoView {
                                                 {rows.into_iter().map(|p| {
                                                     let open = is_opening(&p);
                                                     let date = if open { "Opening".to_string() } else { p.date.clone() };
-                                                    let kind = if open { "migrated" } else { "emission" };
+                                                    let kind = day_kind(&p);
                                                     view! {
                                                         <tr>
                                                             <td class="num">{date}</td>
@@ -317,7 +340,7 @@ pub fn BlissHistoryPage() -> impl IntoView {
                                                                     "ledger-chip ledger-chip-open"
                                                                 } else { "ledger-chip" }>{kind}</span>
                                                             </td>
-                                                            <td class="r num">{format!("+{}", fmt_bls(p.change))}</td>
+                                                            <td class="r num">{signed_bls(p.change)}</td>
                                                             <td class="r num">{fmt_bls(p.cumulative)}</td>
                                                         </tr>
                                                     }

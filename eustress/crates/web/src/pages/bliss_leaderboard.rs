@@ -1,120 +1,112 @@
 // =============================================================================
-// Eustress Web - Bliss Leaderboard (Top Investors & Contributors)
+// Eustress Web - Bliss Leaderboard
 // =============================================================================
-// Rankings for BLS investors and contributors. Anonymous users see
-// the leaderboard but their own rank shows as "Anonymous Investor #N".
-// Logged-in users see their profile name and can claim their position.
+// The accounts that earned the most BLS over the last 7 or 30 settled days,
+// read from `/api/ledger/leaderboard`, which sums the public daily
+// distribution records. Accounts appear by the same ids those records
+// publish; a signed-in contributor sees their own row marked.
+//
+// BLS is earned by contributing. Funding the treasury earns none, so there is
+// no ranking of money put in.
 // =============================================================================
 
 use leptos::prelude::*;
+use leptos::task::spawn_local;
+use serde::Deserialize;
 use crate::components::{CentralNav, Footer};
-use crate::state::AppState;
+use crate::state::{AppState, AuthState};
 
-// -----------------------------------------------------------------------------
-// Data Types
-// -----------------------------------------------------------------------------
+const API_URL: &str = "https://api.eustress.dev";
 
-#[derive(Clone, Debug, PartialEq)]
-pub struct InvestorEntry {
-    pub rank: u32,
-    pub display_name: String,
-    pub is_anonymous: bool,
-    pub total_invested_usd: f64,
-    pub bls_holdings: f64,
-    pub tier: InvestorTier,
-    pub contribution_score: f64,
-    pub node_type: &'static str,
-    pub joined: &'static str,
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+struct LeaderRow {
+    rank: u32,
+    account: String,
+    bls: f64,
+    #[serde(default)]
+    score: f64,
+    #[serde(default)]
+    days_active: u32,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum InvestorTier {
-    Patron,
-    Sustainer,
-    Growth,
-    Seed,
-    Contributor,
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+struct Leaderboard {
+    days: u32,
+    #[serde(default)]
+    settled_days: u32,
+    #[serde(default)]
+    from: Option<String>,
+    #[serde(default)]
+    to: Option<String>,
+    #[serde(default)]
+    contributors: u32,
+    #[serde(default)]
+    entries: Vec<LeaderRow>,
 }
 
-impl InvestorTier {
-    fn display_name(&self) -> &'static str {
-        match self {
-            Self::Patron => "Patron",
-            Self::Sustainer => "Sustainer",
-            Self::Growth => "Growth",
-            Self::Seed => "Seed",
-            Self::Contributor => "Contributor",
+/// 2dp with thousands separators, the ledger's own precision.
+fn fmt_bls(v: f64) -> String {
+    let cents = (v.abs() * 100.0).round() as u64;
+    let digits = (cents / 100).to_string();
+    let mut s = String::new();
+    for (i, c) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i) % 3 == 0 {
+            s.push(',');
         }
+        s.push(c);
     }
-
-    fn css_class(&self) -> &'static str {
-        match self {
-            Self::Patron => "tier-patron",
-            Self::Sustainer => "tier-sustainer",
-            Self::Growth => "tier-growth",
-            Self::Seed => "tier-seed",
-            Self::Contributor => "tier-contributor",
-        }
-    }
+    format!("{}{}.{:02}", if v < 0.0 { "-" } else { "" }, s, cents % 100)
 }
 
-// -----------------------------------------------------------------------------
-// Main Component
-// -----------------------------------------------------------------------------
+/// The short form of an account id shown in the table: its first 8
+/// characters, which is how the public distribution records can be matched.
+fn account_tag(id: &str) -> String {
+    format!("Contributor {}", id.get(..8).unwrap_or(id))
+}
 
 #[component]
 pub fn BlissLeaderboardPage() -> impl IntoView {
-    let _app_state = expect_context::<AppState>();
+    let app_state = expect_context::<AppState>();
+    let days = RwSignal::new(30_u32);
+    let board = RwSignal::new(Option::<Leaderboard>::None);
+    let error = RwSignal::new(Option::<String>::None);
+    let loading = RwSignal::new(true);
 
-    let active_tab = RwSignal::new("investors".to_string());
-    let search_query = RwSignal::new(String::new());
+    Effect::new(move |_| {
+        let window = days.get();
+        loading.set(true);
+        spawn_local(async move {
+            let url = format!("{}/api/ledger/leaderboard?days={}", API_URL, window);
+            match gloo_net::http::Request::get(&url).send().await {
+                Ok(resp) if resp.ok() => match resp.json::<Leaderboard>().await {
+                    Ok(data) => {
+                        board.set(Some(data));
+                        error.set(None);
+                    }
+                    Err(e) => error.set(Some(format!("Could not read the leaderboard: {e}"))),
+                },
+                Ok(resp) => error.set(Some(format!("The leaderboard answered {}", resp.status()))),
+                Err(e) => error.set(Some(format!("Could not reach the leaderboard: {e}"))),
+            }
+            loading.set(false);
+        });
+    });
 
-    // Sample investor data (in production, fetched from API)
-    let investors = vec![
-        InvestorEntry { rank: 1, display_name: "Anonymous Investor #1".to_string(), is_anonymous: true, total_invested_usd: 15_000.0, bls_holdings: 172_500.0, tier: InvestorTier::Patron, contribution_score: 0.0, node_type: "Full Node", joined: "2026-01-15" },
-        InvestorEntry { rank: 2, display_name: "CryptoBuilder".to_string(), is_anonymous: false, total_invested_usd: 8_500.0, bls_holdings: 98_175.0, tier: InvestorTier::Patron, contribution_score: 847.2, node_type: "Full Node", joined: "2026-02-01" },
-        InvestorEntry { rank: 3, display_name: "Anonymous Investor #3".to_string(), is_anonymous: true, total_invested_usd: 5_000.0, bls_holdings: 55_000.0, tier: InvestorTier::Sustainer, contribution_score: 0.0, node_type: "Light Node", joined: "2026-02-10" },
-        InvestorEntry { rank: 4, display_name: "EustressWhale".to_string(), is_anonymous: false, total_invested_usd: 3_200.0, bls_holdings: 43_200.0, tier: InvestorTier::Sustainer, contribution_score: 1_234.5, node_type: "Full Node", joined: "2026-01-20" },
-        InvestorEntry { rank: 5, display_name: "Anonymous Investor #5".to_string(), is_anonymous: true, total_invested_usd: 2_000.0, bls_holdings: 22_000.0, tier: InvestorTier::Sustainer, contribution_score: 0.0, node_type: "Light Node", joined: "2026-03-01" },
-        InvestorEntry { rank: 6, display_name: "BuilderDAO".to_string(), is_anonymous: false, total_invested_usd: 1_000.0, bls_holdings: 11_500.0, tier: InvestorTier::Growth, contribution_score: 567.8, node_type: "Full Node", joined: "2026-03-05" },
-        InvestorEntry { rank: 7, display_name: "NightOwlDev".to_string(), is_anonymous: false, total_invested_usd: 500.0, bls_holdings: 8_750.0, tier: InvestorTier::Growth, contribution_score: 2_340.1, node_type: "Full Node", joined: "2026-02-15" },
-        InvestorEntry { rank: 8, display_name: "Anonymous Investor #8".to_string(), is_anonymous: true, total_invested_usd: 100.0, bls_holdings: 1_050.0, tier: InvestorTier::Seed, contribution_score: 0.0, node_type: "Light Node", joined: "2026-03-20" },
-    ];
-
-    // Top contributors (earn, not invest)
-    let contributors = vec![
-        InvestorEntry { rank: 1, display_name: "ScriptWizard".to_string(), is_anonymous: false, total_invested_usd: 0.0, bls_holdings: 45_230.0, tier: InvestorTier::Contributor, contribution_score: 4_523.0, node_type: "Full Node", joined: "2026-01-01" },
-        InvestorEntry { rank: 2, display_name: "VoxelArchitect".to_string(), is_anonymous: false, total_invested_usd: 0.0, bls_holdings: 38_120.0, tier: InvestorTier::Contributor, contribution_score: 3_812.0, node_type: "Full Node", joined: "2026-01-05" },
-        InvestorEntry { rank: 3, display_name: "PixelTeacher".to_string(), is_anonymous: false, total_invested_usd: 0.0, bls_holdings: 29_450.0, tier: InvestorTier::Contributor, contribution_score: 2_945.0, node_type: "Light Node", joined: "2026-01-10" },
-        InvestorEntry { rank: 4, display_name: "Anonymous".to_string(), is_anonymous: true, total_invested_usd: 0.0, bls_holdings: 22_100.0, tier: InvestorTier::Contributor, contribution_score: 2_210.0, node_type: "Light Node", joined: "2026-02-01" },
-        InvestorEntry { rank: 5, display_name: "MeshMaster".to_string(), is_anonymous: false, total_invested_usd: 0.0, bls_holdings: 18_900.0, tier: InvestorTier::Contributor, contribution_score: 1_890.0, node_type: "Full Node", joined: "2026-02-15" },
-        InvestorEntry { rank: 6, display_name: "LuauLord".to_string(), is_anonymous: false, total_invested_usd: 0.0, bls_holdings: 15_600.0, tier: InvestorTier::Contributor, contribution_score: 1_560.0, node_type: "Light Node", joined: "2026-03-01" },
-    ];
-
-    let filter_entries = move |entries: Vec<InvestorEntry>| {
-        let query = search_query.get().to_lowercase();
-        if query.is_empty() {
-            entries
-        } else {
-            entries
-                .into_iter()
-                .filter(|e| e.display_name.to_lowercase().contains(&query))
-                .collect()
-        }
+    let me = move || match app_state.auth.get() {
+        AuthState::Authenticated(u) => Some(u.id.to_string()),
+        _ => None,
     };
 
     view! {
         <div class="page page-leaderboard-industrial">
             <CentralNav active="".to_string() />
 
-            // Background
             <div class="leaderboard-bg">
                 <div class="leaderboard-grid-overlay"></div>
                 <div class="leaderboard-glow glow-1"></div>
                 <div class="leaderboard-glow glow-2"></div>
             </div>
 
-            // Header
             <section class="leaderboard-hero">
                 <div class="hero-header-lines">
                     <span class="header-line"></span>
@@ -122,156 +114,123 @@ pub fn BlissLeaderboardPage() -> impl IntoView {
                     <span class="header-line"></span>
                 </div>
                 <h1 class="leaderboard-title">"Bliss Leaderboard"</h1>
-                <p class="leaderboard-subtitle">"Top investors and contributors powering the Bliss economy"</p>
+                <p class="leaderboard-subtitle">"The contributors who earned the most BLS, from the public ledger"</p>
             </section>
 
-            // Tabs + Search
             <section class="leaderboard-controls">
                 <div class="tab-bar">
                     <button
                         class="tab-btn"
-                        class:active=move || active_tab.get() == "investors"
-                        on:click=move |_| active_tab.set("investors".to_string())
-                    >"Investors"</button>
+                        class:active=move || days.get() == 7
+                        on:click=move |_| days.set(7)
+                    >"Last 7 days"</button>
                     <button
                         class="tab-btn"
-                        class:active=move || active_tab.get() == "contributors"
-                        on:click=move |_| active_tab.set("contributors".to_string())
-                    >"Contributors"</button>
-                </div>
-
-                <div class="search-bar">
-                    <input
-                        type="text"
-                        placeholder="Search..."
-                        prop:value=move || search_query.get()
-                        on:input=move |e| search_query.set(event_target_value(&e))
-                    />
+                        class:active=move || days.get() == 30
+                        on:click=move |_| days.set(30)
+                    >"Last 30 days"</button>
                 </div>
             </section>
 
-            // Leaderboard Table
             <section class="leaderboard-content">
                 {move || {
-                    let tab = active_tab.get();
-                    let entries = if tab == "investors" {
-                        filter_entries(investors.clone())
-                    } else {
-                        filter_entries(contributors.clone())
+                    if let Some(msg) = error.get() {
+                        return view! { <p class="ledger-hint">{msg}</p> }.into_any();
+                    }
+                    let Some(b) = board.get() else {
+                        return view! {
+                            <p class="ledger-hint">{move || if loading.get() { "Loading the leaderboard..." } else { "No data yet." }}</p>
+                        }.into_any();
                     };
-                    let is_investor_tab = tab == "investors";
-
+                    if b.entries.is_empty() {
+                        return view! {
+                            <p class="ledger-hint">
+                                "No BLS has been distributed in this window yet. BLS is credited after "
+                                "UTC midnight for the work done the day before."
+                            </p>
+                        }.into_any();
+                    }
+                    let mine = me();
+                    let window = match (&b.from, &b.to) {
+                        (Some(f), Some(t)) if f != t => format!("{f} to {t}"),
+                        (Some(f), _) => f.clone(),
+                        _ => String::new(),
+                    };
+                    let podium = b.entries.iter().take(3).cloned().collect::<Vec<_>>();
+                    let rows = b.entries.clone();
                     view! {
-                        // Podium (top 3)
+                        <p class="ledger-hint">
+                            {format!(
+                                "{} contributors earned BLS over {} settled day{}{}.",
+                                b.contributors,
+                                b.settled_days,
+                                if b.settled_days == 1 { "" } else { "s" },
+                                if window.is_empty() { String::new() } else { format!(" ({window})") },
+                            )}
+                        </p>
                         <div class="podium">
-                            {entries.iter().take(3).enumerate().map(|(i, entry)| {
-                                let podium_class = match i {
-                                    0 => "podium-gold",
-                                    1 => "podium-silver",
-                                    _ => "podium-bronze",
-                                };
+                            {podium.into_iter().enumerate().map(|(i, e)| {
+                                let class = match i { 0 => "podium-gold", 1 => "podium-silver", _ => "podium-bronze" };
+                                let you = mine.as_deref() == Some(e.account.as_str());
                                 view! {
-                                    <div class={format!("podium-card {}", podium_class)}>
-                                        <span class="podium-rank">{format!("#{}", entry.rank)}</span>
-                                        <div class="podium-avatar">
-                                            {if entry.is_anonymous {
-                                                view! { <span class="avatar-anon">"?"</span> }.into_any()
-                                            } else {
-                                                view! { <span class="avatar-letter">{entry.display_name.chars().next().unwrap_or('?').to_string()}</span> }.into_any()
-                                            }}
-                                        </div>
-                                        <span class="podium-name">{entry.display_name.clone()}</span>
-                                        <span class="podium-bls">{format_number(entry.bls_holdings)} " BLS"</span>
-                                        {if is_investor_tab {
-                                            view! { <span class="podium-usd">{format!("${}", format_number(entry.total_invested_usd))}</span> }.into_any()
-                                        } else {
-                                            view! { <span class="podium-score">{format!("Score: {}", format_number(entry.contribution_score))}</span> }.into_any()
-                                        }}
-                                        <span class={format!("tier-badge {}", entry.tier.css_class())}>{entry.tier.display_name()}</span>
+                                    <div class={format!("podium-card {class}")}>
+                                        <span class="podium-rank">{format!("#{}", e.rank)}</span>
+                                        <span class="podium-name">
+                                            {if you { "You".to_string() } else { account_tag(&e.account) }}
+                                        </span>
+                                        <span class="podium-bls">{format!("{} BLS", fmt_bls(e.bls))}</span>
+                                        <span class="podium-score">{format!("Score {:.1}", e.score)}</span>
                                     </div>
                                 }
-                            }).collect::<Vec<_>>()}
+                            }).collect_view()}
                         </div>
-
-                        // Full table
                         <div class="leaderboard-table">
                             <div class="table-header">
                                 <span class="col-rank">"#"</span>
-                                <span class="col-name">"Name"</span>
-                                <span class="col-bls">"BLS Holdings"</span>
-                                {if is_investor_tab {
-                                    view! { <span class="col-invested">"Invested"</span> }.into_any()
-                                } else {
-                                    view! { <span class="col-score">"Score"</span> }.into_any()
-                                }}
-                                <span class="col-tier">"Tier"</span>
-                                <span class="col-node">"Node"</span>
+                                <span class="col-name">"Contributor"</span>
+                                <span class="col-bls">"BLS earned"</span>
+                                <span class="col-score">"Score"</span>
+                                <span class="col-node">"Days active"</span>
                             </div>
-
-                            {entries.into_iter().map(|entry| {
+                            {rows.into_iter().map(|e| {
+                                let you = mine.as_deref() == Some(e.account.as_str());
                                 view! {
-                                    <div class="table-row">
-                                        <span class="col-rank">{entry.rank.to_string()}</span>
+                                    <div class="table-row" class:table-row-you=move || you>
+                                        <span class="col-rank">{e.rank.to_string()}</span>
                                         <span class="col-name">
-                                            {if entry.is_anonymous {
-                                                view! { <span class="name-anon">{entry.display_name.clone()}</span> }.into_any()
-                                            } else {
-                                                view! { <span class="name-public">{entry.display_name.clone()}</span> }.into_any()
-                                            }}
+                                            {if you { "You".to_string() } else { account_tag(&e.account) }}
                                         </span>
-                                        <span class="col-bls">{format!("{} BLS", format_number(entry.bls_holdings))}</span>
-                                        {if is_investor_tab {
-                                            view! { <span class="col-invested">{format!("${}", format_number(entry.total_invested_usd))}</span> }.into_any()
-                                        } else {
-                                            view! { <span class="col-score">{format_number(entry.contribution_score)}</span> }.into_any()
-                                        }}
-                                        <span class={format!("col-tier {}", entry.tier.css_class())}>{entry.tier.display_name()}</span>
-                                        <span class="col-node">{entry.node_type}</span>
+                                        <span class="col-bls">{fmt_bls(e.bls)}</span>
+                                        <span class="col-score">{format!("{:.1}", e.score)}</span>
+                                        <span class="col-node">{e.days_active.to_string()}</span>
                                     </div>
                                 }
-                            }).collect::<Vec<_>>()}
+                            }).collect_view()}
                         </div>
-                    }
+                    }.into_any()
                 }}
             </section>
 
-            // Info section
             <section class="leaderboard-info">
                 <div class="info-card">
-                    <h3>"Anonymous Investing"</h3>
+                    <h3>"How rankings work"</h3>
                     <p>
-                        "You don't need an account to invest. Treasury contributions via Stripe "
-                        "are anonymous by default. Log in with your Eustress Identity to claim "
-                        "your position on the leaderboard and display your username."
+                        "Accounts are ranked by the BLS the nightly emission credited them over the "
+                        "window. Each day's emission is shared by that day's contribution score. "
+                        "Every figure here is summed from the public daily distribution records."
                     </p>
                 </div>
                 <div class="info-card">
-                    <h3>"How Rankings Work"</h3>
+                    <h3>"Who is listed"</h3>
                     <p>
-                        "Investors are ranked by total USD invested in the treasury. "
-                        "Contributors are ranked by cumulative contribution score. "
-                        "Both earn BLS through their respective paths."
+                        "Accounts appear by the start of their public account id, the same ids the "
+                        "distribution records publish. Sign in and your own row reads You. Funding "
+                        "the treasury earns no BLS, so it does not appear here."
                     </p>
                 </div>
             </section>
 
             <Footer />
         </div>
-    }
-}
-
-// -----------------------------------------------------------------------------
-// Helpers
-// -----------------------------------------------------------------------------
-
-fn format_number(n: f64) -> String {
-    if n >= 1_000_000.0 {
-        format!("{:.1}M", n / 1_000_000.0)
-    } else if n >= 1_000.0 {
-        format!("{:.1}K", n / 1_000.0)
-    } else if n == 0.0 {
-        "0".to_string()
-    } else {
-        format!("{:.0}", n)
     }
 }

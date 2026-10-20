@@ -38,6 +38,8 @@ pub struct RotateToolState {
     pub initial_rotations: std::collections::HashMap<Entity, Quat>,
     /// Initial positions of ALL selected entities (for pivot rotation)
     pub initial_positions: std::collections::HashMap<Entity, Vec3>,
+    /// The press has travelled past the dead zone and the ring turns things.
+    pub drag_live: bool,
     /// World pose of every selected entity at drag start: the rotation runs
     /// in world space around the group pivot and is written back through
     /// each entity's parent.
@@ -61,13 +63,14 @@ impl Plugin for RotateToolPlugin {
     fn build(&self, app: &mut App) {
         // Gizmo drawing moved to `rotate_handles::RotateHandlesPlugin`.
         app.init_resource::<RotateToolState>()
+            // Editor input: idle during a Play session.
             .add_systems(Update, (
                 handle_rotate_interaction,
                 // Numeric-input commit — applies typed angle exactly and
                 // finalizes the drag. Runs after cursor-driven drag so
                 // Enter wins over any in-progress cursor delta.
                 finalize_numeric_input_on_rotate.after(handle_rotate_interaction),
-            ));
+            ).run_if(crate::play_mode::editor_input_enabled));
     }
 }
 
@@ -160,8 +163,8 @@ fn draw_rotation_ring(
 fn handle_rotate_interaction(
     mut commands: Commands,
     mut state: ResMut<RotateToolState>,
-    mouse: Res<ButtonInput<MouseButton>>,
-    keys: Res<ButtonInput<KeyCode>>,
+    // Mouse, keys, and the mid-drag cancel request (Ctrl+Z while dragging).
+    input: (Res<ButtonInput<MouseButton>>, Res<ButtonInput<KeyCode>>, ResMut<crate::drag_guard::DragCancelRequest>),
     windows: Query<&Window, With<PrimaryWindow>>,
     cameras: Query<(&Camera, &GlobalTransform, &Projection)>,
     mut query: Query<(Entity, &GlobalTransform, &mut Transform, Option<&mut crate::classes::BasePart>), With<Selected>>,
@@ -182,7 +185,15 @@ fn handle_rotate_interaction(
     pivot_state: Option<Res<crate::pivot_mode::PivotState>>,
     aabbs: Query<&bevy::camera::primitives::Aabb>,
 ) {
-    if !state.active { return; }
+    let (mouse, keys, mut cancel) = input;
+    // A drag ends when the button is up, however that came about: released
+    // over a panel, released where this system never saw it, or the tool
+    // switched away mid-drag. It goes to the release branch and commits one
+    // undo step; staying latched would lose the step and leave the parts
+    // marked `BeingDragged`, which keeps the disk writer off them.
+    let latched = state.dragged_axis.is_some();
+    let release_now = latched && (!state.active || !mouse.pressed(MouseButton::Left));
+    if !state.active && !release_now { return; }
 
     // Transform mode governs whether rotation axes are world-aligned
     // (World) or rotated to match the active entity (Local). Must match
@@ -193,8 +204,10 @@ fn handle_rotate_interaction(
         .unwrap_or(crate::ui::TransformMode::World);
 
     // Escape cancels an in-progress rotation and restores pre-drag transforms.
-    if keys.just_pressed(KeyCode::Escape) {
+    if keys.just_pressed(KeyCode::Escape) || cancel.pending() {
         if state.dragged_axis.is_some() {
+            cancel.consume();
+            state.drag_live = false;
             for (entity, _, mut transform, bp_opt) in query.iter_mut() {
                 if let Some(pos) = state.initial_positions.get(&entity).copied() {
                     transform.translation = pos;
@@ -229,7 +242,7 @@ fn handle_rotate_interaction(
     // `dragged_axis` set forever (box-select reads it as `handle=true`) and
     // skipped the `TransformEntities` undo push. See the same fix in `move_tool`.
     let drag_in_progress = state.dragged_axis.is_some();
-    let released = mouse.just_released(MouseButton::Left);
+    let released = mouse.just_released(MouseButton::Left) || release_now;
     let cursor_pos = match window.cursor_position() {
         Some(p) => p,
         None if released || drag_in_progress => Vec2::ZERO,
@@ -300,6 +313,7 @@ fn handle_rotate_interaction(
 
         if let Some(axis) = detect_ring_hit(&ray, center, radius, gizmo_rotation) {
             state.dragged_axis = Some(axis);
+            state.drag_live = false;
             state.group_center = center;
             // Capture the gizmo rotation for stable axis across the whole
             // drag — prevents feedback loops in Local mode.
@@ -324,8 +338,16 @@ fn handle_rotate_interaction(
                 );
             }
         }
-    } else if mouse.pressed(MouseButton::Left) {
+    } else if mouse.pressed(MouseButton::Left) && !release_now {
         if let Some(axis) = state.dragged_axis {
+            // Nothing turns until the cursor leaves the dead zone, so a click
+            // on a ring (or a hand that twitches) records nothing.
+            if !state.drag_live {
+                if (cursor_pos - state.drag_start_pos).length() < crate::drag_guard::HANDLE_DEAD_ZONE_PX {
+                    return;
+                }
+                state.drag_live = true;
+            }
             let center = state.group_center;
             let gizmo_rotation = state.drag_rotation;
             let current_angle = angle_on_ring(&ray, center, axis, gizmo_rotation);
@@ -394,7 +416,7 @@ fn handle_rotate_interaction(
                 }
             }
         }
-    } else if mouse.just_released(MouseButton::Left) {
+    } else if mouse.just_released(MouseButton::Left) || release_now {
         if state.dragged_axis.is_some() && !state.initial_rotations.is_empty() {
             let mut old_transforms = Vec::new();
             let mut new_transforms = Vec::new();
@@ -414,7 +436,11 @@ fn handle_rotate_interaction(
             }
 
             if !old_transforms.is_empty() {
-                undo_stack.push(crate::undo::Action::TransformEntities { old_transforms, new_transforms });
+                let n = old_transforms.len();
+                undo_stack.push_labeled(
+                    format!("Rotate {} object{}", n, if n == 1 { "" } else { "s" }),
+                    crate::undo::Action::TransformEntities { old_transforms, new_transforms },
+                );
             }
         }
 
@@ -522,10 +548,7 @@ pub fn compute_ring_radius(
     cam_gt: &GlobalTransform,
     projection: &Projection,
 ) -> f32 {
-    let fov = match projection {
-        Projection::Perspective(p) => p.fov,
-        _ => std::f32::consts::FRAC_PI_4,
-    };
+    let fov = crate::camera_controller::gizmo_fov(projection, cam_gt.translation(), center);
     // Both terms come from `rotate_handles`, which owns the ring geometry the
     // user actually sees. Importing them rather than restating the numbers is
     // the point: this function previously hardcoded a 0.18 camera fraction

@@ -1182,11 +1182,24 @@ fn read_at_cycle(
         ));
     };
 
+    // Several engines can share one Universe, and so one telemetry file:
+    // each line names the engine (`pid`) and run (`run_id`) that wrote it.
+    // A run record that knows both answers from its own lines only.
+    let run_pid = run.get("pid").and_then(|v| v.as_u64());
+    let run_id = run.get("run_id").and_then(|v| v.as_u64());
+
     let mut highest_cycle = f64::NEG_INFINITY;
     for line in raw.lines() {
         let Ok(entry) = serde_json::from_str::<serde_json::Value>(line) else {
             continue;
         };
+        if let (Some(pid), Some(id)) = (run_pid, run_id) {
+            if entry.get("pid").and_then(|v| v.as_u64()) != Some(pid)
+                || entry.get("run_id").and_then(|v| v.as_u64()) != Some(id)
+            {
+                continue;
+            }
+        }
         // Telemetry is append-only across runs, so entries before this run
         // started belong to a different run and must not answer for it.
         if !since.is_empty() {

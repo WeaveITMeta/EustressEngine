@@ -18,12 +18,14 @@ pub mod classes;
 pub mod properties;
 pub mod serialization;
 pub mod plugins;
-pub mod shaders;
 pub mod spawn;
 pub mod soul;
 pub mod korah;
 pub mod telemetry;
-pub mod play_server;
+/// Hosting a multiplayer session from Studio (Start Server, F9).
+pub mod multiplayer;
+/// Server authority: what the host's Play session does, sent to every player.
+pub mod net_replicate;
 pub mod hot_reload;
 pub mod pbr_materials;
 pub mod particles;
@@ -41,6 +43,8 @@ pub mod foot_ik;
 pub mod physics_constraints;
 pub mod play_mode;
 pub mod play_mode_runtime;
+/// Scripts drive the running scene through the live DataModel tree.
+pub mod play_datamodel;
 pub mod script_editor;
 pub mod lsp_launcher;
 // `engine_bridge` is compiled as a BIN-LOCAL module (see main.rs) so its
@@ -57,12 +61,18 @@ pub mod studio_modes;
 pub mod tool_metadata;
 pub mod usage_telemetry;
 pub mod undo;
+/// Dead zones, drag-start offset and mid-drag cancel shared by the viewport tools.
+pub mod drag_guard;
 pub mod camera_controller;
+pub mod view_grid;
 // Government opportunity capture (SAM.gov + Grants.gov). Gated with the
 // `data` feature because it builds on `eustress_data`'s HTTP seam and
 // Connector materialization rather than carrying a second copy of either.
 #[cfg(feature = "data")]
 pub mod capture;
+/// Scripts reach the Data Platform: Rune's `eustress::data` and Luau's DataService.
+#[cfg(feature = "data")]
+pub mod data_scripting;
 // Off-screen AI camera (marker/state/plugin). Also declared in main.rs; mirror
 // it here so the LIBRARY compile of `play_mode` can resolve
 // `crate::ai_camera::AiCamera` (gap-3 Play→Edit camera-disable filter). Its only
@@ -126,10 +136,29 @@ pub mod transform_space;
 pub mod default_scene;
 pub mod startup;
 pub mod terrain_plugin;
+/// The terrain tools' cursor (ring, strength disc, Draw volume, locked
+/// plane, grid, contours, mirror ghosts) and the readout beside it.
+pub mod terrain_cursor;
+/// The terrain tools' Slint surfaces: the `TerrainToolsUi` global, the
+/// saved brush settings and presets, and the material thumbnails.
+pub mod terrain_tools_ui;
+/// The Sea Level tool: its rectangle, level drag, and Fill and Evaporate.
+pub mod terrain_sea_level;
+/// The Region tool: a box of terrain to copy, cut, paste, duplicate,
+/// delete, move, turn and fill.
+pub mod terrain_region;
+/// Engine side of the terrain layer classes: spawning their components from
+/// TOML, hot reload, undo replay, spline-point adoption and Insert placement.
+pub mod terrain_layers;
 // Disk-terrain auto-loader — legacy/disk Spaces hydrate `Workspace/Terrain/`
 // (worldgen export + heightmap import R16/toml format) on Space open.
 // UNGATED sibling of the world-db voxel loader below.
 pub mod terrain_disk_load;
+/// Terrain edits as commands against the live world (fills, voxel writes and
+/// reads, sculpt, paint, clear): the entry point the MCP tools, Luau and Rune
+/// share, its undo entries, and the snapshot a Play session's edits are
+/// rolled back from at Stop.
+pub mod terrain_commands;
 // Wave 9.C — imported-terrain voxel loader. `terrain_plugin` (compiled into
 // BOTH this lib and the bin) calls `crate::terrain_voxel_load::register`, so
 // the module must exist in the lib crate root too, not just `main.rs`.
@@ -151,6 +180,10 @@ pub mod road_tool;
 /// Phase 2 of the Studio plugin system — Luau (`.lua`) script-authored
 /// plugins, no Rust recompile. See its module docs for the architecture.
 pub mod script_plugin_host;
+/// UI Builder, a built-in Studio plugin: a whole game UI (HUD, menus,
+/// screens) from one line, previewed live and inserted as ScreenGuis with
+/// the scripts that run them. Registered by `studio_plugins::StudioPluginSystem`.
+pub mod ui_builder;
 pub mod grid_snapping;
 pub mod collision_snapping;
 pub mod mesh_optimizer;
@@ -215,6 +248,7 @@ pub mod frame_diagnostics;
 pub mod profiler;
 pub mod io_manager;
 pub mod window_focus;
+pub mod window_placement;
 
 // ── Promoted from the bin (dual-compile untangling, 2026-07-02) ──────
 // These five modules were declared ONLY in main.rs, which forced the
@@ -269,3 +303,24 @@ pub use plugins::{
     PhysicsPlugin, InputPlugin, RunPlugin,
     AllServicesPlugin,
 };
+
+/// The directory this crate's `assets/` lives in: the executable's own
+/// directory when an `assets/` folder sits beside it (the installed layout),
+/// otherwise the crate's source directory (`cargo run`).
+///
+/// Join `"assets/..."` onto it. `env!("CARGO_MANIFEST_DIR")` alone is the
+/// BUILD machine's source path, baked in at compile time, so an installed
+/// copy found none of its icons or templates on anyone else's machine. The
+/// `AssetPlugin` root in `main.rs` makes the same choice, and cargo never
+/// puts an `assets/` beside `target/<profile>/`, so dev runs are unaffected.
+/// Decided once per process.
+pub fn resource_root() -> &'static std::path::Path {
+    static ROOT: std::sync::LazyLock<std::path::PathBuf> = std::sync::LazyLock::new(|| {
+        std::env::current_exe()
+            .ok()
+            .and_then(|exe| exe.parent().map(std::path::Path::to_path_buf))
+            .filter(|dir| dir.join("assets").is_dir())
+            .unwrap_or_else(|| std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")))
+    });
+    &ROOT
+}

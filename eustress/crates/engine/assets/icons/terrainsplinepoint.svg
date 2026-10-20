@@ -1,0 +1,5 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="none">
+  <!-- TerrainSplinePoint: one control point on a spline's path. -->
+  <path d="M1 12 C4 12 5 9 8 8 C11 7 12 4 15 4" stroke="#5A5F66" stroke-width="1.2" stroke-linecap="round" opacity="0.8"/>
+  <circle cx="8" cy="8" r="2.6" fill="#F2C94C" stroke="#8A6D1A" stroke-width="0.8"/>
+</svg>

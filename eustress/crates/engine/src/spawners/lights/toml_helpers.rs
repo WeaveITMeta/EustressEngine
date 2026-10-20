@@ -1,13 +1,12 @@
 //! Shared TOML descriptor readers + emitters used by every light
 //! spawner.
 //!
-//! The lighting templates ship descriptors of the form
-//! `Brightness = { type = "float", value = 100000.0, min = 0.0, ... }`
-//! rather than raw scalars (`Brightness = 100000.0`). Wave 3 spawners
-//! tolerate both — the template form for files synthesized by
-//! `space_ops.rs::create_default_space`, the bare-scalar form for
-//! hand-authored TOMLs (the most common shape after a user
-//! find-and-replaces their lights).
+//! The engine's `assets/lighting_templates` light files carry descriptors
+//! of the form `Brightness = { type = "float", value = 1.0, min = 0.0, ... }`,
+//! while the class templates Insert copies (and the importer and Properties
+//! panel) write bare scalars under `[light]` (`brightness = 1.0`). The
+//! spawners tolerate both, as the Space loaders do through
+//! `light_classes::LightSection`.
 //!
 //! Per `LIGHTING_AUDIT.md` §4.X "TOML schema example" the on-disk form
 //! is descriptor-wrapped; this module is the single place those

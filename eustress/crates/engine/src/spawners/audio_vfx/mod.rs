@@ -59,7 +59,7 @@ pub mod beam;
 pub mod particle_emitter;
 pub mod sound;
 
-pub use beam::{sync_beam_transforms, BeamLodMode, BeamSegmentLink, BeamSpawner};
+pub use beam::{hydrate_beam_visuals, sync_beam_transforms, BeamLodMode, BeamSegmentLink, BeamSpawner};
 pub use particle_emitter::{ParticleEmitterPlaceholder, ParticleEmitterSpawner};
 pub use sound::SoundSpawner;
 
@@ -101,7 +101,8 @@ impl Plugin for AudioVfxSpawnerPlugin {
         // The sync system BeamSegmentLink's doc comment always promised —
         // keeps every Beam taut between its two attachments every frame, so
         // dragging a mind-map node carries its edges with it.
-        app.add_systems(Update, sync_beam_transforms);
+        // Folder-loaded beams get their geometry first, then are stretched.
+        app.add_systems(Update, (hydrate_beam_visuals, sync_beam_transforms).chain());
 
         info!(
             "audio_vfx spawner group: registered Sound / ParticleEmitter (STUB — Wave 4 bevy_hanabi) / Beam"

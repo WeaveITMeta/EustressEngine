@@ -14,13 +14,25 @@ use serde::{Deserialize, Serialize};
 // PhysicsService Resource
 // ============================================================================
 
-/// PhysicsService - global physics settings
+/// PhysicsService - global physics settings and simulation fidelity.
+///
+/// The authored surface for which kinds of physics the engine steps. Every
+/// field here is read by something: the tuning fields drive Avian, and each
+/// [`PhysicsDomain`](crate::realism::PhysicsDomain) flag gates that domain's
+/// systems through a run condition, so switching one off stops the work rather
+/// than just recording a preference.
+///
+/// GRAVITY IS NOT HERE. It belongs to the Workspace
+/// ([`crate::services::workspace::Workspace::gravity`]), which
+/// `sync_workspace_gravity_to_avian` copies into Avian every frame. This struct
+/// carried its own `gravity` field that nothing read; wiring it to Avian made a
+/// second writer, and the Workspace sync overwrote it on the next frame, so an
+/// edit here was reported as applied and silently undone. One quantity, one
+/// owner.
 #[derive(Resource, Reflect, Clone, Debug)]
 #[reflect(Resource)]
 pub struct PhysicsService {
-    /// Gravity vector
-    pub gravity: Vec3,
-    /// Physics simulation enabled
+    /// Master switch. False stops every domain below, whatever they are set to.
     pub enabled: bool,
     /// Time scale (1.0 = normal)
     pub time_scale: f32,
@@ -30,20 +42,166 @@ pub struct PhysicsService {
     pub solver_iterations: u32,
     /// Solver sub-steps
     pub solver_substeps: u32,
+
+    // ── Fidelity ────────────────────────────────────────────────────────
+    //
+    // One flag per domain that actually runs systems each step. Domains whose
+    // plugins only register types and expose pure functions (structures,
+    // plasma, propulsion, control, thermocycles, numerics) deliberately have
+    // NO flag: a switch that gates nothing is worse than no switch, because it
+    // reads as a capability the engine does not have.
+    /// Rigid bodies, collision detection and the constraint solver (Avian).
+    pub kinematics: bool,
+    /// Heat conduction and transfer between touching bodies.
+    pub thermodynamics: bool,
+    /// Reactions, combustion and reactor temperature.
+    pub chemistry: bool,
+    /// Circuits, motors and power electronics.
+    pub electricity: bool,
+    /// Impact denting and fracture into separate bodies.
+    pub deformation: bool,
+    /// Smoothed-particle fluid dynamics.
+    pub fluids: bool,
+    /// Stress and strain response of materials.
+    pub materials: bool,
+    /// Thermal and kinetic stepping of particle species.
+    pub particles: bool,
+    /// The divergence-free SPH particle solver.
+    pub particle_simulation: bool,
+    /// Decay chains and reactor kinetics.
+    pub nuclear: bool,
+    /// Property overlays that draw simulation state into the viewport.
+    pub visualizers: bool,
+    /// Spread domain work across threads with Rayon where supported.
+    pub parallel: bool,
 }
 
 impl Default for PhysicsService {
     fn default() -> Self {
         Self {
-            gravity: Vec3::new(0.0, -196.2, 0.0), // Eustress-style gravity
             enabled: true,
             time_scale: 1.0,
             allow_sleep: true,
             solver_iterations: 4,
-            solver_substeps: 1,
+            // Matches the engine's pinned `SubstepCount(6)`. This used to say
+            // 1; harmless while nothing read it, but the moment it syncs to
+            // Avian a default of 1 would silently change every trajectory.
+            solver_substeps: 6,
+
+            // Everything on by default: the engine behaves exactly as it did
+            // before these flags existed until someone turns one off.
+            kinematics: true,
+            thermodynamics: true,
+            chemistry: true,
+            electricity: true,
+            deformation: true,
+            fluids: true,
+            materials: true,
+            particles: true,
+            particle_simulation: true,
+            nuclear: true,
+            visualizers: true,
+            parallel: true,
         }
     }
 }
+
+impl PhysicsService {
+    /// Whether a domain should step this frame.
+    ///
+    /// Folds in the master switch so callers never have to remember to check
+    /// both, which is how a "disabled" simulation ends up half running.
+    pub fn domain_enabled(&self, domain: crate::realism::PhysicsDomain) -> bool {
+        self.enabled && self.domain_flag(domain)
+    }
+
+    /// A domain's own flag, IGNORING the master switch. For reporting and
+    /// persistence; use [`domain_enabled`](Self::domain_enabled) to decide
+    /// whether anything should run.
+    pub fn domain_flag(&self, domain: crate::realism::PhysicsDomain) -> bool {
+        use crate::realism::PhysicsDomain as D;
+        match domain {
+            D::Kinematics => self.kinematics,
+            D::Thermodynamics => self.thermodynamics,
+            D::Chemistry => self.chemistry,
+            D::Electricity => self.electricity,
+            D::Deformation => self.deformation,
+            D::Fluids => self.fluids,
+            D::Materials => self.materials,
+            D::Particles => self.particles,
+            D::ParticleSimulation => self.particle_simulation,
+            D::Nuclear => self.nuclear,
+            D::Visualizers => self.visualizers,
+        }
+    }
+
+    /// Set a domain's own flag. Paired with [`domain_flag`](Self::domain_flag)
+    /// so every caller that walks `PhysicsDomain::ALL` reaches every field
+    /// through one exhaustive match, rather than keeping its own field list
+    /// that a new domain could be forgotten from.
+    pub fn set_domain_flag(&mut self, domain: crate::realism::PhysicsDomain, on: bool) {
+        use crate::realism::PhysicsDomain as D;
+        let field = match domain {
+            D::Kinematics => &mut self.kinematics,
+            D::Thermodynamics => &mut self.thermodynamics,
+            D::Chemistry => &mut self.chemistry,
+            D::Electricity => &mut self.electricity,
+            D::Deformation => &mut self.deformation,
+            D::Fluids => &mut self.fluids,
+            D::Materials => &mut self.materials,
+            D::Particles => &mut self.particles,
+            D::ParticleSimulation => &mut self.particle_simulation,
+            D::Nuclear => &mut self.nuclear,
+            D::Visualizers => &mut self.visualizers,
+        };
+        *field = on;
+    }
+}
+
+/// The value type and allowed range of one PhysicsService setting.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum PhysicsSettingKind {
+    Bool,
+    /// A real number, inclusive range.
+    Float { min: f64, max: f64 },
+    /// A whole number, inclusive range.
+    Int { min: i64, max: i64 },
+    /// Three real numbers `[x, y, z]`.
+    Vec3,
+}
+
+/// Every PhysicsService setting that is NOT a per-domain flag: its property
+/// key, type and range, and what it does. The domain flags come from
+/// [`crate::realism::PhysicsDomain::ALL`]. Together the two are the complete
+/// editable surface, read by the engine to validate edits and by the MCP
+/// server to describe its tools, so neither keeps a copy that can drift.
+///
+/// `solver_iterations` and `allow_sleep` are deliberately absent: nothing
+/// applies them to Avian yet, and offering a knob that changes nothing is the
+/// defect this surface was built to get rid of. Gravity is absent because it
+/// is a Workspace setting, not a PhysicsService one; see [`PhysicsService`].
+pub const PHYSICS_GENERAL_SETTINGS: &[(&str, PhysicsSettingKind, &str)] = &[
+    (
+        "enabled",
+        PhysicsSettingKind::Bool,
+        "Master switch. Off stops every physics domain, whatever the individual flags say.",
+    ),
+    (
+        "time_scale",
+        PhysicsSettingKind::Float { min: 0.0, max: 100.0 },
+        "Speed of the rigid-body physics clock. 1 is real time, 0.5 half speed, 2 double. 0 stops the clock without pausing Play.",
+    ),
+    (
+        "solver_substeps",
+        PhysicsSettingKind::Int { min: 1, max: 64 },
+        "Solver substeps per fixed step. More is stabler for tall stacks and chains of joints, and costs proportionally more. 6 is the pinned default that keeps runs reproducible.",
+    ),
+    (
+        "parallel",
+        PhysicsSettingKind::Bool,
+        "Spread particle work across CPU threads where supported.",
+    ),
+];
 
 // ============================================================================
 // Collision Groups

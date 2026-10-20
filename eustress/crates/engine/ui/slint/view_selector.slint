@@ -1,104 +1,517 @@
 // ============================================================================
-// Eustress Engine Studio - View Selector
-// Camera view mode selector (perspective, top, front, etc.)
+// Eustress Engine Studio - Perspective control
+// ============================================================================
+// Lives at the right end of the viewport tab bar while the Space tab is
+// active, outside the 3D view, so it never covers the scene or catches a
+// click meant for a part. Two parts:
+//
+//   [ 2D | 3D ]   [ icon  User Perspective        v ]
+//
+// The switch flips between the free 3D view and a 2D view locked to one
+// axis plane. The view button names what is on screen ("Top Orthographic",
+// "XY Plane  24 m") and opens the Perspective menu: projection, field of
+// view, the six axis views (the working plane in 2D) and Frame All.
+//
+// Every choice leaves as one `set-view-mode(command)` string, parsed in Rust
+// by `camera_controller::ViewCommand::parse`; the state shown here is pushed
+// back by `ui::perspective_hud`. Nothing in this file owns camera state.
 // ============================================================================
 
-import { HorizontalBox, VerticalBox } from "std-widgets.slint";
+import { Slider } from "std-widgets.slint";
 import { Theme } from "theme.slint";
 
-export component ViewSelector inherits Rectangle {
-    // Properties
-    in property <string> view-mode: "perspective";
-    
-    // Callbacks
-    callback on-set-view-mode(string);
-    
-    width: 140px;
-    height: 32px;
-    background: Theme.overlay-background;
+// One side of a segmented switch.
+component SegmentButton inherits Rectangle {
+    in property <string> label;
+    in property <bool> active;
+    in property <length> label-size: 11px;
+    callback clicked();
+
+    border-radius: 3px;
+    background: root.active ? Theme.accent-cyan.with-alpha(0.22)
+        : touch.has-hover ? Theme.button-hover : transparent;
+    border-width: root.active ? 1px : 0px;
+    border-color: Theme.accent-cyan.with-alpha(0.55);
+
+    touch := TouchArea {
+        mouse-cursor: pointer;
+        clicked => { root.clicked(); }
+    }
+
+    Text {
+        text: root.label;
+        color: root.active ? Theme.text-primary : Theme.text-secondary;
+        font-size: root.label-size;
+        font-weight: root.active ? 700 : 500;
+        horizontal-alignment: center;
+        vertical-alignment: center;
+    }
+}
+
+// The recessed track a pair of SegmentButtons sits in.
+component SegmentTrack inherits Rectangle {
     border-radius: 4px;
-    
-    HorizontalBox {
-        padding: 4px;
-        spacing: 2px;
-        
-        // Perspective
+    background: Theme.background-primary;
+    border-width: 1px;
+    border-color: Theme.border-color;
+}
+
+// Small caps heading inside the menu.
+component MenuHeading inherits Text {
+    color: Theme.text-secondary;
+    font-size: 9px;
+    font-weight: 700;
+    letter-spacing: 0.8px;
+}
+
+component MenuDivider inherits Rectangle {
+    height: 1px;
+    background: Theme.border-color;
+}
+
+// Radio row: projection choice.
+component ChoiceRow inherits Rectangle {
+    in property <string> label;
+    in property <string> detail;
+    in property <string> shortcut;
+    in property <bool> selected;
+    in property <bool> enabled: true;
+    callback clicked();
+
+    height: 38px;
+    border-radius: 4px;
+    background: touch.has-hover && root.enabled ? Theme.button-hover : transparent;
+    opacity: root.enabled ? 1.0 : 0.4;
+
+    touch := TouchArea {
+        enabled: root.enabled;
+        mouse-cursor: root.enabled ? pointer : default;
+        clicked => { root.clicked(); }
+    }
+
+    HorizontalLayout {
+        padding-left: 6px;
+        padding-right: 8px;
+        spacing: 9px;
+
+        // Radio mark, centred in its own column.
         Rectangle {
-            horizontal-stretch: 1;
-            background: root.view-mode == "perspective" ? Theme.selection-background : 
-                        persp-touch.has-hover ? Theme.button-hover : transparent;
-            border-radius: 2px;
-            
-            persp-touch := TouchArea {
-                clicked => { root.on-set-view-mode("perspective"); }
-            }
-            
-            Text {
-                text: "3D";
-                color: root.view-mode == "perspective" ? Theme.text-primary : Theme.text-secondary;
-                font-size: 11px;
-                horizontal-alignment: center;
-                vertical-alignment: center;
+            width: 14px;
+            Rectangle {
+                width: 13px;
+                height: 13px;
+                border-radius: 6.5px;
+                border-width: 1.5px;
+                border-color: root.selected ? Theme.accent-cyan : Theme.text-secondary;
+                Rectangle {
+                    width: 7px;
+                    height: 7px;
+                    border-radius: 3.5px;
+                    background: Theme.accent-cyan;
+                    visible: root.selected;
+                }
             }
         }
-        
-        // Top
-        Rectangle {
+
+        VerticalLayout {
             horizontal-stretch: 1;
-            background: root.view-mode == "top" ? Theme.selection-background : 
-                        top-touch.has-hover ? Theme.button-hover : transparent;
-            border-radius: 2px;
-            
-            top-touch := TouchArea {
-                clicked => { root.on-set-view-mode("top"); }
-            }
-            
+            alignment: center;
+            spacing: 1px;
             Text {
-                text: "Top";
-                color: root.view-mode == "top" ? Theme.text-primary : Theme.text-secondary;
-                font-size: 11px;
-                horizontal-alignment: center;
-                vertical-alignment: center;
+                text: root.label;
+                color: Theme.text-primary;
+                font-size: 12px;
+                font-weight: root.selected ? 600 : 400;
+            }
+            Text {
+                text: root.detail;
+                color: Theme.text-secondary;
+                font-size: 10px;
+                overflow: elide;
             }
         }
-        
-        // Front
-        Rectangle {
+
+        Text {
+            text: root.shortcut;
+            color: Theme.text-secondary;
+            font-size: 10px;
+            vertical-alignment: center;
+        }
+    }
+}
+
+// One of the six axis views. Shows the plane it looks at underneath.
+component AxisButton inherits Rectangle {
+    in property <string> label;
+    in property <string> plane;
+    in property <bool> active;
+    callback clicked();
+
+    height: 36px;
+    border-radius: 4px;
+    background: root.active ? Theme.accent-cyan.with-alpha(0.18)
+        : touch.has-hover ? Theme.button-hover : Theme.background-primary;
+    border-width: 1px;
+    border-color: root.active ? Theme.accent-cyan.with-alpha(0.6) : Theme.border-color;
+
+    touch := TouchArea {
+        mouse-cursor: pointer;
+        clicked => { root.clicked(); }
+    }
+
+    VerticalLayout {
+        alignment: center;
+        spacing: 1px;
+        Text {
+            text: root.label;
+            color: Theme.text-primary;
+            font-size: 11px;
+            font-weight: root.active ? 700 : 400;
+            horizontal-alignment: center;
+        }
+        Text {
+            text: root.plane;
+            color: root.active ? Theme.accent-cyan : Theme.text-secondary;
+            font-size: 9px;
+            horizontal-alignment: center;
+        }
+    }
+}
+
+// Plain action row with a shortcut hint.
+component MenuRow inherits Rectangle {
+    in property <string> label;
+    in property <string> shortcut;
+    callback clicked();
+
+    height: 26px;
+    border-radius: 4px;
+    background: touch.has-hover ? Theme.button-hover : transparent;
+
+    touch := TouchArea {
+        mouse-cursor: pointer;
+        clicked => { root.clicked(); }
+    }
+
+    HorizontalLayout {
+        padding-left: 8px;
+        padding-right: 8px;
+        Text {
             horizontal-stretch: 1;
-            background: root.view-mode == "front" ? Theme.selection-background : 
-                        front-touch.has-hover ? Theme.button-hover : transparent;
-            border-radius: 2px;
-            
-            front-touch := TouchArea {
-                clicked => { root.on-set-view-mode("front"); }
-            }
-            
-            Text {
-                text: "Front";
-                color: root.view-mode == "front" ? Theme.text-primary : Theme.text-secondary;
-                font-size: 11px;
-                horizontal-alignment: center;
-                vertical-alignment: center;
+            text: root.label;
+            color: Theme.text-primary;
+            font-size: 12px;
+            vertical-alignment: center;
+        }
+        Text {
+            text: root.shortcut;
+            color: Theme.text-secondary;
+            font-size: 10px;
+            vertical-alignment: center;
+        }
+    }
+}
+
+export component ViewSelector inherits Rectangle {
+    // "3d" | "2d"
+    in property <string> dimension: "3d";
+    // "perspective" | "orthographic"
+    in property <string> projection: "perspective";
+    // The axis view on screen: custom, front, back, left, right, top, bottom.
+    in property <string> view-axis: "custom";
+    // "User Perspective", "Top Orthographic", "XY Plane", ...
+    in property <string> view-label: "User Perspective";
+    // Visible view height ("24.0 m") while orthographic, else empty.
+    in property <string> view-scale: "";
+    // Perspective vertical field of view, degrees.
+    in property <float> fov: 70;
+
+    callback set-view-mode(string);
+
+    property <bool> is-2d: root.dimension == "2d";
+    property <bool> is-ortho: root.is-2d || root.projection == "orthographic";
+
+    height: 35px;
+    background: transparent;
+
+    HorizontalLayout {
+        padding-top: 5px;
+        padding-bottom: 5px;
+        padding-left: 8px;
+        padding-right: 6px;
+        spacing: 6px;
+        alignment: end;
+
+        // ── 2D | 3D ─────────────────────────────────────────────────────
+        SegmentTrack {
+            width: 70px;
+            HorizontalLayout {
+                padding: 2px;
+                spacing: 2px;
+                SegmentButton {
+                    label: "2D";
+                    active: root.is-2d;
+                    clicked => { root.set-view-mode("2d"); }
+                }
+                SegmentButton {
+                    label: "3D";
+                    active: !root.is-2d;
+                    clicked => { root.set-view-mode("3d"); }
+                }
             }
         }
-        
-        // Right
-        Rectangle {
-            horizontal-stretch: 1;
-            background: root.view-mode == "right" ? Theme.selection-background : 
-                        right-touch.has-hover ? Theme.button-hover : transparent;
-            border-radius: 2px;
-            
-            right-touch := TouchArea {
-                clicked => { root.on-set-view-mode("right"); }
+
+        // ── Current view, opens the Perspective menu ────────────────────
+        view-button := Rectangle {
+            width: 190px;
+            border-radius: 4px;
+            background: view-touch.has-hover ? Theme.button-hover : transparent;
+            border-width: 1px;
+            border-color: view-touch.has-hover ? Theme.border-color : transparent;
+
+            view-touch := TouchArea {
+                mouse-cursor: pointer;
+                clicked => { menu.show(); }
             }
-            
-            Text {
-                text: "Right";
-                color: root.view-mode == "right" ? Theme.text-primary : Theme.text-secondary;
-                font-size: 11px;
-                horizontal-alignment: center;
-                vertical-alignment: center;
+
+            HorizontalLayout {
+                padding-left: 7px;
+                padding-right: 5px;
+                spacing: 6px;
+
+                Rectangle {
+                    width: 14px;
+                    Image {
+                        width: 14px;
+                        height: 14px;
+                        source: root.is-2d ? @image-url("../../assets/icons/ui/view-2d.svg")
+                            : root.is-ortho ? @image-url("../../assets/icons/ui/view-orthographic.svg")
+                            : @image-url("../../assets/icons/ui/view-perspective.svg");
+                        image-fit: contain;
+                        colorize: root.is-ortho ? Theme.accent-cyan : Theme.text-secondary;
+                    }
+                }
+
+                Text {
+                    horizontal-stretch: 1;
+                    text: root.view-label;
+                    color: Theme.text-primary;
+                    font-size: 11px;
+                    vertical-alignment: center;
+                    overflow: elide;
+                }
+
+                if root.view-scale != "": Text {
+                    text: root.view-scale;
+                    color: Theme.text-secondary;
+                    font-size: 10px;
+                    vertical-alignment: center;
+                }
+
+                Rectangle {
+                    width: 12px;
+                    Image {
+                        width: 12px;
+                        height: 12px;
+                        source: @image-url("../../assets/icons/ui/chevron-down.svg");
+                        image-fit: contain;
+                        colorize: Theme.text-secondary;
+                    }
+                }
+            }
+
+            menu := PopupWindow {
+                x: parent.width - self.width;
+                y: parent.height + 4px;
+                width: 272px;
+                // The menu holds a slider and several choices; a click inside
+                // must not dismiss it, only a click outside.
+                close-policy: close-on-click-outside;
+
+                Rectangle {
+                    background: Theme.dialog-background;
+                    border-radius: 6px;
+                    border-width: 1px;
+                    border-color: Theme.border-color;
+                    drop-shadow-blur: 14px;
+                    drop-shadow-color: Theme.shadow-color;
+
+                    VerticalLayout {
+                        padding: 10px;
+                        spacing: 8px;
+
+                        HorizontalLayout {
+                            MenuHeading {
+                                horizontal-stretch: 1;
+                                text: "PERSPECTIVE";
+                                vertical-alignment: center;
+                            }
+                            Text {
+                                text: root.view-label;
+                                color: Theme.text-secondary;
+                                font-size: 10px;
+                                vertical-alignment: center;
+                            }
+                        }
+
+                        SegmentTrack {
+                            height: 32px;
+                            HorizontalLayout {
+                                padding: 2px;
+                                spacing: 2px;
+                                SegmentButton {
+                                    label: "2D";
+                                    label-size: 12px;
+                                    active: root.is-2d;
+                                    clicked => { root.set-view-mode("2d"); }
+                                }
+                                SegmentButton {
+                                    label: "3D";
+                                    label-size: 12px;
+                                    active: !root.is-2d;
+                                    clicked => { root.set-view-mode("3d"); }
+                                }
+                            }
+                        }
+
+                        Text {
+                            text: root.is-2d
+                                ? "Locked to the " + root.view-label + ". Drag to pan, scroll to zoom. Alt+3 returns to 3D."
+                                : "Free orbit, look and fly. Alt+2 flattens the view onto a plane.";
+                            color: Theme.text-secondary;
+                            font-size: 10px;
+                            wrap: word-wrap;
+                        }
+
+                        MenuDivider { }
+
+                        MenuHeading { text: "PROJECTION"; }
+
+                        ChoiceRow {
+                            label: "Perspective";
+                            detail: root.is-2d ? "3D only" : "Depth: far things look smaller";
+                            shortcut: "5";
+                            selected: !root.is-ortho;
+                            enabled: !root.is-2d;
+                            clicked => { root.set-view-mode("perspective"); }
+                        }
+                        ChoiceRow {
+                            label: "Orthographic";
+                            detail: "Parallel: sizes read true at any depth";
+                            shortcut: "5";
+                            selected: root.is-ortho;
+                            clicked => { root.set-view-mode("orthographic"); }
+                        }
+
+                        if !root.is-ortho: HorizontalLayout {
+                            spacing: 8px;
+                            Text {
+                                width: 78px;
+                                text: "Field of view";
+                                color: Theme.text-secondary;
+                                font-size: 11px;
+                                vertical-alignment: center;
+                            }
+                            Slider {
+                                horizontal-stretch: 1;
+                                minimum: 20;
+                                maximum: 120;
+                                value: root.fov;
+                                changed(v) => { root.set-view-mode("fov:" + round(v)); }
+                            }
+                            Text {
+                                width: 32px;
+                                text: round(root.fov) + "°";
+                                color: Theme.text-primary;
+                                font-size: 11px;
+                                horizontal-alignment: right;
+                                vertical-alignment: center;
+                            }
+                        }
+
+                        if root.is-ortho: HorizontalLayout {
+                            Text {
+                                horizontal-stretch: 1;
+                                text: "View height";
+                                color: Theme.text-secondary;
+                                font-size: 11px;
+                                vertical-alignment: center;
+                            }
+                            Text {
+                                text: root.view-scale;
+                                color: Theme.text-primary;
+                                font-size: 11px;
+                                vertical-alignment: center;
+                            }
+                        }
+
+                        MenuDivider { }
+
+                        MenuHeading { text: root.is-2d ? "WORKING PLANE" : "VIEW"; }
+
+                        GridLayout {
+                            spacing: 4px;
+                            Row {
+                                AxisButton {
+                                    label: "Top";
+                                    plane: "XZ";
+                                    active: root.view-axis == "top";
+                                    clicked => { root.set-view-mode("top"); }
+                                }
+                                AxisButton {
+                                    label: "Front";
+                                    plane: "XY";
+                                    active: root.view-axis == "front";
+                                    clicked => { root.set-view-mode("front"); }
+                                }
+                                AxisButton {
+                                    label: "Right";
+                                    plane: "YZ";
+                                    active: root.view-axis == "right";
+                                    clicked => { root.set-view-mode("right"); }
+                                }
+                            }
+                            Row {
+                                AxisButton {
+                                    label: "Bottom";
+                                    plane: "XZ";
+                                    active: root.view-axis == "bottom";
+                                    clicked => { root.set-view-mode("bottom"); }
+                                }
+                                AxisButton {
+                                    label: "Back";
+                                    plane: "XY";
+                                    active: root.view-axis == "back";
+                                    clicked => { root.set-view-mode("back"); }
+                                }
+                                AxisButton {
+                                    label: "Left";
+                                    plane: "YZ";
+                                    active: root.view-axis == "left";
+                                    clicked => { root.set-view-mode("left"); }
+                                }
+                            }
+                        }
+
+                        Text {
+                            text: "Numpad 8, 2, 6, 4. Hold Ctrl for the opposite side.";
+                            color: Theme.text-secondary;
+                            font-size: 10px;
+                            wrap: word-wrap;
+                        }
+
+                        MenuDivider { }
+
+                        MenuRow {
+                            label: "Frame All";
+                            shortcut: "Num .";
+                            clicked => {
+                                root.set-view-mode("frame-all");
+                                menu.close();
+                            }
+                        }
+                    }
+                }
             }
         }
     }

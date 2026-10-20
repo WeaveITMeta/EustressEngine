@@ -154,7 +154,19 @@ impl Material {
             "gold" => Material::Gold,
             "silver" => Material::Silver,
             "bronze" => Material::Bronze,
-            _ => Material::Plastic, // Default fallback
+            // Roblox materials with no preset of their own render as the
+            // nearest one. The part keeps the Roblox name (scripts compare
+            // against `Enum.Material.Asphalt`); only the look is borrowed.
+            "asphalt" | "pavement" | "pebble" | "limestone" | "plaster" => Material::Concrete,
+            "cobblestone" | "rock" | "basalt" | "crackedlava" | "roofshingles" => Material::Slate,
+            "sandstone" | "snow" | "mud" | "ground" | "salt" => Material::Sand,
+            "leafygrass" => Material::Grass,
+            "glacier" => Material::Ice,
+            "forcefield" | "water" => Material::Glass,
+            "leather" | "carpet" | "cardboard" => Material::Fabric,
+            "ceramictiles" => Material::Marble,
+            "clayrooftiles" => Material::Brick,
+            _ => Material::Plastic, // Default fallback (Rubber, Air, unknown)
         }
     }
     
@@ -333,6 +345,11 @@ pub enum ClassName {
     Animator,
     KeyframeSequence,
     ParticleEmitter,
+    /// Physical particle simulation domain: SPH fluids, charged particles,
+    /// conduction. Its `ParticleSpecies` children are the populations.
+    ParticleSimulation,
+    /// One particle population inside a `ParticleSimulation`.
+    ParticleSpecies,
     Beam,
     Sound,
     Terrain,
@@ -541,8 +558,28 @@ pub enum ClassName {
     ColorGradingEffect,      // Post-FX color grade + tonemapper (distinct from ColorCorrectionEffect)
     TerrainDetail,           // Per-material terrain detail config (child of Terrain)
     TerrainRegion,           // Saved voxel region serialized out of Terrain
-    // ── Fission branch: nuclear simulation ──
-    ArcReactorCore,          // ARC-1 compact fission reactor — carries nuclear kinetics + thermal-hydraulics components
+    // Terrain layers: non-destructive edits baked over a terrain's base (see
+    // `terrain::layer_instances`). Appended last so no existing variant moves.
+    /// A road, path, river, canyon or embankment along a spline through its
+    /// `TerrainSplinePoint` children.
+    TerrainSpline,
+    /// One control point of a `TerrainSpline`, placed by its Transform.
+    TerrainSplinePoint,
+    /// An analytic crater, mound, plateau or ridge pressed into the ground.
+    TerrainStamp,
+    /// A flat pad at its Transform's height, blending back into the ground.
+    TerrainFlattenPad,
+    /// Deterministic fractal noise over a rectangle.
+    TerrainNoise,
+    /// A material painted over a rectangle by slope and height rules.
+    TerrainMaterialFill,
+    /// Grass, shrubs, rocks, trees or a custom mesh scattered over the
+    /// finished ground by rules. Bakes nothing into the terrain, and nothing
+    /// it places is stored.
+    TerrainScatter,
+    /// A lake: the ground below a level around its Transform, filled with
+    /// water. Bakes nothing into the terrain, and nothing it fills is stored.
+    TerrainWaterBody,
 }
 
 impl ClassName {
@@ -639,6 +676,8 @@ impl ClassName {
             ClassName::Animator => "Animator",
             ClassName::KeyframeSequence => "KeyframeSequence",
             ClassName::ParticleEmitter => "ParticleEmitter",
+            ClassName::ParticleSimulation => "ParticleSimulation",
+            ClassName::ParticleSpecies => "ParticleSpecies",
             ClassName::Beam => "Beam",
             ClassName::Sound => "Sound",
             ClassName::Terrain => "Terrain",
@@ -828,7 +867,14 @@ impl ClassName {
             ClassName::ColorGradingEffect => "ColorGradingEffect",
             ClassName::TerrainDetail => "TerrainDetail",
             ClassName::TerrainRegion => "TerrainRegion",
-            ClassName::ArcReactorCore => "ArcReactorCore",
+            ClassName::TerrainSpline => "TerrainSpline",
+            ClassName::TerrainSplinePoint => "TerrainSplinePoint",
+            ClassName::TerrainStamp => "TerrainStamp",
+            ClassName::TerrainFlattenPad => "TerrainFlattenPad",
+            ClassName::TerrainNoise => "TerrainNoise",
+            ClassName::TerrainMaterialFill => "TerrainMaterialFill",
+            ClassName::TerrainScatter => "TerrainScatter",
+            ClassName::TerrainWaterBody => "TerrainWaterBody",
         }
     }
 
@@ -927,6 +973,8 @@ impl ClassName {
             "Animator" => Ok(ClassName::Animator),
             "KeyframeSequence" => Ok(ClassName::KeyframeSequence),
             "ParticleEmitter" => Ok(ClassName::ParticleEmitter),
+            "ParticleSimulation" => Ok(ClassName::ParticleSimulation),
+            "ParticleSpecies" => Ok(ClassName::ParticleSpecies),
             "Beam" => Ok(ClassName::Beam),
             "Sound" => Ok(ClassName::Sound),
             "Terrain" => Ok(ClassName::Terrain),
@@ -1128,7 +1176,14 @@ impl ClassName {
             "ColorGradingEffect" => Ok(ClassName::ColorGradingEffect),
             "TerrainDetail" => Ok(ClassName::TerrainDetail),
             "TerrainRegion" => Ok(ClassName::TerrainRegion),
-            "ArcReactorCore" => Ok(ClassName::ArcReactorCore),
+            "TerrainSpline" => Ok(ClassName::TerrainSpline),
+            "TerrainSplinePoint" => Ok(ClassName::TerrainSplinePoint),
+            "TerrainStamp" => Ok(ClassName::TerrainStamp),
+            "TerrainFlattenPad" => Ok(ClassName::TerrainFlattenPad),
+            "TerrainNoise" => Ok(ClassName::TerrainNoise),
+            "TerrainMaterialFill" => Ok(ClassName::TerrainMaterialFill),
+            "TerrainScatter" => Ok(ClassName::TerrainScatter),
+            "TerrainWaterBody" => Ok(ClassName::TerrainWaterBody),
             _ => Err(format!("Unknown class name: {}", s)),
         }
     }
@@ -1154,6 +1209,23 @@ impl ClassName {
             ClassName::GridSensor |
             ClassName::AlignmentGuide |
             ClassName::SnapIndicator
+        )
+    }
+
+    /// Returns true for the terrain layer classes, a spline's control points
+    /// included. Their properties are field tables, they live under
+    /// `Workspace/Terrain/Layers`, and the Explorer lists them under the
+    /// Terrain.
+    pub fn is_terrain_layer(&self) -> bool {
+        matches!(self,
+            ClassName::TerrainSpline |
+            ClassName::TerrainSplinePoint |
+            ClassName::TerrainStamp |
+            ClassName::TerrainFlattenPad |
+            ClassName::TerrainNoise |
+            ClassName::TerrainMaterialFill |
+            ClassName::TerrainScatter |
+            ClassName::TerrainWaterBody
         )
     }
 }
@@ -2141,30 +2213,50 @@ impl Default for EustressCamera {
 // 10. Light Classes
 // ============================================================================
 
+// The four light classes share one authoring model, resolved to Bevy lights by
+// `plugins::light_classes`:
+//
+// - `brightness` is a Roblox-style dial (1 = a normal lamp), display-referred:
+//   a brightness-1 light lights a surface the same on screen at noon and at
+//   midnight, because the physical lumens follow the camera's adapted exposure.
+// - `range` is the light's reach in metres, as Roblox's Range is its reach in
+//   studs: the light fades to nothing at `range`, and a longer range lights
+//   further out rather than only clipping later.
+// - `angle` (SpotLight, SurfaceLight) is the cone's full apex angle in
+//   degrees, 0 to 180, as in Roblox.
+// - `face` (SpotLight, SurfaceLight) is the face of the parent part the light
+//   shines out of: "Top", "Bottom", "Front", "Back", "Left" or "Right".
+
 /// Omni light (Eustress PointLight)
-/// Bevy: PointLightBundle with optional PointLightTexture
+/// Bevy: PointLight, resolved by `plugins::light_classes`
 #[derive(Component, Debug, Clone, Serialize, Deserialize, Reflect)]
 #[reflect(Component)]
 pub struct EustressPointLight {
-    /// Intensity in lumens (Eustress "Brightness")
-    /// Bevy: PointLight.intensity
+    /// Roblox-style brightness dial (Eustress "Brightness"); see the note
+    /// above the light classes for what it means physically.
     pub brightness: f32,
 
     /// Hue (Eustress "Color")
     /// Bevy: PointLight.color
     pub color: Color,
 
-    /// Falloff distance (Eustress "Range")
-    /// Bevy: PointLight.range
+    /// Reach in metres (Eustress "Range"): the light fades to nothing here.
     pub range: f32,
 
-    /// Spherical area light radius — larger radius = softer shadows and wider illumination
-    /// Bevy: PointLight.radius
+    /// Radius of the emitting sphere in metres. Widens specular highlights;
+    /// diffuse lighting is unchanged. Bevy: PointLight.radius
     #[serde(default)]
     pub radius: f32,
 
-    /// Cast shadows (Eustress "Shadows")
+    /// Cast shadows (Eustress "Shadows"). Off by default, as in Roblox: a
+    /// shadowed point light renders six shadow views every frame.
     pub shadows: bool,
+
+    /// Roblox `Light.Enabled`: a disabled light emits nothing and casts no
+    /// shadow. Defaults to on, so data written before the field existed
+    /// loads unchanged.
+    #[serde(default = "light_enabled_default")]
+    pub enabled: bool,
 
     /// Optional light texture/cookie (Bevy 0.17+: PointLightTexture)
     /// Asset path to a cubemap texture that modulates light intensity.
@@ -2174,31 +2266,62 @@ pub struct EustressPointLight {
     pub texture: Option<String>,
 }
 
+/// Reach of a new light, in metres. The class templates carry the same value.
+pub const DEFAULT_LIGHT_RANGE: f32 = 16.0;
+/// Cone of a new SpotLight or SurfaceLight: Roblox's default, a full apex
+/// angle of 90 degrees.
+pub const DEFAULT_LIGHT_ANGLE: f32 = 90.0;
+
 impl Default for EustressPointLight {
     fn default() -> Self {
         Self {
-            brightness: 1.0, // Roblox-style 0..N dial; scaled to lumens by engine light_sync (was raw lumens, inconsistent with the 1.0 template)
+            brightness: 1.0,
             color: Color::WHITE,
-            range: 60.0,
+            range: DEFAULT_LIGHT_RANGE,
             radius: 0.0, // Point source by default, increase for area light
-            shadows: true,
+            shadows: false,
+            enabled: true,
             texture: None,
         }
     }
 }
 
+/// Serde default for the light classes' `enabled` field.
+fn light_enabled_default() -> bool {
+    true
+}
+
+/// Serde default for the SpotLight and SurfaceLight `angle` field.
+fn light_angle_default() -> f32 {
+    DEFAULT_LIGHT_ANGLE
+}
+
+/// Serde default for the SpotLight and SurfaceLight `face` field.
+fn light_face_default() -> String {
+    "Front".to_string()
+}
+
 /// Spot light (Eustress SpotLight)
-/// Bevy: SpotLightBundle with optional SpotLightTexture
+/// Bevy: SpotLight on an emitter child, resolved by `plugins::light_classes`
 #[derive(Component, Debug, Clone, Serialize, Deserialize, Reflect)]
 #[reflect(Component)]
 pub struct EustressSpotLight {
     pub brightness: f32,
     pub color: Color,
     pub range: f32,
-    /// Cone angle in degrees (Eustress "Angle")
+    /// Full apex angle of the cone in degrees, 0 to 180 (Eustress "Angle")
+    #[serde(default = "light_angle_default")]
     pub angle: f32,
     pub shadows: bool,
-    
+    /// Roblox `Light.Enabled` (see `EustressPointLight::enabled`).
+    #[serde(default = "light_enabled_default")]
+    pub enabled: bool,
+    /// Face of the parent part the cone shines out of (Eustress "Face"). With
+    /// no part parent it turns the cone relative to the light itself; "Front"
+    /// shines along the light's -Z.
+    #[serde(default = "light_face_default")]
+    pub face: String,
+
     /// Optional light texture/cookie (Bevy 0.17+: SpotLightTexture)
     /// Asset path to a 2D texture that modulates light intensity.
     /// Projects the texture pattern onto illuminated surfaces.
@@ -2210,27 +2333,38 @@ pub struct EustressSpotLight {
 impl Default for EustressSpotLight {
     fn default() -> Self {
         Self {
-            brightness: 1.0, // Roblox-style 0..N dial; scaled to lumens by engine light_sync (was raw lumens, inconsistent with the 1.0 template)
+            brightness: 1.0,
             color: Color::WHITE,
-            range: 60.0,
-            angle: 45.0, // Degrees — typical spotlight cone
-            shadows: true,
+            range: DEFAULT_LIGHT_RANGE,
+            angle: DEFAULT_LIGHT_ANGLE,
+            shadows: false,
+            enabled: true,
+            face: light_face_default(),
             texture: None,
         }
     }
 }
 
 /// Surface light (Eustress SurfaceLight)
-/// Emits light from a specific face of a part
+/// Emits a cone of light out of one face of its parent part. Bevy: SpotLight
+/// on an emitter child at the face, resolved by `plugins::light_classes`.
 #[derive(Component, Debug, Clone, Serialize, Deserialize, Reflect)]
 #[reflect(Component)]
 pub struct SurfaceLight {
     pub brightness: f32,
     pub color: Color,
     pub range: f32,
+    #[serde(default = "light_face_default")]
     pub face: String,  // "Top", "Bottom", "Front", "Back", "Left", "Right"
+    /// Full apex angle of the cone in degrees, 0 to 180 (Eustress "Angle").
+    /// 180 lights the whole half-space in front of the face.
+    #[serde(default = "light_angle_default")]
+    pub angle: f32,
     pub shadows: bool,
-    
+    /// Roblox `Light.Enabled` (see `EustressPointLight::enabled`).
+    #[serde(default = "light_enabled_default")]
+    pub enabled: bool,
+
     /// Optional light texture/cookie
     /// Asset path to a 2D texture that modulates light intensity from this surface.
     /// Format: "assets/textures/surface_cookie.png" or content hash
@@ -2243,30 +2377,38 @@ impl Default for SurfaceLight {
         Self {
             brightness: 1.0,
             color: Color::WHITE,
-            range: 60.0,
-            face: "Front".to_string(),
-            shadows: true,
+            range: DEFAULT_LIGHT_RANGE,
+            face: light_face_default(),
+            angle: DEFAULT_LIGHT_ANGLE,
+            shadows: false,
+            enabled: true,
             texture: None,
         }
     }
 }
 
-/// Directional light (Eustress DirectionalLight / Sun)
-/// Bevy: DirectionalLight with optional DirectionalLightTexture
-/// 
-/// Simulates distant light sources like the sun. All rays are parallel.
+/// Directional light (Eustress DirectionalLight)
+/// Bevy: DirectionalLight, resolved by `plugins::light_classes`
+///
+/// A distant light with parallel rays, shining along the entity's -Z. It is
+/// not the sun: the sun and moon belong to the Lighting service.
 #[derive(Component, Debug, Clone, Serialize, Deserialize, Reflect)]
 #[reflect(Component)]
 pub struct EustressDirectionalLight {
-    /// Light intensity/brightness
+    /// Brightness dial: 1 is 10,000 lux on screen at daylight exposure,
+    /// display-referred like the other light classes.
     pub brightness: f32,
-    
+
     /// Light color
     pub color: Color,
-    
+
     /// Cast shadows
     pub shadows: bool,
-    
+
+    /// A disabled light emits nothing and casts no shadow.
+    #[serde(default = "light_enabled_default")]
+    pub enabled: bool,
+
     /// Shadow depth bias (prevents shadow acne)
     #[serde(default = "default_shadow_depth_bias")]
     pub shadow_depth_bias: f32,
@@ -2292,6 +2434,7 @@ impl Default for EustressDirectionalLight {
             brightness: 1.0,
             color: Color::WHITE,
             shadows: true,
+            enabled: true,
             shadow_depth_bias: 0.02,
             shadow_normal_bias: 1.8,
             texture: None,
@@ -6732,12 +6875,18 @@ impl Terrain {
             chunk_resolution: self.chunk_resolution,
             chunks_x: self.chunks_x,
             chunks_z: self.chunks_z,
+            // The class has no grid centre property; its grid is centred on
+            // the world origin.
+            center_chunk: IVec2::ZERO,
             lod_levels: self.lod_levels,
             lod_distances: (0..self.lod_levels)
                 .map(|i| self.view_distance * (i as f32 + 1.0) / self.lod_levels as f32)
                 .collect(),
             view_distance: self.view_distance,
             height_scale: self.height_scale,
+            // The class has no offset property; its procedural terrain
+            // keeps the band floor at world Y = 0.
+            height_offset: 0.0,
             seed: self.seed,
         }
     }
@@ -6934,10 +7083,10 @@ pub struct Clouds {
     /// Cloud spread/scale - larger values = bigger, more spread out clouds
     pub spread: f32,
     
-    /// Cloud layer altitude in studs (height above ground)
+    /// Height of the cloud base above the ground, metres
     pub altitude: f32,
-    
-    /// Cloud layer thickness in studs
+
+    /// Depth of the cloud layer from base to top, metres
     pub thickness: f32,
     
     /// Primary cloud color (lit by sun)
@@ -6952,7 +7101,7 @@ pub struct Clouds {
     /// Wind direction in degrees (0 = North, 90 = East)
     pub wind_direction: f32,
     
-    /// Wind speed in studs per second
+    /// Wind speed at the cloud layer, metres per second
     pub wind_speed: f32,
     
     /// Cloud coverage hemisphere mode
@@ -6985,10 +7134,13 @@ impl Default for Clouds {
         Self {
             enabled: true,
             density: 0.5,
-            coverage: 0.4,
+            coverage: 0.45,
             spread: 1.0,
-            altitude: 500.0,
-            thickness: 100.0,
+            // Fair-weather cumulus: bases around 1.5 km, tops near 2.7 km. The
+            // renderer raymarches this shell over a curved planet, so a layer
+            // 100 m thick at 500 m (the old default) drew as a low, flat mist.
+            altitude: 1500.0,
+            thickness: 1200.0,
             color: [1.0, 1.0, 1.0, 1.0],
             shadow_color: [0.4, 0.4, 0.5, 1.0],
             softness: 0.7,
@@ -7035,10 +7187,12 @@ impl Clouds {
             color: [0.8, 0.8, 0.85, 1.0],
             shadow_color: [0.5, 0.5, 0.55, 1.0],
             softness: 0.3,
+            altitude: 800.0,
+            thickness: 700.0,
             ..Default::default()
         }
     }
-    
+
     /// Create stormy sky
     pub fn stormy() -> Self {
         Self {
@@ -7047,21 +7201,24 @@ impl Clouds {
             layer_type: CloudLayerType::Cumulonimbus,
             color: [0.4, 0.4, 0.45, 1.0],
             shadow_color: [0.2, 0.2, 0.25, 1.0],
-            thickness: 200.0,
+            // Cumulonimbus towers: low bases, tops near the tropopause.
+            altitude: 900.0,
+            thickness: 6000.0,
             wind_speed: 30.0,
             shadow_intensity: 0.6,
             ..Default::default()
         }
     }
-    
+
     /// Create high cirrus clouds
     pub fn cirrus() -> Self {
         Self {
             density: 0.3,
             coverage: 0.4,
             layer_type: CloudLayerType::Cirrus,
-            altitude: 1000.0,
-            thickness: 50.0,
+            // Ice cloud, high in the troposphere and thin.
+            altitude: 7500.0,
+            thickness: 500.0,
             softness: 0.9,
             spread: 2.0,
             ..Default::default()
@@ -7151,7 +7308,11 @@ impl Default for Star {
             cycle_paused: true,
             latitude: 45.0,     // Mid-latitude
             day_of_year: 172,   // Summer solstice (longest day)
-            angular_size: 5.3, // Visible but not overwhelming (real sun is ~0.53°)
+            // The true disc. Bevy draws it energy-conserving (radiance is the
+            // light's illuminance over the disc's solid angle), so a bigger disc
+            // is not brighter, only larger, and bloom supplies the glare the
+            // eye actually sees around the sun.
+            angular_size: 0.53,
             noon_color: [1.0, 0.98, 0.95, 1.0],
             horizon_color: [1.0, 0.5, 0.2, 1.0],
             noon_intensity: 100000.0,  // ~100k lux (bright sunlight)
@@ -7161,7 +7322,9 @@ impl Default for Star {
             ambient_day_color: [0.4, 0.5, 0.7, 1.0],
             ambient_night_color: [0.02, 0.02, 0.05, 1.0],
             corona_intensity: 0.3,
-            god_rays_intensity: 0.0,
+            // A multiplier on the ground haze the sun's shafts are drawn in; 1.0
+            // is the calibrated default, 0.0 turns the shafts off.
+            god_rays_intensity: 1.0,
             texture: String::new(),
         }
     }
@@ -7283,6 +7446,43 @@ impl Star {
 
 /// Type alias for backward compatibility (Sun renamed to Star)
 pub type Sun = Star;
+
+/// Obliquity of the ecliptic, degrees: the tilt between the Earth's equator
+/// and the plane the Sun appears to travel in.
+pub const ECLIPTIC_OBLIQUITY: f32 = 23.44;
+
+/// The Sun's ecliptic longitude, degrees, on `day_of_year`: 0 at the March
+/// equinox (day 80), 90 at the June solstice.
+pub fn solar_ecliptic_longitude(day_of_year: u16) -> f32 {
+    (day_of_year as f32 - 80.0) * (360.0 / 365.25)
+}
+
+/// Ecliptic longitude and latitude to right ascension and declination, all
+/// in degrees.
+pub fn ecliptic_to_equatorial(longitude: f32, latitude: f32) -> (f32, f32) {
+    let (l, b, e) = (
+        longitude.to_radians(),
+        latitude.to_radians(),
+        ECLIPTIC_OBLIQUITY.to_radians(),
+    );
+    let sin_dec = b.sin() * e.cos() + b.cos() * e.sin() * l.sin();
+    let ra = (l.sin() * e.cos() - b.tan() * e.sin()).atan2(l.cos());
+    (ra.to_degrees(), sin_dec.clamp(-1.0, 1.0).asin().to_degrees())
+}
+
+/// The world direction of a point on the sky from its hour angle and
+/// declination (degrees) at `latitude` (degrees).
+///
+/// World axes as [`Sun::direction`] has them: +X east, +Y up, +Z north. The
+/// celestial pole is `(0, sin lat, cos lat)`; an hour angle of 0 is the
+/// meridian, due south of the pole, and a negative one is east of it (a body
+/// rises in the east and its hour angle grows through the day).
+pub fn sky_direction(hour_angle: f32, declination: f32, latitude: f32) -> Vec3 {
+    let (h, d, lat) = (hour_angle.to_radians(), declination.to_radians(), latitude.to_radians());
+    let pole = Vec3::new(0.0, lat.sin(), lat.cos());
+    let meridian = Vec3::new(0.0, lat.cos(), -lat.sin());
+    (pole * d.sin() + (meridian * h.cos() - Vec3::X * h.sin()) * d.cos()).normalize()
+}
 
 // ============================================================================
 // 23e. Moon (Lighting child - Celestial Body)
@@ -7418,7 +7618,11 @@ impl Default for Moon {
             enabled: true,
             lunar_day: 14.76,  // Full moon
             sync_with_sun: true,
-            angular_size: 5.2, // Large and visible (real moon is ~0.52°)
+            // About twice the true 0.52 degrees. At a 70 degree field of view the
+            // true disc is eight pixels across, too few to show the maria or a
+            // crescent; this is the size the eye reads the moon at. Set 0.52
+            // for the physical disc.
+            angular_size: 1.1,
             color: [0.95, 0.95, 1.0, 1.0],
             glow_color: [0.8, 0.85, 1.0, 0.3],
             full_intensity: 0.5,  // Slightly brighter than real for gameplay
@@ -7491,56 +7695,44 @@ impl Moon {
         self.orbital_inclination * node_angle.to_radians().sin()
     }
     
-    /// Get moon direction vector using realistic orbital mechanics
-    /// 
-    /// The Moon follows the Sun's path (ecliptic) but:
-    /// 1. Offset by elongation angle (determines phase)
-    /// 2. Inclined ~5.1° to the ecliptic (causes latitude variation)
-    /// 
+    /// Get the moon's direction from its place on the celestial sphere.
+    ///
+    /// The Moon sits `elongation` degrees east of the Sun along the ecliptic,
+    /// `orbital_inclination` above or below it, and the whole sky turns about
+    /// the celestial pole with the time of day. Both bodies go through
+    /// [`sky_direction`], the same alt-azimuth conversion
+    /// [`Sun::direction`] uses, so the angle between them is the elongation
+    /// and the lit side of the moon faces the rendered sun.
+    ///
+    /// This used to give the Moon the Sun's declination and add the
+    /// elongation to the Sun's azimuth. A full moon, opposite the Sun, then
+    /// stood where the noon Sun stands: high in a summer sky, where the real
+    /// full moon of summer runs low. At a summer midnight at 45 degrees north
+    /// it put the "full" moon 133 degrees from the Sun instead of 180.
+    ///
     /// # Arguments
     /// * `sun` - The Sun component for latitude/time calculations
     pub fn direction_realistic(&self, sun: &Sun) -> Vec3 {
-        // Get Sun's position
-        let sun_elevation = sun.elevation();
-        let sun_azimuth = sun.azimuth();
-        
-        // Moon's elongation from sun (determines phase)
-        let elongation = self.elongation_from_sun();
-        
-        // Moon's azimuth = Sun's azimuth + elongation
-        // Moon rises ~50 min later each day, moves ~12° east per day
-        let moon_azimuth = (sun_azimuth + elongation) % 360.0;
-        
-        // Moon's elevation follows similar path to sun but offset
-        // At full moon (180° elongation), moon is highest when sun is lowest
-        let hour_offset = elongation / 15.0; // Convert degrees to hours
-        let effective_hour = (sun.time_of_day + hour_offset) % 24.0;
-        
-        // Calculate moon elevation using same formula as sun but with offset time
-        let hour_angle = (effective_hour - 12.0) * 15.0;
-        let declination = 23.45 * ((360.0 / 365.0) * (sun.day_of_year as f32 - 81.0)).to_radians().sin();
-        
-        // Add moon's orbital inclination effect
-        let moon_declination = declination + self.ecliptic_latitude();
-        
-        let lat_rad = sun.latitude.to_radians();
-        let dec_rad = moon_declination.to_radians();
-        let hour_rad = hour_angle.to_radians();
-        
-        let sin_elevation = lat_rad.sin() * dec_rad.sin() 
-            + lat_rad.cos() * dec_rad.cos() * hour_rad.cos();
-        
-        let moon_elevation = sin_elevation.asin().to_degrees();
-        
-        // Convert to direction vector
-        let elev_rad = moon_elevation.to_radians();
-        let azim_rad = moon_azimuth.to_radians();
-        
-        Vec3::new(
-            azim_rad.sin() * elev_rad.cos(),
-            elev_rad.sin(),
-            azim_rad.cos() * elev_rad.cos(),
-        ).normalize()
+        let (hour_angle, declination) = self.equatorial_position(sun);
+        sky_direction(hour_angle, declination, sun.latitude)
+    }
+
+    /// The Moon's hour angle and declination, in degrees, for `sun`'s date,
+    /// time of day and latitude.
+    pub fn equatorial_position(&self, sun: &Sun) -> (f32, f32) {
+        let sun_longitude = solar_ecliptic_longitude(sun.day_of_year);
+        let moon_longitude = sun_longitude + self.elongation_from_sun();
+        // Argument of latitude: how far along its inclined orbit the Moon is
+        // from the ascending node.
+        let moon_latitude =
+            self.orbital_inclination * (moon_longitude - self.ascending_node).to_radians().sin();
+        let (sun_ra, _) = ecliptic_to_equatorial(sun_longitude, 0.0);
+        let (moon_ra, moon_dec) = ecliptic_to_equatorial(moon_longitude, moon_latitude);
+        // The Sun's hour angle is its solar time. Everything on the sky shares
+        // one sidereal clock, so the Moon's trails it by the difference in
+        // right ascension.
+        let sun_hour_angle = (sun.time_of_day - 12.0) * 15.0;
+        (sun_hour_angle + (sun_ra - moon_ra), moon_dec)
     }
     
     /// Simplified direction calculation (legacy compatibility)

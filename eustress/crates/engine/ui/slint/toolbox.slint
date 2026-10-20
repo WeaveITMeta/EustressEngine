@@ -174,13 +174,13 @@ export component Toolbox inherits Rectangle {
                 spacing: 6px;
                 
                 // Primitives
-                PanelHeader {
+                primitives-header := PanelHeader {
                     title: "Primitives";
                     collapsible: true;
                 }
                 
                 // Row 1: Block, Sphere, Wedge, Cylinder
-                Rectangle {
+                if !primitives-header.collapsed: Rectangle {
                     height: 64px;
                     property <length> row-w: 4 * 64px + 3 * 4px;
                     ToolButton { x: (parent.width - parent.row-w) / 2 + 0 * 68px; icon: @image-url("../../assets/icons/ui/block.svg"); label: "Block"; tooltip: "Basic building block"; clicked => { root.on-insert-part("Block"); } }
@@ -190,7 +190,7 @@ export component Toolbox inherits Rectangle {
                 }
                 
                 // Row 2: Corner Wedge, Cone
-                Rectangle {
+                if !primitives-header.collapsed: Rectangle {
                     height: 64px;
                     property <length> row-w: 2 * 64px + 1 * 4px;
                     ToolButton { x: (parent.width - parent.row-w) / 2 + 0 * 68px; icon: @image-url("../../assets/icons/ui/corner.svg"); label: "Corner"; tooltip: "Corner wedge - roof corners"; clicked => { root.on-insert-part("CornerWedge"); } }
@@ -198,12 +198,12 @@ export component Toolbox inherits Rectangle {
                 }
                 
                 // Models
-                PanelHeader {
+                models-header := PanelHeader {
                     title: "Models";
                     collapsible: true;
                 }
                 
-                Rectangle {
+                if !models-header.collapsed: Rectangle {
                     height: 64px;
                     property <length> row-w: 2 * 64px + 1 * 4px;
                     ToolButton { x: (parent.width - parent.row-w) / 2 + 0 * 68px; icon: @image-url("../../assets/icons/ui/package.svg"); label: "Model"; tooltip: "Empty model container"; clicked => { root.on-insert-part("Model"); } }
@@ -211,12 +211,12 @@ export component Toolbox inherits Rectangle {
                 }
                 
                 // Lighting
-                PanelHeader {
+                lighting-header := PanelHeader {
                     title: "Lighting";
                     collapsible: true;
                 }
                 
-                Rectangle {
+                if !lighting-header.collapsed: Rectangle {
                     height: 64px;
                     property <length> row-w: 3 * 64px + 2 * 4px;
                     ToolButton { x: (parent.width - parent.row-w) / 2 + 0 * 68px; icon: @image-url("../../assets/icons/ui/lightbulb.svg"); label: "Point"; tooltip: "Omnidirectional light source"; clicked => { root.on-insert-part("PointLight"); } }
@@ -225,12 +225,12 @@ export component Toolbox inherits Rectangle {
                 }
                 
                 // Gameplay
-                PanelHeader {
+                gameplay-header := PanelHeader {
                     title: "Gameplay";
                     collapsible: true;
                 }
                 
-                Rectangle {
+                if !gameplay-header.collapsed: Rectangle {
                     height: 64px;
                     property <length> row-w: 2 * 64px + 1 * 4px;
                     ToolButton { x: (parent.width - parent.row-w) / 2 + 0 * 68px; icon: @image-url("../../assets/icons/ui/gamepad.svg"); label: "Spawn"; tooltip: "Player spawn location"; clicked => { root.on-insert-part("SpawnLocation"); } }
@@ -238,12 +238,12 @@ export component Toolbox inherits Rectangle {
                 }
                 
                 // Physics
-                PanelHeader {
+                physics-header := PanelHeader {
                     title: "Physics";
                     collapsible: true;
                 }
                 
-                Rectangle {
+                if !physics-header.collapsed: Rectangle {
                     height: 64px;
                     property <length> row-w: 3 * 64px + 2 * 4px;
                     ToolButton { x: (parent.width - parent.row-w) / 2 + 0 * 68px; icon: @image-url("../../assets/icons/ui/anchor.svg"); label: "Anchor"; tooltip: "Attachment point"; clicked => { root.on-insert-part("Attachment"); } }
@@ -252,12 +252,12 @@ export component Toolbox inherits Rectangle {
                 }
                 
                 // Effects
-                PanelHeader {
+                effects-header := PanelHeader {
                     title: "Effects";
                     collapsible: true;
                 }
                 
-                Rectangle {
+                if !effects-header.collapsed: Rectangle {
                     height: 64px;
                     property <length> row-w: 3 * 64px + 2 * 4px;
                     ToolButton { x: (parent.width - parent.row-w) / 2 + 0 * 68px; icon: @image-url("../../assets/icons/ui/fire.svg"); label: "Particle"; tooltip: "Particle emitter"; clicked => { root.on-insert-part("ParticleEmitter"); } }
@@ -266,12 +266,12 @@ export component Toolbox inherits Rectangle {
                 }
                 
                 // Scripts
-                PanelHeader {
+                scripts-header := PanelHeader {
                     title: "Scripts";
                     collapsible: true;
                 }
                 
-                Rectangle {
+                if !scripts-header.collapsed: Rectangle {
                     height: 64px;
                     ToolButton { x: (parent.width - 64px) / 2; icon: @image-url("../../assets/icons/soulservice.svg"); label: "Soul"; tooltip: "Soul script (.soul → .rune)"; clicked => { root.on-insert-part("SoulScript"); } }
                 }

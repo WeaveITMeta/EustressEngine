@@ -30,10 +30,11 @@
 //! - Idle entities (no activity > threshold) auto-release to server
 //! - Gradual handoff blends physics authority over 1-2 seconds
 
+use bevy::platform::time::Instant;
 use bevy::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 use tracing::{info, warn};
 
 use crate::config::OwnershipConfig;
@@ -428,7 +429,7 @@ pub fn process_ownership_requests(
                 entity,
                 net_id: request.net_id,
                 client_id: request.client_id,
-                reason: format!("Too far: {:.1} > {:.1} studs", distance, config.max_request_distance),
+                reason: format!("Too far: {:.1} > {:.1} m", distance, config.max_request_distance),
             });
             continue;
         }

@@ -207,22 +207,27 @@ pub fn elevation_to_terrain(
         chunk_resolution: config.chunk_resolution,
         chunks_x: chunks_x / 2,  // TerrainConfig uses half-extents from center
         chunks_z: chunks_z / 2,
+        center_chunk: IVec2::ZERO,
         lod_levels: config.lod_levels,
         lod_distances: generate_lod_distances(config.lod_levels, config.chunk_size),
         view_distance: config.chunk_size * (chunks_x.max(chunks_z) as f32) * 1.5,
         height_scale: 1.0,  // Already applied to heights
+        height_offset: 0.0, // Heights are stored as raw world Y
         seed: 0,
     };
     
     // Create terrain data
+    // No material layer: an elevation file carries heights only, and the
+    // importer that writes this to disk emits an all-Grass matmap beside it.
     let terrain_data = TerrainData {
         heightmap: None,  // Will be created as Image asset
-        splatmap: None,
         height_cache: resampled,
         cache_width: target_width,
         cache_height: target_height,
-        splat_cache: Vec::new(),
-        splat_dirty: false,
+        material_cache: Vec::new(),
+        material_dirty: false,
+        slot_palette: Default::default(),
+        sparse_surface: false,
     };
     
     Ok(ElevationImportResult {

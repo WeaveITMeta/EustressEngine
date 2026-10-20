@@ -37,6 +37,10 @@ toml = "0.8"
 # the disk shape of an MCP-created entity matches every other surface
 # (Insert menu, Toolbox, Model ribbon).
 eustress-common = { path = "../common" }
+# Data mining over data files (`mine_data`): the JSON front door of the
+# data leaf. `import` only: CSV and JSON reading, no arrow/parquet here. The
+# engine's build unifies in `parquet`, and Parquet files then read too.
+eustress-data = { path = "../data", features = ["import"] }
 # Parametric CAD kernel — cad_create_part / cad_export_glb evaluate
 # feature trees and write .glb without a live Studio.
 eustress-cad = { path = "../cad" }
@@ -48,6 +52,11 @@ base64 = "0.22"
 # Chrono — parse the RFC-3339 timestamp on `runtime-snapshot.json` so
 # `get_sim_value` / `list_sim_values` can report snapshot age.
 chrono = { workspace = true }
+
+# Sim IPC paths + instance registry — the sim tools address one engine among
+# several on a Universe through its per-instance queue and snapshot, whose
+# paths the engine and these tools share from one definition. Std-only.
+eustress-bridge-client = { path = "../bridge-client" }
 
 # Git tool implementations shell out to `git`; no native dep needed.
 # The spatial / physics / simulation tool groups are also filesystem +

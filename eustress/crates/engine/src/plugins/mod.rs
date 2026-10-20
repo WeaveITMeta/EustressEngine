@@ -19,7 +19,6 @@ pub mod input_plugin;
 pub mod run_plugin;
 pub mod celestial_plugin;
 pub mod clouds_plugin;
-pub mod fission_plugin;
 
 pub use workspace_plugin::WorkspacePlugin;
 pub use lighting_plugin::LightingPlugin;
@@ -29,7 +28,6 @@ pub use input_plugin::InputPlugin;
 pub use run_plugin::RunPlugin;
 pub use celestial_plugin::CelestialPlugin;
 pub use clouds_plugin::CloudsPlugin;
-pub use fission_plugin::FissionPlugin;
 
 use bevy::prelude::*;
 use eustress_common::{AttributesPlugin, ParametersPlugin};
@@ -48,7 +46,6 @@ impl Plugin for AllServicesPlugin {
             PhysicsPlugin,
             InputPlugin,
             RunPlugin,
-            FissionPlugin,
             AttributesPlugin,
             ParametersPlugin,
         ));

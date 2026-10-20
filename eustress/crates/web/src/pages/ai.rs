@@ -361,10 +361,10 @@ pub fn AiPage() -> impl IntoView {
                 </div>
                 <div class="cta-container">
                     <h2 class="cta-headline">"Ready to Build with "<span class="cta-accent">"AI"</span>"?"</h2>
-                    <p class="cta-subtext">"Download Eustress Engine and start creating with Soul Language today."</p>
+                    <p class="cta-subtext">"Download Eustress Engine and turn a plain-language summary into a running script."</p>
                     <div class="cta-buttons">
                         <a href="/download" class="ai-cta-primary">"Download Engine →"</a>
-                        <a href="/docs/scripting" class="ai-cta-secondary">"Soul Language Docs"</a>
+                        <a href="/docs/scripting" class="ai-cta-secondary">"Scripting Docs"</a>
                     </div>
                 </div>
             </section>

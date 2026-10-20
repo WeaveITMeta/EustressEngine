@@ -412,6 +412,9 @@ pub struct GroupingPlugin;
 
 impl Plugin for GroupingPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(Update, (handle_group_action, handle_ungroup_action));
+        app.add_systems(
+            Update,
+            (handle_group_action, handle_ungroup_action).run_if(crate::play_mode::editor_input_enabled),
+        );
     }
 }

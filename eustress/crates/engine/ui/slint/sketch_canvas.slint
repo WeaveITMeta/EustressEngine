@@ -1,34 +1,291 @@
 // ============================================================================
-// Sketch Canvas — lightweight 2D sketch inspector + constraint actions
+// Sketch panel: the selected CadPart's first sketch
 // ============================================================================
-// Full Fusion-grade freehand draw lands next; v0 exposes the solver surface:
-// entity list, constraint/dimension status, Solve / add-constraint shortcuts.
-// Bound from main when a CadPart is selected (optional floating panel).
+// A floating panel on the shared chrome (DRAFTING_UX.md Law 1): the glass
+// surface, hairline, header and close button every floating panel carries.
+//
+// - The solve state is a chip (Law 6) in the constraint-health colours:
+//   green when fully constrained, amber with the freedoms left, red when the
+//   constraints conflict or cannot be solved.
+// - Entity glyphs follow the sketch state palette: free geometry in
+//   `cat-parts` blue, construction amber, fixed green, everything white once
+//   the sketch is fully constrained. A click picks a row as A, the next as
+//   B; the picks show as badges on the rows.
+// - The constraint actions are ribbon buttons in the constraint hue (Law 3),
+//   enabled only once enough entities are picked.
+//
+// Rust (`update_sketch_ui_state` in cad_plugin.rs) fills the rows and the
+// solve state when the part's tree changes, not every frame, so the rows
+// keep their hover and click state.
 
-import { Theme } from "theme.slint";
-import { VerticalBox, HorizontalBox, ScrollView, Button } from "std-widgets.slint";
+import { Theme, FloatingPanelHeader, IconButton } from "theme.slint";
+import { ScrollView } from "std-widgets.slint";
 
 export struct SketchEntityRow {
     index: int,
+    // line | rect | circle | arc | point | construction
     kind: string,
+    // "Line", "Rectangle", ...
+    label: string,
+    // Size and position in the status-bar display unit.
     summary: string,
+    // free | construction | fixed | full
+    state: string,
 }
 
 export struct SketchConstraintRow {
     index: int,
+    // The constraint's file name: horizontal, perpendicular, equal_length, ...
     kind: string,
+    // "Perpendicular", "Equal length", ...
+    label: string,
+    // The entities it names: "e0, e1"
     detail: string,
 }
+
+// ── Solve-state chip ────────────────────────────────────────────────────────
+
+component SolveChip inherits Rectangle {
+    // full | under | over | failed; empty before the first solve
+    in property <string> state: "";
+    in property <int> free-dof: 0;
+
+    property <color> tone: root.state == "full" ? Theme.text-success
+        : root.state == "under" ? Theme.text-warning
+        : (root.state == "over" || root.state == "failed") ? Theme.text-error
+        : Theme.text-secondary;
+    property <string> caption: root.state == "full" ? "Fully constrained"
+        : root.state == "under" ? (root.free-dof == 1 ? "1 DOF free" : "\{root.free-dof} DOF free")
+        : root.state == "over" ? "Over-constrained"
+        : root.state == "failed" ? "Does not solve"
+        : "Not solved yet";
+
+    width: chip-row.preferred-width;
+    height: 22px;
+    border-radius: 11px;
+    background: root.tone.with-alpha(0.14);
+    border-width: 1px;
+    border-color: root.tone.with-alpha(0.45);
+
+    chip-row := HorizontalLayout {
+        padding-left: 9px;
+        padding-right: 10px;
+        spacing: 6px;
+        alignment: center;
+
+        VerticalLayout {
+            alignment: center;
+            Rectangle {
+                width: 7px;
+                height: 7px;
+                border-radius: 3.5px;
+                background: root.tone;
+            }
+        }
+        Text {
+            text: root.caption;
+            color: root.tone;
+            font-size: Theme.font-sm;
+            font-weight: 600;
+            vertical-alignment: center;
+        }
+    }
+}
+
+// ── Section label: "Entities 4" ─────────────────────────────────────────────
+
+component SectionLabel inherits HorizontalLayout {
+    in property <string> title: "";
+    in property <int> count: 0;
+
+    padding-left: 12px;
+    padding-right: 12px;
+    padding-top: 10px;
+    padding-bottom: 4px;
+
+    Text {
+        text: root.title;
+        color: Theme.text-secondary;
+        font-size: Theme.font-sm;
+        font-weight: 600;
+        letter-spacing: 0.3px;
+        horizontal-stretch: 1;
+    }
+    Text {
+        text: root.count;
+        color: Theme.text-disabled;
+        font-size: Theme.font-sm;
+    }
+}
+
+// ── Entity row ──────────────────────────────────────────────────────────────
+
+component EntityRowView inherits Rectangle {
+    in property <SketchEntityRow> item;
+    // "A", "B" or empty
+    in property <string> pick: "";
+    callback clicked();
+
+    pure function entity-icon(kind: string) -> image {
+        if kind == "line" { return @image-url("../../assets/icons/ui/cad-line.svg"); }
+        if kind == "rect" { return @image-url("../../assets/icons/ui/cad-rect.svg"); }
+        if kind == "circle" { return @image-url("../../assets/icons/ui/cad-circle.svg"); }
+        if kind == "arc" { return @image-url("../../assets/icons/ui/cad-arc.svg"); }
+        if kind == "construction" { return @image-url("../../assets/icons/ui/cad-construction.svg"); }
+        return @image-url("../../assets/icons/ui/cad-point.svg");
+    }
+
+    pure function state-color(state: string) -> color {
+        if state == "full" { return Theme.text-primary; }
+        if state == "fixed" { return Theme.text-success; }
+        if state == "construction" { return Theme.text-warning; }
+        return Theme.cat-parts;
+    }
+
+    height: 24px;
+    border-radius: Theme.radius-sm;
+    background: root.pick != "" ? Theme.explorer-item-selected
+        : touch.has-hover ? Theme.explorer-item-hover
+        : transparent;
+
+    HorizontalLayout {
+        padding-left: 8px;
+        padding-right: 6px;
+        spacing: 8px;
+
+        VerticalLayout {
+            alignment: center;
+            Image {
+                width: 14px;
+                height: 14px;
+                source: root.entity-icon(root.item.kind);
+                image-fit: contain;
+                colorize: root.state-color(root.item.state);
+            }
+        }
+        Text {
+            width: 24px;
+            text: "e\{root.item.index}";
+            color: Theme.text-disabled;
+            font-size: Theme.font-sm;
+            vertical-alignment: center;
+        }
+        Text {
+            width: 72px;
+            text: root.item.label;
+            color: Theme.text-primary;
+            font-size: Theme.font-sm;
+            vertical-alignment: center;
+            overflow: elide;
+        }
+        Text {
+            horizontal-stretch: 1;
+            text: root.item.summary;
+            color: Theme.text-secondary;
+            font-size: Theme.font-sm;
+            vertical-alignment: center;
+            overflow: elide;
+        }
+        if root.pick != "": VerticalLayout {
+            alignment: center;
+            Rectangle {
+                width: 18px;
+                height: 16px;
+                border-radius: 8px;
+                // A pick is a selection, and selection is cyan (Law 3).
+                background: Theme.accent-cyan;
+                Text {
+                    width: 100%;
+                    height: 100%;
+                    text: root.pick;
+                    color: Theme.background-primary;
+                    font-size: Theme.font-xs;
+                    font-weight: 700;
+                    horizontal-alignment: center;
+                    vertical-alignment: center;
+                }
+            }
+        }
+    }
+
+    touch := TouchArea {
+        mouse-cursor: pointer;
+        clicked => { root.clicked(); }
+    }
+}
+
+// ── Constraint row ──────────────────────────────────────────────────────────
+
+component ConstraintRowView inherits Rectangle {
+    in property <SketchConstraintRow> item;
+
+    pure function constraint-icon(kind: string) -> image {
+        if kind == "horizontal" { return @image-url("../../assets/icons/ui/cad-horizontal.svg"); }
+        if kind == "vertical" { return @image-url("../../assets/icons/ui/cad-vertical.svg"); }
+        if kind == "perpendicular" { return @image-url("../../assets/icons/ui/cad-perpendicular.svg"); }
+        if kind == "parallel" || kind == "collinear" { return @image-url("../../assets/icons/ui/cad-parallel.svg"); }
+        if kind == "tangent" { return @image-url("../../assets/icons/ui/cad-tangent.svg"); }
+        if kind == "equal_length" || kind == "equal_radius" { return @image-url("../../assets/icons/ui/cad-equal.svg"); }
+        if kind == "symmetric" { return @image-url("../../assets/icons/ui/cad-symmetric.svg"); }
+        if kind == "fix" { return @image-url("../../assets/icons/ui/lock.svg"); }
+        return @image-url("../../assets/icons/ui/cad-coincident.svg");
+    }
+
+    height: 22px;
+    background: transparent;
+
+    HorizontalLayout {
+        padding-left: 8px;
+        padding-right: 6px;
+        spacing: 8px;
+
+        VerticalLayout {
+            alignment: center;
+            Image {
+                width: 14px;
+                height: 14px;
+                source: root.constraint-icon(root.item.kind);
+                image-fit: contain;
+                colorize: Theme.cat-constraint;
+            }
+        }
+        Text {
+            width: 104px;
+            text: root.item.label;
+            color: Theme.text-primary;
+            font-size: Theme.font-sm;
+            vertical-alignment: center;
+            overflow: elide;
+        }
+        Text {
+            horizontal-stretch: 1;
+            text: root.item.detail;
+            color: Theme.text-secondary;
+            font-size: Theme.font-sm;
+            vertical-alignment: center;
+            overflow: elide;
+        }
+    }
+}
+
+// ── The panel ───────────────────────────────────────────────────────────────
 
 export component SketchCanvasPanel inherits Rectangle {
     in property <bool> visible-when: false;
     in property <string> part-name: "";
     in property <string> sketch-name: "";
-    in property <string> solve-status: "";
+    // full | under | over | failed; empty before the first solve
+    in property <string> solve-state: "";
+    in property <int> free-dof: 0;
+    // Why the sketch or its part is in trouble; empty when all is well.
+    in property <string> status-detail: "";
     in property <[SketchEntityRow]> entities: [];
     in property <[SketchConstraintRow]> constraints: [];
     in property <int> selected-a: -1;
     in property <int> selected-b: -1;
+    // Tallest the panel may grow: the viewport height less its margins.
+    // The lists shrink first, so the actions and footer stay on screen.
+    in property <length> height-limit: 640px;
 
     callback solve();
     callback add-horizontal();
@@ -38,154 +295,262 @@ export component SketchCanvasPanel inherits Rectangle {
     callback select-entity(int);
     callback close();
 
-    width: 280px;
-    height: 380px;
+    property <bool> have-a: root.selected-a >= 0;
+    property <bool> have-b: root.selected-a >= 0 && root.selected-b >= 0;
+
+    width: 300px;
+    height: min(stack.preferred-height, root.height-limit);
     visible: root.visible-when;
     background: Theme.panel-glass;
     border-radius: Theme.radius-lg;
     border-width: 1px;
     border-color: Theme.border-color;
-    drop-shadow-blur: 16px;
+    drop-shadow-blur: 24px;
     drop-shadow-color: Theme.shadow-float;
+    clip: true;
 
-    // 1px top hairline — the same depth cue every sibling floating
-    // panel carries (ToolOptionsBar / ToolPanel / toasts).
+    // 1px top hairline: the depth cue every floating panel carries.
     Rectangle {
         y: 0;
+        width: 100%;
         height: 1px;
-        width: parent.width;
         background: Theme.border-highlight;
     }
 
-    VerticalBox {
-        padding: 10px;
-        spacing: 8px;
+    stack := VerticalLayout {
+        padding: 0;
+        spacing: 0;
 
-        HorizontalBox {
+        FloatingPanelHeader {
+            icon: @image-url("../../assets/icons/ui/pen.svg");
+            title: root.sketch-name != "" ? root.sketch-name : "Sketch";
+            subtitle: root.part-name;
+            close => { root.close(); }
+        }
+
+        Rectangle {
+            height: 1px;
+            background: Theme.ribbon-separator;
+        }
+
+        // ── Solve state ─────────────────────────────────────────
+        HorizontalLayout {
+            padding-left: 12px;
+            padding-right: 12px;
+            padding-top: 10px;
+            padding-bottom: 2px;
+            alignment: start;
+
+            SolveChip {
+                state: root.solve-state;
+                free-dof: root.free-dof;
+            }
+        }
+
+        if root.status-detail != "": HorizontalLayout {
+            padding-left: 12px;
+            padding-right: 12px;
+            padding-top: 4px;
+
             Text {
-                text: "Sketch · " + root.sketch-name;
-                color: Theme.text-primary;
-                font-size: 13px;
-                font-weight: 600;
-                horizontal-stretch: 1;
-            }
-            // Standard close: 28px hit box, 18px glyph, red hover —
-            // matches ToolPanel/ToolOptionsBar (DRAFTING_UX.md Law 1).
-            Rectangle {
-                width: 28px; height: 28px;
-                background: close-touch.has-hover
-                    ? Theme.accent-red.with-alpha(0.2)
-                    : transparent;
-                border-radius: Theme.radius-sm;
-                Text {
-                    text: "×";
-                    color: close-touch.has-hover ? Theme.accent-red : Theme.text-secondary;
-                    font-size: 18px;
-                    font-weight: 700;
-                    horizontal-alignment: center;
-                    vertical-alignment: center;
-                }
-                close-touch := TouchArea {
-                    mouse-cursor: pointer;
-                    clicked => { root.close(); }
-                }
+                text: root.status-detail;
+                color: root.solve-state == "failed" ? Theme.text-error : Theme.text-warning;
+                font-size: Theme.font-sm;
+                wrap: word-wrap;
             }
         }
 
-        Text {
-            text: root.part-name;
-            color: Theme.text-secondary;
-            font-size: 10px;
+        // ── Entities ────────────────────────────────────────────
+        SectionLabel {
+            title: "Entities";
+            count: root.entities.length;
         }
 
-        Text {
-            text: root.solve-status;
-            color: Theme.accent-cyan;
-            font-size: 10px;
-            wrap: word-wrap;
-        }
+        Rectangle {
+            // Up to seven rows before it scrolls; shrinks first when the
+            // viewport is short.
+            preferred-height: min(entity-list.preferred-height, 7 * 25px);
+            min-height: min(entity-list.preferred-height, 2 * 25px);
+            vertical-stretch: 1;
 
-        Text {
-            text: "Entities — click to pick A (1st) / B (2nd) for a constraint";
-            color: Theme.text-secondary;
-            font-size: 10px;
-            font-weight: 600;
-            wrap: word-wrap;
-        }
+            ScrollView {
+                width: 100%;
+                height: 100%;
+                horizontal-scrollbar-policy: always-off;
 
-        ScrollView {
-            height: 100px;
-            VerticalBox {
-                spacing: 2px;
-                for e in root.entities: Rectangle {
-                    height: 18px;
-                    background: e.index == root.selected-a
-                        ? Theme.accent-cyan.with-alpha(0.35)
-                        : e.index == root.selected-b
-                            ? Theme.accent-cyan.with-alpha(0.18)
-                            : transparent;
-                    border-radius: 3px;
-                    TouchArea {
+                entity-list := VerticalLayout {
+                    padding-left: 6px;
+                    padding-right: 6px;
+                    spacing: 1px;
+
+                    for e in root.entities: EntityRowView {
+                        item: e;
+                        pick: e.index == root.selected-a ? "A"
+                            : e.index == root.selected-b ? "B"
+                            : "";
                         clicked => { root.select-entity(e.index); }
-                        HorizontalBox {
-                            padding: 0px;
-                            Text {
-                                text: e.index + "  " + e.kind;
-                                color: Theme.text-primary;
-                                font-size: 10px;
-                                min-width: 70px;
-                            }
-                            Text {
-                                text: e.summary;
-                                color: Theme.text-secondary;
-                                font-size: 10px;
-                                horizontal-stretch: 1;
-                            }
-                        }
                     }
                 }
             }
         }
 
-        Text {
-            text: "A: " + (root.selected-a >= 0 ? root.selected-a : "—")
-                + "   B: " + (root.selected-b >= 0 ? root.selected-b : "—")
-                + "   (click a row again to clear it)";
-            color: Theme.accent-cyan;
-            font-size: 9px;
+        // ── Constraints ─────────────────────────────────────────
+        SectionLabel {
+            title: "Constraints";
+            count: root.constraints.length;
         }
 
-        Text {
-            text: "Constraints";
-            color: Theme.text-secondary;
-            font-size: 10px;
-            font-weight: 600;
+        if root.constraints.length == 0: HorizontalLayout {
+            padding-left: 14px;
+            padding-right: 12px;
+            padding-bottom: 4px;
+
+            Text {
+                text: "None yet";
+                color: Theme.text-disabled;
+                font-size: Theme.font-sm;
+            }
         }
 
-        ScrollView {
-            height: 80px;
-            VerticalBox {
-                spacing: 2px;
-                for c in root.constraints: Text {
-                    text: c.kind + "  " + c.detail;
-                    color: Theme.text-primary;
-                    font-size: 10px;
+        if root.constraints.length > 0: Rectangle {
+            preferred-height: min(constraint-list.preferred-height, 5 * 22px);
+            min-height: min(constraint-list.preferred-height, 22px);
+            vertical-stretch: 1;
+
+            ScrollView {
+                width: 100%;
+                height: 100%;
+                horizontal-scrollbar-policy: always-off;
+
+                constraint-list := VerticalLayout {
+                    padding-left: 6px;
+                    padding-right: 6px;
+                    spacing: 0px;
+
+                    for c in root.constraints: ConstraintRowView {
+                        item: c;
+                    }
                 }
             }
         }
 
-        HorizontalBox {
-            spacing: 4px;
-            Button { text: "H"; clicked => { root.add-horizontal(); } }
-            Button { text: "V"; clicked => { root.add-vertical(); } }
-            Button { text: "⊥"; clicked => { root.add-perpendicular(); } }
-            Button { text: "⊙"; clicked => { root.add-coincident(); } }
+        // ── Constrain ───────────────────────────────────────────
+        Rectangle {
+            height: 1px;
+            background: Theme.ribbon-separator;
         }
 
-        Button {
-            text: "Solve Sketch";
-            primary: true;
-            clicked => { root.solve(); }
+        HorizontalLayout {
+            padding-left: 8px;
+            padding-right: 8px;
+            padding-top: 6px;
+            spacing: 4px;
+            alignment: center;
+
+            IconButton {
+                icon: @image-url("../../assets/icons/ui/cad-horizontal.svg");
+                label: "Horizontal";
+                tooltip: "Horizontal";
+                tint: Theme.cat-constraint;
+                enabled: root.have-a;
+                clicked => { root.add-horizontal(); }
+            }
+            IconButton {
+                icon: @image-url("../../assets/icons/ui/cad-vertical.svg");
+                label: "Vertical";
+                tooltip: "Vertical";
+                tint: Theme.cat-constraint;
+                enabled: root.have-a;
+                clicked => { root.add-vertical(); }
+            }
+            IconButton {
+                icon: @image-url("../../assets/icons/ui/cad-perpendicular.svg");
+                label: "Perpendicular";
+                tooltip: "Perpendicular";
+                tint: Theme.cat-constraint;
+                enabled: root.have-b;
+                clicked => { root.add-perpendicular(); }
+            }
+            IconButton {
+                icon: @image-url("../../assets/icons/ui/cad-coincident.svg");
+                label: "Coincident";
+                tooltip: "Coincident";
+                tint: Theme.cat-constraint;
+                enabled: root.have-b;
+                clicked => { root.add-coincident(); }
+            }
+        }
+
+        HorizontalLayout {
+            padding-left: 12px;
+            padding-right: 12px;
+            padding-top: 2px;
+            padding-bottom: 8px;
+
+            Text {
+                text: !root.have-a ? "Pick an entity above"
+                    : !root.have-b ? "Pick a second entity for Perpendicular or Coincident"
+                    : "Click a picked row to drop it";
+                color: Theme.text-disabled;
+                font-size: Theme.font-xs;
+                horizontal-alignment: center;
+                overflow: elide;
+            }
+        }
+
+        // ── Footer ──────────────────────────────────────────────
+        Rectangle {
+            height: 1px;
+            background: Theme.ribbon-separator;
+        }
+
+        HorizontalLayout {
+            padding-left: 12px;
+            padding-right: 12px;
+            padding-top: 8px;
+            padding-bottom: 8px;
+
+            // Secondary: the sketch re-solves on every constraint added.
+            // This writes the solved positions back to the part's file.
+            Rectangle {
+                horizontal-stretch: 1;
+                height: 28px;
+                border-radius: Theme.radius-sm;
+                background: solve-touch.pressed ? Theme.button-pressed
+                    : solve-touch.has-hover ? Theme.button-hover
+                    : Theme.button-background;
+                border-width: 1px;
+                border-color: Theme.border-color;
+                animate background { duration: 100ms; easing: ease-out; }
+
+                HorizontalLayout {
+                    alignment: center;
+                    spacing: 6px;
+
+                    VerticalLayout {
+                        alignment: center;
+                        Image {
+                            width: 14px;
+                            height: 14px;
+                            source: @image-url("../../assets/icons/ui/cad-solve.svg");
+                            image-fit: contain;
+                            colorize: Theme.text-primary;
+                        }
+                    }
+                    Text {
+                        text: "Solve sketch";
+                        color: Theme.text-primary;
+                        font-size: 12px;
+                        font-weight: 600;
+                        vertical-alignment: center;
+                    }
+                }
+
+                solve-touch := TouchArea {
+                    mouse-cursor: pointer;
+                    clicked => { root.solve(); }
+                }
+            }
         }
     }
 }

@@ -1,0 +1,115 @@
+// ============================================================================
+// Purchase prompt: a script in Play asked to sell a product.
+//
+// Studio makes test purchases only, and the prompt says so: nothing is
+// charged. Buy and Cancel answer the script's PromptProductPurchase (or
+// PromptGamePassPurchase); Enter buys, Escape cancels. Rust fills the text
+// (engine/src/ui/purchase_prompt.rs), so nothing here converts numbers.
+// ============================================================================
+
+import { Button } from "std-widgets.slint";
+import { Theme } from "theme.slint";
+
+export component PurchasePromptDialog inherits Rectangle {
+    in property <string> product-name: "";
+    // "Product" or "Pass": what the player gets.
+    in property <string> kind-text: "";
+    in property <string> description: "";
+    // "50 Tickets".
+    in property <string> price-text: "";
+    in property <bool> test-mode: true;
+    callback buy();
+    callback cancel();
+
+    // Full-window dim backdrop; a click outside the card cancels.
+    background: Theme.modal-backdrop;
+    TouchArea { clicked => { root.cancel(); } }
+
+    card := Rectangle {
+        width: 420px;
+        height: body.preferred-height;
+        x: (parent.width - self.width) / 2;
+        y: (parent.height - self.height) / 2;
+        background: Theme.dialog-background;
+        border-width: 1px;
+        border-color: Theme.border-color;
+        border-radius: 10px;
+        drop-shadow-blur: 18px;
+        drop-shadow-color: Theme.shadow-color;
+
+        TouchArea { } // clicks inside the card never reach the backdrop
+
+        keys := FocusScope {
+            init => { self.focus(); }
+            key-pressed(event) => {
+                if event.text == Key.Escape {
+                    root.cancel();
+                    return accept;
+                }
+                if event.text == Key.Return {
+                    root.buy();
+                    return accept;
+                }
+                return reject;
+            }
+
+            body := VerticalLayout {
+                padding: 20px;
+                spacing: 10px;
+
+                Text {
+                    text: "Buy " + root.product-name + "?";
+                    font-size: 17px;
+                    font-weight: 700;
+                    color: Theme.text-primary;
+                    wrap: word-wrap;
+                }
+                Text {
+                    text: root.kind-text;
+                    font-size: 12px;
+                    color: Theme.text-secondary;
+                }
+                if root.description != "": Text {
+                    text: root.description;
+                    font-size: 12px;
+                    color: Theme.text-secondary;
+                    wrap: word-wrap;
+                }
+                Text {
+                    text: root.price-text;
+                    font-size: 22px;
+                    font-weight: 700;
+                    color: Theme.accent-eustress;
+                }
+                if root.test-mode: Rectangle {
+                    height: note.preferred-height + 12px;
+                    border-radius: 6px;
+                    background: Theme.background-tertiary;
+                    border-width: 1px;
+                    border-color: Theme.border-color;
+                    note := Text {
+                        x: 10px;
+                        width: parent.width - 20px;
+                        text: "Test purchase: this is Studio, so no Tickets are charged. Your script's ProcessReceipt runs as it will for players.";
+                        font-size: 11px;
+                        color: Theme.text-warning;
+                        wrap: word-wrap;
+                    }
+                }
+                HorizontalLayout {
+                    spacing: 8px;
+                    alignment: end;
+                    Button {
+                        text: "Cancel";
+                        clicked => { root.cancel(); }
+                    }
+                    Button {
+                        text: "Buy";
+                        primary: true;
+                        clicked => { root.buy(); }
+                    }
+                }
+            }
+        }
+    }
+}

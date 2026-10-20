@@ -204,6 +204,15 @@ pub struct CenterTabSpaceSnapshot {
     pub closed_tabs: Vec<CenterTabEntry>,
 }
 
+/// Orders `CenterTabManager::sort_tabs` offers from the tab context menu.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TabSortKey {
+    /// Case-insensitive by tab name.
+    Name,
+    /// Grouped by kind (code, script, web, ...), then by name within a kind.
+    Type,
+}
+
 /// Bevy Resource managing all open center tabs
 #[derive(Resource)]
 pub struct CenterTabManager {
@@ -625,22 +634,68 @@ impl CenterTabManager {
         }
     }
 
-    /// Close all tabs except the given index (and Scene tab)
-    pub fn close_others(&mut self, keep_index: usize) {
-        for i in (1..self.tabs.len()).rev() {
-            if i != keep_index && !self.tabs[i].pinned {
-                self.tabs.remove(i);
+    /// Close every unpinned tab `close(index)` picks. Closed tabs go on the
+    /// reopen stack in their strip order, so repeated Ctrl+Shift+T brings them
+    /// back right to left. The active tab stays active when it survives;
+    /// otherwise the nearest survivor to its left takes over.
+    fn close_where(&mut self, close: impl Fn(usize) -> bool) {
+        let active_id = self.tabs.get(self.active_tab).map(|t| t.id);
+        let mut kept = Vec::with_capacity(self.tabs.len());
+        let mut nearest_left = 0;
+        for (i, tab) in std::mem::take(&mut self.tabs).into_iter().enumerate() {
+            if !tab.pinned && close(i) {
+                self.closed_tabs.push(tab);
+            } else {
+                if i <= self.active_tab {
+                    nearest_left = kept.len();
+                }
+                kept.push(tab);
             }
         }
-        // Recalculate active tab
-        self.active_tab = self.active_tab.min(self.tabs.len() - 1);
+        self.tabs = kept;
+        let overflow = self.closed_tabs.len().saturating_sub(20);
+        self.closed_tabs.drain(..overflow);
+        self.active_tab = active_id
+            .and_then(|id| self.tabs.iter().position(|t| t.id == id))
+            .unwrap_or(nearest_left);
         self.dirty = true;
+    }
+
+    /// Close all tabs except the given index (and pinned tabs). The kept tab
+    /// becomes active, since it is the one the user pointed at.
+    pub fn close_others(&mut self, keep_index: usize) {
+        if keep_index >= self.tabs.len() {
+            return;
+        }
+        let keep_id = self.tabs[keep_index].id;
+        self.close_where(|i| i != keep_index);
+        self.active_tab = self.tabs.iter().position(|t| t.id == keep_id).unwrap_or(0);
+    }
+
+    /// Close every unpinned tab to the right of `index`.
+    pub fn close_to_right(&mut self, index: usize) {
+        self.close_where(|i| i > index);
     }
 
     /// Close all closable (non-pinned) tabs
     pub fn close_all_unpinned(&mut self) {
-        self.tabs.retain(|t| t.pinned);
-        self.active_tab = 0;
+        self.close_where(|_| true);
+    }
+
+    /// Reorder the unpinned tabs, keeping pinned tabs where they are and the
+    /// active tab active. The sort is stable, so equal keys keep the order
+    /// the user gave them.
+    pub fn sort_tabs(&mut self, by: TabSortKey) {
+        let active_id = self.tabs.get(self.active_tab).map(|t| t.id);
+        let first_unpinned = self.tabs.iter().position(|t| !t.pinned).unwrap_or(self.tabs.len());
+        let tail = &mut self.tabs[first_unpinned..];
+        match by {
+            TabSortKey::Name => tail.sort_by_cached_key(|t| t.name.to_lowercase()),
+            TabSortKey::Type => tail.sort_by_cached_key(|t| (t.tab_type.type_string(), t.name.to_lowercase())),
+        }
+        if let Some(pos) = active_id.and_then(|id| self.tabs.iter().position(|t| t.id == id)) {
+            self.active_tab = pos;
+        }
         self.dirty = true;
     }
 
@@ -652,39 +707,55 @@ impl CenterTabManager {
         }
     }
 
-    /// Reorder a tab from one index to another
-    pub fn reorder_tab(&mut self, from: usize, to: usize) {
-        if from == 0 || to == 0 { return; } // Cannot move Scene tab
-        if from >= self.tabs.len() || to >= self.tabs.len() { return; }
-        if from == to { return; }
-
+    /// Move tab `from` into the gap before `slot`, where slot `k` is the gap
+    /// in front of tab `k` and `tabs.len()` is the gap after the last tab.
+    /// This is what a drag drop means: the caret the user saw. Pinned tabs
+    /// never move and nothing lands among them; the active tab stays active.
+    pub fn move_tab_to_slot(&mut self, from: usize, slot: usize) {
+        if from >= self.tabs.len() || self.tabs[from].pinned {
+            return;
+        }
+        let first_unpinned = self.tabs.iter().position(|t| !t.pinned).unwrap_or(self.tabs.len());
+        let slot = slot.clamp(first_unpinned, self.tabs.len());
+        // The gaps on either side of the tab itself put it back where it was.
+        if slot == from || slot == from + 1 {
+            return;
+        }
+        let active_id = self.tabs.get(self.active_tab).map(|t| t.id);
         let tab = self.tabs.remove(from);
+        let to = if slot > from { slot - 1 } else { slot };
         self.tabs.insert(to, tab);
-
-        // Adjust active tab index
-        if self.active_tab == from {
-            self.active_tab = to;
-        } else if from < self.active_tab && to >= self.active_tab {
-            self.active_tab -= 1;
-        } else if from > self.active_tab && to <= self.active_tab {
-            self.active_tab += 1;
+        if let Some(pos) = active_id.and_then(|id| self.tabs.iter().position(|t| t.id == id)) {
+            self.active_tab = pos;
         }
         self.dirty = true;
     }
 
-    /// Mark a tab as dirty (unsaved changes)
-    pub fn mark_dirty(&mut self, index: usize) {
-        if let Some(tab) = self.tabs.get_mut(index) {
-            tab.dirty = true;
-            self.dirty = true;
+    /// Mark a tab as having unsaved changes. Returns true when the flag
+    /// changed, so the caller can refresh that one tab in the strip.
+    ///
+    /// The manager's own `dirty` stays untouched: it triggers a full rebuild
+    /// of the tab strip and a re-push of the editor text a few frames later,
+    /// which must never happen while someone is typing.
+    pub fn mark_dirty(&mut self, index: usize) -> bool {
+        match self.tabs.get_mut(index) {
+            Some(tab) if !tab.dirty => {
+                tab.dirty = true;
+                true
+            }
+            _ => false,
         }
     }
 
-    /// Mark a tab as clean (saved)
-    pub fn mark_clean(&mut self, index: usize) {
-        if let Some(tab) = self.tabs.get_mut(index) {
-            tab.dirty = false;
-            self.dirty = true;
+    /// Mark a tab as saved. Returns true when the flag changed. Leaves the
+    /// manager's rebuild flag alone, for the reason given on [`Self::mark_dirty`].
+    pub fn mark_clean(&mut self, index: usize) -> bool {
+        match self.tabs.get_mut(index) {
+            Some(tab) if tab.dirty => {
+                tab.dirty = false;
+                true
+            }
+            _ => false,
         }
     }
 
@@ -830,6 +901,86 @@ pub fn script_summary_path_canonical(folder: &Path) -> std::path::PathBuf {
         .and_then(|n| n.to_str())
         .unwrap_or("Summary");
     folder.join(format!("{}.md", name))
+}
+
+// ─── Saving a code tab ──────────────────────────────────────────────
+//
+// A tab writes back to the file it was read from. For a tab opened from the
+// Explorer that is the entity's `LoadedFromFile.path`, which the loader sets
+// to the exact source file (honouring an `_instance.toml` `[script] source`
+// override). For a tab opened by path it is the same file
+// `resolve_script_source` read. `script_source_path_canonical` names
+// `<folder>.rune`, so it is used only to create a source file for a folder
+// that has none: used unconditionally it would write a new `.rune` beside a
+// `.client.luau` and leave the real script untouched.
+
+/// The source file behind a tab's Code view. `entity_source` is the
+/// `LoadedFromFile.path` of the tab's entity, when it has one.
+pub fn code_source_file(tab: &CenterTabEntry, entity_source: Option<&Path>) -> Option<PathBuf> {
+    fn in_folder(folder: &Path) -> PathBuf {
+        script_source_path(folder).unwrap_or_else(|| script_source_path_canonical(folder))
+    }
+    if let Some(src) = entity_source {
+        if src.is_dir() {
+            return Some(in_folder(src));
+        }
+        if src.file_name().and_then(|n| n.to_str()) == Some("_instance.toml") {
+            return src.parent().map(in_folder);
+        }
+        return Some(src.to_path_buf());
+    }
+    let path = tab.file_path.as_ref()?;
+    Some(if path.is_dir() { in_folder(path) } else { path.clone() })
+}
+
+/// Where Save writes a tab's code buffer (`content`): its source file, for a
+/// script tab in either view or a plain code tab. A script's Summary saves
+/// itself as it is edited, so Save from the Summary view writes the code.
+/// `None` for a Markdown document, which also saves as it is edited.
+pub fn code_save_target(tab: &CenterTabEntry, entity_source: Option<&Path>) -> Option<PathBuf> {
+    let is_code = matches!(
+        tab.tab_type,
+        CenterTabType::SoulScript { mode: SoulScriptMode::Code | SoulScriptMode::Summary }
+            | CenterTabType::CodeEditor { .. }
+    );
+    if is_code { code_source_file(tab, entity_source) } else { None }
+}
+
+/// Write a script's text to `path`, keeping the line endings the file already
+/// uses, then put the same bytes into the Space's Fjall `tree`.
+///
+/// The write is an ordinary edit as far as the file watcher is concerned:
+/// no `RecentlyWrittenFiles` mark. A marked path is skipped entirely, which
+/// would leave the running `SoulScriptData` on the old source and skip the
+/// watcher's disk-to-tree mirror. The direct `put_tree_file` makes the save
+/// durable even when the watcher drops the event (its start-up grace period
+/// after a Space opens); it is a no-op when no database is active.
+pub fn write_script_file(path: &Path, text: &str) -> std::io::Result<()> {
+    use std::io::Write;
+    let crlf = std::fs::read(path)
+        .map(|b| b.windows(2).any(|w| w == b"\r\n"))
+        .unwrap_or(false);
+    let lf = text.replace("\r\n", "\n");
+    let out = if crlf { lf.replace('\n', "\r\n") } else { lf };
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let mut file = std::fs::File::create(path)?;
+    file.write_all(out.as_bytes())?;
+    file.sync_all()?;
+    crate::space::active_db::put_tree_file(path, out.as_bytes());
+    Ok(())
+}
+
+/// Save one tab's Code view to its source file. `Ok(None)` when the tab has
+/// no Code view to save.
+pub fn save_code_tab(tab: &CenterTabEntry, entity_source: Option<&Path>) -> Result<Option<PathBuf>, String> {
+    let Some(target) = code_save_target(tab, entity_source) else {
+        return Ok(None);
+    };
+    write_script_file(&target, &tab.content)
+        .map_err(|e| format!("{}: {e}", target.display()))?;
+    Ok(Some(target))
 }
 
 /// Route a file path to the appropriate tab type based on extension
@@ -994,5 +1145,203 @@ mod tests {
         // Cannot close Scene tab
         mgr.close_tab(0);
         assert_eq!(mgr.tabs.len(), 2); // Still 2
+    }
+
+    /// A fresh scratch folder under the system temp dir, removed on drop.
+    struct Scratch(PathBuf);
+    impl Scratch {
+        fn new(tag: &str) -> Self {
+            let p = std::env::temp_dir().join(format!(
+                "eustress-center-tabs-{tag}-{}",
+                std::process::id()
+            ));
+            let _ = std::fs::remove_dir_all(&p);
+            std::fs::create_dir_all(&p).unwrap();
+            Scratch(p)
+        }
+    }
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn code_tab(file_path: Option<PathBuf>, content: &str) -> CenterTabEntry {
+        CenterTabEntry {
+            id: 1,
+            name: "ClientController".into(),
+            tab_type: CenterTabType::SoulScript { mode: SoulScriptMode::Code },
+            entity: None,
+            file_path,
+            url: None,
+            pinned: false,
+            dirty: false,
+            loading: false,
+            content: content.into(),
+            summary_content: String::new(),
+        }
+    }
+
+    #[test]
+    fn save_writes_the_luau_file_the_folder_holds_never_a_new_rune() {
+        let s = Scratch::new("luau");
+        let folder = s.0.join("ClientController");
+        std::fs::create_dir_all(&folder).unwrap();
+        std::fs::write(folder.join("_instance.toml"), "[metadata]\n").unwrap();
+        std::fs::write(folder.join("ClientController.client.luau"), "print(1)\n").unwrap();
+
+        let tab = code_tab(Some(folder.clone()), "print(2)\n");
+        let saved = save_code_tab(&tab, None).unwrap().unwrap();
+
+        assert_eq!(saved, folder.join("ClientController.client.luau"));
+        assert_eq!(std::fs::read_to_string(&saved).unwrap(), "print(2)\n");
+        assert!(!folder.join("ClientController.rune").exists());
+    }
+
+    #[test]
+    fn save_prefers_the_entitys_loaded_source_file() {
+        let s = Scratch::new("entity");
+        let folder = s.0.join("Door");
+        std::fs::create_dir_all(&folder).unwrap();
+        let named = folder.join("Door.server.luau");
+        std::fs::write(&named, "-- old\n").unwrap();
+        std::fs::write(folder.join("Other.luau"), "-- other\n").unwrap();
+
+        let tab = code_tab(None, "-- new\n");
+        let saved = save_code_tab(&tab, Some(&named)).unwrap().unwrap();
+
+        assert_eq!(saved, named);
+        assert_eq!(std::fs::read_to_string(&named).unwrap(), "-- new\n");
+        assert_eq!(std::fs::read_to_string(folder.join("Other.luau")).unwrap(), "-- other\n");
+    }
+
+    #[test]
+    fn save_keeps_crlf_files_crlf() {
+        let s = Scratch::new("crlf");
+        let file = s.0.join("a.rune");
+        std::fs::write(&file, "pub fn main() {\r\n}\r\n").unwrap();
+
+        let mut tab = code_tab(Some(file.clone()), "pub fn main() {\n    1\n}\n");
+        tab.tab_type = CenterTabType::CodeEditor { language: "rune".into() };
+        save_code_tab(&tab, None).unwrap();
+
+        assert_eq!(
+            std::fs::read(&file).unwrap(),
+            b"pub fn main() {\r\n    1\r\n}\r\n".to_vec()
+        );
+    }
+
+    #[test]
+    fn save_from_the_summary_view_writes_the_code_and_a_markdown_document_has_no_target() {
+        let s = Scratch::new("views");
+        let file = s.0.join("x.rune");
+        let mut tab = code_tab(Some(file.clone()), "code");
+        tab.tab_type = CenterTabType::SoulScript { mode: SoulScriptMode::Summary };
+        assert_eq!(code_save_target(&tab, None), Some(file));
+
+        tab.tab_type = CenterTabType::SoulScript { mode: SoulScriptMode::Markdown };
+        assert_eq!(code_save_target(&tab, None), None);
+    }
+
+    #[test]
+    fn dirty_and_clean_report_only_real_transitions() {
+        let mut mgr = CenterTabManager::default();
+        let idx = mgr.open_web_tab("https://a.test", "a");
+        mgr.dirty = false;
+
+        assert!(mgr.mark_dirty(idx));
+        assert!(!mgr.mark_dirty(idx), "already dirty");
+        assert!(mgr.tabs[idx].dirty);
+        assert!(mgr.mark_clean(idx));
+        assert!(!mgr.mark_clean(idx), "already clean");
+        assert!(!mgr.dirty, "marking a tab never rebuilds the whole strip");
+    }
+
+    /// Scene plus web tabs named `names`, in order, with the last one active.
+    fn strip(names: &[&str]) -> CenterTabManager {
+        let mut mgr = CenterTabManager::default();
+        for n in names {
+            mgr.open_web_tab(&format!("https://{n}.test"), n);
+        }
+        mgr
+    }
+
+    fn names(mgr: &CenterTabManager) -> Vec<&str> {
+        mgr.tabs[1..].iter().map(|t| t.name.as_str()).collect()
+    }
+
+    #[test]
+    fn drop_slots_land_where_the_caret_was() {
+        // Dragging right: the gap before D puts A between C and D.
+        let mut mgr = strip(&["A", "B", "C", "D"]);
+        mgr.move_tab_to_slot(1, 4);
+        assert_eq!(names(&mgr), ["B", "C", "A", "D"]);
+
+        // The gap after the last tab is a real slot (it used to be refused).
+        let mut mgr = strip(&["A", "B", "C"]);
+        mgr.move_tab_to_slot(1, 4);
+        assert_eq!(names(&mgr), ["B", "C", "A"]);
+
+        // Dragging left.
+        let mut mgr = strip(&["A", "B", "C"]);
+        mgr.move_tab_to_slot(3, 1);
+        assert_eq!(names(&mgr), ["C", "A", "B"]);
+
+        // Either gap beside the tab itself is a no-op.
+        let mut mgr = strip(&["A", "B", "C"]);
+        mgr.dirty = false;
+        mgr.move_tab_to_slot(2, 2);
+        mgr.move_tab_to_slot(2, 3);
+        assert_eq!(names(&mgr), ["A", "B", "C"]);
+        assert!(!mgr.dirty);
+    }
+
+    #[test]
+    fn pinned_scene_never_moves_and_nothing_lands_before_it() {
+        let mut mgr = strip(&["A", "B"]);
+        mgr.move_tab_to_slot(0, 2);
+        mgr.move_tab_to_slot(2, 0);
+        assert_eq!(mgr.tabs[0].tab_type, CenterTabType::Scene);
+        assert_eq!(names(&mgr), ["B", "A"]);
+    }
+
+    #[test]
+    fn active_tab_follows_its_tab_through_moves_and_sorts() {
+        let mut mgr = strip(&["c", "B", "a"]);
+        mgr.select_tab(2); // B
+        mgr.move_tab_to_slot(1, 4); // c to the end
+        assert_eq!(mgr.tabs[mgr.active_tab].name, "B");
+        mgr.sort_tabs(TabSortKey::Name);
+        assert_eq!(names(&mgr), ["a", "B", "c"]);
+        assert_eq!(mgr.tabs[mgr.active_tab].name, "B");
+    }
+
+    #[test]
+    fn sort_by_type_groups_kinds_then_names() {
+        let mut mgr = strip(&["zeta"]);
+        mgr.open_file(Path::new("beta.rs"));
+        mgr.open_web_tab("https://alpha.test", "alpha");
+        mgr.open_file(Path::new("alpha.rs"));
+        mgr.sort_tabs(TabSortKey::Type);
+        assert_eq!(names(&mgr), ["alpha.rs", "beta.rs", "alpha", "zeta"]);
+    }
+
+    #[test]
+    fn bulk_closes_are_reopenable_and_keep_the_right_tab_active() {
+        let mut mgr = strip(&["A", "B", "C", "D"]);
+        mgr.close_others(2); // B
+        assert_eq!(names(&mgr), ["B"]);
+        assert_eq!(mgr.tabs[mgr.active_tab].name, "B");
+        assert!(mgr.reopen_last_closed());
+        assert_eq!(mgr.tabs.last().unwrap().name, "D");
+
+        let mut mgr = strip(&["A", "B", "C", "D"]); // D active
+        mgr.close_to_right(2);
+        assert_eq!(names(&mgr), ["A", "B"]);
+        assert_eq!(mgr.tabs[mgr.active_tab].name, "B");
+
+        mgr.close_all_unpinned();
+        assert_eq!(mgr.tabs.len(), 1);
+        assert_eq!(mgr.active_tab, 0);
     }
 }

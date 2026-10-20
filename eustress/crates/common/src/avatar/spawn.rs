@@ -90,6 +90,9 @@ pub struct AvatarLocomotion {
     /// True for exactly the frame the avatar touches down. The edge itself —
     /// `land_impact` decays, so it cannot be used to detect the transition.
     pub just_landed: bool,
+    /// Riding a seat ([`super::seat::AvatarSeated`]); the Humanoid reads
+    /// `Seated`.
+    pub seated: bool,
 }
 
 /// How far below the capsule bottom the sole is planted.
@@ -135,12 +138,20 @@ impl Plugin for AvatarSpawnPlugin {
 /// authoring frame, and it would break again for any body whose origin is at
 /// the hips. Measuring the lowest foot bone and shifting by the difference is
 /// correct for all of those without a per-asset special case.
+/// An avatar whose measured pose is its final one: its Animator plays it
+/// (`PoseReady`), or its motion graph is live when clips can play
+/// (`model-import`); without clips the rest pose is.
+#[cfg(feature = "model-import")]
+type PoseFinal = Or<(With<crate::animation::PoseReady>, With<super::anim::AvatarMotionGraph>)>;
+#[cfg(not(feature = "model-import"))]
+type PoseFinal = With<AvatarBody>;
+
 fn calibrate_feet_to_ground(
     mut commands: Commands,
     globals: Query<&GlobalTransform>,
     // Only calibrate once the motion graph is live, so the measured pose is
     // the animated one.
-    animated: Query<(), With<super::anim::AvatarMotionGraph>>,
+    animated: Query<(), PoseFinal>,
     mut transforms: Query<&mut Transform>,
     mut q: Query<
         (
@@ -234,7 +245,10 @@ fn handle_spawn_avatar(
     mut commands: Commands,
     mut events: MessageReader<SpawnAvatar>,
     asset_server: Res<AssetServer>,
+    policy: Option<Res<super::space_character::SpaceCharacterPolicy>>,
 ) {
+    // The movement verbs the open Space starts every avatar with.
+    let abilities = policy.as_deref().map(|p| p.abilities).unwrap_or_default();
     for req in events.read() {
         let desc = req.descriptor().clone();
         if let Err(error) = desc.validate() {
@@ -267,6 +281,7 @@ fn handle_spawn_avatar(
                 AvatarIntent::default(),
                 AvatarLocomotion::default(),
                 desc.clone(),
+                abilities,
             ))
             .id();
 

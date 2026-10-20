@@ -351,6 +351,8 @@ pub enum AllocationStatus {
 pub struct ManufacturingProgramRegistry {
     pub investors: Vec<Investor>,
     pub manufacturers: Vec<Manufacturer>,
+    /// The Space these were loaded from; another Space opening reloads them.
+    pub space_root: std::path::PathBuf,
 }
 
 impl ManufacturingProgramRegistry {
@@ -573,38 +575,57 @@ impl ManufacturingProgramRegistry {
     }
 }
 
-impl Plugin for ManufacturingPlugin {
-    fn build(&self, app: &mut App) {
-        let root = crate::space::default_space_root();
-        let vendors_dir = root.join(VENDORS_DIR);
-        let investors_dir = root.join(INVESTORS_DIR);
+impl ManufacturingProgramRegistry {
+    /// The vendors and investors of the Space at `space_root`.
+    pub fn load_space(space_root: &std::path::Path) -> Self {
+        Self {
+            manufacturers: Self::load_instances_from_dir(&space_root.join(VENDORS_DIR)),
+            investors: Self::load_instances_from_dir(&space_root.join(INVESTORS_DIR)),
+            space_root: space_root.to_path_buf(),
+        }
+    }
 
-        let mut registry = ManufacturingProgramRegistry::default();
-        registry.manufacturers =
-            ManufacturingProgramRegistry::load_instances_from_dir(&vendors_dir);
-        registry.investors =
-            ManufacturingProgramRegistry::load_instances_from_dir(&investors_dir);
-
-        let manufacturer_count = registry.manufacturers.len();
-        let investor_count = registry.investors.len();
-
-        app.insert_resource(registry);
-
-        // Said out loud, because an empty vendor list leaves the RFQ Builder
-        // with nothing to raise an order against, and "the button does nothing"
-        // is a far worse symptom to debug than a startup line.
-        if manufacturer_count == 0 {
+    /// Said out loud, because an empty vendor list leaves the RFQ Builder
+    /// with nothing to raise an order against, and "the button does nothing"
+    /// is a far worse symptom to debug than a startup line.
+    fn log_loaded(&self) {
+        let vendors_dir = self.space_root.join(VENDORS_DIR);
+        if self.manufacturers.is_empty() {
             tracing::info!(
-                "ManufacturingPlugin: no vendors at {} — the RFQ Builder will have                  none to offer until one is registered. This is normal for a Space                  that does not do procurement.",
+                "ManufacturingPlugin: no vendors at {}; the RFQ Builder will have \
+                 none to offer until one is registered. This is normal for a Space \
+                 that does not do procurement.",
                 vendors_dir.display()
             );
         } else {
             tracing::info!(
                 "ManufacturingPlugin loaded: {} vendors, {} investors from {}",
-                manufacturer_count,
-                investor_count,
+                self.manufacturers.len(),
+                self.investors.len(),
                 vendors_dir.display()
             );
         }
     }
+}
+
+impl Plugin for ManufacturingPlugin {
+    fn build(&self, app: &mut App) {
+        let registry = ManufacturingProgramRegistry::load_space(&crate::space::open_space_root_of(app));
+        registry.log_loaded();
+        app.insert_resource(registry)
+            .add_systems(Update, follow_open_space);
+    }
+}
+
+/// Reload the vendors and investors when another Space is opened.
+fn follow_open_space(
+    space_root: Option<Res<crate::space::SpaceRoot>>,
+    mut registry: ResMut<ManufacturingProgramRegistry>,
+) {
+    let Some(space_root) = space_root else { return };
+    if !space_root.is_changed() || registry.space_root == space_root.0 {
+        return;
+    }
+    *registry = ManufacturingProgramRegistry::load_space(&space_root.0);
+    registry.log_loaded();
 }

@@ -546,6 +546,9 @@ export component ScriptEditor inherits Rectangle {
     callback on-tab-closed(int);
     callback on-content-changed(string);
     callback on-save();
+    /// True while either editor view's text field has keyboard focus. The
+    /// host feeds it to the engine keyboard gate so typing stays here.
+    in-out property <bool> editor-has-focus: false;
     callback on-build();
     callback on-summarize();        // Reverse build: generate summary from code via Claude
     callback on-toggle-mode(int);   // Toggle summary/code for tab at index
@@ -952,6 +955,15 @@ export component ScriptEditor inherits Rectangle {
                             root.current-content = text;
                             root.on-content-changed(text);
                         }
+                        key-pressed(event) => {
+                            if (event.modifiers.control && !event.modifiers.shift && event.text == "s") {
+                                root.on-save();
+                                return accept;
+                            }
+                            reject
+                        }
+                        changed has-focus => { root.editor-has-focus = self.has-focus; }
+                        init => { root.editor-has-focus = self.has-focus; }
                     }
                 }
             }
@@ -1132,12 +1144,18 @@ export component ScriptEditor inherits Rectangle {
                         caret-moved(line, col) => {
                             root.on-caret-moved(line, col);
                         }
+                        changed has-focus => { root.editor-has-focus = self.has-focus; }
+                        init => { root.editor-has-focus = self.has-focus; }
 
                         // Completion keys. Intercepted ONLY while the popup is
                         // open, so with no popup every key behaves exactly as
                         // it did before — Tab still inserts a tab, Enter still
                         // breaks the line.
                         key-pressed(event) => {
+                            if (event.modifiers.control && !event.modifiers.shift && event.text == "s") {
+                                root.on-save();
+                                return accept;
+                            }
                             if (event.text == Key.Space && event.modifiers.control) {
                                 root.on-completion-request();
                                 return accept;

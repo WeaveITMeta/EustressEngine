@@ -1,5 +1,8 @@
-# PointLight — Omni-directional light source (child of BasePart or Attachment)
-# Bevy: PointLight component
+# PointLight: Omni-directional light source (child of BasePart or Attachment)
+# Bevy: PointLight (common/src/plugins/light_classes.rs)
+#
+# brightness: Roblox-style dial, display-referred (1 = a normal lamp).
+# range:      reach in metres; the light fades to nothing here.
 
 [light]
 color = [255, 255, 255]

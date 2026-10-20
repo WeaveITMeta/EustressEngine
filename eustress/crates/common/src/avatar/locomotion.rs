@@ -27,13 +27,22 @@
 //! stutter and makes the animation state flicker. A sphere cast slightly
 //! narrower than the capsule tracks the surface the capsule is actually resting
 //! on.
+//!
+//! ## Gravity is the live value
+//!
+//! The body is kinematic, so Avian's gravity never acts on it; the controller
+//! integrates gravity itself, from Avian's `Gravity` as it stands that frame,
+//! which `Workspace.gravity` drives. A Space set to the Moon, or a script that
+//! changes gravity mid-game, moves the player the way it moves every falling
+//! part. Take-off speed stays fixed, so a jump authored to peak at 0.9 m peaks
+//! at 0.9 m under standard gravity and at about 5.4 m on the Moon.
 
 use bevy::prelude::*;
 use avian3d::prelude::*;
 
 use super::spawn::{AvatarBody, AvatarIntent, AvatarLocomotion};
 use super::{AvatarControl, AvatarSystems, SpawnedByAvatarRuntime};
-use eustress_avatar_schema::GRAVITY_MPS2;
+use crate::units::STANDARD_GRAVITY_F32;
 
 /// Grace period after leaving ground during which a jump still works.
 const COYOTE_TIME: f32 = 0.12;
@@ -57,26 +66,56 @@ const GROUND_SNAP_TOLERANCE: f32 = 0.12;
 /// How long the body may be airborne and motionless before it is treated as
 /// wedged, seconds.
 const STUCK_GRACE: f32 = 0.30;
-/// Distance below which a frame's movement counts as "did not move", metres.
-const STUCK_EPSILON: f32 = 0.004;
+/// Speed below which an airborne body counts as not moving, m/s, at standard
+/// gravity. The controller scales it by the live gravity.
+///
+/// A jump spends `2 · speed / g` seconds below a given speed around its apex,
+/// so a threshold fixed for Earth would hold a standing jump on the Moon under
+/// it for the whole grace period. Scaled, every apex passes through it in
+/// about 0.05 s, and a weightless body, which nothing presses into a wedge, is
+/// never counted as one. Being a speed rather than a distance per frame, it
+/// means the same at every frame rate.
+const STUCK_SPEED: f32 = 0.24;
 
-/// Is there room for the body at `pos`?
+/// The downward pull the controller integrates, m/s², from the live gravity.
+///
+/// The controller stands on a world-up floor: it probes for ground along −Y
+/// and measures slopes against +Y. So it takes gravity's downward component
+/// and ignores the rest, and a gravity pointing up leaves the body weightless
+/// rather than pinning it to a ceiling it cannot stand on. With no `Gravity`
+/// resource it is standard gravity.
+pub fn downward_gravity(gravity: Option<&Gravity>) -> f32 {
+    gravity.map_or(STANDARD_GRAVITY_F32, |g| (-g.0.y).max(0.0))
+}
+
+/// Is there room for the body at `pos`, counting only the colliders `solid`
+/// accepts?
 ///
 /// Uses the OVERLAP query, not a shape cast. A zero-distance cast does not
 /// reliably report a starting penetration — it reported solid rock as free
 /// space, and the wedge recovery duly teleported the body inside a wall.
 /// `shape_intersections` asks the question directly.
-pub(crate) fn capsule_fits(
+///
+/// The climb passes its surface rules as `solid`, so a trigger volume the
+/// body is standing in never reads as the body being buried in a wall.
+pub(crate) fn capsule_fits_where(
     spatial: &SpatialQuery,
     collider: &Collider,
     pos: Vec3,
     rot: Quat,
     filter: &SpatialQueryFilter,
+    solid: &dyn Fn(Entity) -> bool,
 ) -> bool {
     if !pos.is_finite() {
         return false;
     }
-    spatial.shape_intersections(collider, pos, rot, filter).is_empty()
+    let mut clear = true;
+    spatial.shape_intersections_callback(collider, pos, rot, filter, |e| {
+        clear = !solid(e);
+        // Keep looking only while nothing solid has been found.
+        clear
+    });
+    clear
 }
 
 /// Find somewhere near `from` the body actually fits.
@@ -98,6 +137,19 @@ pub(crate) fn unwedge(
     filter: &SpatialQueryFilter,
     radius: f32,
 ) -> Option<Vec3> {
+    unwedge_where(spatial, collider, from, rot, filter, radius, &|_| true)
+}
+
+/// As [`unwedge`], counting only the colliders `solid` accepts.
+pub(crate) fn unwedge_where(
+    spatial: &SpatialQuery,
+    collider: &Collider,
+    from: Vec3,
+    rot: Quat,
+    filter: &SpatialQueryFilter,
+    radius: f32,
+    solid: &dyn Fn(Entity) -> bool,
+) -> Option<Vec3> {
     const RINGS: [f32; 5] = [0.6, 1.2, 2.0, 3.2, 5.0];
     for scale in RINGS {
         let step = radius * scale;
@@ -115,7 +167,7 @@ pub(crate) fn unwedge(
         ];
         for off in candidates {
             let p = from + off;
-            if capsule_fits(spatial, collider, p, rot, filter) {
+            if capsule_fits_where(spatial, collider, p, rot, filter, solid) {
                 return Some(p);
             }
         }
@@ -185,6 +237,10 @@ pub struct AvatarTimers {
     /// Seconds spent airborne while gravity is being applied but the body is
     /// not actually moving — the signature of being wedged.
     pub stuck_time: f32,
+    /// Whether a non-finite move on this avatar has been reported yet.
+    pub non_finite_reported: bool,
+    /// How long a jump pressed while seated has been waiting.
+    pub seated_jump_age: f32,
 }
 
 impl Default for AvatarTimers {
@@ -196,9 +252,15 @@ impl Default for AvatarTimers {
             // Nothing to consume until a real press clears this.
             jump_consumed: true,
             stuck_time: 0.0,
+            non_finite_reported: false,
+            seated_jump_age: 0.0,
         }
     }
 }
+
+/// How long a jump pressed while seated stays pending, seconds: a joined
+/// player's press reaches the host a round trip later.
+const SEATED_JUMP_HOLD: f32 = 0.5;
 
 pub(crate) struct AvatarLocomotionPlugin;
 
@@ -229,6 +291,7 @@ fn attach_timers(
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn drive_locomotion(
     time: Res<Time>,
+    gravity: Option<Res<Gravity>>,
     spatial: SpatialQuery,
     move_and_slide: MoveAndSlide,
     mut q: Query<
@@ -243,6 +306,8 @@ pub(crate) fn drive_locomotion(
             &Collider,
             Option<&super::climb::AvatarClimb>,
             Option<&super::landing::AvatarLanding>,
+            Option<&super::abilities::AvatarAbilities>,
+            Option<&super::seat::AvatarSeated>,
         ),
         With<SpawnedByAvatarRuntime>,
     >,
@@ -251,10 +316,39 @@ pub(crate) fn drive_locomotion(
     if dt <= 0.0 {
         return;
     }
+    let g = downward_gravity(gravity.as_deref());
+    // Below this much movement in a frame, an airborne body has stopped.
+    let stuck_below = STUCK_SPEED * (g / STANDARD_GRAVITY_F32) * dt;
 
-    for (entity, mut tf, mut vel, mut loco, mut intent, mut timers, body, collider, climb, landing)
+    for (entity, mut tf, mut vel, mut loco, mut intent, mut timers, body, collider, climb, landing, abilities, seated)
         in q.iter_mut()
     {
+        let abilities = abilities.copied().unwrap_or_default();
+        // A seat owns the body outright too: it rides the seat
+        // (`seat::ride_seats`). A jump pressed while seated stays pending for
+        // `SEATED_JUMP_HOLD`, long enough to reach the host and be spent on
+        // getting up; an older one expires, so a press that meant something
+        // else in the seat (a handbrake) never fires when the rider leaves
+        // another way.
+        loco.seated = seated.is_some();
+        if loco.seated {
+            loco.grounded = true;
+            loco.planar_speed = 0.0;
+            loco.speed_norm = 0.0;
+            loco.vertical_velocity = 0.0;
+            loco.air_time = 0.0;
+            vel.0 = Vec3::ZERO;
+            if intent.jump_pressed {
+                timers.seated_jump_age += dt;
+                if timers.seated_jump_age > SEATED_JUMP_HOLD {
+                    intent.jump_pressed = false;
+                }
+            }
+            if !intent.jump_pressed {
+                timers.seated_jump_age = 0.0;
+            }
+            continue;
+        }
         // A climb owns the body outright. Letting the controller integrate at
         // the same time makes the two fight over position and the character
         // jitters off the ledge.
@@ -332,6 +426,12 @@ pub(crate) fn drive_locomotion(
         loco.air_time = timers.since_grounded;
 
         // ── Jump buffering ──────────────────────────────────────────────────
+        // With jumping switched off a press is dropped, not buffered, so it
+        // cannot fire later when jumping comes back on.
+        if !abilities.jump {
+            intent.jump_pressed = false;
+            timers.jump_consumed = true;
+        }
         if intent.jump_pressed {
             timers.since_jump_press = 0.0;
             timers.jump_consumed = false;
@@ -354,7 +454,7 @@ pub(crate) fn drive_locomotion(
         dir.y = 0.0;
         let dir = if dir.length_squared() > 1e-6 { dir.normalize() } else { Vec3::ZERO };
 
-        let target_speed = if intent.sprint {
+        let target_speed = if intent.sprint && abilities.sprint {
             motion.run_speed * motion.sprint_multiplier
         } else if dir != Vec3::ZERO {
             motion.walk_speed
@@ -428,7 +528,7 @@ pub(crate) fn drive_locomotion(
                 v.y = target.y.min(0.0);
             }
         } else {
-            v.y -= GRAVITY_MPS2 * dt;
+            v.y -= g * dt;
             // Terminal velocity, so a long fall cannot tunnel.
             v.y = v.y.max(-55.0);
         }
@@ -509,8 +609,13 @@ pub(crate) fn drive_locomotion(
             |_hit| MoveAndSlideHitResponse::Accept,
         );
 
-        let mut new_pos = out.position;
-        let mut new_vel = out.projected_velocity;
+        // A collide-and-slide that begins inside geometry (a body snapped
+        // into overlap, as a replica can be) can hand back a non-finite
+        // result. Whatever is written below is permanent: the velocity feeds
+        // the next frame, the gait signal and, through the animation, every
+        // bone. Stay put for this frame instead.
+        let mut new_pos = if out.position.is_finite() { out.position } else { tf.translation };
+        let mut new_vel = if out.projected_velocity.is_finite() { out.projected_velocity } else { Vec3::ZERO };
 
         // ── Running into a wall should STOP you ─────────────────────────────
         //
@@ -654,7 +759,7 @@ pub(crate) fn drive_locomotion(
         // pinned between colliders. Left alone this never resolves — the fall
         // animation plays forever and no input helps.
         let moved_this_frame = (new_pos - tf.translation).length();
-        if !grounded && moved_this_frame < STUCK_EPSILON && !can_jump {
+        if !grounded && moved_this_frame < stuck_below && !can_jump {
             timers.stuck_time += dt;
         } else {
             timers.stuck_time = 0.0;
@@ -672,6 +777,23 @@ pub(crate) fn drive_locomotion(
                 new_vel = Vec3::ZERO;
             }
             timers.stuck_time = 0.0;
+        }
+
+        // Last line of defence before the state is kept: nothing non-finite is
+        // written, whatever above produced it. Said once per avatar, naming
+        // it, so the source can be found.
+        if !new_pos.is_finite() || !new_vel.is_finite() {
+            if !timers.non_finite_reported {
+                timers.non_finite_reported = true;
+                warn!(
+                    "avatar: non-finite move on {entity:?} ({:?}): pos {new_pos:?} vel {new_vel:?}, kept in place",
+                    body.control
+                );
+            }
+            if !new_pos.is_finite() {
+                new_pos = tf.translation;
+            }
+            new_vel = Vec3::ZERO;
         }
 
         tf.translation = new_pos;
@@ -702,7 +824,12 @@ fn move_and_slide_ground_probe(
         &ShapeCastConfig::from_max_distance(max_dist),
         filter,
     )?;
-    Some((Vec3::from(hit.normal1), hit.distance))
+    let normal = Vec3::from(hit.normal1);
+    // A cast that starts overlapping can report a zero normal. That is no
+    // surface to stand on or walk along, and stored as the ground normal it
+    // turns every angle measured against it into NaN, so it counts as no hit.
+    (normal.is_finite() && normal.length_squared() > 0.25 && hit.distance.is_finite())
+        .then_some((normal, hit.distance))
 }
 
 /// Lift, move, and drop — a position correction, never an impulse.

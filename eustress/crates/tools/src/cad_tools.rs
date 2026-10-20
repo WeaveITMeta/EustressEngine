@@ -894,6 +894,7 @@ impl ToolHandler for CadDescribePartTool {
         let mut eval_error: Option<String> = None;
         let mut mesh_stats = serde_json::Value::Null;
         let mut per_feature = Vec::new();
+        let mut bodies = Vec::new();
         if want_mesh {
             match eustress_cad::evaluate_tree(&tree) {
                 Ok(out) => {
@@ -903,6 +904,7 @@ impl ToolHandler for CadDescribePartTool {
                         .unwrap_or(eustress_cad::DEFAULT_MESH_TOLERANCE);
                     mesh_stats = mesh_json(out.mesh.as_ref(), tol);
                     per_feature = entry_status_json(&out);
+                    bodies = bodies_json(&out, tol);
                 }
                 Err(e) => {
                     evaluates = false;
@@ -944,6 +946,7 @@ impl ToolHandler for CadDescribePartTool {
                 "features": features,
                 "sketches": sketches,
                 "feature_status": per_feature,
+                "bodies": bodies,
                 "mesh": mesh_stats,
             }),
         )
@@ -1348,49 +1351,38 @@ impl ToolHandler for CadMeasureTool {
 // `parse_tree` accepts.
 // ════════════════════════════════════════════════════════════════════
 
-/// How well the kernel actually supports a feature op today.
+/// How well the kernel supports a feature op.
 ///
 /// Deliberately finer-grained than "supported / blocked". The dangerous
-/// case is the middle one: `Approximate` ops succeed, mutate the body,
-/// and report OK — but the result is not what the name promises (a
-/// mesh-crease fillet leaves BRep topology untouched, so `cad_measure`
-/// reports the UNFILLETED volume). Silently returning "ok" there would
-/// reproduce exactly the class of failure this tool surface exists to
-/// eliminate, so the caveat rides along in the response.
+/// case is the middle one: an `Approximate` op succeeds, mutates the body
+/// and reports OK, but the result is not what the name promises, so the
+/// caveat rides along in the response instead of hiding behind an "ok".
+/// Every op is exact at the op level; where one feature instance falls
+/// back to an approximation (a shell of a body that is no longer a plain
+/// extrusion, a positional `/edge-N` blend reference) the evaluator marks
+/// that entry degraded, and the validity state returned with every write
+/// carries it. The other two variants let a future op declare itself
+/// without new plumbing.
 enum OpSupport {
     Working,
+    #[allow(dead_code)]
     Approximate(&'static str),
+    #[allow(dead_code)]
     NotImplemented(&'static str),
 }
 
 fn op_support(op: &str) -> Option<OpSupport> {
     use OpSupport::*;
     Some(match op {
-        "extrude" | "revolve" | "hole" | "mirror" | "pattern" | "boolean" | "split"
-        | "sweep" | "plane" => Working,
-        "fillet" => Approximate(
-            "fillet is a post-tessellation mesh-crease soften, NOT a BRep fillet: the solid \
-             topology is unchanged, so volume/area from cad_measure will NOT reflect it",
-        ),
-        "chamfer" => Approximate(
-            "chamfer is a post-tessellation mesh-crease soften, NOT a BRep chamfer: the solid \
-             topology is unchanged, so volume/area from cad_measure will NOT reflect it",
-        ),
-        "shell" => Approximate(
-            "shell is open-top only (the inner cut protrudes through +Z); a fully enclosed \
-             cavity needs offset surfaces the kernel does not have yet",
-        ),
-        "loft" => NotImplemented(
-            "loft needs a multi-profile interpolation + guide-curve solver that truck-modeling \
-             0.6 does not provide (it has homotopy for two surfaces only)",
-        ),
+        "extrude" | "revolve" | "hole" | "mirror" | "pattern" | "boolean" | "split" | "sweep"
+        | "plane" | "reference_plane" | "loft" | "fillet" | "chamfer" | "shell" => Working,
         _ => return None,
     })
 }
 
 const KNOWN_OPS: &[&str] = &[
     "extrude", "revolve", "hole", "mirror", "pattern", "boolean", "split", "sweep",
-    "fillet", "chamfer", "shell", "loft", "plane",
+    "fillet", "chamfer", "shell", "loft", "plane", "reference_plane",
 ];
 
 /// Enclosed volume of a tree's evaluated body, or `None` when it does
@@ -1518,7 +1510,10 @@ fn build_feature_entry(
     let mut obj = serde_json::Map::new();
     obj.insert("kind".into(), serde_json::Value::String("feature".into()));
     obj.insert("name".into(), serde_json::Value::String(name.to_string()));
-    obj.insert("op".into(), serde_json::Value::String(op.to_string()));
+    // The feature's serde tag is `reference_plane`; `plane` is the short
+    // form this tool has always advertised, and it never deserialized.
+    let tag = if op == "plane" { "reference_plane" } else { op };
+    obj.insert("op".into(), serde_json::Value::String(tag.to_string()));
     for (k, v) in args {
         // These four are the tool's own envelope, not feature fields.
         if matches!(k.as_str(), "path" | "name" | "op" | "index") {
@@ -1679,7 +1674,7 @@ impl ToolHandler for CadAddFeatureTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: "cad_add_feature",
-            description: "Append or insert a feature into a CadPart's tree. op = extrude | revolve | hole | mirror | pattern | boolean | split | sweep | fillet | chamfer | shell (loft is rejected: not implemented). Op-specific fields pass through to the kernel — extrude: sketch, depth, end_condition, combine, both_sides; hole: sketch_point, diameter, depth; pattern: pattern_kind, features, count, spacing/direction/axis/angle; boolean: target, boolean_op; mirror: plane, features; split: plane. Lengths and angles MUST be unit strings (\"20 mm\", \"90 deg\") or variable names. Every algorithmic parameter takes a rule, not just a value: count, spacing, angle, depth and diameter all accept a variable name or an arithmetic expression (\"pitch * 2\", \"rows * cols\", \"width/2 - wall\"), so one variable edit restates the whole pattern. Returns the re-evaluated validity state so the edit's soundness is visible immediately.",
+            description: "Append or insert a feature into a CadPart's tree. A part is a list of BODIES: combine = add joins every body the feature touches (or starts a new body if it touches none), subtract cuts every body it touches (and fails if it touches none), intersect keeps what they share, new_body always starts one; `bodies` limits a feature to named bodies. Sketches sit on their `plane` (xy, xz with normal +Y, yz, a reference plane, or a planar FACE by name), and features follow it. ops: extrude (sketch, depth, end_condition, both_sides, reverse, to, draft_angle, thin), revolve (sketch, axis = x|y|z, a sketch line 'e3', or a straight edge name; angle; both_sides), loft (profiles: 2+ sketch names), sweep (profile, path), hole (sketch_point, diameter, depth, counterbore_diameter/_depth, countersink_diameter/_angle, tap_class for a cosmetic thread), fillet (edges, radius), chamfer (edges, distance, distance2 or angle), shell (wall_thickness, open_faces: face names, empty for a closed cavity), mirror (plane, features), pattern (pattern_kind, features, count, spacing, direction or direction_ref, axis, angle), boolean (target, boolean_op, tools, keep_tools), split (plane: two bodies), plane (plane_kind = offset|three_point|tangent_face|normal_to_curve with base/distance, p1/p2/p3, face, or curve/t). Faces and edges are referenced by the persistent names cad_list_topology returns. Lengths and angles MUST be unit strings (\"20 mm\", \"90 deg\"), variable names, or expressions (\"width/2 - wall\"). Returns the re-evaluated validity state so the edit's soundness is visible immediately.",
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -1689,27 +1684,45 @@ impl ToolHandler for CadAddFeatureTool {
                     "index": { "type": "integer", "description": "Insert position; appends when omitted" },
                     "sketch": { "type": "string", "description": "extrude/revolve: name of the sketch entry used as profile" },
                     "depth": { "type": "string", "description": "extrude/hole: unit string or variable name" },
-                    "end_condition": { "type": "string", "description": "blind (fixed depth, honours both_sides) | mid_plane (half the depth each side of the sketch plane) | through_all (ignores depth and spans the whole current body). to_plane, to_surface and up_to_next are REJECTED: the feature carries no field naming the target to stop at, so they cannot be resolved." },
+                    "end_condition": { "type": "string", "description": "blind (depth; negative or reverse=true goes against the sketch normal, and a subtract given neither cuts into the material, so a cut sketched on a face goes into the part) | mid_plane (half the depth each side) | through_all (through every body, both ways) | to_plane / to_surface (stop at `to`: a plane or planar face; exact for any orientation) | up_to_next (stop at the first planar face in the way)" },
+                    "to": { "type": "string", "description": "extrude to_plane/to_surface: plane name or planar face name" },
+                    "reverse": { "type": "boolean", "description": "extrude: go against the sketch normal" },
+                    "thin": { "type": "string", "description": "extrude: wall thickness for a thin feature (a band inside every loop)" },
+                    "bodies": { "type": "array", "items": { "type": "string" }, "description": "limit the combine to these bodies" },
                     "combine": { "type": "string", "description": "new_body | add | subtract | intersect" },
                     "both_sides": { "type": "boolean" },
-                    "draft_angle": { "type": "string", "description": "NOT IMPLEMENTED — only \"0 deg\" (the default) is accepted; any non-zero value is rejected rather than silently producing straight walls." },
+                    "draft_angle": { "type": "string", "description": "extrude: taper of the side walls, e.g. \"3 deg\" (positive leans inward toward the far end; holes in the profile open out). Profiles of lines, rectangles or circles." },
                     "sketch_point": { "type": "string", "description": "hole: e.g. Sketch1/point-0" },
                     "diameter": { "type": "string", "description": "hole: unit string" },
-                    "axis": { "type": "string" },
-                    "angle": { "type": "string" },
+                    "axis": { "type": "string", "description": "revolve / circular pattern: x | y | z, a sketch line 'e3' (revolve), or a straight edge name" },
+                    "angle": { "type": "string", "description": "revolve / circular pattern angle; chamfer: angle from the first face" },
+                    "direction_ref": { "type": "string", "description": "linear pattern: straight edge name to pattern along" },
+                    "profiles": { "type": "array", "items": { "type": "string" }, "description": "loft: section sketch names in order" },
+                    "profile": { "type": "string", "description": "sweep: profile sketch" },
+                    "tools": { "type": "array", "items": { "type": "string" }, "description": "boolean: tool bodies applied to `target`" },
+                    "keep_tools": { "type": "boolean", "description": "boolean: keep tool bodies after combining" },
+                    "plane_kind": { "type": "string", "description": "plane: offset | three_point | tangent_face | normal_to_curve" },
+                    "base": { "type": "string", "description": "plane offset: base plane or planar face" },
+                    "face": { "type": "string", "description": "plane tangent_face: planar face name" },
+                    "curve": { "type": "string", "description": "plane normal_to_curve: straight edge name" },
+                    "t": { "type": "number", "description": "plane normal_to_curve: position along the edge, 0..1" },
+                    "p1": { "type": "array", "items": { "type": "number" }, "description": "plane three_point: [x,y,z] m" },
+                    "p2": { "type": "array", "items": { "type": "number" } },
+                    "p3": { "type": "array", "items": { "type": "number" } },
                     "plane": { "type": "string", "description": "mirror/split: plane reference" },
                     "features": { "type": "array", "items": { "type": "string" }, "description": "mirror/pattern: feature names to operate on" },
                     "pattern_kind": { "type": "string", "description": "linear | circular | path | sketch" },
                     "count": { "type": ["integer", "string"], "description": "pattern: how many instances. A whole number, or a variable/expression string (\"hole_count\", \"rows * cols\"), so the repetition itself is a rule rather than a baked constant." },
                     "spacing": { "type": "string", "description": "pattern: unit string or variable" },
                     "direction": { "type": "array", "items": { "type": "number" }, "description": "pattern linear: [x,y,z]" },
-                    "target": { "type": "string", "description": "boolean: name of the feature whose body is the operand" },
+                    "target": { "type": "string", "description": "boolean: the body acted on; alone (no tools) it is the TOOL applied to every other body" },
                     "boolean_op": { "type": "string", "description": "union | difference | intersect" },
-                    "radius": { "type": "string", "description": "fillet" },
-                    "distance": { "type": "string", "description": "chamfer" },
-                    "edges": { "type": "array", "items": { "type": "string" } },
+                    "radius": { "type": "string", "description": "fillet radius" },
+                    "distance": { "type": "string", "description": "chamfer distance (plane offset: distance)" },
+                    "distance2": { "type": "string", "description": "chamfer: second distance for an asymmetric chamfer" },
+                    "edges": { "type": "array", "items": { "type": "string" }, "description": "fillet/chamfer: edge names 'FaceA | FaceB' from cad_list_topology. Edges an extrude swept from sketch corners are blended exactly from the profile; other straight convex edges between planar faces are cut with an exact blend cutter." },
                     "wall_thickness": { "type": "string", "description": "shell" },
-                    "open_faces": { "type": "array", "items": { "type": "string" } }
+                    "open_faces": { "type": "array", "items": { "type": "string" }, "description": "shell: face names left open (e.g. [\"Extrude1.cap_end\"]); empty = closed cavity" }
                 },
                 "required": ["path", "op"]
             }),
@@ -2124,28 +2137,37 @@ impl ToolHandler for CadDeleteFeatureTool {
 // hands back the one piece of information the caller cannot derive.
 // ════════════════════════════════════════════════════════════════════
 
-/// The 12 constraint kinds, with the arity the solver expects.
-/// Unary constraints act on one entity; binary ones relate two.
-const CONSTRAINT_KINDS: &[(&str, bool)] = &[
-    ("coincident", true),
-    ("concentric", true),
-    ("collinear", true),
-    ("parallel", true),
-    ("perpendicular", true),
-    ("tangent", true),
-    ("horizontal", false),
-    ("vertical", false),
-    ("equal_length", true),
-    ("equal_radius", true),
-    ("symmetric", true),
-    ("fix", false),
+/// How many entities a constraint kind relates.
+#[derive(Clone, Copy, PartialEq)]
+enum Arity {
+    One,
+    Two,
+    /// One entity, or two when it relates two points (horizontal /
+    /// vertical between points).
+    OneOrTwo,
+}
+
+/// Every constraint kind the solver accepts, with its arity.
+const CONSTRAINT_KINDS: &[(&str, Arity)] = &[
+    ("coincident", Arity::Two),
+    ("concentric", Arity::Two),
+    ("collinear", Arity::Two),
+    ("parallel", Arity::Two),
+    ("perpendicular", Arity::Two),
+    ("tangent", Arity::Two),
+    ("horizontal", Arity::OneOrTwo),
+    ("vertical", Arity::OneOrTwo),
+    ("equal_length", Arity::Two),
+    ("equal_radius", Arity::Two),
+    ("symmetric", Arity::Two),
+    ("fix", Arity::One),
+    ("midpoint", Arity::Two),
+    ("point_on_line", Arity::Two),
+    ("point_on_circle", Arity::Two),
 ];
 
-fn constraint_is_binary(kind: &str) -> Option<bool> {
-    CONSTRAINT_KINDS
-        .iter()
-        .find(|(k, _)| *k == kind)
-        .map(|(_, binary)| *binary)
+fn constraint_arity(kind: &str) -> Option<Arity> {
+    CONSTRAINT_KINDS.iter().find(|(k, _)| *k == kind).map(|(_, a)| *a)
 }
 
 /// Locate a sketch entry by name, returning its tree index.
@@ -2237,13 +2259,13 @@ impl ToolHandler for CadCreateSketchTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: "cad_create_sketch",
-            description: "Add a named 2D sketch to a CadPart, on a base plane (xy | xz | yz) or a face reference. Sketches are how features get POSITIONED — a hole, for example, is drilled at the first point of the sketch it names, so a hole at a specific location needs its own sketch carrying that point. Returns the solver status and remaining degrees of freedom for every sketch in the part.",
+            description: "Add a named 2D sketch to a CadPart, on a plane: xy, xz (normal +Y, the Y-up ground plane), yz, a reference plane feature, or a planar face by the name cad_list_topology gives it (e.g. Extrude1.cap_end). Sketches are how features get POSITIONED — a hole, for example, is drilled at the first point of the sketch it names, so a hole at a specific location needs its own sketch carrying that point. Returns the solver status and remaining degrees of freedom for every sketch in the part.",
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
                     "path":  { "type": "string", "description": "CadPart folder or features.toml, Space-relative" },
                     "name":  { "type": "string", "description": "Sketch name, referenced by later features (e.g. HoleSketch)" },
-                    "plane": { "type": "string", "description": "xy | xz | yz, or a face reference like Extrude1/face-0", "default": "xy" },
+                    "plane": { "type": "string", "description": "xy | xz (normal +Y, the Y-up ground plane) | yz, a reference plane feature, or a planar face name from cad_list_topology (e.g. Extrude1.cap_end)", "default": "xy" },
                     "index": { "type": "integer", "description": "Insert position; appends when omitted. A sketch must appear BEFORE the feature that names it." }
                 },
                 "required": ["path", "name"]
@@ -2272,21 +2294,12 @@ impl ToolHandler for CadCreateSketchTool {
             .unwrap_or("xy")
             .trim()
             .to_string();
-        // `resolve_plane` accepts only the three base planes. Face
-        // references are documented on the Sketch type but not
-        // implemented, and a sketch carrying one parses happily and
-        // then fails at evaluation with a message pointing at the
-        // feature rather than at the sketch that caused it. Reject it
-        // here, where the caller can still act on it.
-        if !matches!(plane.as_str(), "xy" | "xz" | "yz") {
-            return err(
-                TOOL,
-                format!(
-                    "plane '{plane}' is not supported — use xy, xz or yz. Sketching on a face \
-                     reference is described on the Sketch type but the evaluator does not \
-                     implement it yet, so such a sketch would parse and then fail to evaluate."
-                ),
-            );
+        // Any plane the evaluator can place: a built-in plane, a reference
+        // plane feature, or a planar face by name. Whether it resolves is
+        // decided by the tree at this point, and the commit below reports
+        // the sketch's status, naming the plane if it does not.
+        if plane.is_empty() {
+            return err(TOOL, "plane must not be empty (xy, xz, yz, a reference plane, or a planar face name)");
         }
 
         let (path, mut tree, before_vol) = match load_tree_for_edit(ctx, path_s, TOOL) {
@@ -2454,7 +2467,7 @@ impl ToolHandler for CadAddConstraintTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: "cad_add_constraint",
-            description: "Add a geometric constraint between sketch entities: coincident | concentric | collinear | parallel | perpendicular | tangent | horizontal | vertical | equal_length | equal_radius | symmetric | fix. horizontal, vertical and fix take one entity; the rest take two. ALWAYS returns the post-solve status and remaining degrees of freedom, because a constraint's effect on a sketch is global and cannot be predicted from the edit alone.",
+            description: "Add a geometric constraint between sketch entities: coincident | concentric | collinear | parallel | perpendicular | tangent | horizontal | vertical | equal_length | equal_radius | symmetric | fix | midpoint | point_on_line | point_on_circle. fix takes one entity; horizontal and vertical take a line, or two points via e2; symmetric takes a line and an axis line (e1, e2) or two points and an axis line (e1, e2, e3); midpoint and point_on_line put a point of e1 on line e2, point_on_circle on circle or arc e2; the rest take two. p1 / p2 (start | end | center) say which point of e1 / e2 a point constraint means; without them a point is itself, a circle its centre, and coincident joins the nearest pair of endpoints as drawn. A pair the solver has no formula for is refused by name. ALWAYS returns the post-solve status and remaining degrees of freedom, because a constraint's effect on a sketch is global and cannot be predicted from the edit alone.",
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -2462,7 +2475,10 @@ impl ToolHandler for CadAddConstraintTool {
                     "sketch": { "type": "string", "description": "Name of the sketch" },
                     "kind":   { "type": "string", "description": "Constraint kind (see description)" },
                     "e1":     { "type": "integer", "description": "First entity index" },
-                    "e2":     { "type": "integer", "description": "Second entity index (binary constraints only)" }
+                    "e2":     { "type": "integer", "description": "Second entity index (binary constraints)" },
+                    "e3":     { "type": "integer", "description": "symmetric between two points: the axis line" },
+                    "p1":     { "type": "string", "description": "start | end | center: which point of e1" },
+                    "p2":     { "type": "string", "description": "start | end | center: which point of e2" }
                 },
                 "required": ["path", "sketch", "kind", "e1"]
             }),
@@ -2486,8 +2502,21 @@ impl ToolHandler for CadAddConstraintTool {
             return err(TOOL, "e1 required (entity index)");
         };
         let e2 = input.get("e2").and_then(|v| v.as_u64()).map(|v| v as usize);
+        let e3 = input.get("e3").and_then(|v| v.as_u64()).map(|v| v as usize);
+        let point_ref = |key: &str| -> Result<Option<eustress_cad::sketch::PointRef>, String> {
+            match input.get(key).and_then(|v| v.as_str()) {
+                None => Ok(None),
+                Some(s) => serde_json::from_value(serde_json::Value::String(s.trim().to_ascii_lowercase()))
+                    .map(Some)
+                    .map_err(|_| format!("{key} = '{s}': expected start, end or center")),
+            }
+        };
+        let (p1, p2) = match (point_ref("p1"), point_ref("p2")) {
+            (Ok(a), Ok(b)) => (a, b),
+            (Err(e), _) | (_, Err(e)) => return err(TOOL, e),
+        };
 
-        let Some(is_binary) = constraint_is_binary(&kind) else {
+        let Some(arity) = constraint_arity(&kind) else {
             return err(
                 TOOL,
                 format!(
@@ -2496,10 +2525,10 @@ impl ToolHandler for CadAddConstraintTool {
                 ),
             );
         };
-        if is_binary && e2.is_none() {
+        if arity == Arity::Two && e2.is_none() {
             return err(TOOL, format!("constraint '{kind}' relates two entities — e2 is required"));
         }
-        if !is_binary && e2.is_some() {
+        if arity == Arity::One && e2.is_some() {
             return err(
                 TOOL,
                 format!("constraint '{kind}' applies to a single entity — remove e2"),
@@ -2522,7 +2551,7 @@ impl ToolHandler for CadAddConstraintTool {
             // Out-of-range indices would be accepted by serde and then
             // quietly ignored (or panic) inside the solver. Catch them
             // where the caller can still act on the message.
-            for (label, ix) in [("e1", Some(e1)), ("e2", e2)] {
+            for (label, ix) in [("e1", Some(e1)), ("e2", e2), ("e3", e3)] {
                 if let Some(ix) = ix {
                     if ix >= n {
                         return err(
@@ -2541,7 +2570,11 @@ impl ToolHandler for CadAddConstraintTool {
                     Ok(k) => k,
                     Err(e) => return err(TOOL, format!("constraint kind '{kind}': {e}")),
                 };
-            sk.constraints.push(eustress_cad::SketchConstraint { kind: parsed_kind, e1, e2 });
+            let mut c = eustress_cad::SketchConstraint::new(parsed_kind, e1, e2);
+            c.p1 = p1;
+            c.p2 = p2;
+            c.e3 = e3;
+            sk.constraints.push(c);
         }
 
         let state = match commit_sketch_edit(&path, &tree, TOOL, "add_constraint", before_vol) {
@@ -2561,7 +2594,7 @@ impl ToolHandler for CadAddConstraintTool {
             "ok": true,
             "path": path.to_string_lossy(),
             "sketch": sketch_name,
-            "added": { "kind": kind, "e1": e1, "e2": e2 },
+            "added": { "kind": kind, "e1": e1, "e2": e2, "e3": e3, "p1": p1, "p2": p2 },
             "solve": this,
         });
         merge_state(&mut data, state);
@@ -2587,15 +2620,18 @@ impl ToolHandler for CadDimensionTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: "cad_dimension",
-            description: "Add a driving dimension to a sketch: linear (one entity) | radial (one entity) | angular (two entities). The value is a unit string (\"50 mm\"), a variable name (\"length\"), or an expression (\"length/2 - 10 mm\") — driving a dimension from a variable is what keeps a part parametric. Returns the post-solve status and remaining degrees of freedom.",
+            description: "Add a driving dimension to a sketch: linear (a line's length or a rectangle's width/height with axis = x|y; with e2: the distance between two points (p1/p2 = start|end|center pick points of lines and arcs), from a point to a line, or between parallel lines; axis = x|y measures one component) | radial | diameter | angular (two lines; 0-180 deg unsigned, beyond that counter-clockwise from e1). The value is a unit string (\"50 mm\"), a variable name (\"length\"), or an expression (\"length/2 - 10 mm\") — driving a dimension from a variable is what keeps a part parametric. Returns the post-solve status and remaining degrees of freedom.",
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
                     "path":   { "type": "string", "description": "CadPart folder or features.toml, Space-relative" },
                     "sketch": { "type": "string", "description": "Name of the sketch" },
-                    "type":   { "type": "string", "description": "linear | radial | angular" },
+                    "type":   { "type": "string", "description": "linear | radial | diameter | angular" },
                     "e1":     { "type": "integer", "description": "First entity index" },
-                    "e2":     { "type": "integer", "description": "Second entity index (angular only)" },
+                    "e2":     { "type": "integer", "description": "Second entity index (angular; optional for linear)" },
+                    "axis":   { "type": "string", "description": "linear: x | y" },
+                    "p1":     { "type": "string", "description": "linear: start | end | center of e1" },
+                    "p2":     { "type": "string", "description": "linear: start | end | center of e2" },
                     "value":  { "type": "string", "description": "Unit string, variable name, or expression. Never a bare number." }
                 },
                 "required": ["path", "sketch", "type", "e1", "value"]
@@ -2619,8 +2655,8 @@ impl ToolHandler for CadDimensionTool {
         if value.is_empty() {
             return err(TOOL, "value required");
         }
-        if !matches!(dty.as_str(), "linear" | "radial" | "angular") {
-            return err(TOOL, format!("unknown dimension type '{dty}' — expected linear, radial or angular"));
+        if !matches!(dty.as_str(), "linear" | "radial" | "diameter" | "angular") {
+            return err(TOOL, format!("unknown dimension type '{dty}' — expected linear, radial, diameter or angular"));
         }
         if dty == "angular" && e2.is_none() {
             return err(TOOL, "angular dimensions relate two entities — e2 is required");
@@ -2663,6 +2699,13 @@ impl ToolHandler for CadDimensionTool {
                 obj.insert("e2".into(), serde_json::Value::from(e2));
             }
             obj.insert("value".into(), serde_json::Value::String(value.clone()));
+            if dty == "linear" {
+                for key in ["axis", "p1", "p2"] {
+                    if let Some(v) = input.get(key).and_then(|v| v.as_str()) {
+                        obj.insert(key.into(), serde_json::Value::String(v.trim().to_ascii_lowercase()));
+                    }
+                }
+            }
             let dim: eustress_cad::SketchDimension =
                 match serde_json::from_value(serde_json::Value::Object(obj)) {
                     Ok(d) => d,
@@ -3198,6 +3241,248 @@ impl ToolHandler for CadListSourcesTool {
                 "library_dir": dir.to_string_lossy(),
                 "definitions": rows,
             }),
+        )
+    }
+}
+
+// ── Kernel v2: bodies, topology names, STEP ─────────────────────────
+
+/// Per-body summary for describe/list responses: name, face count,
+/// volume, bounds.
+fn bodies_json(out: &eustress_cad::EvalOutput, tol: f64) -> Vec<serde_json::Value> {
+    out.bodies
+        .iter()
+        .map(|b| {
+            let m = eustress_cad::tessellate_body(b, tol);
+            let mp = eustress_cad::mass_properties(&m);
+            serde_json::json!({
+                "name": b.name,
+                "faces": b.face_count(),
+                "volume_m3": mp.signed_volume.abs(),
+                "bbox_min_m": mp.min,
+                "bbox_max_m": mp.max,
+            })
+        })
+        .collect()
+}
+
+// ── cad_list_topology ────────────────────────────────────────────────
+
+pub struct CadListTopologyTool;
+
+impl ToolHandler for CadListTopologyTool {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition {
+            name: "cad_list_topology",
+            description: "List a CadPart's bodies, faces and edges by their persistent names: the names fillet, chamfer, shell open_faces, sketch planes, extrude `to` targets and pattern `direction_ref` accept. Faces are named after the feature and sketch entity that made them (`Extrude1.cap_end`, `Extrude1.side.e0.top`, `Hole1.wall.0`); an edge is named by the two faces it separates (`Extrude1.cap_end | Extrude1.side.e0.top`). Names survive regeneration and booleans, so they stay valid when an upstream dimension changes. Each face reports whether it is planar and its outward normal; each edge its end points, length and whether it is straight. Read-only.",
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "path":   { "type": "string", "description": "CadPart folder or features.toml, Space-relative" },
+                    "body":   { "type": "string", "description": "Only this body (default: all)" },
+                    "what":   { "type": "string", "description": "faces | edges | all (default all)" },
+                    "planar_only": { "type": "boolean", "description": "Faces: only planar ones (what a sketch or plane reference can use)" },
+                    "near":   { "type": "array", "items": { "type": "number" }, "description": "[x, y, z] m: sort by distance from this point, nearest first" },
+                    "limit":  { "type": "integer", "description": "Cap per list (default 200)" }
+                },
+                "required": ["path"]
+            }),
+            modes: &[WorkshopMode::General],
+            requires_approval: false,
+            stream_topics: &["workshop.tool.cad_list_topology"],
+        }
+    }
+
+    fn execute(&self, input: serde_json::Value, ctx: &ToolContext) -> ToolResult {
+        const TOOL: &str = "cad_list_topology";
+        let path_s = input.get("path").and_then(|v| v.as_str()).unwrap_or("");
+        let body_filter = input.get("body").and_then(|v| v.as_str()).map(str::to_string);
+        let what = input.get("what").and_then(|v| v.as_str()).unwrap_or("all").to_ascii_lowercase();
+        let planar_only = input.get("planar_only").and_then(|v| v.as_bool()).unwrap_or(false);
+        let limit = input.get("limit").and_then(|v| v.as_u64()).unwrap_or(200) as usize;
+        let near: Option<[f64; 3]> = input.get("near").and_then(|v| v.as_array()).and_then(|a| {
+            (a.len() == 3).then(|| [a[0].as_f64().unwrap_or(0.0), a[1].as_f64().unwrap_or(0.0), a[2].as_f64().unwrap_or(0.0)])
+        });
+        let (path, src) = match read_features(ctx, path_s, TOOL) {
+            Ok(v) => v,
+            Err(e) => return e,
+        };
+        let tree = match eustress_cad::parse_tree(&src) {
+            Ok(t) => t,
+            Err(e) => return err(TOOL, format!("parse {}: {e}", path.display())),
+        };
+        let out = match eustress_cad::evaluate_tree(&tree) {
+            Ok(o) => o,
+            Err(e) => return err(TOOL, format!("the tree does not evaluate: {e}")),
+        };
+        let dist = |p: [f64; 3]| near.map_or(0.0, |q| ((p[0] - q[0]).powi(2) + (p[1] - q[1]).powi(2) + (p[2] - q[2]).powi(2)).sqrt());
+        let mut faces = Vec::new();
+        let mut edges = Vec::new();
+        for b in &out.bodies {
+            if body_filter.as_deref().map_or(false, |f| f != b.name) {
+                continue;
+            }
+            if what != "edges" {
+                for f in eustress_cad::faces_of(b) {
+                    if planar_only && f.plane.is_none() {
+                        continue;
+                    }
+                    let d = dist(f.centroid);
+                    faces.push((
+                        d,
+                        serde_json::json!({
+                            "body": f.body,
+                            "name": f.name,
+                            "kind": f.kind,
+                            "planar": f.plane.is_some(),
+                            "normal": f.plane.map(|p| [p.z.x, p.z.y, p.z.z]),
+                            "centroid_m": f.centroid,
+                        }),
+                    ));
+                }
+            }
+            if what != "faces" {
+                for e in eustress_cad::edges_of(b) {
+                    let mid = [(e.a[0] + e.b[0]) * 0.5, (e.a[1] + e.b[1]) * 0.5, (e.a[2] + e.b[2]) * 0.5];
+                    edges.push((
+                        dist(mid),
+                        serde_json::json!({
+                            "body": e.body,
+                            "name": e.name,
+                            "faces": e.faces,
+                            "a_m": e.a,
+                            "b_m": e.b,
+                            "length_m": e.length(),
+                            "straight": e.straight,
+                        }),
+                    ));
+                }
+            }
+        }
+        if near.is_some() {
+            faces.sort_by(|x, y| x.0.total_cmp(&y.0));
+            edges.sort_by(|x, y| x.0.total_cmp(&y.0));
+        }
+        let (nf, ne) = (faces.len(), edges.len());
+        let faces: Vec<serde_json::Value> = faces.into_iter().take(limit).map(|(_, v)| v).collect();
+        let edges: Vec<serde_json::Value> = edges.into_iter().take(limit).map(|(_, v)| v).collect();
+        let tol = tree.metadata.mesh_tolerance.unwrap_or(eustress_cad::DEFAULT_MESH_TOLERANCE);
+        ok(
+            TOOL,
+            format!("{} body(ies), {nf} face(s), {ne} edge(s)", out.bodies.len()),
+            serde_json::json!({
+                "ok": true,
+                "path": path.to_string_lossy(),
+                "bodies": bodies_json(&out, tol),
+                "planes": out.planes.keys().collect::<Vec<_>>(),
+                "faces": faces,
+                "edges": edges,
+                "truncated": nf > limit || ne > limit,
+            }),
+        )
+    }
+}
+
+// ── cad_export_step ──────────────────────────────────────────────────
+
+pub struct CadExportStepTool;
+
+impl ToolHandler for CadExportStepTool {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition {
+            name: "cad_export_step",
+            description: "Export a CadPart as STEP (ISO 10303-21, AP214), the exact B-rep format every mechanical CAD package imports (Fusion, SolidWorks, Inventor, Onshape, FreeCAD). Unlike GLB, which is a triangle mesh, STEP carries the true surfaces, so holes stay round and faces stay flat in the receiving tool. Units are millimetres, as the file declares. Each body is written as its own solid.",
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string", "description": "CadPart folder or features.toml, Space-relative" },
+                    "out":  { "type": "string", "description": "Output .step path, Space-relative (default: export.step in the part folder)" }
+                },
+                "required": ["path"]
+            }),
+            modes: &[WorkshopMode::General],
+            requires_approval: false,
+            stream_topics: &["workshop.tool.cad_export_step"],
+        }
+    }
+
+    fn execute(&self, input: serde_json::Value, ctx: &ToolContext) -> ToolResult {
+        const TOOL: &str = "cad_export_step";
+        let path_s = input.get("path").and_then(|v| v.as_str()).unwrap_or("");
+        let (path, src) = match read_features(ctx, path_s, TOOL) {
+            Ok(v) => v,
+            Err(e) => return e,
+        };
+        let tree = match eustress_cad::parse_tree(&src) {
+            Ok(t) => t,
+            Err(e) => return err(TOOL, format!("parse {}: {e}", path.display())),
+        };
+        let out = match eustress_cad::evaluate_tree(&tree) {
+            Ok(o) => o,
+            Err(e) => return err(TOOL, format!("the tree does not evaluate: {e}")),
+        };
+        let broken: Vec<&str> = out.entry_status.iter().filter(|s| !s.ok).map(|s| s.name.as_str()).collect();
+        let dest = match input.get("out").and_then(|v| v.as_str()) {
+            Some(o) => match resolve_space_path(ctx, o) {
+                Ok(p) => p,
+                Err(e) => return err(TOOL, e),
+            },
+            None => path.parent().map(|p| p.join("export.step")).unwrap_or_else(|| std::path::PathBuf::from("export.step")),
+        };
+        let name = path
+            .parent()
+            .and_then(|p| p.file_name())
+            .map(|s| s.to_string_lossy().to_string())
+            .unwrap_or_else(|| "part".to_string());
+        let text = match eustress_cad::step_string(&out.bodies, &name) {
+            Ok(t) => t,
+            Err(e) => return err(TOOL, format!("{e}")),
+        };
+        // A STEP file whose entity numbers repeat is rejected by every
+        // importer; check before claiming success.
+        let mut seen = std::collections::HashSet::new();
+        let mut dup = None;
+        for line in text.lines() {
+            if let Some(rest) = line.trim_start().strip_prefix('#') {
+                if let Some((num, _)) = rest.split_once('=') {
+                    let n = num.trim().to_string();
+                    if !seen.insert(n.clone()) {
+                        dup = Some(n);
+                        break;
+                    }
+                }
+            }
+        }
+        if let Some(n) = dup {
+            return err(TOOL, format!("internal: the STEP writer emitted entity #{n} twice; not writing a corrupt file"));
+        }
+        if let Some(parent) = dest.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        if let Err(e) = std::fs::write(&dest, &text) {
+            return err(TOOL, format!("write {}: {e}", dest.display()));
+        }
+        let mut data = serde_json::json!({
+            "ok": true,
+            "path": path.to_string_lossy(),
+            "out": dest.to_string_lossy(),
+            "bytes": text.len(),
+            "entities": seen.len(),
+            "bodies": out.bodies.iter().map(|b| b.name.clone()).collect::<Vec<_>>(),
+            "units": "mm",
+        });
+        if !broken.is_empty() {
+            data["warning"] = format!(
+                "exported the part as it evaluates, but {} feature(s) failed and are missing from it: {}",
+                broken.len(),
+                broken.join(", ")
+            )
+            .into();
+        }
+        ok(
+            TOOL,
+            format!("Wrote {} ({} bodies, {} bytes, mm)", dest.display(), out.bodies.len(), text.len()),
+            data,
         )
     }
 }

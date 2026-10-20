@@ -351,6 +351,7 @@ pub fn tool_meta(id: &str) -> Option<ToolMeta> {
         "cad:mate_coincident" => ("Coincident", "Add a coincident mate", "link", true),
         "cad:mate_prismatic" => ("Prismatic", "Add a prismatic (slider) mate", "cad-slide", true),
         "cad:mate_revolute" => ("Revolute", "Add a revolute (hinge) mate", "hinge", true),
+        "cad:open_sketch" => ("Edit Sketch", "Open the selected CadPart's sketch", "pen", true),
         "cad:solve_sketch" => ("Solve Sketch", "Solve the parametric sketch", "cad-solve", true),
         "ccem:asbuilt_compiler" => ("As-Built Compiler", "Compile As-Built", "build", false),
         "ccem:bid_leveler" => ("Bid Leveler", "Level bid", "build", false),

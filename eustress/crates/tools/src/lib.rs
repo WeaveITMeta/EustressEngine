@@ -31,6 +31,10 @@
 //! engine can insert it directly. Off by default so the MCP server
 //! can depend on this crate without pulling in the Bevy tree.
 
+// `serde_json::json!` recurses once per token tree, and the larger tool
+// schemas (cad_add_feature's above all) pass the default limit of 128.
+#![recursion_limit = "256"]
+
 /// Tool capability classification and caller permissions (CMMC AC.L1-3.1.2).
 pub mod capability;
 pub mod modes;
@@ -46,16 +50,22 @@ pub use registry::{
 // Tool implementation modules. Each hosts a family of related tools;
 // see the struct docs in the individual files for the full surface.
 pub mod cad_tools;
+/// Data mining over files in the Universe (`mine_data`).
+pub mod data_tools;
 pub mod diff_tools;
 pub mod embedvec_tools;
 pub mod entity_tools;
 pub mod file_tools;
 pub mod git_tools;
 pub mod memory_tools;
+pub mod particle_sim_tools;
 pub mod physics_tools;
 pub mod script_tools;
 pub mod shell_tools;
 pub mod simulation_tools;
+/// Which engine a simulation tool targets, and the per-instance files it
+/// talks to it through. Shared by the simulation tools.
+pub mod sim_ipc;
 pub mod spatial_tools;
 pub mod universe_tools;
 pub mod website_tools;
@@ -91,6 +101,10 @@ pub fn register_all_tools(registry: &mut ToolRegistry) {
     registry.register(entity_tools::UpdateEntityTool);
     registry.register(entity_tools::DeleteEntityTool);
 
+    // Particle simulations (fluids, charged particles, conduction): author
+    // and inspect ParticleSimulation / ParticleSpecies files.
+    registry.register(particle_sim_tools::ParticleSimulationTool);
+
     // Parametric CAD (feature-tree CadPart) — write path…
     registry.register(cad_tools::CadCreatePartTool);
     registry.register(cad_tools::CadSetVariableTool);
@@ -123,6 +137,14 @@ pub fn register_all_tools(registry: &mut ToolRegistry) {
     registry.register(cad_tools::CadOffsetSketchTool);
     registry.register(cad_tools::CadPublishPartTool);
     registry.register(cad_tools::CadListSourcesTool);
+    // Kernel v2: persistent face/edge names, and exact B-rep export.
+    registry.register(cad_tools::CadListTopologyTool);
+    registry.register(cad_tools::CadExportStepTool);
+
+    // Data mining over data files: models, feature selection, clustering,
+    // association rules and simulation residuals, each run returning a
+    // report with its cautions.
+    registry.register(data_tools::MineDataTool);
 
     // File I/O.
     registry.register(file_tools::ReadFileTool);

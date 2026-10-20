@@ -293,7 +293,9 @@ pub fn handle_select_children_event(
     // NOT `With<Selected>` — a Folder anchor never gets the `Selected`
     // component (see `resolve_selected_entities`).
     anchor_candidates: Query<Entity, With<Instance>>,
-    children_query: Query<&Children>,
+    // Children as the instance tree sees them: a part's pose anchor (not an
+    // instance) is replaced by the placed children hanging from it.
+    hierarchy: crate::space::pose_anchor::InstanceHierarchy,
     instance_query: Query<Option<&Instance>>,
     selection_manager: Option<Res<SelectionSyncManager>>,
 ) {
@@ -305,8 +307,7 @@ pub fn handle_select_children_event(
     // Snapshot entities to add (avoid mutating during query iteration).
     let mut to_add: Vec<String> = Vec::new();
     for parent in anchors {
-        let Ok(children) = children_query.get(parent) else { continue };
-        for child in children.iter() {
+        for child in hierarchy.children(parent) {
             // Filter abstract classes (Folder etc. stay non-visual).
             let inst = instance_query.get(child).ok().flatten();
             if is_abstract_celestial(inst) { continue; }

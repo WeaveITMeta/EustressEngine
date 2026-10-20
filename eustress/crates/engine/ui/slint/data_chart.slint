@@ -22,6 +22,18 @@ export struct ChartPoint {
     yv: string,   // formatted data y
 }
 
+// One sample in the 3D view: position normalized to -1..1 per axis (Rust
+// scales each column to its own range), its color, and formatted values.
+export struct ChartPoint3 {
+    nx: float,
+    ny: float,
+    nz: float,
+    color: color,
+    xv: string,
+    yv: string,
+    zv: string,
+}
+
 // One clickable chip in the view switcher.
 component Chip inherits Rectangle {
     in property <string> label;
@@ -254,6 +266,121 @@ component AxisField inherits Rectangle {
     }
 }
 
+// 3D scatter: drag to orbit, wheel to zoom. Rust sends normalized points
+// once; the projection is plain math on two angles, so orbiting never goes
+// back to Rust. Size and opacity grow toward the viewer as depth cues (Slint
+// draws in model order, so there is no depth sort).
+component Scatter3DBox inherits Rectangle {
+    in property <[ChartPoint3]> points;
+    in property <string> x-label;
+    in property <string> y-label;
+    in property <string> z-label;
+    in-out property <float> yaw-deg: 35;
+    in-out property <float> pitch-deg: 20;
+    in-out property <float> zoom: 1.0;
+    property <float> yaw0;
+    property <float> pitch0;
+    property <angle> yaw: self.yaw-deg * 1deg;
+    property <angle> pitch: self.pitch-deg * 1deg;
+    property <length> cx: self.width / 2;
+    property <length> cy: self.height / 2;
+    property <length> s: min(self.width, self.height) * 0.35 * self.zoom;
+    background: Theme.viewport-background;
+    border-width: 1px;
+    border-color: Theme.border-color;
+    border-radius: 4px;
+    clip: true;
+
+    TouchArea {
+        mouse-cursor: move;
+        pointer-event(e) => {
+            if (e.kind == PointerEventKind.down) {
+                root.yaw0 = root.yaw-deg;
+                root.pitch0 = root.pitch-deg;
+            }
+        }
+        moved => {
+            root.yaw-deg = root.yaw0 + (self.mouse-x - self.pressed-x) / 1px * 0.4;
+            root.pitch-deg = max(-89, min(89, root.pitch0 + (self.mouse-y - self.pressed-y) / 1px * 0.4));
+        }
+        scroll-event(e) => {
+            root.zoom = max(0.2, min(5.0, root.zoom * (e.delta-y > 0px ? 1.1 : 0.9)));
+            return accept;
+        }
+    }
+
+    // Axes from the origin to each projected unit vector.
+    Path {
+        width: 100%;
+        height: 100%;
+        fill: transparent;
+        stroke: Theme.border-highlight;
+        stroke-width: 1px;
+        viewbox-x: 0;
+        viewbox-y: 0;
+        viewbox-width: root.width / 1px;
+        viewbox-height: root.height / 1px;
+        commands: "M " + root.cx / 1px + " " + root.cy / 1px
+            + " L " + (root.cx + root.s * cos(root.yaw)) / 1px + " " + (root.cy - root.s * sin(root.yaw) * sin(root.pitch)) / 1px
+            + " M " + root.cx / 1px + " " + root.cy / 1px
+            + " L " + root.cx / 1px + " " + (root.cy - root.s * cos(root.pitch)) / 1px
+            + " M " + root.cx / 1px + " " + root.cy / 1px
+            + " L " + (root.cx + root.s * sin(root.yaw)) / 1px + " " + (root.cy + root.s * cos(root.yaw) * sin(root.pitch)) / 1px;
+    }
+    Text {
+        x: root.cx + root.s * 1.08 * cos(root.yaw);
+        y: root.cy - root.s * 1.08 * sin(root.yaw) * sin(root.pitch) - self.height / 2;
+        text: root.x-label;
+        color: Theme.text-secondary;
+        font-size: 10px;
+    }
+    Text {
+        x: root.cx + 4px;
+        y: root.cy - root.s * 1.08 * cos(root.pitch) - self.height;
+        text: root.y-label;
+        color: Theme.text-secondary;
+        font-size: 10px;
+    }
+    Text {
+        x: root.cx + root.s * 1.08 * sin(root.yaw);
+        y: root.cy + root.s * 1.08 * cos(root.yaw) * sin(root.pitch) - self.height / 2;
+        text: root.z-label;
+        color: Theme.text-secondary;
+        font-size: 10px;
+    }
+
+    for p in root.points: Rectangle {
+        property <float> x1: p.nx * cos(root.yaw) + p.nz * sin(root.yaw);
+        property <float> z1: p.nz * cos(root.yaw) - p.nx * sin(root.yaw);
+        property <float> y2: p.ny * cos(root.pitch) - self.z1 * sin(root.pitch);
+        // 0 far .. 1 near
+        property <float> depth: (p.ny * sin(root.pitch) + self.z1 * cos(root.pitch) + 1) / 2;
+        width: 3px + 4px * self.depth;
+        height: self.width;
+        border-radius: self.width / 2;
+        x: root.cx + root.s * self.x1 - self.width / 2;
+        y: root.cy - root.s * self.y2 - self.height / 2;
+        background: p.color.with-alpha(0.35 + 0.6 * self.depth);
+
+        point-touch := TouchArea {}
+        if point-touch.has-hover: Rectangle {
+            x: 10px;
+            y: -4px;
+            width: point-label.preferred-width + 12px;
+            height: 20px;
+            background: Theme.panel-glass;
+            border-radius: 4px;
+            point-label := Text {
+                x: 6px;
+                vertical-alignment: center;
+                font-size: 10px;
+                color: Theme.text-primary;
+                text: "(" + p.xv + ", " + p.yv + ", " + p.zv + ")";
+            }
+        }
+    }
+}
+
 export component DataChartView inherits Rectangle {
     in property <string> title;
     in property <string> x-label;
@@ -264,6 +391,12 @@ export component DataChartView inherits Rectangle {
     in property <[string]> x-ticks;
     in property <[string]> y-ticks;
     in property <[ChartPoint]> points;
+    // 3D view: the last three numeric columns, colored by `color3-label`.
+    in property <[ChartPoint3]> points3;
+    in property <string> x3-label;
+    in property <string> y3-label;
+    in property <string> z3-label;
+    in property <string> color3-label;
     in-out property <string> xmin-in;
     in-out property <string> xmax-in;
     in-out property <string> ymin-in;
@@ -284,7 +417,10 @@ export component DataChartView inherits Rectangle {
             Chip { label: "Split"; active: root.view-mode == "split"; clicked => { root.view-mode = "split"; } }
             Chip { label: "3D";    active: root.view-mode == "3d";    clicked => { root.view-mode = "3d"; } }
             Rectangle { horizontal-stretch: 1; }
-            Chip { label: "Color by: " + (root.title == "" ? "—" : root.title); clickable: false; }
+            if root.view-mode == "3d" && root.color3-label != "": Chip {
+                label: "Color by: " + root.color3-label;
+                clickable: false;
+            }
         }
 
         // ── Legend (series + live fit equation) ───────────────────────────
@@ -333,14 +469,21 @@ export component DataChartView inherits Rectangle {
                 x-label: root.x-label; y-label: root.y-label; points: root.points;
             }
         }
-        if root.view-mode == "3d": Rectangle {
+        if root.view-mode == "3d" && root.points3.length > 0: Scatter3DBox {
+            vertical-stretch: 1;
+            points: root.points3;
+            x-label: root.x3-label;
+            y-label: root.y3-label;
+            z-label: root.z3-label;
+        }
+        if root.view-mode == "3d" && root.points3.length == 0: Rectangle {
             vertical-stretch: 1;
             background: Theme.viewport-background;
             border-width: 1px; border-color: Theme.border-color; border-radius: 4px;
             Text {
                 x: (parent.width - self.width) / 2;
                 y: (parent.height - self.height) / 2;
-                text: "3D scatter — coming soon";
+                text: "The 3D view needs three numeric columns.";
                 color: Theme.text-disabled; font-size: 12px;
             }
         }

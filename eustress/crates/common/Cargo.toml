@@ -9,6 +9,9 @@ bevy = { workspace = true, features = ["serialize", "bevy_color", "bevy_pbr", "b
 # Avatar descriptor + derived metrics. Bevy-free by design so the wasm web
 # customizer links the SAME code — see the crate's module doc.
 eustress-avatar-schema = { path = "../avatar-schema", features = ["bevy"] }
+# The particle solver behind `realism::particle_sim`, which re-exports it. A
+# crate of its own so dev builds compile it optimised (.cargo/config.toml).
+eustress-particle-sim = { path = "../particle-sim" }
 serde = { workspace = true }
 ron = { workspace = true }
 uuid = { workspace = true }
@@ -64,6 +67,11 @@ gltf = { version = "1.4", optional = true }
 # Image processing for GeoTIFF
 tiff = { version = "0.9", optional = true }
 image = { version = "0.25", optional = true }
+
+# Material-map mip chains (linear-light colour, renormalised normals), the
+# same builder the engine's material loader uses. The terrain texture arrays
+# run it on every layer. Tiny, and built at opt-level 3 in dev.
+texture-gen = { path = "../texture-gen" }
 
 # Time for Soul codegen
 chrono = "0.4"

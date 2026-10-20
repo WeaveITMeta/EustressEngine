@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="none">
+  <!-- TerrainStamp: a mound pressed onto flat ground, its footprint dashed. -->
+  <ellipse cx="8" cy="12" rx="6.5" ry="1.8" stroke="#30A060" stroke-width="0.7" stroke-dasharray="1.4 1"/>
+  <path d="M2 12 C4.5 12 5 5 8 5 C11 5 11.5 12 14 12 Z" fill="#64C896" stroke="#30A060" stroke-width="0.6"/>
+  <path d="M6.6 6.4 C7.2 5.7 8.8 5.7 9.4 6.4" stroke="#FFFFFF" stroke-width="0.7" stroke-linecap="round" opacity="0.6"/>
+</svg>

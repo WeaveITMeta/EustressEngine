@@ -187,11 +187,7 @@ fn horizontal_solver_unit() {
             p2: [1.0, 0.4],
         }],
         dimensions: vec![],
-        constraints: vec![SketchConstraint {
-            kind: ConstraintKind::Horizontal,
-            e1: 0,
-            e2: None,
-        }],
+        constraints: vec![SketchConstraint::new(ConstraintKind::Horizontal, 0, None)],
     };
     let report = solve_sketch(&sketch, &HashMap::new()).unwrap();
     assert!(

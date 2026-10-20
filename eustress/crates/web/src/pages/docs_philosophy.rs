@@ -1,16 +1,12 @@
 // =============================================================================
 // Eustress Web - Philosophy Documentation Page
 // =============================================================================
-// The core philosophy of Eustress Engine: file-system-first, IDE agnostic,
-// no vendor lock-in, your data is your data, and the power of vibe coding.
+// Philosophy: the principles behind Eustress, each tied to a mechanism the
+// reader can inspect in the product and in the source.
 // =============================================================================
 
 use leptos::prelude::*;
 use crate::components::{CentralNav, Footer};
-
-// -----------------------------------------------------------------------------
-// Table of Contents Data
-// -----------------------------------------------------------------------------
 
 #[derive(Clone, Debug, PartialEq)]
 struct TocSection {
@@ -28,86 +24,96 @@ struct TocSubsection {
 fn get_toc() -> Vec<TocSection> {
     vec![
         TocSection {
-            id: "manifesto",
-            title: "Manifesto",
+            id: "overview",
+            title: "Overview",
             subsections: vec![
-                TocSubsection { id: "manifesto-vision", title: "Our Vision" },
-                TocSubsection { id: "manifesto-principles", title: "Core Principles" },
-                TocSubsection { id: "manifesto-different", title: "What Makes Us Different" },
+                TocSubsection { id: "overview-purpose", title: "What Eustress Is For" },
+                TocSubsection { id: "overview-principles", title: "Six Principles" },
             ],
         },
         TocSection {
-            id: "filesystem",
-            title: "File-System-First",
+            id: "agents",
+            title: "Agents and People",
             subsections: vec![
-                TocSubsection { id: "filesystem-why", title: "Why Files Matter" },
-                TocSubsection { id: "filesystem-structure", title: "Project Structure" },
-                TocSubsection { id: "filesystem-formats", title: "Open Formats" },
+                TocSubsection { id: "agents-same", title: "The Same Spaces" },
+                TocSubsection { id: "agents-mcp", title: "The MCP Server" },
+                TocSubsection { id: "agents-bridge", title: "The Engine Bridge" },
+                TocSubsection { id: "agents-camera", title: "The AI Camera" },
             ],
         },
         TocSection {
-            id: "freedom",
-            title: "Freedom & Ownership",
+            id: "ownership",
+            title: "Your Work Is Yours",
             subsections: vec![
-                TocSubsection { id: "freedom-ide", title: "IDE Agnostic" },
-                TocSubsection { id: "freedom-lockin", title: "No Vendor Lock-In" },
-                TocSubsection { id: "freedom-data", title: "Your Data Is Your Data" },
+                TocSubsection { id: "ownership-files", title: "Files You Can Read" },
+                TocSubsection { id: "ownership-history", title: "History You Keep" },
+                TocSubsection { id: "ownership-scale", title: "A Database for Scale" },
+                TocSubsection { id: "ownership-privacy", title: "What Leaves Your Machine" },
             ],
         },
         TocSection {
-            id: "performance",
-            title: "Performance",
+            id: "rust",
+            title: "One Language",
             subsections: vec![
-                TocSubsection { id: "performance-rust", title: "100% Rust" },
-                TocSubsection { id: "performance-scale", title: "Scale" },
-                TocSubsection { id: "performance-benchmarks", title: "Benchmarks" },
+                TocSubsection { id: "rust-throughout", title: "Rust Throughout" },
+                TocSubsection { id: "rust-slint", title: "Slint Is Rust" },
+                TocSubsection { id: "rust-exceptions", title: "What Is Not Rust" },
             ],
         },
         TocSection {
-            id: "vibe",
-            title: "Vibe Coding",
+            id: "units",
+            title: "Measured in SI",
             subsections: vec![
-                TocSubsection { id: "vibe-what", title: "What Is Vibe Coding" },
-                TocSubsection { id: "vibe-soul", title: "Soul Language" },
-                TocSubsection { id: "vibe-ai", title: "AI Integration" },
+                TocSubsection { id: "units-meters", title: "Meters Everywhere" },
+                TocSubsection { id: "units-display", title: "Display Units" },
+                TocSubsection { id: "units-si", title: "SI in the Physics" },
             ],
         },
         TocSection {
-            id: "community",
-            title: "Community",
+            id: "determinism",
+            title: "Same Inputs, Same World",
             subsections: vec![
-                TocSubsection { id: "community-open", title: "Open Development" },
-                TocSubsection { id: "community-contribute", title: "Contributing" },
-                TocSubsection { id: "community-future", title: "The Future" },
+                TocSubsection { id: "determinism-pins", title: "The Pins" },
+                TocSubsection { id: "determinism-seed", title: "One Seed" },
+            ],
+        },
+        TocSection {
+            id: "license",
+            title: "Source-Available",
+            subsections: vec![
+                TocSubsection { id: "license-shield", title: "PolyForm Shield" },
+                TocSubsection { id: "license-commercial", title: "The Commercial License" },
+            ],
+        },
+        TocSection {
+            id: "roadmap",
+            title: "What's Next",
+            subsections: vec![
+                TocSubsection { id: "roadmap-determinism", title: "A Determinism Gate" },
+                TocSubsection { id: "roadmap-branches", title: "Branching the Whole World" },
             ],
         },
     ]
 }
 
-// -----------------------------------------------------------------------------
-// Main Component
-// -----------------------------------------------------------------------------
-
 /// Philosophy documentation page.
 #[component]
 pub fn DocsPhilosophyPage() -> impl IntoView {
-    let active_section = RwSignal::new("manifesto".to_string());
+    let active_section = RwSignal::new("overview".to_string());
 
     view! {
         <div class="page page-docs">
             <CentralNav active="learn".to_string() />
 
-            // Background
             <div class="docs-bg">
                 <div class="docs-grid-overlay"></div>
                 <div class="docs-glow glow-philosophy"></div>
             </div>
 
             <div class="docs-layout">
-                // Floating TOC Sidebar
                 <aside class="docs-toc">
                     <div class="toc-header">
-                        <img src="/assets/icons/brain.svg" alt="Philosophy" class="toc-icon" />
+                        <img src="/assets/icons/book.svg" alt="Philosophy" class="toc-icon" />
                         <h2>"Philosophy"</h2>
                     </div>
                     <nav class="toc-nav">
@@ -148,9 +154,7 @@ pub fn DocsPhilosophyPage() -> impl IntoView {
                     </div>
                 </aside>
 
-                // Main Content
                 <main class="docs-content">
-                    // Hero
                     <header class="docs-hero">
                         <div class="docs-breadcrumb">
                             <a href="/learn">"Learn"</a>
@@ -159,596 +163,551 @@ pub fn DocsPhilosophyPage() -> impl IntoView {
                         </div>
                         <h1 class="docs-title">"The Eustress Philosophy"</h1>
                         <p class="docs-subtitle">
-                            "Your data is your data. Your tools are your choice. Your creativity 
-                            is unlimited. We believe in freedom, performance, and the power of 
-                            open standards."
+                            "Eustress is a source-available simulation and data platform, written in Rust,
+                            where people and AI agents build and run the same Spaces. These are the
+                            principles behind it, each tied to a mechanism you can inspect yourself."
                         </p>
                         <div class="docs-meta">
                             <span class="meta-item">
                                 <img src="/assets/icons/clock.svg" alt="Time" />
-                                "15 min read"
+                                "11 min read"
                             </span>
                             <span class="meta-item">
-                                <img src="/assets/icons/code.svg" alt="Level" />
-                                "All Levels"
+                                <img src="/assets/icons/cube.svg" alt="Level" />
+                                "Beginner"
                             </span>
                             <span class="meta-item">
                                 <img src="/assets/icons/check.svg" alt="Updated" />
-                                "v0.16.1"
+                                "Updated Sep 2026"
                             </span>
                         </div>
                     </header>
 
-                    // ─────────────────────────────────────────────────────
-                    // Manifesto
-                    // ─────────────────────────────────────────────────────
-                    <section id="manifesto" class="docs-section">
-                        <h2 class="section-anchor">"Manifesto"</h2>
+                    // =========================================================
+                    // OVERVIEW
+                    // =========================================================
+                    <section id="overview" class="docs-section">
+                        <h2 class="section-title">
+                            <span class="section-number">"01"</span>
+                            "Overview"
+                        </h2>
 
-                        <div id="manifesto-vision" class="docs-block">
-                            <h3>"Our Vision"</h3>
-                            <div class="manifesto-quote">
-                                <blockquote>
-                                    "We believe that creation should be as natural as thinking. 
-                                    That your tools should amplify your vision, not constrain it. 
-                                    That your work belongs to you, forever."
-                                </blockquote>
-                            </div>
+                        <div id="overview-purpose" class="subsection">
+                            <h3>"What Eustress Is For"</h3>
                             <p>
-                                "Eustress Engine was born from frustration with the status quo. 
-                                Proprietary formats that lock you in. Bloated editors that slow you down. 
-                                Licensing models that treat creators as renters, not owners."
+                                "Eustress is for modeling physical systems, running them forward in time and
+                                measuring what happens: a battery cell under load, heat moving through a part,
+                                a structure an agent assembles and tests. The 3D view and the entity component
+                                system underneath are how it does that. The product is the simulation and the
+                                data it produces."
                             </p>
                             <p>
-                                "We built something different. Something that respects your time, 
-                                your data, and your freedom. Something that scales from a single 
-                                developer to a global team. Something that will still work in 50 years."
+                                "Every principle below is a decision you can check in the product or in the
+                                source, which is public. Where a principle is still partly a goal, the page
+                                says which part."
                             </p>
                         </div>
 
-                        <div id="manifesto-principles" class="docs-block">
-                            <h3>"Core Principles"</h3>
-                            <div class="principles-grid">
-                                <div class="principle-card">
-                                    <div class="principle-number">"01"</div>
-                                    <h4>"Files Over Databases"</h4>
-                                    <p>
-                                        "Plain text files are the universal interface. They work with 
-                                        every tool, every version control system, every backup solution. 
-                                        They will outlive any proprietary format."
-                                    </p>
-                                </div>
-                                <div class="principle-card">
-                                    <div class="principle-number">"02"</div>
-                                    <h4>"Standards Over Proprietary"</h4>
-                                    <p>
-                                        "We use glTF for 3D, TOML for config, PNG for images. Open 
-                                        standards that anyone can read, write, and extend. No secret 
-                                        sauce, no magic binaries."
-                                    </p>
-                                </div>
-                                <div class="principle-card">
-                                    <div class="principle-number">"03"</div>
-                                    <h4>"Performance Without Compromise"</h4>
-                                    <p>
-                                        "100% Rust means memory safety without garbage collection. 
-                                        Fearless concurrency without data races. Native performance 
-                                        on every platform."
-                                    </p>
-                                </div>
-                                <div class="principle-card">
-                                    <div class="principle-number">"04"</div>
-                                    <h4>"Simplicity Over Complexity"</h4>
-                                    <p>
-                                        "The best code is no code. The best feature is the one you 
-                                        don't need. We ruthlessly eliminate complexity to focus on 
-                                        what matters: your creation."
-                                    </p>
-                                </div>
-                            </div>
-                        </div>
-
-                        <div id="manifesto-different" class="docs-block">
-                            <h3>"What Makes Us Different"</h3>
-                            <table class="docs-table comparison">
-                                <thead>
-                                    <tr>
-                                        <th>"Aspect"</th>
-                                        <th>"Others"</th>
-                                        <th>"Eustress"</th>
-                                    </tr>
-                                </thead>
-                                <tbody>
-                                    <tr>
-                                        <td>"Project Format"</td>
-                                        <td>"Proprietary binary"</td>
-                                        <td>"Plain folders + TOML"</td>
-                                    </tr>
-                                    <tr>
-                                        <td>"Scene Format"</td>
-                                        <td>"Custom binary"</td>
-                                        <td>"glTF 2.0 (JSON)"</td>
-                                    </tr>
-                                    <tr>
-                                        <td>"Asset Pipeline"</td>
-                                        <td>"Import → Convert → Lock"</td>
-                                        <td>"Use directly, cache derived"</td>
-                                    </tr>
-                                    <tr>
-                                        <td>"Editor"</td>
-                                        <td>"Required, proprietary"</td>
-                                        <td>"Optional, any editor works"</td>
-                                    </tr>
-                                    <tr>
-                                        <td>"Version Control"</td>
-                                        <td>"Painful, needs LFS"</td>
-                                        <td>"Native Git, text diffs"</td>
-                                    </tr>
-                                    <tr>
-                                        <td>"Collaboration"</td>
-                                        <td>"Cloud lock-in"</td>
-                                        <td>"Any Git host"</td>
-                                    </tr>
-                                    <tr>
-                                        <td>"Licensing"</td>
-                                        <td>"Per-seat, royalties"</td>
-                                        <td>"Free, source-available (PolyForm Shield)"</td>
-                                    </tr>
-                                </tbody>
-                            </table>
-                        </div>
-                    </section>
-
-                    // ─────────────────────────────────────────────────────
-                    // File-System-First
-                    // ─────────────────────────────────────────────────────
-                    <section id="filesystem" class="docs-section">
-                        <h2 class="section-anchor">"File-System-First"</h2>
-
-                        <div id="filesystem-why" class="docs-block">
-                            <h3>"Why Files Matter"</h3>
-                            <p>
-                                "Opening a folder "<strong>"is"</strong>" opening a project. No import 
-                                wizards. No project files. No databases. Just a folder with your stuff."
-                            </p>
-                            <div class="docs-callout success">
-                                <strong>"The Obsidian/VS Code Model:"</strong>
-                                " Like Obsidian for notes or VS Code for code, Eustress treats your 
-                                project folder as the source of truth. The engine reads files directly. 
-                                What you see in your file explorer is what the engine sees."
-                            </div>
-                            <p>"This approach gives you:"</p>
-                            <ul class="docs-list">
-                                <li><strong>"Portability"</strong>" — Copy a folder, you've copied a project"</li>
-                                <li><strong>"Transparency"</strong>" — See exactly what's in your project"</li>
-                                <li><strong>"Tooling Freedom"</strong>" — Use any editor, any script, any tool"</li>
-                                <li><strong>"Version Control"</strong>" — Git just works, no plugins needed"</li>
-                                <li><strong>"Longevity"</strong>" — Files outlive software companies"</li>
-                            </ul>
-                        </div>
-
-                        <div id="filesystem-structure" class="docs-block">
-                            <h3>"Project Structure"</h3>
-                            <pre class="code-block"><code>{"my-project/                    ← Open this folder = open project
-├── .eustress/                  ← Engine metadata
-│   ├── project.toml            ← Project settings (committed)
-│   ├── settings.toml           ← Editor preferences (committed)
-│   ├── cache/                  ← Derived assets (gitignored)
-│   │   ├── textures/           ← GPU-optimized textures
-│   │   ├── meshes/             ← Optimized geometry
-│   │   └── scripts/            ← Compiled Rune bytecode
-│   └── local/                  ← User-local state (gitignored)
-│
-├── Workspace/                  ← 3D scene content
-│   ├── _service.toml           ← Service metadata
-│   ├── Ground.part.toml        ← Part definition
-│   ├── Building.model.toml     ← Model definition
-│   └── assets/
-│       └── building.glb        ← glTF model
-│
-├── SoulService/                ← Scripts
-│   ├── _service.toml
-│   └── main.soul               ← Soul script
-│
-├── StarterGui/                 ← UI definitions
-│   ├── _service.toml
-│   └── HUD/
-│       ├── _instance.toml
-│       └── Panel.frame.toml
-│
-├── assets/                     ← Raw assets
-│   ├── textures/
-│   ├── audio/
-│   └── models/
-│
-└── .gitignore                  ← Standard Git ignore"}</code></pre>
-                        </div>
-
-                        <div id="filesystem-formats" class="docs-block">
-                            <h3>"Open Formats"</h3>
+                        <div id="overview-principles" class="subsection">
+                            <h3>"Six Principles"</h3>
                             <table class="docs-table">
                                 <thead>
-                                    <tr>
-                                        <th>"Content"</th>
-                                        <th>"Format"</th>
-                                        <th>"Why"</th>
-                                    </tr>
+                                    <tr><th>"Principle"</th><th>"What to look at"</th></tr>
                                 </thead>
                                 <tbody>
-                                    <tr>
-                                        <td>"Configuration"</td>
-                                        <td>"TOML"</td>
-                                        <td>"Human-readable, Git-diffable"</td>
-                                    </tr>
-                                    <tr>
-                                        <td>"3D Models"</td>
-                                        <td>"glTF 2.0"</td>
-                                        <td>"Industry standard, JSON scenes"</td>
-                                    </tr>
-                                    <tr>
-                                        <td>"Textures"</td>
-                                        <td>"PNG, JPEG, KTX2"</td>
-                                        <td>"Universal support"</td>
-                                    </tr>
-                                    <tr>
-                                        <td>"Audio"</td>
-                                        <td>"OGG, WAV, FLAC"</td>
-                                        <td>"Open codecs"</td>
-                                    </tr>
-                                    <tr>
-                                        <td>"Scripts"</td>
-                                        <td>".soul, .rune"</td>
-                                        <td>"Plain text, any editor"</td>
-                                    </tr>
-                                    <tr>
-                                        <td>"Data"</td>
-                                        <td>"JSON, CSV"</td>
-                                        <td>"Universal interchange"</td>
-                                    </tr>
+                                    <tr><td>"Agents and people work in the same Spaces"</td><td>"The MCP server, the engine bridge, the AI camera"</td></tr>
+                                    <tr><td>"Your work is yours"</td><td>"Space folders, TOML files, git history, the WorldDb"</td></tr>
+                                    <tr><td>"One language underneath"</td><td>"Rust in the engine, Studio, tools and website"</td></tr>
+                                    <tr><td>"Measured in SI"</td><td>"Meters in every system, SI types in the physics"</td></tr>
+                                    <tr><td>"Same inputs, same world"</td><td>"A fixed 60 Hz step, pinned physics settings, one seed"</td></tr>
+                                    <tr><td>"Source-available"</td><td>"PolyForm Shield 1.0.0, plus a commercial license"</td></tr>
                                 </tbody>
                             </table>
                         </div>
                     </section>
 
-                    // ─────────────────────────────────────────────────────
-                    // Freedom & Ownership
-                    // ─────────────────────────────────────────────────────
-                    <section id="freedom" class="docs-section">
-                        <h2 class="section-anchor">"Freedom & Ownership"</h2>
+                    // =========================================================
+                    // AGENTS AND PEOPLE
+                    // =========================================================
+                    <section id="agents" class="docs-section">
+                        <h2 class="section-title">
+                            <span class="section-number">"02"</span>
+                            "Agents and People"
+                        </h2>
 
-                        <div id="freedom-ide" class="docs-block">
-                            <h3>"IDE Agnostic"</h3>
+                        <div id="agents-same" class="subsection">
+                            <h3>"The Same Spaces"</h3>
                             <p>
-                                "Use whatever editor you love. Eustress doesn't care."
+                                "An agent in Eustress works in the Space you have open, not in a copy and not
+                                by reading screenshots of the interface. The parts it creates appear in your
+                                Explorer, and the editor actions your keyboard shortcuts run are one bridge call
+                                away ("<code>"action.invoke"</code>")."
                             </p>
-                            <div class="editor-grid">
-                                <div class="editor-card">
-                                    <h4>"VS Code"</h4>
-                                    <p>"Full extension support, integrated terminal, Git"</p>
-                                </div>
-                                <div class="editor-card">
-                                    <h4>"Neovim"</h4>
-                                    <p>"LSP support, lightning fast, keyboard-driven"</p>
-                                </div>
-                                <div class="editor-card">
-                                    <h4>"Zed"</h4>
-                                    <p>"GPU-accelerated, collaborative, modern"</p>
-                                </div>
-                                <div class="editor-card">
-                                    <h4>"Sublime Text"</h4>
-                                    <p>"Fast, minimal, distraction-free"</p>
-                                </div>
-                                <div class="editor-card">
-                                    <h4>"Eustress Studio"</h4>
-                                    <p>"Integrated 3D viewport, visual editing"</p>
-                                </div>
-                                <div class="editor-card">
-                                    <h4>"Notepad"</h4>
-                                    <p>"Yes, even Notepad works. It's just text."</p>
-                                </div>
-                            </div>
-                            <div class="docs-callout info">
-                                <strong>"Hot Reload Everywhere:"</strong>
-                                " Save a file in any editor, Eustress detects the change and 
-                                hot-reloads automatically. No plugins required."
-                            </div>
-                        </div>
-
-                        <div id="freedom-lockin" class="docs-block">
-                            <h3>"No Vendor Lock-In"</h3>
                             <p>
-                                "Your project is a folder. You can:"
-                            </p>
-                            <ul class="docs-list">
-                                <li><strong>"Copy it"</strong>" — Drag and drop, it's a folder"</li>
-                                <li><strong>"Zip it"</strong>" — Standard archive, any tool"</li>
-                                <li><strong>"Git it"</strong>" — Push to GitHub, GitLab, Bitbucket, your own server"</li>
-                                <li><strong>"Sync it"</strong>" — Dropbox, OneDrive, Google Drive, rsync"</li>
-                                <li><strong>"Back it up"</strong>" — Time Machine, Backblaze, tape drives"</li>
-                                <li><strong>"Read it"</strong>" — In 50 years, TOML will still be readable"</li>
-                            </ul>
-                            <p>
-                                "We will never hold your data hostage. If Eustress disappeared tomorrow, 
-                                your projects would still be usable. glTF models open in Blender. TOML 
-                                configs are human-readable. Your work is yours."
+                                "Studio's Workshop panel and the MCP server take their tools from one crate, "
+                                <code>"eustress-tools"</code>", so a tool added there is available to an agent in
+                                either place."
                             </p>
                         </div>
 
-                        <div id="freedom-data" class="docs-block">
-                            <h3>"Your Data Is Your Data"</h3>
-                            <div class="data-ownership">
-                                <div class="ownership-card">
-                                    <h4>"🔒 No Cloud Required"</h4>
-                                    <p>
-                                        "Everything runs locally. No account needed. No internet required. 
-                                        No telemetry by default. Your creations stay on your machine."
-                                    </p>
+                        <div id="agents-mcp" class="subsection">
+                            <h3>"The MCP Server"</h3>
+                            <p>
+                                "The MCP server, "<code>"eustress-mcp"</code>", speaks the Model Context Protocol over
+                                standard input and output, the way MCP clients such as Claude Desktop, Cursor and
+                                Windsurf launch a server. Through it an agent lists Universes and Spaces, reads and
+                                edits entities and scripts, runs simulations and experiments, and reads the
+                                op-log."
+                            </p>
+                            <p>
+                                "When an engine is running, entity edits go through it and appear in the open
+                                Space at once. When none is, they are written to the Space's files instead. "
+                                <a href="/learn/mcp">"MCP Server"</a>" lists the tools and how to connect a
+                                client."
+                            </p>
+                        </div>
+
+                        <div id="agents-bridge" class="subsection">
+                            <h3>"The Engine Bridge"</h3>
+                            <p>
+                                "Every running engine, windowed or headless, opens a bridge: a JSON-RPC listener
+                                on "<code>"127.0.0.1"</code>" whose port it writes to "<code>".eustress/engine.port"</code>
+                                " in its Universe. The MCP server and the "<code>"eustress"</code>" command-line tool
+                                are both clients of it. Each request and each reply is one line of JSON:"
+                            </p>
+                            <div class="code-block">
+                                <div class="code-header">
+                                    <span class="code-lang">"Bridge wire format"</span>
                                 </div>
-                                <div class="ownership-card">
-                                    <h4>"📤 Export Everything"</h4>
-                                    <p>
-                                        "Export to any format. glTF, FBX, OBJ for models. JSON, CSV for 
-                                        data. No artificial limitations on getting your data out."
-                                    </p>
-                                </div>
-                                <div class="ownership-card">
-                                    <h4>"🔓 No DRM"</h4>
-                                    <p>
-                                        "Your builds are yours. Distribute them however you want. No 
-                                        license checks, no online activation, no phone-home."
-                                    </p>
-                                </div>
-                                <div class="ownership-card">
-                                    <h4>"📜 Source-Available Core"</h4>
-                                    <p>
-                                        "The engine core is source-available under PolyForm Shield. Fork it, modify it, learn from
-                                        it. Your investment in learning Eustress is never wasted."
-                                    </p>
-                                </div>
+                                <pre><code class="language-json">{r#"{"jsonrpc":"2.0","id":1,"method":"ecs.inspect","params":{"limit":10}}
+{"jsonrpc":"2.0","id":1,"result":{...}}"#}</code></pre>
                             </div>
+                            <p>
+                                "Its methods cover what acting in a world takes: query and edit entities ("
+                                <code>"ecs.query"</code>", "<code>"entity.create"</code>", "<code>"entity.update"</code>
+                                "), advance physics one fixed tick at a time ("<code>"sim.step"</code>"), cast rays
+                                against live colliders ("<code>"scene.raycast"</code>"), run editor actions ("
+                                <code>"action.invoke"</code>"), read the op-log ("<code>"oplog.tail"</code>") and
+                                capture images ("<code>"viewport.capture"</code>", "<code>"ai_camera.capture"</code>")."
+                            </p>
+                        </div>
+
+                        <div id="agents-camera" class="subsection">
+                            <h3>"The AI Camera"</h3>
+                            <p>
+                                "An agent that builds something needs to look at it without taking over your
+                                view. The AI camera is a second camera that renders 1280 by 720 images into an
+                                off-screen texture instead of the window. It appears in the Explorer as a Camera
+                                named AI Camera, and the "<code>"ai_camera_set_pose"</code>", "
+                                <code>"ai_camera_orbit"</code>", "<code>"ai_camera_frame"</code>" and "
+                                <code>"ai_camera_capture"</code>" tools move it and save what it sees, while your
+                                viewport stays where you left it."
+                            </p>
                         </div>
                     </section>
 
-                    // ─────────────────────────────────────────────────────
-                    // Performance
-                    // ─────────────────────────────────────────────────────
-                    <section id="performance" class="docs-section">
-                        <h2 class="section-anchor">"Performance"</h2>
+                    // =========================================================
+                    // YOUR WORK IS YOURS
+                    // =========================================================
+                    <section id="ownership" class="docs-section">
+                        <h2 class="section-title">
+                            <span class="section-number">"03"</span>
+                            "Your Work Is Yours"
+                        </h2>
 
-                        <div id="performance-rust" class="docs-block">
-                            <h3>"100% Rust"</h3>
+                        <div id="ownership-files" class="subsection">
+                            <h3>"Files You Can Read"</h3>
                             <p>
-                                "Eustress is written entirely in Rust. Not a wrapper around C++. 
-                                Not a scripting layer on top of something else. Pure Rust, from 
-                                the ground up."
+                                "A Space is a folder you can open without Eustress. Services, instances and
+                                settings are TOML; scripts are "<code>".rune"</code>" and "<code>".luau"</code>" files;
+                                meshes are "<code>".glb"</code>". Edit any of them in another editor and the file
+                                watcher applies the save to the open Space. Rune scripts also get completions
+                                from the "<a href="/learn/lsp">"Rune language server"</a>"."
                             </p>
-                            <div class="rust-benefits">
-                                <div class="benefit">
-                                    <h4>"🦀 Memory Safety"</h4>
-                                    <p>"No null pointers. No buffer overflows. No use-after-free. The compiler catches bugs before they ship."</p>
-                                </div>
-                                <div class="benefit">
-                                    <h4>"⚡ Zero-Cost Abstractions"</h4>
-                                    <p>"High-level code compiles to optimal machine code. No runtime overhead for safety."</p>
-                                </div>
-                                <div class="benefit">
-                                    <h4>"🔄 Fearless Concurrency"</h4>
-                                    <p>"Data races are compile-time errors. Multi-threading without fear."</p>
-                                </div>
-                                <div class="benefit">
-                                    <h4>"🚫 No Garbage Collection"</h4>
-                                    <p>"Predictable performance. No GC pauses. No frame drops from memory management."</p>
+                            <p>
+                                <a href="/docs/universes">"Universes"</a>" walks through the folder layout, from
+                                the Eustress folder down to a single "<code>"_instance.toml"</code>"."
+                            </p>
+                        </div>
+
+                        <div id="ownership-history" class="subsection">
+                            <h3>"History You Keep"</h3>
+                            <p>
+                                <code>"Ctrl+S"</code>" and autosave, every 300 seconds by default, each commit the
+                                Space folder to git. The record of how a Space changed is ordinary git history on
+                                your own disk: any git client reads it, and you can push it to any git host you
+                                choose."
+                            </p>
+                            <div class="callout callout-advanced">
+                                <img src="/assets/icons/settings.svg" alt="Advanced" />
+                                <div>
+                                    <strong>"Git holds the files, not the database"</strong>
+                                    <p>
+                                        "Parts that live only in the Space's database are not in these commits. "
+                                        <a href="/docs/universes#history-coverage">"What Git Captures"</a>" lists
+                                        what a commit covers and how to export the rest as TOML first."
+                                    </p>
                                 </div>
                             </div>
                         </div>
 
-                        <div id="performance-scale" class="docs-block">
-                            <h3>"Scale"</h3>
+                        <div id="ownership-scale" class="subsection">
+                            <h3>"A Database for Scale"</h3>
                             <p>
-                                "Eustress scales from a single entity to millions:"
+                                "One file per part stops scaling long before a large world does, so each Space
+                                also has a database, "<code>"world.fjalldb/"</code>", and Studio builds the scene
+                                from it. Files are read into it when the Space opens. A Space with more than
+                                100,000 binary parts streams them around the camera, 350 m out by default,
+                                instead of loading them all."
+                            </p>
+                            <p>
+                                "What lives only in the database can still be read as text. The "
+                                <code>"export_instances_toml"</code>" tool writes it out as ordinary "
+                                <code>"_instance.toml"</code>" files from a running engine, and "
+                                <code>"eustress-space export"</code>" does the same with no engine at all."
+                            </p>
+                        </div>
+
+                        <div id="ownership-privacy" class="subsection">
+                            <h3>"What Leaves Your Machine"</h3>
+                            <p>
+                                "Studio sends anonymous usage statistics by default, so that the tools people
+                                reach for get built first. Each ribbon click is recorded as the tool, the mode and
+                                discipline it was clicked in, whether the tool is wired, and a timestamp. Scene
+                                content, file names and entity names are not part of it."
+                            </p>
+                            <p>
+                                "Clicks are kept as JSON lines in "<code>"%LOCALAPPDATA%\\Eustress\\telemetry"</code>
+                                " on Windows (the local application data folder on other systems), so you can
+                                read exactly what is collected. Only per-tool totals are sent: when a session
+                                ends, or at the next launch if that send did not go through. To stop it, clear "
+                                <strong>"Send anonymous usage statistics"</strong>" under "
+                                <strong>"Settings > Notifications > Privacy"</strong>"."
+                            </p>
+                        </div>
+                    </section>
+
+                    // =========================================================
+                    // ONE LANGUAGE
+                    // =========================================================
+                    <section id="rust" class="docs-section">
+                        <h2 class="section-title">
+                            <span class="section-number">"04"</span>
+                            "One Language"
+                        </h2>
+
+                        <div id="rust-throughout" class="subsection">
+                            <h3>"Rust Throughout"</h3>
+                            <p>
+                                "The engine, Studio, the WorldDb, the MCP server, the "<code>"eustress"</code>
+                                " command-line tool and the headless runner are Rust, and so is this website,
+                                written with Leptos and compiled to WebAssembly. That is about 574,000 lines of
+                                Rust across 1,342 files under "<code>"eustress/crates"</code>"."
+                            </p>
+                            <p>
+                                "One language means one compiler checks the whole path, from a record in the
+                                database to a field in the Properties panel. Rust's ownership rules give memory
+                                safety without a garbage collector, so no collector pause can land in the middle
+                                of a fixed-rate simulation step."
+                            </p>
+                        </div>
+
+                        <div id="rust-slint" class="subsection">
+                            <h3>"Slint Is Rust"</h3>
+                            <p>
+                                "Studio's interface is written in Slint, a declarative language for user
+                                interfaces, across 66 "<code>".slint"</code>" files. Slint is compiled, not
+                                interpreted: the engine's build script turns the interface into Rust, and the
+                                editor includes the result with "<code>"slint::include_modules!()"</code>"."
+                            </p>
+                            <div class="code-block">
+                                <div class="code-header">
+                                    <span class="code-lang">"crates/engine/build.rs"</span>
+                                </div>
+                                <pre><code class="language-rust">{r#"let slint_config = slint_build::CompilerConfiguration::new()
+    .with_style("fluent-dark".into());
+
+slint_build::compile_with_config(
+    "ui/slint/main.slint",
+    slint_config,
+).expect("Failed to compile Slint UI");"#}</code></pre>
+                            </div>
+                            <p>
+                                "A panel's properties and callbacks are therefore Rust types, checked by the same
+                                compiler as the engine that feeds them."
+                            </p>
+                        </div>
+
+                        <div id="rust-exceptions" class="subsection">
+                            <h3>"What Is Not Rust"</h3>
+                            <p>"Rust is the rule. These are the exceptions:"</p>
+                            <table class="docs-table">
+                                <thead>
+                                    <tr><th>"Part"</th><th>"Language"</th><th>"Why"</th></tr>
+                                </thead>
+                                <tbody>
+                                    <tr><td>"The Luau virtual machine"</td><td>"C++"</td><td>"Luau scripts run in Roblox's Luau VM, built into the engine through the "<code>"mlua"</code>" crate. Rune scripts run in a VM written in Rust."</td></tr>
+                                    <tr><td>"Workers behind "<code>"api.eustress.dev"</code></td><td>"JavaScript"</td><td>"They run on Cloudflare Workers. The content API server, "<code>"eustress-backend"</code>", is Rust."</td></tr>
+                                    <tr><td>"The VS Code extension"</td><td>"TypeScript"</td><td>"VS Code loads extensions written in JavaScript or TypeScript."</td></tr>
+                                    <tr><td>"Asset scripts"</td><td>"Python"</td><td>"They run inside Blender to build the avatar and export the primitive part meshes."</td></tr>
+                                    <tr><td>"GPU shaders"</td><td>"WGSL"</td><td>"Five shader files, for billboards, the sun disc, the moon's phase and instanced part materials."</td></tr>
+                                </tbody>
+                            </table>
+                        </div>
+                    </section>
+
+                    // =========================================================
+                    // MEASURED IN SI
+                    // =========================================================
+                    <section id="units" class="docs-section">
+                        <h2 class="section-title">
+                            <span class="section-number">"05"</span>
+                            "Measured in SI"
+                        </h2>
+
+                        <div id="units-meters" class="subsection">
+                            <h3>"Meters Everywhere"</h3>
+                            <p>
+                                "One unit is one meter. The engine stores every length in meters ("
+                                <code>"ENGINE_NATIVE_UNIT"</code>" is "<code>"Unit::Meter"</code>"), and gravity is
+                                standard gravity, pointing down:"
+                            </p>
+                            <div class="equation-card">
+                                <div class="equation">"g = 9.80665 m/s²"</div>
+                                <div class="equation-label">"Standard gravity, the engine default"</div>
+                            </div>
+                            <p>
+                                "Conversions happen only at the edges: when a file written in another unit loads,
+                                and when the Properties panel shows or takes a value in your display unit. A
+                                value read from a file, a script or a physics result is already in meters."
+                            </p>
+                        </div>
+
+                        <div id="units-display" class="subsection">
+                            <h3>"Display Units"</h3>
+                            <p>
+                                "If you think in other units, pick one from the unit badge, which reads "
+                                <code>"m"</code>" until you change it: centimeters, millimeters, feet and inches
+                                are among the choices. The Properties panel then shows and accepts lengths in that
+                                unit and converts them to meters. The world itself does not change."
+                            </p>
+                            <p>
+                                "A file can be written in another unit too. Name it with "<code>"unit"</code>" under "
+                                <code>"[metadata]"</code>", and the loader converts the position and scale to meters
+                                once, as it loads:"
+                            </p>
+                            <div class="code-block">
+                                <div class="code-header">
+                                    <span class="code-lang">"Workspace/Crate/_instance.toml"</span>
+                                </div>
+                                <pre><code class="language-toml">{r#"[metadata]
+class_name = "Part"
+unit = "cm"
+
+[asset]
+mesh = "parts/block.glb"
+scene = "Scene0"
+
+[transform]
+position = [0.0, 50.0, 0.0]    # 0.5 m
+rotation = [0.0, 0.0, 0.0, 1.0]
+scale = [10.0, 10.0, 10.0]     # a 10 cm cube"#}</code></pre>
+                            </div>
+                        </div>
+
+                        <div id="units-si" class="subsection">
+                            <h3>"SI in the Physics"</h3>
+                            <p>
+                                "The physics libraries use SI throughout, and each quantity is its own Rust type: "
+                                <code>"Meters"</code>", "<code>"Kilograms"</code>", "<code>"Seconds"</code>", "
+                                <code>"Kelvin"</code>", "<code>"Moles"</code>" and "<code>"Amperes"</code>", with derived
+                                types such as "<code>"Newtons"</code>", "<code>"Pascals"</code>", "<code>"Joules"</code>
+                                " and "<code>"Watts"</code>". A mass cannot be passed where a length is expected, and
+                                the compiler says so."
+                            </p>
+                            <p>
+                                "Physical constants such as the gravitational constant and the speed of light are
+                                stored in SI too. "<a href="/docs/realism">"Realism"</a>" covers the laws built on
+                                them."
+                            </p>
+                        </div>
+                    </section>
+
+                    // =========================================================
+                    // SAME INPUTS, SAME WORLD
+                    // =========================================================
+                    <section id="determinism" class="docs-section">
+                        <h2 class="section-title">
+                            <span class="section-number">"06"</span>
+                            "Same Inputs, Same World"
+                        </h2>
+
+                        <div id="determinism-pins" class="subsection">
+                            <h3>"The Pins"</h3>
+                            <p>
+                                "A result is worth comparing only if running it again gives the same answer, so
+                                Eustress fixes every setting that shapes a physics step:"
                             </p>
                             <table class="docs-table">
                                 <thead>
-                                    <tr>
-                                        <th>"Metric"</th>
-                                        <th>"Capability"</th>
-                                    </tr>
+                                    <tr><th>"Setting"</th><th>"Value"</th></tr>
                                 </thead>
                                 <tbody>
-                                    <tr>
-                                        <td>"Entities"</td>
-                                        <td>"Millions (ECS architecture)"</td>
-                                    </tr>
-                                    <tr>
-                                        <td>"Physics Bodies"</td>
-                                        <td>"100,000+ (Avian3D)"</td>
-                                    </tr>
-                                    <tr>
-                                        <td>"Draw Calls"</td>
-                                        <td>"Automatic batching"</td>
-                                    </tr>
-                                    <tr>
-                                        <td>"Terrain"</td>
-                                        <td>"Infinite (streaming chunks)"</td>
-                                    </tr>
-                                    <tr>
-                                        <td>"Simulation Speed"</td>
-                                        <td>"31M× real-time"</td>
-                                    </tr>
-                                    <tr>
-                                        <td>"Hot Reload"</td>
-                                        <td>"< 100ms"</td>
-                                    </tr>
+                                    <tr><td>"Fixed timestep"</td><td>"60 Hz"</td></tr>
+                                    <tr><td>"Physics substeps"</td><td>"6 per step"</td></tr>
+                                    <tr><td>"Solver settings"</td><td>"Avian's defaults, set explicitly"</td></tr>
+                                    <tr><td>"Gravity"</td><td>"9.80665 m/s², downward"</td></tr>
+                                    <tr><td>"Random seed"</td><td><code>"GlobalRngSeed"</code>", a fixed constant by default"</td></tr>
                                 </tbody>
                             </table>
+                            <div class="code-block">
+                                <div class="code-header">
+                                    <span class="code-lang">"crates/engine/src/app_core.rs"</span>
+                                </div>
+                                <pre><code class="language-rust">{r#".insert_resource(avian3d::prelude::Gravity(bevy::math::Vec3::NEG_Y * 9.80665))
+.insert_resource(Time::<bevy::time::Fixed>::from_hz(60.0))
+.insert_resource(avian3d::prelude::SubstepCount(6))
+.insert_resource(avian3d::dynamics::solver::SolverConfig::default())
+.add_plugins(eustress_common::physics::DeterminismPlugin)"#}</code></pre>
+                            </div>
+                            <p>
+                                "The timestep and the substep count are written into the engine as values rather
+                                than left to Avian's defaults, so a physics library update cannot change them
+                                quietly."
+                            </p>
                         </div>
 
-                        <div id="performance-benchmarks" class="docs-block">
-                            <h3>"Benchmarks"</h3>
-                            <div class="benchmark-cards">
-                                <div class="benchmark-card">
-                                    <div class="benchmark-value">"60+ FPS"</div>
-                                    <div class="benchmark-label">"1M entities"</div>
-                                    <div class="benchmark-detail">"On mid-range hardware"</div>
+                        <div id="determinism-seed" class="subsection">
+                            <h3>"One Seed"</h3>
+                            <p>
+                                "Randomness that shapes a simulation comes from one seed. "<code>"GlobalRngSeed"</code>
+                                " is a fixed constant unless you set another, and the particle simulation and the
+                                scenario engine derive their random streams from it. A run that uses randomness can
+                                be repeated from the Space alone, and changing the seed varies it on purpose."
+                            </p>
+                            <p>
+                                "The headless runner makes a run a function of its inputs. This simulates 600
+                                ticks, 10 seconds at 60 Hz, writes the recording and exits with a status code:"
+                            </p>
+                            <div class="code-block">
+                                <div class="code-header">
+                                    <span class="code-lang">"Bash"</span>
                                 </div>
-                                <div class="benchmark-card">
-                                    <div class="benchmark-value">"< 50ms"</div>
-                                    <div class="benchmark-label">"Startup time"</div>
-                                    <div class="benchmark-detail">"Empty project"</div>
-                                </div>
-                                <div class="benchmark-card">
-                                    <div class="benchmark-value">"< 100MB"</div>
-                                    <div class="benchmark-label">"Memory baseline"</div>
-                                    <div class="benchmark-detail">"Engine + editor"</div>
-                                </div>
-                                <div class="benchmark-card">
-                                    <div class="benchmark-value">"< 50MB"</div>
-                                    <div class="benchmark-label">"Binary size"</div>
-                                    <div class="benchmark-detail">"Release build"</div>
-                                </div>
+                                <pre><code class="language-bash">{r#"eustress run ~/Documents/Eustress/Universe1/Spaces/Space1 --ticks 600"#}</code></pre>
                             </div>
+                            <p><a href="/learn/cli">"CLI & Headless"</a>" covers the runner and its options."</p>
                         </div>
                     </section>
 
-                    // ─────────────────────────────────────────────────────
-                    // Vibe Coding
-                    // ─────────────────────────────────────────────────────
-                    <section id="vibe" class="docs-section">
-                        <h2 class="section-anchor">"Vibe Coding"</h2>
+                    // =========================================================
+                    // SOURCE-AVAILABLE
+                    // =========================================================
+                    <section id="license" class="docs-section">
+                        <h2 class="section-title">
+                            <span class="section-number">"07"</span>
+                            "Source-Available"
+                        </h2>
 
-                        <div id="vibe-what" class="docs-block">
-                            <h3>"What Is Vibe Coding"</h3>
+                        <div id="license-shield" class="subsection">
+                            <h3>"PolyForm Shield"</h3>
                             <p>
-                                "Vibe coding is programming by intent. Instead of writing syntax, 
-                                you describe what you want. The system figures out how to make it happen."
+                                "Eustress is source-available. The source is public on "
+                                <a href="https://github.com/WeaveITMeta/EustressEngine">"GitHub"</a>", and the root "
+                                <code>"LICENSE"</code>" is the PolyForm Shield License 1.0.0. It lets you use the
+                                software for any purpose, change it, build new works on it and distribute copies,
+                                with one exception: providing a product that competes with Eustress, or with a
+                                product Eustress LLC provides using it. Copies you distribute must carry the
+                                license terms and its "<code>"Required Notice"</code>" line."
                             </p>
-                            <div class="docs-callout success">
-                                <strong>"The Future of Development:"</strong>
-                                " Vibe coding isn't about replacing programmers — it's about 
-                                amplifying them. Spend time on creative decisions, not boilerplate."
+                            <p>"At no cost, the license covers:"</p>
+                            <ul class="docs-list">
+                                <li><strong>"Products made with Eustress"</strong>": building, shipping and selling simulations, digital twins, training environments and visualizations."</li>
+                                <li><strong>"Internal use"</strong>": at a company of any size, including in production."</li>
+                                <li><strong>"Changes"</strong>": modifying and forking the engine for your own products."</li>
+                                <li><strong>"Learning"</strong>": academic use, research, evaluation and personal projects."</li>
+                            </ul>
+                            <div class="callout callout-info">
+                                <img src="/assets/icons/help.svg" alt="Info" />
+                                <div>
+                                    <strong>"Built with it, or a substitute for it"</strong>
+                                    <p>
+                                        "If your product is built with Eustress rather than being a substitute for
+                                        it, you owe nothing and you do not need to ask."
+                                    </p>
+                                </div>
                             </div>
                             <p>
-                                "With Eustress, vibe coding means:"
-                            </p>
-                            <ul class="docs-list">
-                                <li><strong>"Soul Language"</strong>" — Write behavior in plain English"</li>
-                                <li><strong>"AI Assistance"</strong>" — Get suggestions, completions, explanations"</li>
-                                <li><strong>"Hot Reload"</strong>" — See changes instantly, iterate rapidly"</li>
-                                <li><strong>"Visual Feedback"</strong>" — Watch your words become reality"</li>
-                            </ul>
-                        </div>
-
-                        <div id="vibe-soul" class="docs-block">
-                            <h3>"Soul Language"</h3>
-                            <p>
-                                "Soul is our natural language scripting system. Write what you want, 
-                                and Soul compiles it to efficient Rust code."
-                            </p>
-                            <pre class="code-block"><code>{"// player_controller.soul
-
-When the player presses W, move them forward at 5 meters per second.
-When the player presses Space and is on the ground, jump with force 8.
-When the player touches a coin, add 10 points and destroy the coin.
-Every 30 seconds, spawn a new enemy at a random spawn point.
-When the player's health reaches zero, show the game over screen."}</code></pre>
-                            <p>
-                                "This compiles to type-safe Rust ECS code. No magic, no runtime 
-                                interpretation — just efficient native code generated from your intent."
+                                "Third-party crates such as Bevy, Slint and Avian keep their own licenses, and
+                                one first-party crate, "<code>"eustress-embedvec"</code>", declares MIT in its
+                                manifest."
                             </p>
                         </div>
 
-                        <div id="vibe-ai" class="docs-block">
-                            <h3>"AI Integration"</h3>
+                        <div id="license-commercial" class="subsection">
+                            <h3>"The Commercial License"</h3>
                             <p>
-                                "Eustress integrates with AI assistants to supercharge your workflow:"
+                                "For rights the Shield license does not give, "<code>"LICENSE-COMMERCIAL.md"</code>
+                                " describes a negotiated commercial license: to offer Eustress, a fork of it or a
+                                substantially similar platform as your own product, or to get conventional terms
+                                such as warranties, indemnification, support SLAs or a perpetual grant. Pricing
+                                follows the rights granted, not your revenue from products the Shield license
+                                already permits."
                             </p>
-                            <ul class="docs-list">
-                                <li><strong>"Code Generation"</strong>" — Describe a feature, get working code"</li>
-                                <li><strong>"Bug Fixing"</strong>" — Paste an error, get a solution"</li>
-                                <li><strong>"Documentation"</strong>" — Ask questions, get answers"</li>
-                                <li><strong>"Asset Creation"</strong>" — Describe a model, generate it"</li>
-                                <li><strong>"Testing"</strong>" — Describe a test case, generate the script"</li>
-                            </ul>
-                            <div class="docs-callout info">
-                                <strong>"Works with Any AI:"</strong>
-                                " Eustress's file-system-first approach means any AI assistant can 
-                                read and modify your project. Claude, GPT, Gemini, local models — 
-                                they all work because your project is just text files."
-                            </div>
+                            <p>
+                                "Write to "<code>"licensing@eustress.dev"</code>", or read the full terms on the "
+                                <a href="/license">"License"</a>" page."
+                            </p>
                         </div>
                     </section>
 
-                    // ─────────────────────────────────────────────────────
-                    // Community
-                    // ─────────────────────────────────────────────────────
-                    <section id="community" class="docs-section">
-                        <h2 class="section-anchor">"Community"</h2>
+                    // =========================================================
+                    // WHAT'S NEXT
+                    // =========================================================
+                    <section id="roadmap" class="docs-section">
+                        <h2 class="section-title">
+                            <span class="section-number">"08"</span>
+                            "What's Next"
+                        </h2>
 
-                        <div id="community-open" class="docs-block">
-                            <h3>"Open Development"</h3>
+                        <div id="roadmap-determinism" class="subsection">
+                            <h3>"A Determinism Gate"</h3>
                             <p>
-                                "Eustress is developed in the open. Our roadmap is public. Our 
-                                discussions are public. Our code is public."
+                                "The pins make determinism testable, and the next step is the test itself. The
+                                headless runtime plan sets a gate: the same Space, run twice for the same number
+                                of ticks, will have to produce byte-identical recordings."
                             </p>
-                            <ul class="docs-list">
-                                <li><strong>"GitHub"</strong>" — Source code, issues, pull requests"</li>
-                                <li><strong>"Discord"</strong>" — Real-time chat, help, showcase"</li>
-                                <li><strong>"Forum"</strong>" — Long-form discussions, tutorials"</li>
-                                <li><strong>"Blog"</strong>" — Development updates, deep dives"</li>
-                            </ul>
                         </div>
 
-                        <div id="community-contribute" class="docs-block">
-                            <h3>"Contributing"</h3>
+                        <div id="roadmap-branches" class="subsection">
+                            <h3>"Branching the Whole World"</h3>
                             <p>
-                                "We welcome contributions of all kinds:"
+                                "Agents already share your Spaces. Next, they will be able to fork one, database
+                                included, try a change and keep it only if it wins. The storage library's
+                                copy-on-write branches are built and tested, and "
+                                <a href="/docs/universes#roadmap">"Universes"</a>" describes what is left to wire."
                             </p>
-                            <ul class="docs-list">
-                                <li><strong>"Code"</strong>" — Bug fixes, features, optimizations"</li>
-                                <li><strong>"Documentation"</strong>" — Tutorials, guides, translations"</li>
-                                <li><strong>"Assets"</strong>" — Models, textures, sounds for the community"</li>
-                                <li><strong>"Testing"</strong>" — Bug reports, feedback, benchmarks"</li>
-                                <li><strong>"Teaching"</strong>" — Help others learn, answer questions"</li>
-                            </ul>
-                        </div>
-
-                        <div id="community-future" class="docs-block">
-                            <h3>"The Future"</h3>
-                            <p>
-                                "We're building Eustress for the long term. Our vision:"
-                            </p>
-                            <ul class="docs-list">
-                                <li><strong>"Universal Platform"</strong>" — Desktop, mobile, web, VR, AR"</li>
-                                <li><strong>"Global Scale"</strong>" — Millions of concurrent users"</li>
-                                <li><strong>"AI-Native"</strong>" — Deep integration with AI assistants"</li>
-                                <li><strong>"Open Ecosystem"</strong>" — Plugins, assets, templates"</li>
-                                <li><strong>"Education"</strong>" — Free for students and educators"</li>
-                            </ul>
                             <div class="future-cta">
-                                <p>
-                                    <strong>"Join us in building the future of creation."</strong>
-                                </p>
+                                <p><strong>"Build it, run it, measure it, and keep the files."</strong></p>
                                 <div class="cta-buttons">
                                     <a href="/download" class="btn-primary-glow">"Download Eustress"</a>
-                                    <a href="/community" class="btn-secondary-steel">"Join the Community"</a>
+                                    <a href="/learn/mcp" class="btn-secondary-steel">"MCP Server Docs"</a>
                                 </div>
                             </div>
                         </div>
                     </section>
 
-                    // Navigation footer
                     <nav class="docs-nav-footer">
-                        <a href="/docs/earning" class="nav-prev">
+                        <a href="/learn/lsp" class="nav-prev">
                             <img src="/assets/icons/arrow-left.svg" alt="Previous" />
                             <div>
                                 <span class="nav-label">"Previous"</span>
-                                <span class="nav-title">"Earning"</span>
+                                <span class="nav-title">"Rune LSP"</span>
                             </div>
                         </a>
-                        <a href="/docs/universes" class="nav-next">
+                        <a href="/learn" class="nav-next">
                             <div>
                                 <span class="nav-label">"Next"</span>
-                                <span class="nav-title">"Universes"</span>
+                                <span class="nav-title">"All Topics"</span>
                             </div>
                             <img src="/assets/icons/arrow-right.svg" alt="Next" />
                         </a>

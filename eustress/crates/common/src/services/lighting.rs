@@ -111,7 +111,10 @@ impl Default for LightingService {
             // looked correct because the camera was over-exposed by a matching
             // amount. Fixing one without the other leaves the scene dark.
             sun_intensity: bevy::light::light_consts::lux::RAW_SUNLIGHT,
-            sun_angular_radius: 3.0, // Degrees — visible disc in 256px skybox
+            // Degrees. Half of the true 0.533 degree disc; bloom draws the glare
+            // around it. The old 3.0 dated from a 256 px skybox and made the sun
+            // eleven times its real width.
+            sun_angular_radius: 0.2665,
             
             // Shadows
             shadows_enabled: true,
@@ -316,8 +319,12 @@ impl Default for EustressAtmosphere {
             // Earth-normal, matching the shipped Atmosphere.instance.toml.
             density: 0.5,
             offset: 0.0,
-            color: [0.4, 0.6, 1.0, 1.0],          // Blue sky (Rayleigh scattering)
-            decay: [0.3, 0.3, 0.3, 1.0],          // Neutral ground albedo
+            // The shipped Atmosphere.instance.toml's values. The Explorer's
+            // Atmosphere entity is hydrated with this default, so it is what
+            // actually renders; `[0.4, 0.6, 1.0]` here cut red Rayleigh
+            // scattering to 0.6x of Earth's and starved every sunset of red.
+            color: [0.776, 0.863, 1.0, 1.0],      // Sky tint (normalised: hue only)
+            decay: [0.439, 0.506, 0.635, 1.0],    // Ground albedo, feeds the horizon
             glare: 0.0,
             haze: 0.0,
 

@@ -4,7 +4,12 @@
 //! These provide common functionality with shared implementations.
 
 pub mod lighting_plugin;
+pub mod light_classes;
+pub mod celestial_sections;
 pub mod sky_atmosphere;
+pub mod moon_disc;
+pub mod volumetric_clouds;
+pub mod orthographic_sky;
 pub mod reflections;
 pub mod character_plugin;
 pub mod humanoid;

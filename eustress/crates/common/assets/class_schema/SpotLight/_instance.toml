@@ -1,11 +1,17 @@
-# SpotLight — Directional cone light (child of BasePart or Attachment)
-# Bevy: SpotLight component
+# SpotLight: Directional cone light (child of BasePart or Attachment)
+# Bevy: SpotLight on an emitter child (common/src/plugins/light_classes.rs)
+#
+# brightness: Roblox-style dial, display-referred (1 = a normal lamp).
+# range:      reach in metres; the light fades to nothing here.
+# angle:      full apex angle of the cone in degrees, 0 to 180.
+# face:       the parent part's face the cone shines out of
+#             (Top, Bottom, Front, Back, Left, Right). Front is -Z.
 
 [light]
 color = [255, 255, 255]
 brightness = 1.0
 range = 16.0
-angle = 45.0
+angle = 90.0
 shadows = false
 enabled = true
 face = "Front"

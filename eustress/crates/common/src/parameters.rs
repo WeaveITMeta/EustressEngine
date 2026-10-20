@@ -694,6 +694,258 @@ impl ParameterValue {
 pub const DEFAULT_PARAMETER_DOMAIN: &str = "instance";
 
 // ============================================================================
+// Labels and the on-disk form
+// ============================================================================
+
+/// The name a Parameter goes by in the Properties panel and on disk: the bare
+/// key in the default domain, `domain.key` in any other.
+pub fn parameter_label(domain: &str, key: &str) -> String {
+    if domain == DEFAULT_PARAMETER_DOMAIN {
+        key.to_string()
+    } else {
+        format!("{domain}.{key}")
+    }
+}
+
+/// Split a label back into `(domain, key)`. The first dot separates them, so
+/// neither a domain nor a key may contain one.
+pub fn split_parameter_label(label: &str) -> (&str, &str) {
+    match label.split_once('.') {
+        Some((domain, key)) if !domain.is_empty() && !key.is_empty() => (domain, key),
+        _ => (DEFAULT_PARAMETER_DOMAIN, label),
+    }
+}
+
+impl ParameterValue {
+    /// The value as it is written under `[parameters]`. Scalars are written
+    /// plainly; every other type is a small table naming its type, so a
+    /// Vector3 reads back as a Vector3 rather than as a JSON string.
+    pub fn to_toml(&self) -> toml::Value {
+        use toml::Value as T;
+        let typed = |type_name: &str, value: T| {
+            let mut t = toml::map::Map::new();
+            t.insert("type".into(), T::String(type_name.into()));
+            t.insert("value".into(), value);
+            T::Table(t)
+        };
+        let floats = |v: &[f32]| T::Array(v.iter().map(|x| T::Float(*x as f64)).collect());
+        match self {
+            Self::Bool(b) => T::Boolean(*b),
+            Self::Int(i) => T::Integer(*i),
+            Self::Float(f) => T::Float(*f),
+            Self::String(s) => T::String(s.clone()),
+            Self::Vector3(v) => typed("Vector3", floats(v)),
+            Self::Color(c) => typed("Color", floats(c)),
+            Self::EntityRef(e) => match e {
+                Some(id) => typed("EntityRef", T::String(id.to_string())),
+                None => {
+                    let mut t = toml::map::Map::new();
+                    t.insert("type".into(), T::String("EntityRef".into()));
+                    T::Table(t)
+                }
+            },
+            Self::Json(j) => typed("Json", T::String(j.clone())),
+            Self::Binary(b) => typed("Binary", T::String(b.iter().map(|x| format!("{x:02x}")).collect())),
+        }
+    }
+
+    /// Read a value written by [`ParameterValue::to_toml`]. An array or table
+    /// without a recognised `type` is kept verbatim as JSON text, so nothing
+    /// authored by hand is dropped.
+    pub fn from_toml(v: &toml::Value) -> Self {
+        use toml::Value as T;
+        let floats = |v: Option<&T>, n: usize| -> Option<Vec<f32>> {
+            let items = v?.as_array()?;
+            let out: Vec<f32> = items
+                .iter()
+                .filter_map(|x| x.as_float().or_else(|| x.as_integer().map(|i| i as f64)))
+                .map(|x| x as f32)
+                .collect();
+            (items.len() == n && out.len() == n).then_some(out)
+        };
+        match v {
+            T::String(s) => Self::String(s.clone()),
+            T::Integer(i) => Self::Int(*i),
+            T::Float(f) => Self::Float(*f),
+            T::Boolean(b) => Self::Bool(*b),
+            T::Table(t) => {
+                let value = t.get("value");
+                let parsed = match t.get("type").and_then(T::as_str) {
+                    Some("Vector3") => floats(value, 3).map(|v| Self::Vector3([v[0], v[1], v[2]])),
+                    Some("Color") => floats(value, 4).map(|v| Self::Color([v[0], v[1], v[2], v[3]])),
+                    Some("EntityRef") => match value {
+                        None => Some(Self::EntityRef(None)),
+                        Some(T::String(s)) => s.parse().ok().map(|id| Self::EntityRef(Some(id))),
+                        Some(T::Integer(i)) => u64::try_from(*i).ok().map(|id| Self::EntityRef(Some(id))),
+                        _ => None,
+                    },
+                    Some("Json") => value.and_then(T::as_str).map(|s| Self::Json(s.to_string())),
+                    Some("Binary") => value.and_then(T::as_str).and_then(|hex| {
+                        (hex.len() % 2 == 0)
+                            .then(|| {
+                                (0..hex.len())
+                                    .step_by(2)
+                                    .map(|i| u8::from_str_radix(&hex[i..i + 2], 16).ok())
+                                    .collect::<Option<Vec<u8>>>()
+                            })
+                            .flatten()
+                            .map(Self::Binary)
+                    }),
+                    _ => None,
+                };
+                parsed.unwrap_or_else(|| Self::Json(v.to_string()))
+            }
+            other => Self::Json(other.to_string()),
+        }
+    }
+}
+
+impl ParameterBinding {
+    /// The binding as written under `[parameter_bindings]`. Only the
+    /// configuration is persisted: the last read and the last error describe
+    /// this session, and a stale error on disk would claim a fault that may
+    /// have cleared.
+    pub fn to_toml(&self) -> toml::Value {
+        let mut t = toml::map::Map::new();
+        if let Some(c) = &self.connector {
+            t.insert("connector".into(), toml::Value::String(c.clone()));
+        }
+        if let Some(f) = &self.field {
+            t.insert("field".into(), toml::Value::String(f.clone()));
+        }
+        if let Some(s) = self.refresh_seconds {
+            t.insert("refresh_seconds".into(), toml::Value::Integer(s.min(i64::MAX as u64) as i64));
+        }
+        if self.publish {
+            t.insert("publish".into(), toml::Value::Boolean(true));
+        }
+        toml::Value::Table(t)
+    }
+
+    /// Read a binding written by [`ParameterBinding::to_toml`].
+    pub fn from_toml(v: &toml::Value) -> Option<Self> {
+        let t = v.as_table()?;
+        let text = |k: &str| t.get(k).and_then(|x| x.as_str()).filter(|s| !s.trim().is_empty()).map(str::to_string);
+        Some(Self {
+            connector: text("connector"),
+            field: text("field"),
+            refresh_seconds: t
+                .get("refresh_seconds")
+                .and_then(|x| x.as_integer())
+                .and_then(|s| u64::try_from(s).ok())
+                .filter(|s| *s > 0),
+            publish: t.get("publish").and_then(|x| x.as_bool()).unwrap_or(false),
+            last_read_s: None,
+            last_error: None,
+        })
+    }
+}
+
+impl InstanceParameters {
+    /// Build the component from an instance's `[parameters]` and
+    /// `[parameter_bindings]` tables.
+    ///
+    /// `[parameters]` is flat (`label = value`) where the component is
+    /// domain-scoped, so a bare key lands in [`DEFAULT_PARAMETER_DOMAIN`]: a
+    /// parameter is usable before any Domain exists, and promoting it into one
+    /// is an edit, not a migration. A dotted label (`telemetry.sample_rate`)
+    /// names its domain explicitly.
+    pub fn from_toml(values: Option<&HashMap<String, toml::Value>>, bindings: Option<&toml::Value>) -> Self {
+        let mut params = Self::new();
+        for (label, v) in values.into_iter().flatten() {
+            let (domain, key) = split_parameter_label(label);
+            params.set(domain, key, ParameterValue::from_toml(v));
+        }
+        if let Some(table) = bindings.and_then(|b| b.as_table()) {
+            for (label, v) in table {
+                if let Some(binding) = ParameterBinding::from_toml(v) {
+                    let (domain, key) = split_parameter_label(label);
+                    params.bind(domain, key, binding);
+                }
+            }
+        }
+        params
+    }
+
+    /// The `[parameters]` and `[parameter_bindings]` tables this component
+    /// writes, keyed by label and sorted, so the same component always writes
+    /// the same bytes.
+    pub fn to_toml_tables(&self) -> (toml::map::Map<String, toml::Value>, toml::map::Map<String, toml::Value>) {
+        let mut values = std::collections::BTreeMap::new();
+        for (domain, keys) in &self.domains {
+            for (key, v) in keys {
+                values.insert(parameter_label(domain, key), v.to_toml());
+            }
+        }
+        let mut bindings = std::collections::BTreeMap::new();
+        for (domain, keys) in &self.bindings {
+            for (key, b) in keys {
+                bindings.insert(parameter_label(domain, key), b.to_toml());
+            }
+        }
+        (values.into_iter().collect(), bindings.into_iter().collect())
+    }
+
+    /// Remove one key: its value and any binding.
+    pub fn remove(&mut self, domain: &str, key: &str) -> Option<ParameterValue> {
+        let removed = self.domains.get_mut(domain).and_then(|m| m.remove(key));
+        if self.domains.get(domain).is_some_and(|m| m.is_empty()) {
+            self.domains.remove(domain);
+        }
+        self.unbind(domain, key);
+        removed
+    }
+}
+
+// ============================================================================
+// Connectors (the sources a binding names)
+// ============================================================================
+
+/// A Connector's `[attributes]`, read from `<space>/DataService/<name>/_instance.toml`
+/// as the string pairs the data crate's source layer parses.
+///
+/// `name` is the Connector's folder name, one path segment; anything that could
+/// climb out of the Space is refused.
+pub fn connector_attributes(space_root: &std::path::Path, name: &str) -> Result<Vec<(String, String)>, String> {
+    if name.trim().is_empty() || name.contains(['/', '\\']) || name.contains("..") {
+        return Err(format!("'{name}' is not a Connector name"));
+    }
+    let path = space_root.join("DataService").join(name).join("_instance.toml");
+    let text = std::fs::read_to_string(&path)
+        .map_err(|_| format!("no Connector named '{name}' in this Space's DataService"))?;
+    let doc: toml::Table = text.parse().map_err(|e| format!("Connector '{name}': {e}"))?;
+    let class = doc
+        .get("metadata")
+        .and_then(|m| m.get("class_name"))
+        .and_then(|c| c.as_str());
+    if class != Some("Connector") {
+        return Err(format!("'{name}' in DataService is not a Connector"));
+    }
+    Ok(doc
+        .get("attributes")
+        .and_then(|a| a.as_table())
+        .map(|t| {
+            t.iter()
+                .map(|(k, v)| (k.clone(), v.as_str().map(str::to_string).unwrap_or_else(|| v.to_string())))
+                .collect()
+        })
+        .unwrap_or_default())
+}
+
+/// The Connectors in a Space, by folder name, sorted.
+pub fn connector_names(space_root: &std::path::Path) -> Vec<String> {
+    let Ok(entries) = std::fs::read_dir(space_root.join("DataService")) else { return Vec::new() };
+    let mut names: Vec<String> = entries
+        .flatten()
+        .filter(|e| e.path().is_dir())
+        .filter_map(|e| e.file_name().to_str().map(str::to_string))
+        .filter(|name| connector_attributes(space_root, name).is_ok())
+        .collect();
+    names.sort_by_key(|n| n.to_lowercase());
+    names
+}
+
+// ============================================================================
 // Parameter Router (Change Detection & Export via EustressStream)
 // ============================================================================
 
@@ -1587,5 +1839,103 @@ type = "String"
         assert!(errs[0].contains("bad"), "{:?}", errs);
         // the good one still landed
         assert!(reg.domains.contains_key("good"));
+    }
+}
+
+
+#[cfg(test)]
+mod disk_tests {
+    use super::*;
+
+    #[test]
+    fn labels_split_on_the_first_dot_and_the_default_domain_stays_bare() {
+        assert_eq!(parameter_label(DEFAULT_PARAMETER_DOMAIN, "setpoint"), "setpoint");
+        assert_eq!(parameter_label("hvac", "setpoint"), "hvac.setpoint");
+        assert_eq!(split_parameter_label("hvac.setpoint"), ("hvac", "setpoint"));
+        assert_eq!(split_parameter_label("setpoint"), (DEFAULT_PARAMETER_DOMAIN, "setpoint"));
+        assert_eq!(split_parameter_label(".odd"), (DEFAULT_PARAMETER_DOMAIN, ".odd"));
+    }
+
+    #[test]
+    fn every_value_type_survives_the_disk() {
+        let mut p = InstanceParameters::new();
+        p.set(DEFAULT_PARAMETER_DOMAIN, "enabled", ParameterValue::Bool(true));
+        p.set(DEFAULT_PARAMETER_DOMAIN, "count", ParameterValue::Int(-7));
+        p.set("hvac", "setpoint", ParameterValue::Float(21.5));
+        p.set("hvac", "zone", ParameterValue::String("north".into()));
+        p.set("layout", "offset", ParameterValue::Vector3([1.0, -2.5, 3.25]));
+        p.set("layout", "tint", ParameterValue::Color([0.1, 0.2, 0.3, 1.0]));
+        p.set("layout", "anchor", ParameterValue::EntityRef(Some(42)));
+        p.set("layout", "none", ParameterValue::EntityRef(None));
+        p.set("raw", "doc", ParameterValue::Json("{\"a\":1}".into()));
+        p.set("raw", "blob", ParameterValue::Binary(vec![0, 15, 255]));
+        p.bind(
+            "hvac",
+            "temperature",
+            ParameterBinding {
+                connector: Some("BuildingSensors".into()),
+                field: Some("temp_c".into()),
+                refresh_seconds: Some(30),
+                publish: false,
+                last_read_s: Some(9.0),
+                last_error: Some("timed out".into()),
+            },
+        );
+        let (values, bindings) = p.to_toml_tables();
+        assert!(values.contains_key("enabled") && values.contains_key("hvac.setpoint"));
+        let values: HashMap<String, toml::Value> = values.into_iter().collect();
+        let back = InstanceParameters::from_toml(Some(&values), Some(&toml::Value::Table(bindings)));
+        assert_eq!(back.domains, p.domains);
+        let b = back.binding("hvac", "temperature").unwrap();
+        assert_eq!((b.connector.as_deref(), b.field.as_deref(), b.refresh_seconds), (Some("BuildingSensors"), Some("temp_c"), Some(30)));
+        assert_eq!((b.last_read_s, b.last_error.clone()), (None, None), "session state never reaches the disk");
+    }
+
+    #[test]
+    fn a_hand_written_array_is_kept_as_json_rather_than_dropped() {
+        let v: toml::Value = "x = [1, 2]".parse::<toml::Table>().unwrap()["x"].clone();
+        assert_eq!(ParameterValue::from_toml(&v), ParameterValue::Json("[1, 2]".into()));
+    }
+
+    #[test]
+    fn removing_a_key_drops_its_binding_too() {
+        let mut p = InstanceParameters::new();
+        p.set("hvac", "t", ParameterValue::Float(1.0));
+        p.bind("hvac", "t", ParameterBinding { connector: Some("S".into()), ..Default::default() });
+        assert_eq!(p.remove("hvac", "t"), Some(ParameterValue::Float(1.0)));
+        assert!(p.domains.get("hvac").is_none() && p.binding("hvac", "t").is_none());
+    }
+
+    #[test]
+    fn connectors_are_read_from_the_spaces_data_service_and_nowhere_else() {
+        let space = std::env::temp_dir().join(format!("eustress-connectors-{}", std::process::id()));
+        let dir = space.join("DataService").join("Bench");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("_instance.toml"),
+            "[metadata]
+class_name = \"Connector\"
+
+[attributes]
+source_type = \"CSV\"
+endpoint = \"bench.csv\"
+poll_seconds = 10
+enabled = true
+",
+        )
+        .unwrap();
+        let folder = space.join("DataService").join("Notes");
+        std::fs::create_dir_all(&folder).unwrap();
+        std::fs::write(folder.join("_instance.toml"), "[metadata]
+class_name = \"Folder\"
+").unwrap();
+
+        let attrs = connector_attributes(&space, "Bench").unwrap();
+        assert!(attrs.contains(&("source_type".to_string(), "CSV".to_string())));
+        assert!(attrs.contains(&("poll_seconds".to_string(), "10".to_string())));
+        assert!(connector_attributes(&space, "Notes").unwrap_err().contains("not a Connector"));
+        assert!(connector_attributes(&space, "../Bench").is_err());
+        assert_eq!(connector_names(&space), vec!["Bench".to_string()]);
+        let _ = std::fs::remove_dir_all(&space);
     }
 }

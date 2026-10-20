@@ -16,14 +16,8 @@ use bevy::prelude::*;
 use serde::{Deserialize, Serialize};
 
 // ============================================================================
-// World Scale Constants (Unit Conversions Only)
+// Units
 // ============================================================================
-
-/// Legacy constant - Eustress uses meters natively (1 unit = 1 meter)
-pub const STUD_TO_METERS: f32 = 1.0;
-
-/// Legacy constant - Eustress uses meters natively
-pub const METERS_TO_STUDS: f32 = 1.0;
 
 /// The unit `Workspace.gravity` is authored/stored in.
 ///
@@ -34,6 +28,19 @@ pub const METERS_TO_STUDS: f32 = 1.0;
 /// converting through [`crate::units`]; change it here and every gravity-sync
 /// path converts correctly.
 pub const GRAVITY_AUTHORED_UNIT: crate::units::Unit = crate::units::ENGINE_NATIVE_UNIT;
+
+/// The Workspace's default gravity, m/s²: standard gravity, straight down.
+pub const DEFAULT_GRAVITY: Vec3 = Vec3::new(0.0, -crate::units::STANDARD_GRAVITY_F32, 0.0);
+
+/// The gravity to simulate with, m/s²: the Workspace's, which Avian's
+/// `Gravity` follows, or [`DEFAULT_GRAVITY`] in a host with no Workspace.
+///
+/// For code that moves things without Avian (realism particles, buoyancy),
+/// so they fall and float under the same gravity as the parts around them,
+/// including when a script or tool changes it mid-game.
+pub fn live_gravity(workspace: Option<&Workspace>) -> Vec3 {
+    workspace.map_or(DEFAULT_GRAVITY, |ws| ws.gravity)
+}
 
 // ============================================================================
 // Workspace Resource
@@ -118,8 +125,8 @@ pub struct Workspace {
 impl Default for Workspace {
     fn default() -> Self {
         Self {
-            // Physics: Exact SI standard gravity 9.80665 m/s² (Space Grade Ready)
-            gravity: Vec3::new(0.0, -9.80665, 0.0),
+            // Physics: exact standard gravity, 9.80665 m/s² (Space Grade Ready)
+            gravity: DEFAULT_GRAVITY,
             max_entity_speed: 100.0,        // m/s (very fast)
             teleport_threshold: 50.0,       // m/tick (flags large jumps)
             max_acceleration: 50.0,         // m/s²
@@ -217,11 +224,6 @@ impl Workspace {
     /// Check if a position delta is a potential teleport
     pub fn is_teleport(&self, delta: Vec3) -> bool {
         delta.length() > self.teleport_threshold
-    }
-    
-    /// Get gravity in meters/s² (for physics engines using SI units)
-    pub fn gravity_meters(&self) -> Vec3 {
-        self.gravity * STUD_TO_METERS
     }
     
     /// Get world extent (half-size) for spatial hashing

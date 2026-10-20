@@ -207,11 +207,15 @@ impl CapabilityCatalog {
             Capability::new("sound_set_volume", Audio),
             // --- MarketplaceService ---
             Capability::new("marketplace_prompt_purchase", Marketplace),
+            Capability::new("marketplace_prompt_product_purchase", Marketplace),
+            Capability::new("marketplace_prompt_game_pass_purchase", Marketplace),
             Capability::new("marketplace_get_product_info", Marketplace),
             Capability::new("marketplace_player_owns_game_pass", Marketplace),
-            Capability::new("marketplace_get_ticket_balance", Marketplace),
+            Capability::new("marketplace_passes_pending", Marketplace),
+            Capability::new("marketplace_status", Marketplace),
             Capability::new("players_get_player_by_user_id", ReadSim),
             Capability::new("players_get_local_player", ReadSim),
+            Capability::new("players_get_players", ReadSim),
             // --- RunService (environment queries) ---
             Capability::new("run_service_is_client", ReadSim),
             Capability::new("run_service_is_server", ReadSim),

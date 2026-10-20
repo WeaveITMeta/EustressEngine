@@ -4,7 +4,7 @@ use crate::classes::{Instance, ClassName, BasePart, Part, PartType};
 use crate::ui::BevySelectionManager;
 use crate::camera_controller::EustressCamera;
 use crate::play_mode::{PlayModeState, SpawnedDuringPlayMode};
-use eustress_common::terrain::{TerrainConfig, TerrainData, TerrainMode, TerrainBrush, BrushMode, spawn_terrain, TerrainRoot};
+use eustress_common::terrain::{TerrainConfig, TerrainData, TerrainBrush, TerrainTool, spawn_terrain, TerrainRoot};
 
 /// Event to spawn a new part in the scene
 #[derive(Message)]
@@ -225,8 +225,10 @@ pub fn handle_spawn_part_events(
             selection.select(entity_str);
         }
         
-        // Focus camera on the new entity
-        if let Some(mut camera) = camera_query.iter_mut().next() {
+        // Focus camera on the new entity. Not in orthographic: there the
+        // orbit distance is the zoom, so refocusing would jump the view to a
+        // part-sized close-up every time something is inserted into a layout.
+        if let Some(mut camera) = camera_query.iter_mut().next().filter(|c| !c.wants_ortho()) {
             camera.pivot = actual_position;
             // Set a comfortable viewing distance based on part size
             let part_size = size.length();
@@ -350,7 +352,6 @@ fn build_binary_part_def(
     let c = base.color.to_srgba();
     let now = chrono::Utc::now().to_rfc3339();
     InstanceDefinition {
-        nuclear: None,
         plasma: None,
         asset: Some(AssetReference {
             mesh: mesh.to_string(),
@@ -504,14 +505,17 @@ impl Default for SpawnTerrainEvent {
     }
 }
 
-/// Event to toggle terrain edit mode
+/// Enter the terrain tools with the last tool used, or leave them (back to
+/// Select).
 #[derive(Message)]
 pub struct ToggleTerrainEditEvent;
 
-/// Event to set terrain brush mode
+/// Choose a terrain tool, and optionally its mode (an index into
+/// `TerrainTool::mode_labels`), entering the terrain tools.
 #[derive(Message)]
 pub struct SetTerrainBrushEvent {
-    pub mode: BrushMode,
+    pub tool: TerrainTool,
+    pub mode: Option<usize>,
 }
 
 /// Event to import terrain heightmap from file
@@ -601,71 +605,77 @@ pub fn handle_spawn_terrain_events(
     }
 }
 
-/// System to handle terrain edit toggle
+/// Make the terrain tools the current tool (design section 4.1), or, with no
+/// terrain in the Space, open the Terrain panel's empty state (Flat,
+/// Generate World, Import) instead and say so. Returns whether the tools
+/// are now current.
+fn enter_terrain_tools(
+    studio_state: &mut crate::ui::StudioState,
+    has_terrain: bool,
+    notifications: Option<&mut crate::notifications::NotificationManager>,
+) -> bool {
+    if !has_terrain {
+        studio_state.show_terrain_editor = true;
+        if let Some(notifications) = notifications {
+            notifications.info("Add terrain to sculpt it: Flat, Generate World or Import in the Terrain panel");
+        }
+        return false;
+    }
+    studio_state.current_tool = crate::ui::Tool::Terrain;
+    true
+}
+
+/// Enter the terrain tools with the last tool used, or leave them for the
+/// Select tool. `terrain_plugin` keeps `TerrainMode` in step with the
+/// current tool.
 pub fn handle_toggle_terrain_edit(
     mut toggle_events: MessageReader<ToggleTerrainEditEvent>,
-    mode: Option<ResMut<TerrainMode>>,
-    notifications: Option<ResMut<crate::notifications::NotificationManager>>,
+    studio_state: Option<ResMut<crate::ui::StudioState>>,
+    terrain: Query<(), With<TerrainRoot>>,
+    mut notifications: Option<ResMut<crate::notifications::NotificationManager>>,
 ) {
-    let Some(mut mode) = mode else { return };
-    let Some(mut notifications) = notifications else { return };
+    let Some(mut studio_state) = studio_state else { return };
     for _event in toggle_events.read() {
-        *mode = match *mode {
-            TerrainMode::Render => {
-                notifications.info("Terrain Edit Mode: ON");
-                TerrainMode::Editor
-            }
-            TerrainMode::Editor => {
-                notifications.info("Terrain Edit Mode: OFF");
-                TerrainMode::Render
-            }
-        };
+        if studio_state.current_tool == crate::ui::Tool::Terrain {
+            studio_state.current_tool = crate::ui::Tool::Select;
+        } else {
+            enter_terrain_tools(&mut studio_state, !terrain.is_empty(), notifications.as_deref_mut());
+        }
     }
 }
 
-/// System to handle terrain brush mode changes
-/// Auto-enables Editor mode when a brush is selected so toolbar buttons work immediately.
+/// Choose a terrain tool (and its mode when the event names one) and enter
+/// the terrain tools.
 pub fn handle_set_terrain_brush(
     mut brush_events: MessageReader<SetTerrainBrushEvent>,
     brush: Option<ResMut<TerrainBrush>>,
-    mode: Option<ResMut<TerrainMode>>,
-    notifications: Option<ResMut<crate::notifications::NotificationManager>>,
+    studio_state: Option<ResMut<crate::ui::StudioState>>,
+    terrain: Query<(), With<TerrainRoot>>,
+    mut notifications: Option<ResMut<crate::notifications::NotificationManager>>,
 ) {
-    let Some(mut brush) = brush else { return };
-    let Some(mut mode) = mode else { return };
-    let Some(mut notifications) = notifications else { return };
+    let (Some(mut brush), Some(mut studio_state)) = (brush, studio_state) else { return };
     for event in brush_events.read() {
-        // Region and Fill have no stroke behaviour — `apply_brush_to_chunk`
-        // matches them and does nothing. Arming one would leave a lit-up
-        // button that never moves the ground, so say so and keep whichever
-        // brush was already armed.
-        if matches!(event.mode, BrushMode::Region | BrushMode::Fill) {
-            notifications.info(format!(
-                "{:?} brush is on the roadmap — not built yet, so the armed brush is unchanged",
-                event.mode
-            ));
-            continue;
+        brush.tool = event.tool;
+        if let Some(mode) = event.mode {
+            brush.set_mode_index(event.tool, mode);
         }
-        brush.mode = event.mode;
-        // Auto-enable edit mode when selecting a brush tool
-        if *mode != TerrainMode::Editor {
-            *mode = TerrainMode::Editor;
-            notifications.info(format!("Terrain Edit Mode: ON — Brush: {:?}", event.mode));
-        } else {
-            notifications.info(format!("Terrain Brush: {:?}", event.mode));
-        }
+        enter_terrain_tools(&mut studio_state, !terrain.is_empty(), notifications.as_deref_mut());
     }
 }
 
 /// System to handle heightmap import events
 ///
-/// Pipeline: file dialog path → elevation import → chunk → save R16 → spawn terrain
+/// Pipeline: file dialog path, elevation import, centred R16 chunks and
+/// `_terrain.toml` in the loader's format, then `hydrate_terrain_from_disk`
+/// and `spawn_terrain`, so the live terrain is exactly what Save and a
+/// Space reopen see.
 pub fn handle_import_terrain(
     mut import_events: MessageReader<ImportTerrainEvent>,
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
     existing_terrain: Query<Entity, With<TerrainRoot>>,
+    space_root: Option<Res<crate::space::SpaceRoot>>,
     notifications: Option<ResMut<crate::notifications::NotificationManager>>,
 ) {
     let Some(mut notifications) = notifications else { return };
@@ -675,6 +685,15 @@ pub fn handle_import_terrain(
             notifications.error(format!("Heightmap file not found: {}", event.path));
             continue;
         }
+        // The chunk files go into the OPEN Space. `default_space_root()`
+        // re-reads the last-opened path from settings, which can name a
+        // different Space after an in-session switch and would overwrite
+        // that Space's terrain.
+        let Some(ref sr) = space_root else {
+            notifications.error("Import Heightmap: no open Space");
+            continue;
+        };
+        let terrain_dir = sr.0.join("Workspace").join("Terrain");
 
         // Step 1: Import elevation data from any supported format
         let import_config = eustress_common::pointcloud::ElevationImportConfig {
@@ -694,57 +713,150 @@ pub fn handle_import_terrain(
 
         match eustress_common::pointcloud::import_elevation_to_terrain(path, &import_config) {
             Ok(result) => {
-                // Step 2: Remove existing terrain
-                for entity in existing_terrain.iter() {
-                    commands.entity(entity).despawn();
-                }
-
-                // Step 3: Save imported height cache as chunked R16 files
-                let space_root = crate::space::default_space_root();
-                let terrain_dir = space_root.join("Workspace").join("Terrain");
-                let chunks_dir = terrain_dir.join("chunks");
-                let _ = std::fs::create_dir_all(&chunks_dir);
-
-                // Save per-chunk R16 files from the imported height cache
                 let config = &result.config;
                 let data = &result.data;
-                let resolution = config.chunk_resolution;
-                for cz in 0..(config.chunks_z * 2) {
-                    for cx in 0..(config.chunks_x * 2) {
-                        let chunk_path = chunks_dir.join(format!("x{}_z{}.r16", cx, cz));
-                        let start_x = cx * resolution;
-                        let start_z = cz * resolution;
+                let res = config.chunk_resolution as usize;
+                let chunks_dir = terrain_dir.join("chunks");
 
-                        // Extract chunk heightmap from the full cache
-                        let mut chunk_heights = vec![0u8; (resolution * resolution * 2) as usize];
-                        for z in 0..resolution {
-                            for x in 0..resolution {
-                                let src_x = start_x + x;
-                                let src_z = start_z + z;
-                                let src_idx = (src_z * data.cache_width + src_x) as usize;
-                                let dst_idx = (z * resolution + x) as usize;
-                                let height_val = if src_idx < data.height_cache.len() {
-                                    data.height_cache[src_idx]
-                                } else {
-                                    0.0
-                                };
-                                let raw = (height_val.clamp(0.0, 1.0) * 65535.0) as u16;
-                                let bytes = raw.to_le_bytes();
-                                chunk_heights[dst_idx * 2] = bytes[0];
-                                chunk_heights[dst_idx * 2 + 1] = bytes[1];
-                            }
+                // Step 2: Lay the import out in the loader's own format. The
+                // importer's cache spans its full chunk count, `full * res`
+                // per axis, while the loader and Save address a centred grid
+                // of `2n + 1` chunks at signed coordinates `-n..=n`. The
+                // smallest n with `2n + 1 >= full` on both axes holds it, and
+                // `view_distance = n * chunk_size` makes `to_terrain_config`
+                // re-derive exactly n on load.
+                let (full_x, full_z) = result.chunk_count;
+                let n = (full_x.max(full_z) / 2).max(1);
+
+                // The import holds WORLD heights (height_scale 1.0, offset
+                // 0.0), but R16 samples are normalized, so encode against a
+                // band spanning the imported range and write that same band
+                // into the toml below. It always holds Y = 0: an all-positive
+                // heightmap keeps the Y it imported at, a negative one keeps
+                // its depth, and the padding around a non-square import
+                // sits at 0.
+                let (lowest, highest) = data.height_cache.iter().fold(
+                    (f32::INFINITY, f32::NEG_INFINITY),
+                    |(lo, hi), &h| (lo.min(h), hi.max(h)),
+                );
+                let band_floor = if lowest.is_finite() { lowest.min(0.0) } else { 0.0 };
+                let band_range = if highest.is_finite() {
+                    (highest.max(0.0) - band_floor).max(1.0)
+                } else {
+                    1.0
+                };
+                let disk_config = TerrainConfig {
+                    chunks_x: n,
+                    chunks_z: n,
+                    // The toml records no grid centre, so the chunks go on
+                    // the origin-centred grid Step 6 reloads them onto.
+                    center_chunk: IVec2::ZERO,
+                    view_distance: n as f32 * config.chunk_size,
+                    height_offset: band_floor,
+                    height_scale: band_range,
+                    ..config.clone()
+                };
+
+                // Centre the imported grid the way the importer numbers its
+                // chunks (`cx - full / 2`), so importer chunk 0 lands on
+                // loader chunk `-full / 2`, whose tile the copy starts at
+                // (always on the grid, since `n >= full / 2`).
+                let mut disk_data = TerrainData::procedural();
+                disk_data.resize_cache(&disk_config);
+                let padding = disk_config.normalized_height(0.0);
+                disk_data.height_cache.iter_mut().for_each(|h| *h = padding);
+                let first_chunk = IVec2::new(-((full_x / 2) as i32), -((full_z / 2) as i32));
+                let first_tile = disk_config.chunk_grid_index(first_chunk).unwrap_or(UVec2::ZERO);
+                let off_x = first_tile.x as usize * res;
+                let off_z = first_tile.y as usize * res;
+                let (src_w, src_h) = (data.cache_width as usize, data.cache_height as usize);
+                let dst_w = disk_data.cache_width as usize;
+                let dst_h = disk_data.cache_height as usize;
+                for src_z in 0..src_h {
+                    let dst_z = off_z + src_z;
+                    if dst_z >= dst_h {
+                        break;
+                    }
+                    for src_x in 0..src_w {
+                        let dst_x = off_x + src_x;
+                        if dst_x >= dst_w {
+                            break;
                         }
-                        let _ = std::fs::write(&chunk_path, &chunk_heights);
+                        let Some(&h) = data.height_cache.get(src_z * src_w + src_x) else { continue };
+                        disk_data.height_cache[dst_z * dst_w + dst_x] =
+                            disk_config.normalized_height(config.world_height(h));
                     }
                 }
 
-                // Step 4: Write _terrain.toml config
+                // Step 3: Clear the previous terrain's files. Chunk files
+                // beyond the new grid would outlive it, old material maps
+                // (legacy splatmaps included) would paint the new ground on
+                // load, old volume bricks would carve the old caves into
+                // it, and old water would stand over it.
+                let water_file = eustress_common::terrain::voxel_water::water_file_path(&terrain_dir);
+                if let Err(e) = std::fs::remove_file(&water_file) {
+                    if e.kind() != std::io::ErrorKind::NotFound {
+                        warn!("Import Heightmap: could not remove stale {:?}: {}", water_file, e);
+                    }
+                }
+                for (dir, extension) in [
+                    (chunks_dir.clone(), "r16"),
+                    (terrain_dir.join(eustress_common::terrain::toml_loader::MATMAP_DIR), "png"),
+                    (terrain_dir.join(eustress_common::terrain::toml_loader::LEGACY_SPLATMAP_DIR), "png"),
+                    (eustress_common::terrain::volume::volume_dir(&terrain_dir), "vbk"),
+                ] {
+                    let Ok(entries) = std::fs::read_dir(&dir) else { continue };
+                    for entry in entries.flatten() {
+                        let file = entry.path();
+                        if file.extension().and_then(|e| e.to_str()) == Some(extension) {
+                            if let Err(e) = std::fs::remove_file(&file) {
+                                if e.kind() != std::io::ErrorKind::NotFound {
+                                    warn!("Import Heightmap: could not remove stale {:?}: {}", file, e);
+                                }
+                            }
+                        }
+                    }
+                }
+                // A generated world's default layers go with its ground: its
+                // lakes would flood their whole footprints over the import.
+                // Layers the user made stay.
+                eustress_common::terrain::worldgen::default_layers::clear_generated_layers(&sr.0);
+
+                // Step 4: Write every chunk of the grid, the same span
+                // `save_terrain_to_disk` writes on Save.
+                let positions: Vec<IVec2> = disk_config.grid_chunks().collect();
+                if let Err(e) = eustress_common::terrain::toml_loader::save_chunks_to_disk(
+                    &terrain_dir,
+                    &disk_config,
+                    &disk_data,
+                    &positions,
+                ) {
+                    notifications.error(format!("Import Heightmap: could not write chunks: {e}"));
+                    error!("Heightmap import chunk write failed for {:?}: {}", terrain_dir, e);
+                    continue;
+                }
+                // An elevation file carries no materials, so every writer's
+                // matmap contract is met with all-Grass maps. A failure here
+                // is not fatal: the loader reads a chunk with no matmap as
+                // Grass too.
+                eustress_common::terrain::height_query::ensure_material_cache(&mut disk_data);
+                if let Err(e) = eustress_common::terrain::toml_loader::save_material_chunks_to_disk(
+                    &terrain_dir,
+                    &disk_config,
+                    &disk_data,
+                    &positions,
+                ) {
+                    warn!("Import Heightmap: could not write material maps for {:?}: {}", terrain_dir, e);
+                }
+
+                // Step 5: Write _terrain.toml config
                 let terrain_toml = format!(
                     r#"# Auto-generated from imported heightmap: {}
 [terrain]
 chunk_size = {:.1}
 chunk_resolution = {}
-height_scale = {:.1}
+height_scale = {:?}
+height_offset = {:?}
 seed = 0
 
 [streaming]
@@ -757,23 +869,39 @@ levels = {}
 distances = {:?}
 "#,
                     path.display(),
-                    config.chunk_size,
-                    config.chunk_resolution,
-                    import_config.height_scale,
-                    config.view_distance,
-                    config.lod_levels,
-                    config.lod_distances,
+                    disk_config.chunk_size,
+                    disk_config.chunk_resolution,
+                    disk_config.height_scale,
+                    disk_config.height_offset,
+                    disk_config.view_distance,
+                    disk_config.lod_levels,
+                    disk_config.lod_distances,
                 );
-                let _ = std::fs::write(terrain_dir.join("_terrain.toml"), terrain_toml);
+                if let Err(e) = std::fs::write(terrain_dir.join("_terrain.toml"), terrain_toml) {
+                    notifications.error(format!("Import Heightmap: could not write _terrain.toml: {e}"));
+                    error!("Heightmap import toml write failed for {:?}: {}", terrain_dir, e);
+                    continue;
+                }
 
-                // Step 5: Spawn terrain from imported data
-                let _terrain = spawn_terrain(
-                    &mut commands,
-                    &mut meshes,
-                    &mut materials,
-                    result.config,
-                    result.data,
-                );
+                // Step 6: Spawn from what was just written, so the live
+                // config and band are exactly the ones Save writes back
+                // under this toml (the same round trip worldgen and the flat
+                // plate take). The old terrain goes only once the new one
+                // loaded.
+                match crate::terrain_disk_load::hydrate_terrain_from_disk(&terrain_dir) {
+                    Ok(terrain) => {
+                        for entity in existing_terrain.iter() {
+                            commands.entity(entity).despawn();
+                        }
+                        let entity = terrain.spawn(&mut commands, &mut meshes, &mut materials);
+                        commands.entity(entity).insert(crate::terrain_disk_load::DiskSourcedTerrain);
+                    }
+                    Err(e) => {
+                        notifications.error(format!("Import Heightmap: wrote files but load failed: {e}"));
+                        error!("Heightmap import load-back failed for {:?}: {}", terrain_dir, e);
+                        continue;
+                    }
+                }
 
                 let warnings_str = if result.warnings.is_empty() {
                     String::new()
@@ -803,9 +931,9 @@ distances = {:?}
 ///
 /// The task runs `worldgen::pipeline::generate_world` (rayon inside,
 /// deterministic, engine-free) then `worldgen::export::export_to_space`
-/// into the LIVE Space's `Workspace/Terrain/` — NOT `default_space_root()`
-/// (`handle_import_terrain` has that bug; a Space switched in-session would
-/// write to the wrong Space). No ECS access inside the task.
+/// into the LIVE Space's `Workspace/Terrain/`, never `default_space_root()`,
+/// which re-reads the last-opened path from settings and can name a
+/// different Space after an in-session switch. No ECS access inside the task.
 pub fn handle_generate_world(
     mut request_events: MessageReader<GenerateWorldEvent>,
     mut worldgen: ResMut<WorldgenTask>,
@@ -892,12 +1020,13 @@ pub fn poll_worldgen_task(
             // toml → config → resize_cache → load_chunks_from_disk (signed
             // centered [-N,+N] addressing, matching export by construction).
             match crate::terrain_disk_load::hydrate_terrain_from_disk(&terrain_dir) {
-                Ok((config, data, chunk_files)) => {
+                Ok(terrain) => {
+                    let chunk_files = terrain.chunk_files;
                     // Despawn existing terrain (any source) — single-rooted.
                     for entity in existing_terrain.iter() {
                         commands.entity(entity).despawn();
                     }
-                    let entity = spawn_terrain(&mut commands, &mut meshes, &mut materials, config, data);
+                    let entity = terrain.spawn(&mut commands, &mut meshes, &mut materials);
                     // Disk-sourced: Space-switch cleanup + the auto-loader's
                     // latch semantics treat it like any disk terrain.
                     commands.entity(entity).insert(crate::terrain_disk_load::DiskSourcedTerrain);
@@ -905,13 +1034,13 @@ pub fn poll_worldgen_task(
                     worldgen.status = "Spawning terrain chunks\u{2026}".to_string();
                     if let Some(ref mut n) = notifications {
                         n.success(format!(
-                            "World generated: {} chunks written ({} splatmaps), meshing\u{2026}",
-                            summary.chunks_written, summary.splatmaps_written
+                            "World generated: {} chunks written ({} material maps, {} default layers), meshing\u{2026}",
+                            summary.chunks_written, summary.matmaps_written, summary.layers_written
                         ));
                     }
                     info!(
-                        "🌍 Worldgen exported {} chunks / {} splatmaps ({} bytes), loaded {} chunk files from {:?}",
-                        summary.chunks_written, summary.splatmaps_written,
+                        "🌍 Worldgen exported {} chunks / {} material maps / {} default layers ({} bytes), loaded {} chunk files from {:?}",
+                        summary.chunks_written, summary.matmaps_written, summary.layers_written,
                         summary.bytes_written, chunk_files, terrain_dir
                     );
                 }
@@ -960,7 +1089,7 @@ pub fn handle_generate_flat_terrain(
         let queue_busy = queue.as_deref().map(|q| q.is_generating()).unwrap_or(false);
         if worldgen.is_busy() || queue_busy {
             if let Some(ref mut n) = notifications {
-                n.warning("Terrain generation already running — wait for it to finish");
+                n.warning("Terrain generation already running, wait for it to finish");
             }
             continue;
         }
@@ -986,12 +1115,12 @@ pub fn handle_generate_flat_terrain(
         };
 
         match crate::terrain_disk_load::hydrate_terrain_from_disk(&terrain_dir) {
-            Ok((config, data, chunk_files)) => {
+            Ok(terrain) => {
+                let chunk_files = terrain.chunk_files;
                 for entity in existing_terrain.iter() {
                     commands.entity(entity).despawn();
                 }
-                let entity =
-                    spawn_terrain(&mut commands, &mut meshes, &mut materials, config, data);
+                let entity = terrain.spawn(&mut commands, &mut meshes, &mut materials);
                 commands
                     .entity(entity)
                     .insert(crate::terrain_disk_load::DiskSourcedTerrain);
@@ -1004,9 +1133,9 @@ pub fn handle_generate_flat_terrain(
                     ));
                 }
                 info!(
-                    "\u{1f9f1} Flat terrain: {:.0}x{:.0} m at Y={:.1}, wrote {} chunks / {} splatmaps, loaded {} chunk files",
+                    "\u{1f9f1} Flat terrain: {:.0}x{:.0} m at Y={:.1}, wrote {} chunks / {} material maps, loaded {} chunk files",
                     extent, extent, event.spec.height_m,
-                    summary.chunks_written, summary.splatmaps_written, chunk_files
+                    summary.chunks_written, summary.matmaps_written, chunk_files
                 );
             }
             Err(e) => {

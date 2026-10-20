@@ -152,6 +152,126 @@ ghosted too. Causes found in code, and what changed:
    (`group_support_distance`), not just the leader, so a taller companion no
    longer sinks; face-frame grid snapping and edge snapping are unchanged.
 
+## Undo and accidental changes (2026-09-22)
+
+Every path that moves, resizes or re-flags a part was checked against two
+questions: can it happen by accident, and does one Ctrl+Z take it back.
+
+1. Slips are harder to make (`drag_guard.rs`).
+   - A press becomes a drag only past a dead zone: 6 px on a part's body,
+     3 px on a Move, Rotate or Scale handle. A click, or a hand that twitches
+     while clicking, moves nothing and records nothing.
+   - Surface placement is absolute, so on its first frame a body drag threw
+     the part to where the ray behind it met the ground. The start offset is
+     captured when the drag goes live and fades out over 140 px of travel.
+   - Escape cancels any drag and restores what it touched. Ctrl+Z, Redo or a
+     History row click while the button is held does the same, instead of
+     reaching into the history while the drag carries on.
+   - Plain R and T turned the selection on any keypress, with no undo and no
+     text-field check. They now act only during a Select or Move drag, as in
+     Roblox Studio. Ctrl+R and Ctrl+T arrive through the keymap, so rebinds
+     and the Roblox preset apply, and each turn is one undo step.
+   - Grid snap moved the grab point, which knocked aligned parts off the
+     grid. It now snaps the part's lower corner in the surface frame
+     (`math_utils::snap_part_by_corner`): an aligned part stays put and odd
+     sizes land edge-on-grid.
+2. Drags that ended without an undo step.
+   - Each tool latched its drag and waited to see the release. Releasing over
+     a panel or outside the window, or switching tools mid-drag, left the
+     latch set, recorded nothing and kept `BeingDragged` on the parts, which
+     holds the disk writer off. A latched drag now ends as soon as the button
+     is up or the tool is inactive, and commits one labelled step ("Drag 3
+     objects", "Move 2 objects", "Rotate 1 object").
+   - The Move tool ignored rotation on release (align-to-surface turns the
+     part) and never recorded BillboardGui offsets. It records both in one
+     step (`Action::BillboardOffsets`).
+   - A Select drag includes the mind-map neighbours that drift along with it,
+     and cancelling restores them.
+3. Edits that had no undo: keyboard lift and settle, the Ctrl+Shift+Alt wheel
+   resize, a typed Size in Properties, Lock and Anchor paint clicks, and Unlock
+   All. Each records a step. Held keys and wheel rolls repeating within 1.2 s
+   fold into one step (`UndoStack::push_coalesced`), so one Ctrl+Z undoes the
+   whole hold.
+4. Undo that was partial or hit the wrong part.
+   - Every instance loaded from a Space had `Instance.id` 0, and property,
+     tag, attribute and parameter undo find their entity by that id: undoing
+     a colour change recoloured whichever part the query met first. Instances
+     get a unique runtime id on spawn (`undo::assign_runtime_instance_ids`),
+     and no resolver matches 0.
+   - A typed Position or Rotation moves every selected part, but its undo step
+     covered only the primary. It covers every part moved.
+   - Resize Align undo restored position only. It restores size too.
+   - Settle could land on the part's own children, and lift used local Y, so
+     a part inside a rotated Model rose sideways. Both work in world space and
+     exclude the moving set.
+5. History.
+   - Ctrl+Z stepped the edit history and a separate selection history at once,
+     so one keypress reverted a selection and an unrelated edit. Undo and Redo
+     walk the edit history only, and select what they changed.
+   - A History row click jumped the selection history with an edit-history
+     index. It jumps the edit history to that row, backward or forward
+     (`HistoryJumpEvent`).
+   - Rows show the label the tool pushed, so the gesture behind each step is
+     visible.
+   - The limit is 500 steps (was 100); Clear empties the labels as well.
+   - A folded step counts as new work, so the unsaved marker and the history
+     stream see it.
+6. Undo that never reached disk. The disk writer skipped any file written in
+   the last two seconds, the window that stops the file watcher reloading the
+   engine's own writes, so an undo right after a drag came back on reload, and
+   Rotate drags (which rely on the writer) were never saved. The writer holds
+   such changes and writes the latest state once the window passes, and picks
+   an entity up as soon as a drag removes `BeingDragged`.
+
+Known gaps: the wheel resize also scales a part's child BillboardGui label,
+and undo restores the part but not the label. Parts that leave the selection
+mid-drag (a script or the bridge clearing it) are not in that drag's step.
+Status: source only; compile and live test pending.
+
+## Dynamic Insert menu (2026-09-24)
+
+The Insert catalog was pushed once at startup, from the class registry plus a
+hand-kept list of template-only classes, and never changed after that. It now
+updates each time the menu bar's Insert dropdown or the Insert Object dialog
+opens (`slint_ui::refresh_insert_menu`).
+
+1. The catalog is rebuilt from the template folders on disk
+   (`insert_classes::live_catalog`). A class is listed when
+   `class_schema/<Class>/_instance.toml` exists under its canonical name, so a
+   template added while Studio runs appears the next time the menu opens.
+   Template-backed classes without a registered spawner are listed too: Seat,
+   VehicleSeat, SpawnLocation, Humanoid, Decal, Sky, Atmosphere, Clouds, Team,
+   WebFrame and others. `blank_insert_allowed` keeps out Terrain, Camera, Star
+   and Moon (one per Space), Image and Video (File > Import makes them) and the
+   procurement records (the Procurement panel makes them).
+2. An "Inserts into" line names where the next insert lands: the selected
+   instance, the folder a single-file instance sits in, the selected service,
+   or "its usual service" when nothing is selected.
+3. "Suggested for <selection>" lists what usually goes inside it: Attachment,
+   Decal, lights and effects for a Part; Frame, TextLabel and buttons for a GUI
+   container; Sky, Atmosphere and Clouds for Lighting; RemoteEvent and
+   ModuleScript for ReplicatedStorage. A Folder takes its service's list. Only
+   classes in the live catalog are suggested (`suggestions_for`,
+   `context_rows`).
+4. "Recent" lists the latest inserts from every surface, the ribbon's shape and
+   CAD buttons included, and persists across sessions
+   (`EditorSettings.recent_inserts`).
+5. With its search empty, the Insert Object dialog shows the same sections,
+   then Shapes (Sphere, Cylinder, Wedge, Corner Wedge, Cone), then every class
+   by category. Typing ranks matches: exact, prefix, word start ("light" finds
+   PointLight), anywhere in the name, then category (`match_rank`).
+6. Inserts honor a selected service row. The Explorer plus button on
+   ReplicatedStorage used to put a Folder in Workspace. The template, Model and
+   Folder, script and shape handlers now resolve the service's entity
+   (`insert_parent_entity`), and new scripts, Models and Folders carry their
+   parent's service, so a storage service hides them straight away.
+7. The Explorer plus button selects its row, then opens the dialog, in that
+   order through the action queue, so the dialog's target and suggestions come
+   from that row.
+
+Status: source only; compile and live test pending. `main.slint` compiles in
+`slint-viewer`.
+
 ## Already ahead of Roblox
 
 - Group delta for multi-select Position and Rotation (Roblox collapses every

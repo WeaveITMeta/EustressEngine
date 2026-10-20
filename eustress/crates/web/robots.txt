@@ -9,10 +9,12 @@
 User-agent: *
 Allow: /
 Disallow: /admin
+Disallow: /creator
 Disallow: /dashboard
 Disallow: /friends
 Disallow: /kyc
 Disallow: /projects
+Disallow: /purchases
 Disallow: /settings
 Disallow: /tickets
 Disallow: /verify

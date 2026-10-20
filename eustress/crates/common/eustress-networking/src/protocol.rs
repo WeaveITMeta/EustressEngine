@@ -54,7 +54,7 @@ pub enum EustressChannel {
 #[derive(Component, Serialize, Deserialize, Clone, Debug, PartialEq, Reflect)]
 #[reflect(Component)]
 pub struct NetworkTransform {
-    /// Position in studs (quantized for network)
+    /// Position in meters (quantized for network)
     pub position: Vec3,
     /// Rotation as quaternion
     pub rotation: Quat,
@@ -103,7 +103,7 @@ impl NetworkTransform {
 #[derive(Component, Serialize, Deserialize, Clone, Debug, PartialEq, Default, Reflect)]
 #[reflect(Component)]
 pub struct NetworkVelocity {
-    /// Linear velocity in studs/second
+    /// Linear velocity in meters/second
     pub linear: Vec3,
     /// Angular velocity in radians/second
     pub angular: Vec3,

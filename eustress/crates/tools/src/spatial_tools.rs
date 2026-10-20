@@ -22,7 +22,7 @@ impl ToolHandler for MeasureDistanceTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: "measure_distance",
-            description: "Calculate the Euclidean distance between two 3D points in world coordinates. Returns distance in studs (1 stud = 1 meter).",
+            description: "Calculate the Euclidean distance between two 3D points in world coordinates. Returns distance in meters, the engine's world unit.",
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -50,7 +50,7 @@ impl ToolHandler for MeasureDistanceTool {
             tool_name: "measure_distance".to_string(),
             tool_use_id: String::new(),
             success: true,
-            content: format!("Distance: {:.3} studs ({:.3} meters)", distance, distance),
+            content: format!("Distance: {:.3} meters", distance),
             structured_data: Some(serde_json::json!({
                 "distance": distance,
                 "from": from,

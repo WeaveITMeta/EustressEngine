@@ -30,11 +30,18 @@
 //! |-----|---------|--------|
 //! | `EUSTRESS_SMAA`          | on  | subpixel-morphological AA (3 passes) |
 //! | `EUSTRESS_BLOOM`         | on  | filmic bloom (down/upsample chain) |
+//! | `EUSTRESS_BLOOM_INTENSITY` | 0.15 | bloom strength (bevy's `NATURAL`) |
 //! | `EUSTRESS_MSAA`          | off | `2`/`4`/`8` restores hardware MSAA |
 //! | `EUSTRESS_GTAO`          | off | ground-contact AO; adds a `NormalPrepass` |
-//! | `EUSTRESS_AUTO_EXPOSURE` | off | exposure adaptation |
+//! | `EUSTRESS_AUTO_EXPOSURE` | off | histogram exposure adaptation (the sky's own night adaptation is always on; see `sky_atmosphere::SkyExposure`) |
+//! | `EUSTRESS_CONTACT_SHADOWS` | off | screen-space contact shadows from the sun |
 //!
 //! Set any flag to `0`/`false` to disable, or a non-empty value to enable.
+//!
+//! **Contact shadows are a view-layout switch like MSAA.** `ContactShadows`
+//! is part of the mesh view bind-group layout key, which is why it is read
+//! once here and applied to every Studio camera together, never toggled on
+//! one camera at runtime.
 //!
 //! **`EUSTRESS_MSAA` is the one to be careful with:** hardware MSAA and SMAA
 //! both anti-alias, so enabling MSAA while SMAA is on pays twice. It exists to
@@ -42,9 +49,10 @@
 
 use bevy::prelude::*;
 use bevy::anti_alias::smaa::Smaa;
-use bevy::pbr::ScreenSpaceAmbientOcclusion;
+use bevy::pbr::{ContactShadows, ScreenSpaceAmbientOcclusion};
 use bevy::post_process::auto_exposure::{AutoExposure, AutoExposurePlugin};
-use bevy::post_process::bloom::Bloom;
+use bevy::post_process::bloom::{Bloom, BloomCompositeMode, BloomPrefilter};
+use eustress_common::classes::BloomEffect;
 use bevy::render::view::Msaa;
 use std::sync::OnceLock;
 
@@ -74,6 +82,81 @@ fn bloom_on() -> bool {
     *V.get_or_init(|| flag("EUSTRESS_BLOOM", true))
 }
 
+/// Bloom's strength, `EUSTRESS_BLOOM_INTENSITY` (default: bevy's `NATURAL`,
+/// 0.15). Energy-conserving, so raising it spreads more of every bright
+/// pixel into its glow rather than brightening the frame. The sun's disc is
+/// capped for the HDR target (see `lighting_plugin::SUN_DISC_PEAK`), so this
+/// is what sets how far its glare reaches.
+fn bloom() -> Bloom {
+    static V: OnceLock<f32> = OnceLock::new();
+    let natural = Bloom::NATURAL;
+    let intensity = *V.get_or_init(|| {
+        std::env::var("EUSTRESS_BLOOM_INTENSITY")
+            .ok()
+            .and_then(|v| v.trim().parse::<f32>().ok())
+            .filter(|v| v.is_finite() && *v >= 0.0)
+            .unwrap_or(natural.intensity)
+    });
+    Bloom { intensity, ..natural }
+}
+
+/// The bloom an authored Bloom object (Roblox's `BloomEffect`) asks for.
+///
+/// Roblox's `Size` (0-56, default 24) is how far the glow reaches, so it
+/// scales bevy's wide, low-frequency part. A `Threshold` above 0 means only
+/// what is brighter than it glows, which is bevy's additive, thresholded
+/// bloom (its `OLD_SCHOOL` look); a lit white surface here sits near 1, the
+/// sky below it, the sun, lamps at night and silver-lined clouds far above.
+/// With no threshold it stays energy-conserving, `Intensity` scaling the
+/// baseline (Roblox's default 0.4 is the baseline itself).
+fn bloom_from_effect(effect: &BloomEffect) -> Bloom {
+    let base = bloom();
+    let reach = (effect.size.max(0.0) / 24.0).min(2.3);
+    let low_frequency_boost = (base.low_frequency_boost * reach).clamp(0.0, 1.0);
+    if effect.threshold > 0.0 {
+        Bloom {
+            intensity: (0.1 * effect.intensity.max(0.0)).min(1.0),
+            low_frequency_boost,
+            prefilter: BloomPrefilter { threshold: effect.threshold, threshold_softness: 0.3 },
+            composite_mode: BloomCompositeMode::Additive,
+            ..base
+        }
+    } else {
+        Bloom {
+            intensity: (base.intensity * effect.intensity.max(0.0) / 0.4).min(1.0),
+            low_frequency_boost,
+            ..base
+        }
+    }
+}
+
+/// Carry an enabled Bloom object's settings to every Studio camera, and
+/// restore the baseline when it is disabled or deleted.
+fn apply_bloom_effect(
+    effects: Query<&BloomEffect>,
+    changed: Query<(), Changed<BloomEffect>>,
+    mut removed: RemovedComponents<BloomEffect>,
+    mut cameras: Query<&mut Bloom, With<StudioCamera>>,
+) {
+    let removed_any = removed.read().count() > 0;
+    // A camera that just got its Bloom takes the effect too. Asked through
+    // the one mutable query: a second query filtering on `Added<Bloom>` reads
+    // Bloom while this one writes it, which Bevy rejects at startup (B0001).
+    // `is_added` on `Mut` does not mark the component changed.
+    let new_bloom = cameras.iter_mut().any(|b| b.is_added());
+    if changed.is_empty() && !removed_any && !new_bloom {
+        return;
+    }
+    let desired = effects
+        .iter()
+        .find(|e| e.enabled)
+        .map(bloom_from_effect)
+        .unwrap_or_else(bloom);
+    for mut camera_bloom in cameras.iter_mut() {
+        *camera_bloom = desired.clone();
+    }
+}
+
 fn gtao_on() -> bool {
     static V: OnceLock<bool> = OnceLock::new();
     *V.get_or_init(|| flag("EUSTRESS_GTAO", false))
@@ -82,6 +165,15 @@ fn gtao_on() -> bool {
 fn auto_exposure_on() -> bool {
     static V: OnceLock<bool> = OnceLock::new();
     *V.get_or_init(|| flag("EUSTRESS_AUTO_EXPOSURE", false))
+}
+
+/// Screen-space contact shadows: the fine shadow where a part meets the
+/// ground, below what the sun's shadow maps resolve. Read by the sun's
+/// hydration too, which must set `contact_shadows_enabled` on the light for
+/// the camera component to have anything to draw.
+pub fn contact_shadows_on() -> bool {
+    static V: OnceLock<bool> = OnceLock::new();
+    *V.get_or_init(|| flag("EUSTRESS_CONTACT_SHADOWS", false))
 }
 
 /// Hardware MSAA sample count, or `None` to leave the bundle's `Msaa::Off`.
@@ -109,6 +201,7 @@ pub struct PhotorealSettings {
     pub bloom: bool,
     pub gtao: bool,
     pub auto_exposure: bool,
+    pub contact_shadows: bool,
     /// `None` = `Msaa::Off` (the default); `Some(n)` = hardware MSAA at n samples.
     pub msaa_samples: Option<u32>,
 }
@@ -120,6 +213,7 @@ impl Default for PhotorealSettings {
             bloom: bloom_on(),
             gtao: gtao_on(),
             auto_exposure: auto_exposure_on(),
+            contact_shadows: contact_shadows_on(),
             msaa_samples: msaa_override().map(|m| m.samples()),
         }
     }
@@ -140,14 +234,18 @@ impl Plugin for PhotorealPlugin {
         }
 
         app.add_systems(Update, apply_camera_stages);
+        if bloom_on() {
+            app.add_systems(Update, apply_bloom_effect.after(apply_camera_stages));
+        }
 
         let s = PhotorealSettings::default();
         info!(
-            "photoreal: smaa={} bloom={} gtao={} auto_exposure={} msaa={}",
+            "photoreal: smaa={} bloom={} gtao={} auto_exposure={} contact_shadows={} msaa={}",
             s.smaa,
             s.bloom,
             s.gtao,
             s.auto_exposure,
+            s.contact_shadows,
             s.msaa_samples.map_or("off".to_string(), |n| n.to_string()),
         );
     }
@@ -171,7 +269,7 @@ fn apply_camera_stages(mut commands: Commands, cameras: Query<Entity, Added<Stud
             ec.insert(Smaa::default());
         }
         if bloom_on() {
-            ec.insert(Bloom::NATURAL);
+            ec.insert(bloom());
         }
         if let Some(msaa) = msaa_override() {
             ec.insert(msaa);
@@ -181,6 +279,10 @@ fn apply_camera_stages(mut commands: Commands, cameras: Query<Entity, Added<Stud
         }
         if auto_exposure_on() {
             ec.insert(AutoExposure::default());
+        }
+        if contact_shadows_on() {
+            // Requires the `DepthPrepass` every Studio camera already has.
+            ec.insert(ContactShadows::default());
         }
     }
 }

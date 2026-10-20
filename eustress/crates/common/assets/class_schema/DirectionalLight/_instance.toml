@@ -1,11 +1,20 @@
-# DirectionalLight — Scene-wide directional light (sun/moon)
-# Bevy: DirectionalLight component
+# DirectionalLight: Distant light with parallel rays, shining along -Z
+# Bevy: DirectionalLight with no sun disc (common/src/plugins/light_classes.rs).
+# Not the sun: the sun and moon belong to the Lighting service.
+#
+# brightness: 1 is 10,000 lux at daylight exposure, display-referred.
+# The default aim comes in 60 degrees below the horizon.
 
 [light]
 color = [255, 255, 255]
 brightness = 1.0
 shadows = true
 enabled = true
+
+[transform]
+position = [0.0, 0.0, 0.0]
+rotation = [-0.5, 0.0, 0.0, 0.8660254]
+scale = [1.0, 1.0, 1.0]
 
 [metadata]
 class_name = "DirectionalLight"

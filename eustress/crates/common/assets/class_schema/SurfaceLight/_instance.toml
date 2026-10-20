@@ -1,11 +1,18 @@
-# SurfaceLight — Surface-emitting light (child of BasePart)
-# Bevy: Custom surface light component
+# SurfaceLight: Light shining out of one face of its parent part
+# Bevy: SpotLight on an emitter child at the face centre
+# (common/src/plugins/light_classes.rs)
+#
+# brightness: Roblox-style dial, display-referred (1 = a normal lamp).
+# range:      reach in metres; the light fades to nothing here.
+# angle:      full apex angle of the cone in degrees, 0 to 180
+#             (180 lights the whole half-space in front of the face).
+# face:       Top, Bottom, Front, Back, Left or Right. Front is -Z.
 
 [light]
 color = [255, 255, 255]
 brightness = 1.0
 range = 16.0
-angle = 0.0
+angle = 90.0
 shadows = false
 enabled = true
 face = "Front"

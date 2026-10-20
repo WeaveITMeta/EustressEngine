@@ -1,9 +1,10 @@
-# KeyframeSequence — Animation data (keyframes for bones/joints)
-# Bevy: AnimationClip asset
+# KeyframeSequence: a clip written as data. Its keyframes follow inline as
+# [[keyframes]] tables (docs/design/ANIMATION_SYSTEM.md, "The clip record").
+# Defaults are Roblox's: looped, at Action priority.
 
-[animation]
-priority = 0
-looped = false
+[keyframe_sequence]
+loop = true
+priority = "Action"
 
 [metadata]
 class_name = "KeyframeSequence"

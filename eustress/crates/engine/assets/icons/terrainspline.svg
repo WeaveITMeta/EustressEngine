@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="none">
+  <!-- TerrainSpline: a road curving across green ground, its bed dashed. -->
+  <path d="M1 12.5 C4 12.5 5 9 8 8 C11 7 12 3.5 15 3.5" stroke="#64C896" stroke-width="4.2" stroke-linecap="round"/>
+  <path d="M1 12.5 C4 12.5 5 9 8 8 C11 7 12 3.5 15 3.5" stroke="#5A5F66" stroke-width="2.6" stroke-linecap="round"/>
+  <path d="M1.8 12.5 C4 12.5 5 9 8 8 C11 7 12 3.5 14.2 3.5" stroke="#F2C94C" stroke-width="0.6" stroke-linecap="round" stroke-dasharray="1.2 1.2"/>
+</svg>

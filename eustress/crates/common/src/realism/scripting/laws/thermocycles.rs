@@ -9,7 +9,8 @@
 //! (`thermal_efficiency`, `turbine_work`, `compressor_work`, etc.). Because
 //! every `#[rune::function]` in a module must have a unique name, each wrapper
 //! is prefixed with its originating cycle (`rankine_*`, `brayton_*`, `otto_*`,
-//! `refrigeration_*`, `hx_*`).
+//! `refrigeration_*`, `hx_*`). A law that belongs to no single cycle
+//! (`combined_cycle_efficiency`) keeps its bare name.
 
 use rune::{ContextError, Module};
 use crate::realism::thermocycles::{rankine, brayton, otto, refrigeration, heat_exchangers};
@@ -84,6 +85,11 @@ fn rankine_isentropic_turbine_efficiency(h_in: f64, h_out_actual: f64, h_out_ide
 #[rune::function]
 fn rankine_thermal_efficiency(w_net: f64, q_in: f64) -> f64 {
     rankine::thermal_efficiency(w_net as f32, q_in as f32) as f64
+}
+
+#[rune::function]
+fn combined_cycle_efficiency(eta_topping: f64, eta_bottoming: f64) -> f64 {
+    rankine::combined_cycle_efficiency(eta_topping as f32, eta_bottoming as f32) as f64
 }
 
 // ---------------------------------------------------------------------------
@@ -300,6 +306,7 @@ pub fn create_module() -> Result<Module, ContextError> {
     m.function_meta(rankine_reheat_efficiency)?;
     m.function_meta(rankine_isentropic_turbine_efficiency)?;
     m.function_meta(rankine_thermal_efficiency)?;
+    m.function_meta(combined_cycle_efficiency)?;
 
     // Brayton
     m.function_meta(brayton_efficiency)?;

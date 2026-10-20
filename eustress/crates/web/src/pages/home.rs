@@ -56,27 +56,10 @@ pub fn HomePage() -> impl IntoView {
                         </div>
                     </div>
 
-                    // The brand mark itself, lit by the accent. The previous version
-                    // framed it inside a fake application window with mock traffic
-                    // light buttons, showing a product that does not exist instead
-                    // of the one that does.
+                    // The demo reel: real Studio captures and live simulation, no
+                    // mock application chrome around it.
                     <div class="hero-visual-new">
-                        <figure
-                            class="hero-render"
-                            on:mousemove=move |ev| on_tilt_move(&ev)
-                            on:mouseleave=move |ev| on_tilt_leave(&ev)
-                        >
-                            <div class="hero-render-glow" aria-hidden="true"></div>
-                            <img
-                                src="/assets/hero-render.png"
-                                alt="The Eustress Studio editor: a photographed bicycle reconstructed as a Gaussian splat, rendering live in the viewport alongside the scene explorer and properties panels"
-                                class="hero-render-img"
-                                width="1334"
-                                height="714"
-                                fetchpriority="high"
-                                decoding="async"
-                            />
-                        </figure>
+                        <HeroReel />
                     </div>
                 </div>
 
@@ -528,6 +511,142 @@ pub fn HomePage() -> impl IntoView {
 
             <Footer />
         </div>
+    }
+}
+
+// -----------------------------------------------------------------------------
+// Hero demo reel. Loops silently in the tilted frame. The corner button plays
+// it from the top, full screen, with sound and the browser's own controls;
+// leaving full screen puts it back to the silent loop.
+// -----------------------------------------------------------------------------
+
+#[component]
+fn HeroReel() -> impl IntoView {
+    let video_ref = NodeRef::<leptos::html::Video>::new();
+
+    // Browser only: honour reduced motion, and restore the silent loop when
+    // full screen ends (standard API on the element, WebKit's own event on
+    // iOS, where only the video element can go full screen).
+    #[cfg(not(feature = "ssr"))]
+    Effect::new(move |_| {
+        use wasm_bindgen::{closure::Closure, JsCast};
+
+        let Some(video) = video_ref.get() else { return };
+        // Autoplay policy reads the `muted` PROPERTY. An element built in the
+        // browser gets the attribute but starts unmuted, so the browser would
+        // refuse to autoplay it.
+        video.set_muted(true);
+        if crate::components::tilt::prefers_reduced_motion() {
+            video.set_autoplay(false);
+            let _ = video.pause();
+        } else {
+            // Start it once there is a frame to show. Calling play() here, at
+            // mount, runs before the <source> children exist: it fails, and a
+            // play() call also clears the element's autoplay and poster
+            // flags, which left a paused black frame.
+            let on_ready = Closure::<dyn FnMut(web_sys::Event)>::new(move |_: web_sys::Event| {
+                if let Some(v) = video_ref.get_untracked() {
+                    if v.paused() && document().fullscreen_element().is_none() {
+                        let _ = v.play();
+                    }
+                }
+            });
+            let _ = video.add_event_listener_with_callback("loadeddata", on_ready.as_ref().unchecked_ref());
+            on_ready.forget();
+            // HAVE_CURRENT_DATA already: `loadeddata` has fired, start now.
+            if video.ready_state() >= 2 {
+                let _ = video.play();
+            }
+        }
+        let on_exit = Closure::<dyn FnMut(web_sys::Event)>::new(move |_: web_sys::Event| {
+            if document().fullscreen_element().is_some() {
+                return;
+            }
+            if let Some(v) = video_ref.get_untracked() {
+                v.set_muted(true);
+                v.set_controls(false);
+                if !crate::components::tilt::prefers_reduced_motion() {
+                    let _ = v.play();
+                }
+            }
+        });
+        for event in ["fullscreenchange", "webkitfullscreenchange", "webkitendfullscreen"] {
+            let _ = video.add_event_listener_with_callback(event, on_exit.as_ref().unchecked_ref());
+        }
+        on_exit.forget();
+    });
+
+    let open_fullscreen = move |_| {
+        #[cfg(not(feature = "ssr"))]
+        {
+            use wasm_bindgen::JsCast;
+
+            let Some(video) = video_ref.get_untracked() else { return };
+            video.set_current_time(0.0);
+            video.set_muted(false);
+            video.set_controls(true);
+            let _ = video.play();
+            if video.request_fullscreen().is_err() {
+                // iOS Safari has no element full screen; its video player does.
+                if let Ok(enter) = js_sys::Reflect::get(&video, &"webkitEnterFullscreen".into()) {
+                    if let Some(enter) = enter.dyn_ref::<js_sys::Function>() {
+                        let _ = enter.call0(&video);
+                    }
+                }
+            }
+        }
+    };
+
+    view! {
+        <figure
+            class="hero-render hero-reel"
+            on:mousemove=move |ev| on_tilt_move(&ev)
+            on:mouseleave=move |ev| on_tilt_leave(&ev)
+        >
+            <div class="hero-render-glow" aria-hidden="true"></div>
+            <video
+                node_ref=video_ref
+                class="hero-render-video"
+                poster="/assets/demo/eustress-demo-poster.jpg"
+                muted=true
+                prop:muted=true
+                on:click=move |_| {
+                    // Click toggles the silent loop. In full screen the
+                    // browser's own controls handle it.
+                    #[cfg(not(feature = "ssr"))]
+                    if let Some(v) = video_ref.get_untracked() {
+                        if document().fullscreen_element().is_none() {
+                            if v.paused() {
+                                let _ = v.play();
+                            } else {
+                                let _ = v.pause();
+                            }
+                        }
+                    }
+                }
+                autoplay=true
+                loop=true
+                playsinline=true
+                preload="auto"
+                width="1920"
+                height="1080"
+                aria-label="Eustress demo: an idea for a canyon footbridge is built in Eustress Studio, fails a live rockfall simulation, gets a redesigned canopy, passes the same test, and comes out costed and ready to build"
+            >
+                <source src="/assets/demo/eustress-demo.webm" type="video/webm" />
+                <source src="/assets/demo/eustress-demo.mp4" type="video/mp4" />
+            </video>
+            <button
+                type="button"
+                class="hero-fullscreen"
+                aria-label="Watch the demo full screen, with sound"
+                title="Watch full screen"
+                on:click=open_fullscreen
+            >
+                <svg viewBox="0 0 24 24" aria-hidden="true">
+                    <path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5" />
+                </svg>
+            </button>
+        </figure>
     }
 }
 

@@ -244,6 +244,6 @@ pub struct GeomSnapPlugin;
 impl Plugin for GeomSnapPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<GeomSnapState>()
-            .add_systems(Update, update_forced_category);
+            .add_systems(Update, update_forced_category.run_if(crate::play_mode::editor_input_enabled));
     }
 }

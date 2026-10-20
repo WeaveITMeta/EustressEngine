@@ -339,6 +339,23 @@ service must land in the matching Eustress service folder**, not in a
 single dumping ground. This is what makes the import look right in
 Explorer.
 
+The service's own properties are written too (`service_props.rs`): the
+engine's template for that service (`common/assets/service_templates/`) with
+the place's values laid over `[properties]`. Covered: Lighting (clock time,
+ambient and outdoor ambient, colour shift, brightness, shadow softness and
+`GlobalShadows`, exposure, latitude, technology, fog colour and distances),
+Workspace (gravity, fallen-parts height, wind, streaming, signal behaviour),
+Players (auto-loading, respawn time, player counts), StarterPlayer (character
+and camera defaults, written to `StarterPlayer/_service.toml` while its script
+folders land at the top level), SoundService (reverb, distance, Doppler and
+rolloff scales) and MaterialService (`Use2022Materials`, and each
+`<Material>Name` override as a `material_overrides` table). Values keep the
+template's units, which are Roblox's, except Lighting's fog distances: the
+engine hands those to Bevy's distance fog in meters. Fog is enabled only when
+the place pulled `FogEnd` in from Roblox's 100,000-stud "off" distance. Any
+other authored property is reported as unmapped and kept under
+`[properties.extras]`.
+
 ### Service router table
 
 The disk layout under `<space_root>/` is confirmed by inspection of
@@ -609,14 +626,13 @@ Rock      = [0.50, 0.45, 0.40]
 # … etc., 23 entries
 ```
 
-The Eustress terrain renderer reads this block on chunk-mesh generation
-and applies the per-source-material color as a vertex tint on top of the
-Eustress material's base color. Implementation hook:
-`eustress-common::terrain::material::TerrainMaterialConfig` already has a
-`textures: [Option<Handle<Image>>; 8]` slot — we add a parallel `tints:
-[Option<Color>; 8]` slot (sourced from `MaterialColors`) that the shader
-multiplies in. This is a small additive change to `material.rs` and the
-splat shader.
+The Eustress terrain renderer applies each per-source-material color as
+the tint of that material's slot. Implementation hook: the terrain
+material slot table (`eustress-common::terrain::material_slots`), whose
+`MaterialSlot::tint` the textured terrain shader multiplies into the
+slot's albedo and whose swatch colours the vertex-colour fallback. The
+tints come from `MaterialColors`, one per built-in slot the importer maps
+a source material onto.
 
 ### 6.5 Water layer
 
@@ -709,37 +725,41 @@ unvisited chunks.**
 
 ## 7. CSG (UnionOperation / NegateOperation / IntersectOperation)
 
-Roblox CSG operations come in two storable shapes inside a `.rbxl`:
+A CSG instance's baked render mesh lives in one of three places, checked
+in this order:
 
-1. **Baked mesh** — every shipped CSG instance carries a triangulated
-   render mesh + a collision mesh inside `BinaryString` properties on
-   the instance:
-   - `MeshData` — render mesh (vertices, normals, UVs, triangles).
-   - `PhysicalConfigData` — collision/physics mesh (decimated convex
-     pieces).
-   - `ChildData` — the original operand tree (so Studio can re-execute
-     the CSG when the user edits the source primitives).
-2. **Pure operand tree** — older or partial saves may only store
-   `ChildData` and rely on Studio's CSG engine to bake on open. We
-   re-execute these via `truck-shapeops` (§7.2).
+1. **`MeshData2`**: a deduplicated `SharedString`. Current files keep the
+   mesh here and leave the legacy `MeshData` present but empty.
+2. **`MeshData`**: a `BinaryString`; the only location in older files. An
+   empty blob counts as absent, so it can never shadow a populated
+   `MeshData2`.
+3. **The cloud**: no inline mesh, and an `AssetId` naming a
+   `PartOperationAsset` model (binary or XML). That model holds one
+   `PartOperationAsset` whose `MeshData2`/`MeshData` is the same CSGMDL
+   blob. It is fetched through the `AssetFetcher` (§11) and counted in
+   `ImportReport::csg_cloud_fetched`.
+
+Alongside the mesh the instance carries `PhysicalConfigData` (decimated
+collision pieces) and `ChildData`/`ChildData2` (the operand tree Studio
+re-executes when the source primitives change). A save with only the
+operand tree needs re-execution (§7.2).
 
 ### 7.1 Primary path — baked-mesh extraction (the 99% case)
 
 For each `UnionOperation` / `NegateOperation` / `IntersectOperation`
-instance with `MeshData` present:
+instance with a mesh in any of the three places above:
 
-1. Read the `MeshData` binary blob via `rbx_dom_weak`. Roblox's CSG mesh
-   format is a custom layout documented in the `rbx-mesh` crate
-   (rojo-rbx ecosystem). It's a packed sequence of:
-   - u32 version
-   - u32 vertex_count
-   - per-vertex: position (Vec3 f32), normal (Vec3 f32), uv (Vec2 f32),
-     color (Color3uint8), tangent (Vec3 f32 — derived if absent)
-   - u32 triangle_count
-   - per-triangle: 3 × u32 vertex indices
-2. Convert to a Eustress mesh by writing to `.glb` (gltf binary, 1
-   primitive, indexed triangles) with our standard vertex layout:
-   POSITION, NORMAL, TEXCOORD_0, COLOR_0, TANGENT.
+1. Decode the CSGMDL blob (`csg::decode_mesh_data`). Versions 2, 4 and 5
+   are read; 4 is obfuscated, 5 is plaintext with a checksum fallback, and 2
+   comes both ways: plaintext inline, XOR-obfuscated in the
+   `PartOperationAsset` Roblox serves for a cloud union. Its vertex-stride
+   magic (84) tells which. A vertex is 84 bytes: position, normal, RGBA,
+   normal id, UV, tangent.
+2. Write a `.glb` (glTF binary, one primitive, indexed triangles; POSITION,
+   NORMAL, TEXCOORD_0, COLOR_0) **unit-normalised**: centred on its bounding
+   box and scaled to span `[-0.5, 0.5]`. The engine multiplies every part
+   mesh by `Transform.scale`, which carries the part's `Size`, so geometry
+   written at its native stud size would be drawn Size².
 3. Place the `.glb` at
    `<space_root>/<service>/<csg-instance-folder>/csg.glb`.
 4. Create a `Part` instance at
@@ -807,8 +827,9 @@ it; recompute is for the rare edit case.
 
 | Failure                                                | Behaviour                                                                                       |
 | ------------------------------------------------------ | ----------------------------------------------------------------------------------------------- |
-| `MeshData` decode fails (malformed)                    | Fall through to §7.2 if `ChildData` present; else log + skip with a bounding-box `Part` fallback.|
-| Both `MeshData` and `ChildData` absent                 | Log `CsgEmpty` warning; create AABB-sized Block as last resort.                                  |
+| `MeshData` decode fails (malformed)                    | Unit block stand-in (the part's `Size` gives it its extent) + an approximation naming the decode error. |
+| No inline mesh, cloud `AssetId` unavailable            | Unit block stand-in + an approximation naming the fetch error (or the missing fetcher).          |
+| No inline mesh and no `AssetId`                        | Unit block stand-in + an approximation.                                                           |
 | `truck-shapeops` boolean op returns `None` (tolerance) | Try once with a 10× tolerance multiplier per `eustress-cad`'s convention. If still failing, log + create AABB Block. |
 | `.glb` write fails (disk full / permissions)           | Hard error → abort import; the partial Space is left for the user to inspect.                    |
 
@@ -925,14 +946,14 @@ the string lookup, then `ClassName::from_str` for the typed value.
 | `TextLabel`              | `TextLabel`              | inherited                   | Direct.                                                                |
 | `TextButton`             | `TextButton`             | inherited                   | Direct.                                                                |
 | `TextBox`                | `TextBox`                | inherited                   | Direct.                                                                |
-| `ImageLabel`             | `ImageLabel`             | inherited                   | Direct; `Image` → `asset_path`.                                        |
-| `ImageButton`            | `ImageButton`             | inherited                   | Direct; `Image` → `asset_path`.                                        |
+| `ImageLabel`             | `ImageLabel`             | inherited                   | Direct; `Image`/`ImageContent` → `[image].image` (§11).                |
+| `ImageButton`            | `ImageButton`             | inherited                   | Direct; `Image`/`ImageContent` → `[image].image` (§11).                |
 | `ScrollingFrame`         | `ScrollingFrame`         | inherited                   | Direct.                                                                |
 | `ViewportFrame`          | `ViewportFrame`          | inherited                   | Direct.                                                                |
 | `ParticleEmitter`        | `ParticleEmitter`        | inherited                   | Direct.                                                                |
 | `Beam`                   | `Beam`                   | inherited                   | Direct.                                                                |
-| `Sound`                  | `Sound`                  | inherited                   | `SoundId` → `asset_path`. Placeholder unless `AssetFetcher` set.       |
-| `Script`                 | `LuauScript`             | inherited                   | Source preserved; `ScriptTransformer::transform` invoked.              |
+| `Sound`                  | `Sound`                  | inherited                   | `SoundId`/`AudioContent` → `[sound].sound_id` (§11).                   |
+| `Script`                 | `LuauScript`             | inherited                   | Source preserved; `ScriptTransformer::transform` invoked. `Disabled` → `[script].enabled = false`; `RunContext` Server/Client/Plugin → `[script].run_context` (Legacy keeps the class default). |
 | `LocalScript`            | `LuauLocalScript`        | inherited                   | Same.                                                                  |
 | `ModuleScript`           | `LuauModuleScript`       | inherited                   | Same.                                                                  |
 | `RemoteEvent`            | `RemoteEvent`            | inherited                   | §8.                                                                    |
@@ -947,8 +968,8 @@ the string lookup, then `ClassName::from_str` for the typed value.
 | `Animator`               | `Animator`               | inherited                   | Direct.                                                                |
 | `Camera`                 | `Camera`                 | inherited                   | Direct.                                                                |
 | `SpecialMesh`            | `SpecialMesh`            | inherited                   | Direct; `MeshId` → `asset_mesh`.                                       |
-| `Decal`                  | `Decal`                  | inherited                   | Direct; `Texture` → `asset_path`.                                      |
-| `Texture` (BasePart texture child) | `Decal` + `_texture_tiled = true` | inherited | Roblox `Texture` is a tiling `Decal`; we preserve the tiling flag.    |
+| `Decal`                  | `Decal`                  | inherited                   | Direct; `Texture`/`TextureContent` → `[decal].texture` (§11); `Face`, `Color3`, `Transparency`, `ZIndex` → `[decal]`. |
+| `Texture` (BasePart texture child) | `Texture`      | inherited                   | `Texture`/`TextureContent` → `[texture].texture`; `Face`, `Color3`, `Transparency` and `StudsPerTileU/V`, `OffsetStudsU/V` (in meters, §10.2) → `[texture]`. |
 | `UnionOperation`         | `Part` (asset-meshed)    | inherited                   | **§7 — baked mesh extraction + opt-in recompute.**                     |
 | `NegateOperation`        | `Part` (asset-meshed)    | inherited                   | **§7.**                                                                |
 | `IntersectOperation`     | `Part` (asset-meshed)    | inherited                   | **§7.**                                                                |
@@ -977,10 +998,10 @@ materialised as instances. They become routing decisions per §5.
 | `Float64`                   | `PropertyValue::Float(f32)`         | Downcast to f32; loss accepted (Eustress is f32 everywhere).                     |
 | `Vector2`                   | `PropertyValue::Vector2`            | Direct.                                                                          |
 | `Vector2int16`              | `PropertyValue::Vector2`            | Cast i16 → f32.                                                                  |
-| `Vector3`                   | `PropertyValue::Vector3 (Vec3)`     | Direct — `STUD_TO_METERS = 1.0` confirmed (`services::workspace`).               |
+| `Vector3`                   | `PropertyValue::Vector3 (Vec3)`     | Direct; lengths follow §10.2.                                                    |
 | `Vector3int16`              | `PropertyValue::Vector3`            | Cast i16 → f32.                                                                  |
-| `CFrame`                    | `PropertyValue::Transform`          | Rotation matrix → `Quat::from_mat3`; position → translation; scale = 1.          |
-| `OptionalCFrame`            | `PropertyValue::Transform` or absent| `None` → property omitted (template default used).                               |
+| `CFrame`                    | `PropertyValue::Transform`          | §10.1. A joint's `C0`/`C1` keep both parts: `[constraint].c0` (meters) and `c0_rotation` (quaternion). |
+| `OptionalCFrame`            | `PropertyValue::Transform` or absent| `None` → property omitted (template default used). A Model's `WorldPivotData` is `[model].world_pivot` (position in meters). |
 | `Color3`                    | `PropertyValue::Color3`             | f32 [0..1].                                                                      |
 | `Color3uint8`               | `PropertyValue::Color3`             | u8/255 → f32.                                                                    |
 | `BrickColor`                | `PropertyValue::Color3`             | Static 128-entry palette lookup (rbx_dom_weak ships this).                       |
@@ -989,7 +1010,7 @@ materialised as instances. They become routing decisions per §5.
 | `Rect`                      | `PropertyValue::Rect`               | Direct — `crate::ui_types::Rect`. Wave-2 promotion from extras.                  |
 | `Enum`                      | `PropertyValue::Enum(String)`       | Label resolved via `rbx_reflection_database`; raw int kept as fallback.          |
 | `EnumItem`                  | `PropertyValue::Enum(String)`       | Same.                                                                            |
-| `ContentId` / `Content`     | `InstanceOverrides::asset_path`     | See §11.                                                                         |
+| `ContentId` / `Content`     | a class section key, or `[asset].mesh` | See §11.                                                                      |
 | `String` (ProtectedString — script source) | inline TOML `source` field | Routed to script TOML.                                                |
 | `BinaryString`              | base64 string in `extras`           | Default; for specific properties (Terrain SmoothGrid, CSG MeshData) we decode in the dedicated dispatchers (§6, §7) and the property never lands in `extras`. |
 | `SharedString`              | base64 string in `extras`           | Same default; CSG dispatcher consumes specific cases.                            |
@@ -1002,12 +1023,12 @@ materialised as instances. They become routing decisions per §5.
 | `Faces` / `Axes`            | bitset string in `extras`           | Same.                                                                            |
 | `MaterialColors`            | `[material_colors]` table on Terrain instance | §6.4.                                                                  |
 | `Font`                      | `PropertyValue::Font` (family + weight + style) | Promoted from extras when the GUI dispatcher consumes it.            |
-| `Tags`                      | `[metadata.tags]` array              | Direct; Eustress already has a tags subsystem.                                   |
-| `Attributes`                | `[properties.attributes]` table      | Direct; the recent (2026-05-25) Properties-panel work supports this.              |
+| `Tags`                      | root `tags` array                    | Where `InstanceDefinition` and the tree reader read them.                        |
+| `Attributes`                | root `[attributes]` table            | In the reader's forms: scalars, `Vector2` and `Vector3` bare; `Color3`, `BrickColor` and `CFrame` as the tagged tables a folded value object uses; `UDim`, `UDim2`, `NumberRange`, `Rect`, the sequences, `Font` and `EnumItem` tagged by type name. A string arrives as bytes and is written as text; bytes that are not UTF-8 are `{ Bytes = "<hex>" }`. An `EnumItem` carries its type, item name and value. |
 | `Ref` (Instance reference)  | `Uuid` (via §12) in `extras`         | Resolved by referent → uuid lookup. Unresolved refs logged.                      |
 | `UniqueId`                  | preserved in `[metadata.roblox_unique_id]` | For cross-import correlation.                                              |
 | `SecurityCapabilities`      | dropped with `SecurityCapDiscarded` warning | Roblox-internal access control with no Eustress cognate.                    |
-| `NetAssetRef`               | `InstanceOverrides::asset_path`     | Same as Content.                                                                 |
+| `NetAssetRef`               | `[properties.extras]`               | Round-trip only.                                                                 |
 
 **`extras` block**: properties without a first-class slot get written into a
 `[properties.extras]` sub-table. The file watcher already round-trips unknown
@@ -1017,24 +1038,153 @@ small focused PR against `PropertyValue`.
 
 ### 10.1 CFrame conversion (the rotation gotcha)
 
-Roblox CFrames store rotation as a row-major 3×3 matrix. `glam` uses
-column-major. The conversion:
+`rbx_types::Matrix3`'s `x`/`y`/`z` fields are the matrix's ROWS, in the
+order Roblox serialises them. The basis vectors (right, up, back) are its
+COLUMNS, so the conversion gathers columns:
 
 ```rust
 fn roblox_cframe_to_transform(cf: &rbx_types::CFrame) -> Transform {
-    // Roblox: rows are basis vectors (right, up, back).
-    let right = Vec3::new(cf.orientation.x.x, cf.orientation.x.y, cf.orientation.x.z);
-    let up    = Vec3::new(cf.orientation.y.x, cf.orientation.y.y, cf.orientation.y.z);
-    let back  = Vec3::new(cf.orientation.z.x, cf.orientation.z.y, cf.orientation.z.z);
-    // glam Mat3::from_cols expects column basis vectors.
-    let mat = Mat3::from_cols(right, up, back);
-    let rotation = Quat::from_mat3(&mat);
+    let (r0, r1, r2) = (cf.orientation.x, cf.orientation.y, cf.orientation.z);
+    let right = Vec3::new(r0.x, r1.x, r2.x);
+    let up    = Vec3::new(r0.y, r1.y, r2.y);
+    let back  = Vec3::new(r0.z, r1.z, r2.z);
+    let rotation = Quat::from_mat3(&Mat3::from_cols(right, up, back));
     let translation = Vec3::new(cf.position.x, cf.position.y, cf.position.z);
     Transform { translation, rotation, scale: Vec3::ONE }
 }
 ```
 
-Two unit tests cover identity CFrame and a 90°-about-Y to catch sign flips.
+Using the rows as columns transposes the matrix, and a rotation's transpose
+is its inverse: identity and 180° turns survive, every other angle imports
+turned the wrong way. `property_map::cframe_to_translation_quat` is the one
+implementation; `CFrameValue` attributes go through it too. The tests use an
+asymmetric rotation (+90° about Y must give `qy = +0.7071`), since identity
+cannot tell a matrix from its transpose.
+
+**Poses in a tree.** Roblox gives a part's `CFrame` in world space and an
+`Attachment`'s or a `Bone`'s relative to its part. An imported Space's
+`space.toml` sets `[space] transform_rule = "parent_pose"`, and under that
+rule each file's `[transform]` is its pose relative to its parent's pose
+(position and rotation), never its parent's size. The importer writes each
+node relative to the pose the loader composes for its parent, a cylinder's
+axis turn included (`roblox-import/src/pose.rs`), so a part nested in a part
+lands where Roblox had it. A node whose parents hold no pose, such as a part
+in a `Folder` or a `Model`, is written in world space. The key goes into
+`space.toml` before the first instance file, so a Space holding
+parent-relative files carries the key even when its import stops partway.
+
+Studio draws the rule with a hidden anchor: a sized part's placed children
+(parts, `Attachment`s, `Bone`s, `Model`s, `Folder`s, `Tool`s, `Accessory`s)
+hang from one unscaled child entity whose scale is the inverse of the part's
+size (`engine/src/space/pose_anchor.rs`). Resizing a part moves nothing that
+hangs from it, and a child reparented onto a part keeps its place in the
+world. The anchor is not an instance: the Explorer, the Play tree and Select
+Children list its children as the part's.
+
+With `EUSTRESS_MIGRATE_POSE=1` set, a Space written before the rule moves to
+it the first time it opens (`engine/src/space/rule_migration.rs`, planned by
+`eustress_common::pose_migration`). Each file whose placement would change is
+copied to `.eustress/transform_migration/<time>/` and rewritten, in its own
+unit, so that it stays where it was drawn, a nested part at the size it was
+drawn; a part the importer wrote that nothing has saved since goes where
+Roblox had it. `migration.log` beside the copies lists every file. The key
+goes into `space.toml` last, so a move that stops partway is put back from its
+copies and done again on the next open. Without the switch such a Space
+opens under the legacy rule and nothing on disk changes.
+
+### 10.2 Units
+
+Roblox studs are feet. Every imported instance carries
+`metadata.unit = "ft"`, and the loader converts the transform block from it:
+`position`, `scale` (the part's `Size`) and `mesh_offset`. Nothing else in
+the file is converted at load; class sections are read as engine-native
+meters. The importer therefore writes every other world-space length in
+meters (studs × 0.3048):
+
+- `Texture` `StudsPerTileU/V`, `OffsetStudsU/V`
+- light `Range`
+- `Sound` `RollOffMinDistance`/`RollOffMaxDistance`
+- `ParticleEmitter` `Size`, `Speed`, `ZOffset`
+- `Beam` `Width0/1`, `CurveSize0/1`, `TextureLength`, `ZOffset`
+- `BillboardGui` `StudsOffset`, `MaxDistance`
+- constraint `Thickness`, lengths and limits, prismatic `Velocity`, and a
+  joint's `C0`/`C1` offset
+- `Camera` near and far planes
+- a `Model`'s `WorldPivot` position (`[model].world_pivot`)
+
+Gameplay values are written as authored: `Humanoid` `WalkSpeed`,
+`JumpPower`, `JumpHeight`, `HipHeight` (the engine's Humanoid documents them in
+studs), and `VehicleSeat` `MaxSpeed`, `Torque`, `TurnSpeed`. `MaxSpeed` is a
+speed in the file's length unit: studs per second, which the file's `ft` reads
+as feet per second, turned into metres per second when the seat loads
+(`record_class_props`). `Torque` and `TurnSpeed` are read as written.
+
+### 10.3 Value objects
+
+A `*Value` child folds into its parent as a typed attribute named after it
+(`value_objects.rs`, Contract A), and scripts reading `.Value` on it are
+rewritten to `GetAttribute`. `IntConstrainedValue` and
+`DoubleConstrainedValue` fold to their number (read from the lowercase
+`value` property they serialise); their `MinValue`/`MaxValue` range is not
+kept. `RayValue` cannot be an attribute and is dropped with an
+approximation.
+
+A value object with children of its own (a car's `Handling.Torque` holding
+`Location` and `Suspension` values) still folds its value into its parent,
+and also stays in the tree as a `Folder`, so its children fold into its own
+attributes: `Handling.Torque.Value` reads `Handling:GetAttribute("Torque")`
+and `Handling.Torque.Location.Value` reads
+`Handling.Torque:GetAttribute("Location")`.
+
+`GuiMain`, the legacy name of `ScreenGui`, imports as a `ScreenGui`.
+
+### 10.4 Animations
+
+An `Animation`'s `AnimationId` is kept as written, in `[properties]
+animation_id`: a Roblox id finds its clip at run time through the Space's
+id map, `assets/roblox_ids.toml`.
+
+A `KeyframeSequence` is one clip record, the one
+`docs/design/ANIMATION_SYSTEM.md` describes (`animation.rs`). Its `Loop`,
+`Priority` and `AuthoredHipHeight` go to `[keyframe_sequence]`, and each
+`Keyframe` is one `[[keyframes]]` entry: its `Pose` tree flattened into
+`[keyframes.poses.<joint>]` tables that name the pose above them, its
+`NumberPose`s under `[keyframes.numbers]` and its `KeyframeMarker`s under
+`[[keyframes.markers]]`. A pose holds only what differs from Roblox's
+defaults: `cframe` (the `CFrame` in Roblox's order, position and then the
+rotation matrix by rows, in studs under the record's `unit = "ft"`),
+`easing`, `direction`, and `weight`, where 0 marks a pose that only holds
+the hierarchy together. A pose drives the joint between its parent pose's
+part and its own, so a top-level pose drives nothing: it is left out, and its
+children still name it as their parent. Enums are written by name. A
+keyframe holds one pose
+per joint name; where two poses share a name, the one that keys the joint
+is kept and the report says so. The sequences Roblox's Animation Editor
+saves under `ServerStorage/RBX_ANIMSAVES` import the same way.
+
+After the walk, every Roblox id the place plays is fetched: each
+`AnimationId`, and each id in a string literal of a script that works with
+animations (Roblox's `Animate` script keeps its default clips that way). A
+fetched model holding a `KeyframeSequence` becomes
+`assets/animations/rbx-<id>.anim.toml`, named for its id in
+`assets/roblox_ids.toml`. A literal that turns out to be an image or a sound
+is left alone. The report counts `animation_sequences` and
+`animation_clips`, and lists every id with no clip under
+`animation_ids_missing`, with where the place names it and why. Most Roblox
+animations need a credential to fetch (§11).
+
+### 10.5 The Sun and the Moon
+
+The Sky under Lighting sizes the Space's Sun and Moon, which own their
+discs: `SunAngularSize` goes to `Lighting/Sun.instance.toml`
+`[star] angular_size` and `MoonAngularSize` to `Lighting/Moon.instance.toml`
+`[moon] angular_size`, each made from the engine's lighting template when the
+Space has none. Roblox's sizes a billboard that includes a wide glow and the
+engine's is the physical disc, so each is scaled from Roblox's default to the
+engine's: sun = 0.53 × SunAngularSize / 21, moon = 1.1 × MoonAngularSize / 11,
+within 0.05 to 20 degrees. A place at Roblox's defaults lands exactly on the
+engine's; one that doubled its sun gets a sun twice the engine's. A place
+with no Sky leaves the Sun and the Moon at their defaults.
 
 ---
 
@@ -1062,11 +1212,70 @@ keeps the no-network behaviour; an integrator can plug in a community
 mirror, a local file cache, or a CDN proxy. When set, the resolver:
 
 1. Calls `fetch(asset_id)`.
-2. Writes the bytes to
-   `<universe_root>/assets/<kind>/rbx-<asset_id>.<ext>` where `kind` is
-   inferred from the property (Image → `images/`, Sound → `audio/`, etc.)
-   and `<ext>` from the bytes' magic header.
-3. Returns the relative path for `asset_path` / `asset_mesh`.
+2. For a mesh property (`MeshId`, `MeshContent`, a SpecialMesh's mesh),
+   decodes the Roblox `.mesh` and writes
+   `<space_root>/assets/meshes/rbx-<asset_id>.glb`, unit-normalised like a
+   union (§7.1); the part's `[asset].mesh` points at it. A legacy
+   `SpecialMesh` FileMesh draws at its native size times `Scale` rather
+   than filling the part, so its `mesh_scale` is native × `Scale` ÷ `Size`.
+3. For anything else, sniffs the bytes (PNG, JPEG, WebP, GIF, BMP, DDS,
+   OGG, WAV, MP3) into `<space_root>/assets/textures/` or `assets/sounds/`
+   and writes the file as a `space://` URL into the key the class's engine
+   loader reads:
+
+   | Class | Roblox property | Section key |
+   | --- | --- | --- |
+   | `Decal` | `Texture`, `TextureContent` | `[decal].texture` |
+   | `Texture` | `Texture`, `TextureContent` | `[texture].texture` |
+   | `ImageLabel`, `ImageButton` | `Image`, `ImageContent` | `[image].image` |
+   | `Sound` | `SoundId`, `AudioContent` | `[sound].sound_id` |
+   | `ParticleEmitter` | `Texture` | `[particle].texture` |
+   | `Beam` | `Texture` | `[beam].texture` |
+   | `VideoFrame` | `Video`, `VideoContent` | `[video].source` |
+   | `Sky` | `SkyboxFt/Bk/Lf/Rt/Up/Dn` | `[sky].skybox_front/back/left/right/top/bottom` |
+
+   A fetched file with no engine slot (a Trail's texture) is kept as
+   `space://…` in `[properties.extras]`; an asset that was not fetched keeps
+   its Roblox URI there, and its section key stays empty. Media never goes
+   to `[asset]`: the engine's `[asset]` table requires `mesh`, and one
+   holding only a path fails to deserialize.
+4. A textured mesh (a MeshPart's `TextureID`/`TextureContent`, or a folded
+   SpecialMesh's `TextureId`) is baked into a copy of the mesh with the
+   texture as its glTF material, `assets/meshes/rbx-<mesh>-tex-<texture>-<look>.glb`,
+   and the part gets `[properties] respect_gltf_materials = true` so the
+   engine draws that material (`texture_bake.rs`). A MeshPart shows its
+   `Color` through transparent texels, so the texture is composited over the
+   part colour; a SpecialMesh's texture is multiplied by `VertexColor` and
+   keeps its alpha. Roughness and metalness come from the part's material
+   preset. `<look>` hashes those inputs, so parts that look alike share one
+   file. Only PNG and JPEG embed in glTF; any other texture keeps the plain
+   mesh and an asset warning.
+
+Current files spell most media properties as `Content`: `MeshContent`,
+`TextureContent`, `ImageContent`, `AudioContent` and so on, alongside the
+legacy `ContentId` names. Both are recognised.
+
+**Roblox `.mesh` versions.** 1.00 and 1.01 (ASCII; 1.00 stores positions at
+twice their size and is halved, 1.01 is not; legacy normals are normalised),
+2.00, 3.00 and 3.01 (binary with a LOD table), 4.00, 4.01 and 5.00 (a fixed
+header with LOD, bone, subset and FACS counts, 40-byte vertices, and an
+8-byte skinning envelope per vertex when skinned), and 6.00 and 7.00 (typed
+chunks: `COREMESH`, `LODS`, `SKINNING`, `FACS`, `HSRAVIS`). Only LOD0, the
+full-detail mesh, is kept. A vertex is position, normal, UV, then a tangent
+from 36 bytes and an RGBA colour at 40. A `COREMESH` v2 chunk is Draco
+geometry, which is not decoded: the part keeps its placeholder and the
+report names it.
+
+**Credentials.** Roblox refuses most asset downloads without
+authentication. The `rbx_import` bin and Studio's import take an Open Cloud
+API key with the `legacy-asset:manage` scope from
+`EUSTRESS_ROBLOX_API_KEY` (preferred: it goes to
+`apis.roblox.com/asset-delivery-api/v1/assetId/<id>`, and the signed CDN
+location it returns is downloaded without it), or a `.ROBLOSECURITY`
+cookie from `EUSTRESS_ROBLOSECURITY`. Rate limits (HTTP 429) and server
+errors are retried up to five times with backoff. A refusal (401/403) is
+never cached as a missing asset, so a later run with a credential fetches
+it.
 
 `rbxasset://` is handled by checking the user's local Roblox Studio install
 (if present) at `%LOCALAPPDATA%/Roblox/Versions/`. If found, copy locally
@@ -1076,6 +1285,25 @@ and use; if not, emit warning.
 perspective — the integrator decides whether to follow it.
 
 ---
+
+### 11.1 Re-importing a Space that is being rebuilt
+
+`rbx_import --clean` moves the old Space to `Spaces/.trash` and imports the
+place fresh. Two things a rebuild keeps of its own come back from the
+trashed copy (`carry_over.rs`): every folder named `Rebuild` directly under
+a top-level folder (`Workspace/Rebuild`, `ServerScriptService/Rebuild`, ...),
+copied whole, and `.eustress/rebuild_patches.toml`, the rebuild's edits to
+imported instances, replayed onto the fresh files:
+
+```toml
+[[patch]]
+path = "Workspace/Cars/Sedan"   # the instance folder, Space-relative
+key = "attributes.MaxSpeed"     # a dotted key into its _instance.toml
+value = 120                     # or `remove = true`
+```
+
+A patch whose instance no longer exists goes to
+`.eustress/rebuild_patches_orphaned.toml`, and the importer prints the counts.
 
 ## 12. Idempotency + deterministic UUIDs
 

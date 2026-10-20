@@ -1,62 +1,55 @@
 //! # Published-content fetch
 //!
-//! Downloads a published simulation and unpacks it so the Player can open it.
-//! This is the half of the publish loop that never existed: Studio has uploaded
-//! to R2 since the pipeline was built (`engine/src/ui/file_event_handler.rs:701`),
-//! and nothing has ever read from it.
+//! Downloads a published simulation so the Player can open it.
 //!
-//! ## What a published simulation actually is
+//! ## What a published simulation is
 //!
-//! A `.pak` is **tar + zstd of the Universe directory**
-//! (`file_event_handler.rs:912-963`) — the file-system-first workspace of
-//! `.instance.toml` files, `.glb` meshes and `.soul` scripts. It is *not* a
-//! binary scene blob, which is why "extract the binary scene parser" was the
-//! wrong plan: unpacking gives a Space directory, and opening that directory is
-//! the same job Studio already does.
+//! Studio publishes a world as `.echk` chunks: each Space baked into
+//! content-addressed spatial chunks, plus the Universe's `assets/`, named by
+//! a [`WorldManifest`]. Simulations published before that are one `.pak`
+//! (tar + zstd of the Universe folder), and still open.
 //!
 //! ## Flow
 //!
 //! ```text
 //! FetchSpace(sim_id)
-//!   → GET {API}/api/simulations/{id}/space      (bytes)
-//!   → zstd decode → untar → content cache
-//!   → SpaceFetched { root }
+//!   → GET {API}/api/simulations/{id}/world/manifest
+//!       → each chunk not already cached:
+//!           GET {API}/api/simulations/{id}/world/chunks/{blake3}, verified by hash
+//!       → decode → WorldDownloaded
+//!   (409 {"format":"pak"}: an older publish)
+//!   → GET {API}/api/simulations/{id}/download → zstd → untar → WorldDownloaded
 //! ```
 //!
-//! Work happens on a worker thread; Bevy only ever sees messages.
-//!
-//! ## Cache
-//!
-//! Unpacked under `dirs::data_local_dir()/eustress/spaces/<sim_id>/`, keyed by
-//! the publish hash so an unchanged simulation is not refetched. Studio already
-//! computes that hash to skip no-op uploads (`file_event_handler.rs:714`).
+//! A downloaded world then opens exactly like one a host sent
+//! (`systems::net_play`). Work happens on a worker thread; Bevy only sees
+//! messages. Native only: a browser build fetches with the platform's
+//! `fetch` instead of blocking HTTP on a thread.
 
 use bevy::prelude::*;
+use std::collections::HashMap;
 use std::io::Read;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::mpsc::{channel, Receiver, Sender};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
+
+use eustress_echk::{content_hash, is_content_hash, WorldManifest};
+use eustress_networking::session::{assemble_world, ChunkCache, DownloadedWorld, WorldDownloaded};
+
+use super::live_world::{find_spawn, world_from_universe_dir, DiskChunkCache};
 
 /// Where published content is fetched from. Matches Studio's `PUBLISH_API`.
 pub const PUBLISH_API: &str = "https://api.eustress.dev";
 
-/// Ask the Player to download and unpack a published simulation.
+/// Where a published world's players stand when it names no SpawnLocation.
+const DEFAULT_SPAWN: [f32; 3] = [0.0, 2.0, 8.0];
+
+/// Ask the Player to download and open a published simulation.
 #[derive(Message, Debug, Clone)]
 pub struct FetchSpace {
     pub simulation_id: String,
-    /// Bearer token. Published content is auth-gated today; the worker's
-    /// download handler rejects anonymous reads.
+    /// Bearer token, for a simulation that is not public.
     pub token: Option<String>,
-}
-
-/// A simulation is unpacked and ready to open.
-#[derive(Message, Debug, Clone)]
-pub struct SpaceFetched {
-    pub simulation_id: String,
-    pub root: PathBuf,
-    /// Every `_instance.toml` found — the Spaces this Universe contains.
-    pub spaces: Vec<PathBuf>,
-    pub bytes: usize,
 }
 
 #[derive(Message, Debug, Clone)]
@@ -66,7 +59,7 @@ pub struct SpaceFetchFailed {
 }
 
 enum FetchResult {
-    Ok(SpaceFetched),
+    Ok(DownloadedWorld),
     Err(SpaceFetchFailed),
 }
 
@@ -83,18 +76,11 @@ impl Plugin for SpaceFetchPlugin {
         let (tx, rx) = channel();
         app.insert_resource(FetchChannel { tx, rx: Mutex::new(rx) })
             .add_message::<FetchSpace>()
-            .add_message::<SpaceFetched>()
             .add_message::<SpaceFetchFailed>()
+            // Also registered by NetPlugin; idempotent.
+            .add_message::<WorldDownloaded>()
             .add_systems(Update, (start_fetches, drain_results));
     }
-}
-
-/// Local cache root for unpacked simulations.
-pub fn cache_root() -> PathBuf {
-    dirs::data_local_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join("eustress")
-        .join("spaces")
 }
 
 fn start_fetches(mut events: MessageReader<FetchSpace>, chan: Res<FetchChannel>) {
@@ -108,12 +94,9 @@ fn start_fetches(mut events: MessageReader<FetchSpace>, chan: Res<FetchChannel>)
         std::thread::Builder::new()
             .name(format!("space-fetch-{id}"))
             .spawn(move || {
-                let result = match fetch_and_unpack(&id, token.as_deref()) {
-                    Ok(v) => FetchResult::Ok(v),
-                    Err(e) => FetchResult::Err(SpaceFetchFailed {
-                        simulation_id: id.clone(),
-                        error: e,
-                    }),
+                let result = match fetch_world(&id, token.as_deref()) {
+                    Ok(world) => FetchResult::Ok(world),
+                    Err(error) => FetchResult::Err(SpaceFetchFailed { simulation_id: id.clone(), error }),
                 };
                 let _ = tx.send(result);
             })
@@ -123,21 +106,16 @@ fn start_fetches(mut events: MessageReader<FetchSpace>, chan: Res<FetchChannel>)
 
 fn drain_results(
     chan: Res<FetchChannel>,
-    mut ok: MessageWriter<SpaceFetched>,
+    mut ok: MessageWriter<WorldDownloaded>,
     mut fail: MessageWriter<SpaceFetchFailed>,
 ) {
     let Ok(rx) = chan.rx.lock() else { return };
     while let Ok(r) = rx.try_recv() {
         match r {
-            FetchResult::Ok(v) => {
-                info!(
-                    "📦 unpacked {} → {:?} ({} spaces, {} bytes)",
-                    v.simulation_id,
-                    v.root,
-                    v.spaces.len(),
-                    v.bytes
-                );
-                ok.write(v);
+            FetchResult::Ok(world) => {
+                let files: usize = world.spaces.iter().map(|(_, r)| r.len()).sum::<usize>() + world.assets.len();
+                info!("📦 fetched {} ({} Spaces, {} files)", world.universe, world.spaces.len(), files);
+                ok.write(WorldDownloaded(Arc::new(world)));
             }
             FetchResult::Err(e) => {
                 error!("📥 fetch {} failed: {}", e.simulation_id, e.error);
@@ -147,45 +125,83 @@ fn drain_results(
     }
 }
 
-/// Download, decompress, untar. Blocking; runs off the Bevy thread.
-fn fetch_and_unpack(sim_id: &str, token: Option<&str>) -> Result<SpaceFetched, String> {
-    let url = format!("{PUBLISH_API}/api/simulations/{sim_id}/space");
-
+/// Download a published world. Blocking; runs off the Bevy thread.
+fn fetch_world(sim_id: &str, token: Option<&str>) -> Result<DownloadedWorld, String> {
     let client = reqwest::blocking::Client::builder()
         .timeout(std::time::Duration::from_secs(300))
         .build()
         .map_err(|e| format!("http client: {e}"))?;
+    let get = |url: &str| {
+        let mut req = client.get(url);
+        if let Some(t) = token {
+            req = req.bearer_auth(t);
+        }
+        req.send().map_err(|e| format!("GET {url}: {e}"))
+    };
 
-    let mut req = client.get(&url);
-    if let Some(t) = token {
-        req = req.bearer_auth(t);
+    let manifest_url = format!("{PUBLISH_API}/api/simulations/{sim_id}/world/manifest");
+    let resp = get(&manifest_url)?;
+    let status = resp.status();
+    if status.as_u16() == 409 {
+        // Published before .echk: one .pak of the whole Universe.
+        return fetch_legacy_pak(sim_id, &get);
+    }
+    if !status.is_success() {
+        let body = resp.text().unwrap_or_default();
+        return Err(format!("{status} from {manifest_url}: {}", body.chars().take(200).collect::<String>()));
+    }
+    let manifest: WorldManifest = resp.json().map_err(|e| format!("read the world manifest: {e}"))?;
+    manifest.validate().map_err(|e| format!("the world manifest was refused: {e}"))?;
+
+    let cache = DiskChunkCache::default();
+    let mut chunks: HashMap<String, Vec<u8>> = HashMap::new();
+    for hash in manifest.hashes() {
+        if !is_content_hash(&hash) {
+            return Err(format!("bad chunk name {hash:?}"));
+        }
+        if let Some(bytes) = cache.get(&hash).filter(|b| content_hash(b) == hash) {
+            chunks.insert(hash, bytes);
+            continue;
+        }
+        let url = format!("{PUBLISH_API}/api/simulations/{sim_id}/world/chunks/{hash}");
+        let resp = get(&url)?;
+        let status = resp.status();
+        if !status.is_success() {
+            return Err(format!("{status} from {url}"));
+        }
+        let bytes = resp.bytes().map_err(|e| format!("read chunk {hash}: {e}"))?.to_vec();
+        if content_hash(&bytes) != hash {
+            return Err(format!("chunk {hash} does not match its content hash"));
+        }
+        cache.put(&hash, &bytes);
+        chunks.insert(hash, bytes);
     }
 
-    let resp = req.send().map_err(|e| format!("GET {url}: {e}"))?;
+    let mut world = assemble_world(&manifest, |h| chunks.get(h).map(|b| b.as_slice()), DEFAULT_SPAWN)?;
+    if let Some(at) = find_spawn(&world) {
+        world.spawn = at.to_array();
+    }
+    Ok(world)
+}
+
+fn fetch_legacy_pak(
+    sim_id: &str,
+    get: &dyn Fn(&str) -> Result<reqwest::blocking::Response, String>,
+) -> Result<DownloadedWorld, String> {
+    let url = format!("{PUBLISH_API}/api/simulations/{sim_id}/download");
+    let resp = get(&url)?;
     let status = resp.status();
     if !status.is_success() {
-        // Worth naming precisely: a 403 here is the historical failure mode —
-        // the worker gates downloads on `sim.is_public`, which publish did not
-        // set, so simulations listed publicly were denied on download.
         let body = resp.text().unwrap_or_default();
         return Err(format!("{status} from {url}: {}", body.chars().take(200).collect::<String>()));
     }
-
     let bytes = resp.bytes().map_err(|e| format!("read body: {e}"))?;
     if bytes.is_empty() {
         return Err("empty .pak".into());
     }
-
-    let dest = cache_root().join(sim_id);
+    let dest = super::live_world::data_root().join("pak").join(sim_id);
     unpack_pak(&bytes, &dest)?;
-
-    let spaces = find_spaces(&dest);
-    Ok(SpaceFetched {
-        simulation_id: sim_id.to_string(),
-        root: dest,
-        spaces,
-        bytes: bytes.len(),
-    })
+    world_from_universe_dir(&dest)
 }
 
 /// zstd → tar → directory. Public so a local `.pak` can be opened without a
@@ -244,47 +260,20 @@ pub fn is_unsafe_archive_path(path: &Path) -> bool {
             .any(|c| matches!(c, std::path::Component::ParentDir | std::path::Component::Prefix(_)))
 }
 
-/// Every `_instance.toml` under `root` — one per authored instance; the Spaces
-/// are the directories that contain them.
-fn find_spaces(root: &Path) -> Vec<PathBuf> {
-    let mut out = Vec::new();
-    let mut stack = vec![root.to_path_buf()];
-    let mut guard = 0;
-
-    while let Some(dir) = stack.pop() {
-        guard += 1;
-        if guard > 20_000 {
-            warn!("space scan hit its node budget; results are partial");
-            break;
-        }
-        let Ok(entries) = std::fs::read_dir(&dir) else { continue };
-        for e in entries.flatten() {
-            let p = e.path();
-            if p.is_dir() {
-                stack.push(p);
-            } else if p.file_name().and_then(|n| n.to_str()) == Some("_instance.toml") {
-                out.push(p);
-            }
-        }
-    }
-    out.sort();
-    out
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// Round-trip the real published format: tar + zstd, exactly as
-    /// `package_universe_to_pak` produces it.
+    /// Round-trip the legacy published format: tar + zstd of a Universe
+    /// folder, the way Studio built a `.pak` before `.echk`.
     #[test]
-    fn unpacks_a_pak_built_the_way_studio_builds_them() {
-        let tmp = std::env::temp_dir().join("eustress_pak_rt");
+    fn unpacks_a_legacy_pak_into_a_world() {
+        let tmp = std::env::temp_dir().join(format!("eustress_pak_rt_{}", std::process::id()));
         let src = tmp.join("src");
         let out = tmp.join("out");
         let _ = std::fs::remove_dir_all(&tmp);
-        std::fs::create_dir_all(src.join("MySpace")).unwrap();
-        std::fs::write(src.join("MySpace/_instance.toml"), "[metadata]\nclass_name = \"Space\"\n")
+        std::fs::create_dir_all(src.join("Spaces/MySpace/Workspace/Floor")).unwrap();
+        std::fs::write(src.join("Spaces/MySpace/Workspace/Floor/_instance.toml"), "[metadata]\nclass_name = \"Part\"\n")
             .unwrap();
         std::fs::write(src.join("readme.txt"), "hello").unwrap();
 
@@ -297,10 +286,10 @@ mod tests {
         let pak = zstd::encode_all(std::io::Cursor::new(&tar_bytes), 3).unwrap();
 
         unpack_pak(&pak, &out).expect("unpack");
-
-        let spaces = find_spaces(&out);
-        assert_eq!(spaces.len(), 1, "expected one _instance.toml, got {spaces:?}");
-        assert!(out.join("readme.txt").is_file());
+        let world = world_from_universe_dir(&out).expect("world");
+        assert_eq!(world.start_space, "MySpace");
+        assert_eq!(world.spaces[0].1.len(), 1);
+        assert_eq!(world.spaces[0].1[0].0, "Workspace/Floor/_instance.toml");
 
         let _ = std::fs::remove_dir_all(&tmp);
     }

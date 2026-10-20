@@ -39,6 +39,10 @@ tracing     = "0.1"
 
 # Hex encoding (for uuid output)
 hex         = "0.4"
+# Texture baking (textured part meshes): decode a PNG texture, composite it
+# over the part colour, re-encode. 0.17 is the line the workspace already
+# builds for `image`, so this adds no new crate to compile.
+png         = "0.17"
 
 # TOML emission for [properties.extras] routing + report serialization
 toml        = "0.8"

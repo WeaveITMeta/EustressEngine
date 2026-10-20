@@ -99,6 +99,66 @@ pub struct WorkshopClaudeTasks {
     pub chat_pending: bool,
 }
 
+impl WorkshopClaudeTasks {
+    /// True while a model call for the agent loop is in flight: the main turn
+    /// or an advisor or critic consult. Drives the Workshop's "Thinking" strip
+    /// and holds messages sent mid-turn in the queue.
+    pub fn is_busy(&self) -> bool {
+        self.chat_pending || !self.agentic_in_flight.is_empty() || !self.advisor_in_flight.is_empty()
+    }
+}
+
+/// Set by the Workshop's Stop button (or Escape) from the Slint action layer,
+/// consumed by [`apply_workshop_stop`] on the next frame. An atomic because
+/// the action layer does not take this module's resources, the same reason
+/// the attach strip stages through a static.
+static STOP_REQUESTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Ask the agent loop to stop at the next frame.
+pub fn request_stop() {
+    STOP_REQUESTED.store(true, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Stop the agent loop: abandon in-flight model calls and close out every
+/// tool call that has not run.
+///
+/// A provider call on a blocking thread cannot be cancelled, so its container
+/// is dropped instead: the thread finishes, writes into an `Arc` nobody reads,
+/// and its answer never reaches the conversation. Tokens it already spent are
+/// still billed by the provider; they are just no longer shown.
+///
+/// Every open `tool_use` gets a result saying it was stopped, because the next
+/// request must pair each one with a `tool_result`. The closing Notice is what
+/// keeps the loop stopped: `ready_to_dispatch` treats it as a finished turn,
+/// where the freshly written tool results alone would read as "continue".
+///
+/// Queued messages are left alone and go out on the next frame, which makes
+/// Stop double as "stop and do this instead".
+pub fn apply_workshop_stop(
+    mut pipeline: ResMut<IdeationPipeline>,
+    mut tasks: ResMut<WorkshopClaudeTasks>,
+) {
+    if !STOP_REQUESTED.swap(false, std::sync::atomic::Ordering::Relaxed) {
+        return;
+    }
+
+    let was_thinking = tasks.is_busy();
+    tasks.agentic_in_flight.clear();
+    tasks.advisor_in_flight.clear();
+    tasks.chat_pending = false;
+
+    let closed = pipeline.skip_unanswered_tool_calls(
+        &[McpCommandStatus::Pending, McpCommandStatus::Approved, McpCommandStatus::Running],
+        "Stopped by the user before this finished.",
+    );
+    pipeline.awaiting_tool_approval = false;
+
+    if was_thinking || closed > 0 {
+        pipeline.add_notice_message("Stopped".to_string());
+        info!("Workshop: stopped by the user ({closed} open tool calls closed)");
+    }
+}
+
 // ============================================================================
 // 2. System prompt for conversational ideation
 // ============================================================================
@@ -382,6 +442,10 @@ pub(super) fn ready_to_dispatch(messages: &[super::ChatMessage]) -> bool {
             MessageRole::System => Some(false),
             // A failed turn is a finished turn. Never auto-retry.
             MessageRole::Error => Some(false),
+            // A Stop is a finished turn too. Without this, the tool results
+            // Stop writes for every unresolved call would read as "resolved,
+            // continue", and the loop would restart the instant it was stopped.
+            MessageRole::Notice => Some(false),
             // UI-only rows — transparent to the dispatch guard.
             MessageRole::Artifact | MessageRole::Approval => None,
         })
@@ -695,7 +759,7 @@ pub(crate) fn build_anthropic_messages(pipeline: &IdeationPipeline) -> Vec<Value
                     }));
                 }
             }
-            MessageRole::Approval | MessageRole::Artifact | MessageRole::Error => {
+            MessageRole::Approval | MessageRole::Artifact | MessageRole::Error | MessageRole::Notice => {
                 // Don't send UI-only messages to Claude.
             }
         }
@@ -807,19 +871,23 @@ pub fn dispatch_normalize_request(
         None => return,
     };
     
+    // The key first: without one the step cannot run, so the card says so
+    // instead of spinning as Running.
+    let api_key = match (&global_settings, &space_settings) {
+        (Some(global), Some(space)) => space.effective_api_key(global),
+        _ => String::new(),
+    };
+    if api_key.is_empty() {
+        pipeline.update_mcp_status(msg_id, McpCommandStatus::Error);
+        pipeline.add_error_message(
+            "No API key configured. Add one in Settings > Soul, then start the step again.".to_string(),
+        );
+        return;
+    }
+
     // Mark as running
     pipeline.update_mcp_status(msg_id, McpCommandStatus::Running);
     pipeline.state = IdeationState::Normalizing;
-    
-    // Get API key
-    let api_key = match (&global_settings, &space_settings) {
-        (Some(global), Some(space)) => {
-            let key = space.effective_api_key(global);
-            if key.is_empty() { return; }
-            key
-        }
-        _ => return,
-    };
     
     // Build normalization prompt
     let prompt = normalizer::build_normalize_prompt(&pipeline.conversation_context);
@@ -1413,7 +1481,13 @@ fn build_tool_context(
 /// content. Falls back to the raw JSON if compaction fails.
 fn compact_input_preview(input: &Value) -> String {
     let s = input.to_string();
-    if s.len() <= 140 { s } else { format!("{}…", &s[..140.min(s.len())]) }
+    // Cut on a character boundary. This sliced the byte string at 140, which
+    // panics whenever a multi-byte character (×, °, an accented name, an
+    // emoji) straddles that byte, taking the engine down mid-turn.
+    match s.char_indices().nth(140) {
+        Some((cut, _)) => format!("{}…", &s[..cut]),
+        None => s,
+    }
 }
 
 // ============================================================================
@@ -1569,5 +1643,98 @@ mod tests {
     #[test]
     fn an_empty_transcript_does_not_dispatch() {
         assert!(!ready_to_dispatch(&[]));
+    }
+
+    #[test]
+    fn a_stop_stays_stopped() {
+        // Stop writes a result onto every open tool call, and a resolved
+        // result on its own reads as "continue". The Notice after them is what
+        // keeps the loop from restarting the instant it was stopped.
+        assert!(!ready_to_dispatch(&[
+            msg(MessageRole::User),
+            resolved_tool(),
+            msg(MessageRole::Notice),
+        ]));
+    }
+
+    #[test]
+    fn sending_after_a_stop_resumes() {
+        assert!(ready_to_dispatch(&[
+            msg(MessageRole::User),
+            msg(MessageRole::Notice),
+            msg(MessageRole::User),
+        ]));
+    }
+
+    #[test]
+    fn notices_never_reach_the_model() {
+        let mut pipeline = IdeationPipeline::default();
+        pipeline.add_user_message("hello".to_string());
+        pipeline.add_notice_message("Stopped".to_string());
+        let request = serde_json::to_string(&build_anthropic_messages(&pipeline)).unwrap();
+        assert!(!request.contains("Stopped"), "a notice leaked into the request: {request}");
+    }
+
+    fn open_tool_call(id: &str, status: McpCommandStatus) -> ChatMessage {
+        ChatMessage {
+            role: MessageRole::Mcp,
+            mcp_method: Some("tool_use".to_string()),
+            mcp_endpoint: Some("create_entity".to_string()),
+            tool_use_id: Some(id.to_string()),
+            tool_input: Some(serde_json::json!({ "name": "Part" })),
+            mcp_status: Some(status),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn abandoned_tool_calls_all_get_a_result() {
+        // The provider rejects a request holding a tool_use with no matching
+        // tool_result, so Stop must answer every open call.
+        let mut pipeline = IdeationPipeline::default();
+        pipeline.messages.push(open_tool_call("a", McpCommandStatus::Pending));
+        pipeline.messages.push(open_tool_call("b", McpCommandStatus::Running));
+        pipeline.messages.push(ChatMessage {
+            tool_result: Some("done".to_string()),
+            ..open_tool_call("c", McpCommandStatus::Done)
+        });
+
+        let closed = pipeline.skip_unanswered_tool_calls(
+            &[McpCommandStatus::Pending, McpCommandStatus::Approved, McpCommandStatus::Running],
+            "stopped",
+        );
+
+        assert_eq!(closed, 2, "only the two open calls should be touched");
+        assert!(pipeline.messages.iter().all(|m| m.tool_result.is_some()));
+        assert_eq!(
+            pipeline.messages[2].tool_result.as_deref(),
+            Some("done"),
+            "a finished call keeps its real result"
+        );
+        assert_eq!(pipeline.messages[0].mcp_status, Some(McpCommandStatus::Skipped));
+    }
+
+    #[test]
+    fn a_redirect_skips_only_what_was_waiting() {
+        // Replying while an approval waits skips the waiting call, never one
+        // that is already running.
+        let mut pipeline = IdeationPipeline::default();
+        pipeline.messages.push(open_tool_call("a", McpCommandStatus::Pending));
+        pipeline.messages.push(open_tool_call("b", McpCommandStatus::Running));
+        let closed = pipeline.skip_unanswered_tool_calls(&[McpCommandStatus::Pending], "redirected");
+        assert_eq!(closed, 1);
+        assert!(pipeline.messages[1].tool_result.is_none());
+    }
+
+    #[test]
+    fn a_tool_preview_never_splits_a_character() {
+        // Slicing the byte string at 140 panicked when a multi-byte character
+        // straddled the cut, taking the engine down mid-turn. The padding
+        // walks the boundary across every byte of the wide characters.
+        for pad in 0..4 {
+            let note = format!("{}{}", "a".repeat(120 + pad), "×°é🙂".repeat(20));
+            let preview = compact_input_preview(&serde_json::json!({ "note": note }));
+            assert!(preview.ends_with('…'), "pad {pad}: {preview}");
+        }
     }
 }

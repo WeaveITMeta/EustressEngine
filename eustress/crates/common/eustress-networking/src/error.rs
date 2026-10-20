@@ -106,13 +106,13 @@ pub enum NetworkError {
     // Validation Errors (Anti-Exploit)
     // ========================================================================
 
-    #[error("Speed violation: {speed} > {max} studs/s")]
+    #[error("Speed violation: {speed} > {max} m/s")]
     SpeedViolation { speed: f32, max: f32 },
 
-    #[error("Acceleration violation: {accel} > {max} studs/s²")]
+    #[error("Acceleration violation: {accel} > {max} m/s²")]
     AccelerationViolation { accel: f32, max: f32 },
 
-    #[error("Teleport violation: {distance} > {max} studs")]
+    #[error("Teleport violation: {distance} > {max} m")]
     TeleportViolation { distance: f32, max: f32 },
 
     #[error("Position out of bounds: {0:?}")]

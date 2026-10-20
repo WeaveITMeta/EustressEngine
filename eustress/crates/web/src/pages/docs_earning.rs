@@ -1,17 +1,12 @@
 // =============================================================================
 // Eustress Web - Earning Documentation Page
 // =============================================================================
-// The economics of Eustress: Bliss (BLS) proof-of-contribution currency,
-// Tickets (TKT) purchasable currency, treasury mechanics, USD payouts,
-// and the marketplace.
+// Earning: how Studio work becomes Bliss (BLS) through the witness, the daily
+// emission and USD treasury drip, identity verification, and Tickets (TKT).
 // =============================================================================
 
 use leptos::prelude::*;
 use crate::components::{CentralNav, Footer};
-
-// -----------------------------------------------------------------------------
-// Table of Contents Data
-// -----------------------------------------------------------------------------
 
 #[derive(Clone, Debug, PartialEq)]
 struct TocSection {
@@ -32,82 +27,126 @@ fn get_toc() -> Vec<TocSection> {
             id: "overview",
             title: "Overview",
             subsections: vec![
-                TocSubsection { id: "overview-currencies", title: "Two Currencies" },
-                TocSubsection { id: "overview-flow", title: "Money Flow" },
-                TocSubsection { id: "overview-principles", title: "Economic Principles" },
+                TocSubsection { id: "overview-how", title: "How Earning Works" },
+                TocSubsection { id: "overview-currencies", title: "BLS and Tickets" },
+                TocSubsection { id: "overview-status", title: "What Runs Today" },
             ],
         },
         TocSection {
-            id: "bliss",
-            title: "Bliss (BLS)",
+            id: "studio",
+            title: "Studio Setup",
             subsections: vec![
-                TocSubsection { id: "bliss-what", title: "What Is Bliss" },
-                TocSubsection { id: "bliss-supply", title: "Supply & Emission" },
-                TocSubsection { id: "bliss-distribution", title: "Daily Distribution" },
+                TocSubsection { id: "studio-signin", title: "Signing In" },
+                TocSubsection { id: "studio-badge", title: "The Bliss Badge" },
+                TocSubsection { id: "studio-nodes", title: "Light and Full Nodes" },
+                TocSubsection { id: "studio-optout", title: "Turning Earning Off" },
             ],
         },
         TocSection {
             id: "contributions",
-            title: "Contribution Types",
+            title: "Earning BLS",
             subsections: vec![
-                TocSubsection { id: "contributions-weights", title: "Weight Table" },
-                TocSubsection { id: "contributions-scoring", title: "Scoring Formula" },
-                TocSubsection { id: "contributions-examples", title: "Examples" },
+                TocSubsection { id: "contributions-tracking", title: "What Studio Measures" },
+                TocSubsection { id: "contributions-score", title: "Scores and Weights" },
+                TocSubsection { id: "contributions-limits", title: "Limits the Witness Enforces" },
             ],
         },
         TocSection {
-            id: "earning-bls",
-            title: "Earning BLS",
+            id: "distribution",
+            title: "Daily Distribution",
             subsections: vec![
-                TocSubsection { id: "earning-bls-witness", title: "Witness Co-Signing" },
-                TocSubsection { id: "earning-bls-nodes", title: "Node Bonuses" },
-                TocSubsection { id: "earning-bls-payouts", title: "Payout Cycle" },
+                TocSubsection { id: "distribution-emission", title: "Emission Schedule" },
+                TocSubsection { id: "distribution-gate", title: "The Effort Gate" },
+                TocSubsection { id: "distribution-share", title: "Your Share" },
+                TocSubsection { id: "distribution-ledger", title: "The Public Ledger" },
+            ],
+        },
+        TocSection {
+            id: "payouts",
+            title: "USD Payouts",
+            subsections: vec![
+                TocSubsection { id: "payouts-treasury", title: "The Treasury" },
+                TocSubsection { id: "payouts-drip", title: "The Daily Drip" },
+                TocSubsection { id: "payouts-identity", title: "Identity Verification" },
+                TocSubsection { id: "payouts-connect", title: "Connecting Stripe" },
             ],
         },
         TocSection {
             id: "tickets",
-            title: "Tickets (TKT)",
+            title: "Tickets",
             subsections: vec![
                 TocSubsection { id: "tickets-packages", title: "Packages" },
-                TocSubsection { id: "tickets-revenue", title: "Revenue Split" },
-                TocSubsection { id: "tickets-usage", title: "Usage" },
+                TocSubsection { id: "tickets-split", title: "Where the Money Goes" },
+                TocSubsection { id: "tickets-sales", title: "Selling for Tickets" },
             ],
         },
         TocSection {
-            id: "treasury",
-            title: "Treasury",
+            id: "roadmap",
+            title: "What's Next",
             subsections: vec![
-                TocSubsection { id: "treasury-funding", title: "How It Grows" },
-                TocSubsection { id: "treasury-drip", title: "Daily Drip" },
-                TocSubsection { id: "treasury-guarantees", title: "Guarantees" },
-            ],
-        },
-        TocSection {
-            id: "usd-payouts",
-            title: "USD Payouts",
-            subsections: vec![
-                TocSubsection { id: "usd-payouts-stripe", title: "Stripe Connect" },
-                TocSubsection { id: "usd-payouts-kyc", title: "KYC Verification" },
-                TocSubsection { id: "usd-payouts-taxes", title: "Tax Handling" },
-            ],
-        },
-        TocSection {
-            id: "marketplace",
-            title: "Marketplace",
-            subsections: vec![
-                TocSubsection { id: "marketplace-selling", title: "Selling Items" },
-                TocSubsection { id: "marketplace-splits", title: "Revenue Splits" },
-                TocSubsection { id: "marketplace-api", title: "Scripting API" },
+                TocSubsection { id: "roadmap-attestation", title: "Proof of Work" },
+                TocSubsection { id: "roadmap-marketplace", title: "Marketplace and Spending" },
+                TocSubsection { id: "roadmap-chain", title: "The Bliss Chain" },
             ],
         },
     ]
 }
 
-// -----------------------------------------------------------------------------
-// Main Component
-// -----------------------------------------------------------------------------
+/// One day of earning: Studio reports work, the witness scores it, and the
+/// midnight run cuts a BLS share and a USD share from the same day score.
+#[component]
+fn EarningFlowDiagram() -> impl IntoView {
+    view! {
+        <figure class="docs-figure">
+            <svg class="docs-diagram" viewBox="0 0 640 230" role="img"
+                aria-label="Studio sends work to the witness every 5 minutes. The witness adds co-signed scores to your day score. At 00:00 UTC the day score sets your share of the BLS emission and your share of the treasury's USD drip.">
+                <defs>
+                    <marker id="earn-arrow" viewBox="0 0 10 10" refX="9" refY="5"
+                        markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+                        <path d="M 0 0 L 10 5 L 0 10 z" class="dg-arrowhead"></path>
+                    </marker>
+                </defs>
 
-/// Earning documentation page — Bliss (BLS), Tickets (TKT), treasury, and payouts.
+                <rect x="10" y="86" width="112" height="56" rx="8" class="dg-box"></rect>
+                <text x="66" y="110" class="dg-label" text-anchor="middle">"Studio"</text>
+                <text x="66" y="128" class="dg-note" text-anchor="middle">"time, by type"</text>
+
+                <line x1="122" y1="114" x2="180" y2="114" class="dg-line" marker-end="url(#earn-arrow)"></line>
+                <text x="151" y="104" class="dg-note" text-anchor="middle">"every 5 min"</text>
+
+                <rect x="180" y="86" width="112" height="56" rx="8" class="dg-box"></rect>
+                <text x="236" y="110" class="dg-label" text-anchor="middle">"Witness"</text>
+                <text x="236" y="128" class="dg-note" text-anchor="middle">"weights, limits"</text>
+
+                <line x1="292" y1="114" x2="348" y2="114" class="dg-line" marker-end="url(#earn-arrow)"></line>
+                <text x="320" y="104" class="dg-note" text-anchor="middle">"score"</text>
+
+                <rect x="348" y="86" width="104" height="56" rx="8" class="dg-box dg-box-accent"></rect>
+                <text x="400" y="110" class="dg-label" text-anchor="middle">"Day score"</text>
+                <text x="400" y="128" class="dg-note" text-anchor="middle">"per UTC day"</text>
+
+                <line x1="452" y1="104" x2="520" y2="62" class="dg-line-accent" marker-end="url(#earn-arrow)"></line>
+                <line x1="452" y1="124" x2="520" y2="170" class="dg-line-accent" marker-end="url(#earn-arrow)"></line>
+                <text x="484" y="119" class="dg-note" text-anchor="middle">"00:00 UTC"</text>
+
+                <rect x="520" y="30" width="112" height="56" rx="8" class="dg-box dg-box-violet"></rect>
+                <text x="576" y="54" class="dg-label" text-anchor="middle">"BLS"</text>
+                <text x="576" y="72" class="dg-note" text-anchor="middle">"share of emission"</text>
+
+                <rect x="520" y="146" width="112" height="56" rx="8" class="dg-box"></rect>
+                <text x="576" y="170" class="dg-label" text-anchor="middle">"USD"</text>
+                <text x="576" y="188" class="dg-note" text-anchor="middle">"share of the drip"</text>
+            </svg>
+            <figcaption>
+                "Studio reports work and the witness scores it. At midnight UTC one day score
+                sets two separate shares: BLS from the day's emission and dollars from the
+                treasury's drip."
+            </figcaption>
+        </figure>
+    }
+}
+
+/// Earning documentation page.
 #[component]
 pub fn DocsEarningPage() -> impl IntoView {
     let active_section = RwSignal::new("overview".to_string());
@@ -116,17 +155,15 @@ pub fn DocsEarningPage() -> impl IntoView {
         <div class="page page-docs">
             <CentralNav active="learn".to_string() />
 
-            // Background
             <div class="docs-bg">
                 <div class="docs-grid-overlay"></div>
                 <div class="docs-glow glow-earning"></div>
             </div>
 
             <div class="docs-layout">
-                // Floating TOC Sidebar
                 <aside class="docs-toc">
                     <div class="toc-header">
-                        <img src="/assets/icons/trending.svg" alt="Earning" class="toc-icon" />
+                        <img src="/assets/icons/bliss.svg" alt="Earning" class="toc-icon" />
                         <h2>"Earning"</h2>
                     </div>
                     <nav class="toc-nav">
@@ -167,1160 +204,709 @@ pub fn DocsEarningPage() -> impl IntoView {
                     </div>
                 </aside>
 
-                // Main Content
                 <main class="docs-content">
-                    // Hero
                     <header class="docs-hero">
                         <div class="docs-breadcrumb">
                             <a href="/learn">"Learn"</a>
                             <span class="separator">"/"</span>
                             <span class="current">"Earning"</span>
                         </div>
-                        <h1 class="docs-title">"Earning on Eustress"</h1>
+                        <h1 class="docs-title">"Earning"</h1>
                         <p class="docs-subtitle">
-                            "Build, contribute, and earn real money. Eustress pays developers "
-                            "directly for their work through Bliss (BLS), a proof-of-contribution "
-                            "currency backed by a self-sustaining treasury."
+                            "Bliss (BLS) is the contribution ledger behind earning on Eustress. Studio
+                            reports the time you spend building, a witness service scores it, and at UTC
+                            midnight your day's score earns a share of that day's BLS and, once you have
+                            verified your identity and connected Stripe, a share of the treasury's USD drip."
                         </p>
                         <div class="docs-meta">
                             <span class="meta-item">
                                 <img src="/assets/icons/clock.svg" alt="Time" />
-                                "25 min read"
+                                "17 min read"
                             </span>
                             <span class="meta-item">
-                                <img src="/assets/icons/code.svg" alt="Level" />
-                                "All Levels"
+                                <img src="/assets/icons/cube.svg" alt="Level" />
+                                "Intermediate"
                             </span>
                             <span class="meta-item">
                                 <img src="/assets/icons/check.svg" alt="Updated" />
-                                "v0.16.1"
+                                "Updated Sep 2026"
                             </span>
                         </div>
                     </header>
 
-                    // ─────────────────────────────────────────────────────
-                    // 1. Overview
-                    // ─────────────────────────────────────────────────────
+                    // =========================================================
+                    // OVERVIEW
+                    // =========================================================
                     <section id="overview" class="docs-section">
-                        <h2 class="section-anchor">"1. Overview"</h2>
+                        <h2 class="section-title">
+                            <span class="section-number">"01"</span>
+                            "Overview"
+                        </h2>
 
-                        <div id="overview-currencies" class="docs-block">
-                            <h3>"Two Currencies"</h3>
+                        <div id="overview-how" class="subsection">
+                            <h3>"How Earning Works"</h3>
                             <p>
-                                "The Eustress economy runs on two distinct currencies, each serving "
-                                "a different purpose:"
+                                "Earning has three moving parts. Studio measures the time you spend building
+                                and sorts it into contribution types. The witness, a Cloudflare Worker at "
+                                <code>"api.eustress.dev"</code>", checks each submission, weights it and adds
+                                it to your score for the current UTC day. At 00:00 UTC a scheduled run closes
+                                the day that just ended: it credits BLS in proportion to each contributor's
+                                score, then pays out a slice of the USD treasury by the same score."
                             </p>
-                            <div class="principles-grid">
-                                <div class="principle-card">
-                                    <div class="principle-number">"BLS"</div>
-                                    <h4>"Bliss"</h4>
-                                    <p>
-                                        "Earned by contributing to the ecosystem. Development, creation, "
-                                        "education, moderation — every meaningful contribution earns Bliss. "
-                                        "Bliss is converted to USD daily and paid out via Stripe."
-                                    </p>
-                                </div>
-                                <div class="principle-card">
-                                    <div class="principle-number">"TKT"</div>
-                                    <h4>"Tickets"</h4>
-                                    <p>
-                                        "Purchased with USD via Stripe. Used to buy items in the marketplace, "
-                                        "unlock premium content, and support creators. 50% of Ticket revenue "
-                                        "flows into the Bliss treasury."
-                                    </p>
-                                </div>
-                            </div>
-                            <div class="docs-callout info">
-                                <strong>"Key Distinction:"</strong>
-                                " Developers earn Bliss (BLS) for building — NOT Tickets. "
-                                "Tickets are a spending currency purchased by players. "
-                                "Bliss is a reward currency earned by contributors."
-                            </div>
-                        </div>
-
-                        <div id="overview-flow" class="docs-block">
-                            <h3>"Money Flow"</h3>
+                            <EarningFlowDiagram />
                             <p>
-                                "Here is how money moves through the Eustress economy:"
-                            </p>
-                            <pre class="code-block"><code>{"Players purchase Tickets (TKT) with USD via Stripe
-                    │
-                    ▼
-        ┌───────────────────────┐
-        │   Ticket Revenue      │
-        │   (100% of USD)       │
-        └───────────┬───────────┘
-                    │
-          ┌─────────┴─────────┐
-          ▼                   ▼
-    ┌───────────┐      ┌───────────┐
-    │ Treasury  │      │ Platform  │
-    │   50%     │      │   50%     │
-    └─────┬─────┘      └───────────┘
-          │
-          ▼ Daily drip (0.276%/day)
-    ┌───────────┐
-    │Contributors│ ← 100% of drip goes here
-    │ earn BLS  │
-    └─────┬─────┘
-          │
-          ▼ Converted to USD
-    ┌───────────┐
-    │ Stripe    │ ← Daily payouts
-    │ Connect   │
-    └───────────┘"}</code></pre>
-                            <p>
-                                "The treasury is a one-way valve: it only grows. Ticket sales fill it, "
-                                "and the daily drip distributes a small percentage to contributors. "
-                                "There are zero deductions from the treasury — 100% of the drip goes "
-                                "to the people who build."
+                                "The two payouts are separate flows cut from one score. The dollars you receive
+                                are your share of that day's treasury drip, not a conversion of your BLS, and a
+                                USD payout leaves your BLS balance untouched."
                             </p>
                         </div>
 
-                        <div id="overview-principles" class="docs-block">
-                            <h3>"Economic Principles"</h3>
-                            <div class="principles-grid">
-                                <div class="principle-card">
-                                    <div class="principle-number">"01"</div>
-                                    <h4>"Builders Get Paid"</h4>
+                        <div id="overview-currencies" class="subsection">
+                            <h3>"BLS and Tickets"</h3>
+                            <table class="docs-table">
+                                <thead>
+                                    <tr><th></th><th>"Bliss (BLS)"</th><th>"Tickets (TKT)"</th></tr>
+                                </thead>
+                                <tbody>
+                                    <tr><td>"How you get it"</td><td>"Earned from your daily contribution score"</td><td>"Bought with USD at "<a href="/tickets">"/tickets"</a></td></tr>
+                                    <tr><td>"Precision"</td><td>"2 decimals (1 BLS = 100 minor units)"</td><td>"Whole Tickets"</td></tr>
+                                    <tr><td>"Where it is kept"</td><td>"An append-only ledger the witness publishes"</td><td>"A balance on your account"</td></tr>
+                                    <tr><td>"Becomes dollars?"</td><td>"No. Dollars come from the treasury drip"</td><td>"No"</td></tr>
+                                </tbody>
+                            </table>
+                            <div class="callout callout-info">
+                                <img src="/assets/icons/help.svg" alt="Info" />
+                                <div>
+                                    <strong>"Two currencies, kept apart"</strong>
                                     <p>
-                                        "Every meaningful contribution earns BLS. The more you build, "
-                                        "the more you earn. No gatekeepers, no applications, no waiting."
+                                        "BLS is earned; Tickets are bought, or received from a sale. The witness has
+                                        no exchange between them, and neither one converts to dollars. Dollars reach
+                                        contributors one way: the treasury's daily drip."
                                     </p>
                                 </div>
-                                <div class="principle-card">
-                                    <div class="principle-number">"02"</div>
-                                    <h4>"Treasury Never Shrinks"</h4>
+                            </div>
+                        </div>
+
+                        <div id="overview-status" class="subsection">
+                            <h3>"What Runs Today"</h3>
+                            <table class="docs-table">
+                                <thead>
+                                    <tr><th>"Part"</th><th>"Today"</th></tr>
+                                </thead>
+                                <tbody>
+                                    <tr><td>"Contribution tracking in Studio"</td><td>"Built, on by default"</td></tr>
+                                    <tr><td>"Scoring, limits and co-signing"</td><td>"Built, in the witness"</td></tr>
+                                    <tr><td>"Daily BLS emission and the public ledger"</td><td>"Built, runs at 00:00 UTC"</td></tr>
+                                    <tr><td>"USD drip to Stripe Connect"</td><td>"Built, needs identity verification and a connected account"</td></tr>
+                                    <tr><td>"Buying Tickets, funding the treasury"</td><td>"Built"</td></tr>
+                                    <tr><td>"Spending Tickets in a marketplace"</td><td>"Sale rule built in the witness, no listings yet"</td></tr>
+                                    <tr><td>"Spending BLS"</td><td>"Burn endpoint built, nothing spends BLS yet"</td></tr>
+                                    <tr><td>"Full node duties, the Bliss chain"</td><td>"Designed, not built"</td></tr>
+                                </tbody>
+                            </table>
+                            <p>
+                                "The witness is a single service run by Eustress, and its ledger is off-chain: a
+                                balance is a record the witness keeps and publishes, not a token on a blockchain."
+                            </p>
+                        </div>
+                    </section>
+
+                    // =========================================================
+                    // STUDIO SETUP
+                    // =========================================================
+                    <section id="studio" class="docs-section">
+                        <h2 class="section-title">
+                            <span class="section-number">"02"</span>
+                            "Studio Setup"
+                        </h2>
+
+                        <div id="studio-signin" class="subsection">
+                            <h3>"Signing In"</h3>
+                            <p>
+                                "Earning needs a session with the witness. Sign in with the identity file you
+                                downloaded when you registered on eustress.dev ("
+                                <code>"eustress-<username>.toml"</code>"). Studio reads its "
+                                <code>"public_key"</code>" and "<code>"private_key"</code>", signs a challenge
+                                from the witness with the Ed25519 key and receives a session token. At launch,
+                                Studio signs in again with your most recent identity."
+                            </p>
+                            <div class="callout callout-advanced">
+                                <img src="/assets/icons/settings.svg" alt="Advanced" />
+                                <div>
+                                    <strong>"An identity file without its private key cannot earn"</strong>
                                     <p>
-                                        "The treasury only grows. It is funded by Ticket sales and never "
-                                        "deducted from. The daily drip is a percentage of the total, "
-                                        "ensuring sustainability forever."
+                                        "Studio still signs you in locally, but it cannot answer the witness's
+                                        challenge, so it submits nothing and the badge says so. Load the complete
+                                        file registration downloaded. The session token itself lasts 72 hours and
+                                        Studio does not renew it while running, so after three days in one session,
+                                        open your identity again or restart Studio. Time you worked meanwhile stays
+                                        in the local file and is sent after you sign in."
                                     </p>
                                 </div>
-                                <div class="principle-card">
-                                    <div class="principle-number">"03"</div>
-                                    <h4>"No Investor Tokens"</h4>
+                            </div>
+                        </div>
+
+                        <div id="studio-badge" class="subsection">
+                            <h3>"The Bliss Badge"</h3>
+                            <p>
+                                "The Bliss badge sits beside your account badge in the ribbon and shows your
+                                balance to 2 decimals. Click it for the balance, a "<strong>"Pending"</strong>
+                                " line, the node mode and your bonus multiplier. While you are earning, Pending
+                                reads "<code>"+N pts today"</code>": the score the witness has credited for the
+                                current UTC day plus Studio's estimate for work it has not sent yet. When earning
+                                is blocked, the Pending line says why:"
+                            </p>
+                            <table class="docs-table">
+                                <thead>
+                                    <tr><th>"Pending line begins"</th><th>"Meaning"</th></tr>
+                                </thead>
+                                <tbody>
+                                    <tr><td><em>"Sign in to earn BLS"</em></td><td>"No identity is signed in."</td></tr>
+                                    <tr><td><em>"Identity not verified"</em></td><td>"Studio has no session from the witness: the file lacks a private key, the witness was unreachable at sign-in, or it rejected the identity."</td></tr>
+                                    <tr><td><em>"Not syncing"</em></td><td>"Three submissions in a row failed for a reason other than sign-in. Work is saved locally and retried."</td></tr>
+                                    <tr><td><em>"Bliss disabled"</em></td><td>"Earning is turned off in settings."</td></tr>
+                                </tbody>
+                            </table>
+                            <p>
+                                "Each credited submission logs a line in Output, such as "
+                                <code>"Bliss: +15.0 pts co-signed (Development)"</code>". Unsent time is saved
+                                to "<code>"~/.eustress_engine/bliss_tracker.toml"</code>" every 30 seconds and on
+                                exit. The balance in that file is only a display cache that the next heartbeat
+                                overwrites; the ledger itself lives with the witness."
+                            </p>
+                        </div>
+
+                        <div id="studio-nodes" class="subsection">
+                            <h3>"Light and Full Nodes"</h3>
+                            <p>
+                                "The badge dropdown offers two node modes under "<strong>"NODE MODE"</strong>
+                                ". "<strong>"Light Node"</strong>" is the default, at 1.0x. "
+                                <strong>"Full Node"</strong>" multiplies the score of every co-signed
+                                submission by 1.1. Studio saves the choice as "<code>"bliss_node_mode"</code>
+                                " in "<code>"~/.eustress_engine/settings.json"</code>" and restores it at launch."
+                            </p>
+                            <p>
+                                "The witness never takes the mode from a submission. It uses the mode Studio last
+                                reported in its heartbeat, which Studio sends every 90 seconds, so a switch counts
+                                from the next heartbeat. When Bliss is enabled, Studio also starts a small local
+                                node service on port 7777 that answers health and identity checks. Earning does
+                                not route through it: the tracker talks to the witness directly."
+                            </p>
+                            <div class="callout callout-info">
+                                <img src="/assets/icons/help.svg" alt="Info" />
+                                <div>
+                                    <strong>"What Full does today"</strong>
                                     <p>
-                                        "Investors and treasury funders do NOT receive tokens. They fund "
-                                        "the ecosystem because they believe in it — not to extract value "
-                                        "from it."
+                                        "The Full option describes chain storage and block production. Those duties
+                                        belong to the Bliss chain, which is designed but not built, so today both
+                                        modes run the same local service and differ only in the multiplier."
                                     </p>
                                 </div>
-                                <div class="principle-card">
-                                    <div class="principle-number">"04"</div>
-                                    <h4>"Transparent Economics"</h4>
-                                    <p>
-                                        "Every payout, every drip, every contribution score is auditable. "
-                                        "The ledger is public. The math is in the source, and the source is readable."
-                                    </p>
+                            </div>
+                        </div>
+
+                        <div id="studio-optout" class="subsection">
+                            <h3>"Turning Earning Off"</h3>
+                            <p>
+                                "Earning is on by default. To turn it off, close Studio, set "
+                                <code>"bliss_enabled"</code>" to "<code>"false"</code>" in the settings file and
+                                start Studio again. Studio then skips the local node, submits no work and the
+                                badge reads "<em>"Bliss disabled"</em>". It still tallies active seconds in its
+                                local file, and sends them if you turn earning back on."
+                            </p>
+                            <div class="code-block">
+                                <div class="code-header">
+                                    <span class="code-lang">"~/.eustress_engine/settings.json (excerpt)"</span>
                                 </div>
+                                <pre><code class="language-json">{r#"{
+  "bliss_enabled": false,
+  "bliss_node_mode": "Light"
+}"#}</code></pre>
                             </div>
                         </div>
                     </section>
 
-                    // ─────────────────────────────────────────────────────
-                    // 2. Bliss (BLS)
-                    // ─────────────────────────────────────────────────────
-                    <section id="bliss" class="docs-section">
-                        <h2 class="section-anchor">"2. Bliss (BLS)"</h2>
+                    // =========================================================
+                    // EARNING BLS
+                    // =========================================================
+                    <section id="contributions" class="docs-section">
+                        <h2 class="section-title">
+                            <span class="section-number">"03"</span>
+                            "Earning BLS"
+                        </h2>
 
-                        <div id="bliss-what" class="docs-block">
-                            <h3>"What Is Bliss"</h3>
+                        <div id="contributions-tracking" class="subsection">
+                            <h3>"What Studio Measures"</h3>
                             <p>
-                                "Bliss (BLS) is a proof-of-contribution cryptocurrency that represents "
-                                "your share of the Eustress ecosystem's value. Unlike speculative tokens, "
-                                "Bliss can only be earned through real, verified contributions."
+                                "Studio counts a moment as work only when its window has focus and you pressed a
+                                key, clicked, scrolled or moved the mouse in the last 60 seconds. It files each
+                                such moment under one contribution type, taking the most valuable signal first:"
                             </p>
                             <table class="docs-table">
                                 <thead>
-                                    <tr>
-                                        <th>"Property"</th>
-                                        <th>"Value"</th>
-                                    </tr>
+                                    <tr><th>"Signal in the last 120 seconds"</th><th>"Type"</th><th>"Weight"</th></tr>
                                 </thead>
                                 <tbody>
-                                    <tr>
-                                        <td>"Symbol"</td>
-                                        <td>"BLS"</td>
-                                    </tr>
-                                    <tr>
-                                        <td>"Full Name"</td>
-                                        <td>"Bliss"</td>
-                                    </tr>
-                                    <tr>
-                                        <td>"Decimals"</td>
-                                        <td>"18"</td>
-                                    </tr>
-                                    <tr>
-                                        <td>"Initial Supply"</td>
-                                        <td>"100,000,000 (100M)"</td>
-                                    </tr>
-                                    <tr>
-                                        <td>"Hard Cap"</td>
-                                        <td>"None — tail emission ensures perpetual rewards"</td>
-                                    </tr>
-                                    <tr>
-                                        <td>"Consensus"</td>
-                                        <td>"Proof-of-Contribution (PoC)"</td>
-                                    </tr>
+                                    <tr><td>"You edited text in a script tab"</td><td><code>"Development"</code></td><td>"3.0"</td></tr>
+                                    <tr><td>"You made a change that lands on the undo stack"</td><td><code>"Creation"</code></td><td>"2.5"</td></tr>
+                                    <tr><td>"Neither: navigating, inspecting, testing"</td><td><code>"ActiveTime"</code></td><td>"1.0"</td></tr>
                                 </tbody>
                             </table>
-                            <div class="docs-callout success">
-                                <strong>"Not Hard-Capped:"</strong>
-                                " Bliss is intentionally NOT hard-capped. Tail emission ensures that "
-                                "there are always rewards available for new contributors, even decades "
-                                "from now. Early contributors benefit from lower total supply, but "
-                                "the system never runs dry."
+                            <p>
+                                "Undo and redo are not new work; only a new undoable change is. Every 5 minutes
+                                Studio submits what it has gathered, in chunks of at least 60 seconds and at most
+                                one hour, up to 6 chunks at a time, so an offline backlog drains steadily after
+                                you reconnect."
+                            </p>
+                        </div>
+
+                        <div id="contributions-score" class="subsection">
+                            <h3>"Scores and Weights"</h3>
+                            <p>"The witness turns each submission into a score measured in weighted minutes:"</p>
+                            <div class="equation-card">
+                                <div class="equation">"score = weight x node bonus x minutes"</div>
+                                <div class="equation-label">"Node bonus: Light 1.0, Full 1.1"</div>
                             </div>
-                        </div>
-
-                        <div id="bliss-supply" class="docs-block">
-                            <h3>"Supply & Emission"</h3>
                             <p>
-                                "Bliss uses a halving emission schedule with a permanent tail emission "
-                                "floor, ensuring the ecosystem always has rewards to distribute:"
+                                "An hour of scripting on a Light node scores 3.0 x 1.0 x 60 = 180. The weights
+                                come from the witness's own table, which lists more types than Studio sends. A
+                                type outside the table is rejected."
                             </p>
                             <table class="docs-table">
                                 <thead>
-                                    <tr>
-                                        <th>"Period"</th>
-                                        <th>"Annual Emission Rate"</th>
-                                        <th>"Approx. New BLS/Year"</th>
-                                    </tr>
+                                    <tr><th>"Type"</th><th>"Weight"</th><th>"Sent by Studio"</th></tr>
                                 </thead>
                                 <tbody>
-                                    <tr>
-                                        <td>"Years 0–4"</td>
-                                        <td>"5.0%"</td>
-                                        <td>"5,000,000"</td>
-                                    </tr>
-                                    <tr>
-                                        <td>"Years 4–8"</td>
-                                        <td>"2.5%"</td>
-                                        <td>"~2,625,000"</td>
-                                    </tr>
-                                    <tr>
-                                        <td>"Years 8–12"</td>
-                                        <td>"1.25%"</td>
-                                        <td>"~1,380,000"</td>
-                                    </tr>
-                                    <tr>
-                                        <td>"Years 12–16"</td>
-                                        <td>"0.625%"</td>
-                                        <td>"~720,000"</td>
-                                    </tr>
-                                    <tr>
-                                        <td>"Years 16+"</td>
-                                        <td>"0.5% (floor)"</td>
-                                        <td>"~580,000+"</td>
-                                    </tr>
+                                    <tr><td><code>"Development"</code></td><td>"3.0"</td><td>"Yes"</td></tr>
+                                    <tr><td><code>"Creation"</code></td><td>"2.5"</td><td>"Yes"</td></tr>
+                                    <tr><td><code>"Education"</code></td><td>"2.2"</td><td>"No"</td></tr>
+                                    <tr><td><code>"Collaboration"</code></td><td>"2.0"</td><td>"No"</td></tr>
+                                    <tr><td><code>"Optimization"</code></td><td>"2.0"</td><td>"No"</td></tr>
+                                    <tr><td><code>"QualityAssurance"</code></td><td>"1.8"</td><td>"No"</td></tr>
+                                    <tr><td><code>"Moderation"</code></td><td>"1.5"</td><td>"No"</td></tr>
+                                    <tr><td><code>"Documentation"</code></td><td>"1.5"</td><td>"No"</td></tr>
+                                    <tr><td><code>"ActiveTime"</code></td><td>"1.0"</td><td>"Yes"</td></tr>
+                                    <tr><td><code>"Custom"</code></td><td>"1.0"</td><td>"No"</td></tr>
                                 </tbody>
                             </table>
-                            <pre class="code-block"><code>{"// Emission rate calculation
-fn emission_rate(years_since_launch: f64) -> f64 {
-    let halvings = (years_since_launch / 4.0).floor() as u32;
-    let rate = 0.05 * (0.5_f64).powi(halvings as i32);
-    rate.max(0.005) // minimum 0.5% forever
-}
-
-// Example: Year 10 → 0.05 * 0.5^2 = 0.0125 (1.25%)
-// Example: Year 20 → max(0.05 * 0.5^5, 0.005) = 0.005 (0.5%)"}</code></pre>
+                            <p>
+                                "Sales add a second kind of score, value score, covered under "
+                                <a href="#tickets-sales">"Selling for Tickets"</a>"."
+                            </p>
                         </div>
 
-                        <div id="bliss-distribution" class="docs-block">
-                            <h3>"Daily Distribution"</h3>
+                        <div id="contributions-limits" class="subsection">
+                            <h3>"Limits the Witness Enforces"</h3>
                             <p>
-                                "Bliss is distributed once per day at UTC midnight. The process is "
-                                "fully automated and deterministic:"
+                                "A submission is a claim, and the witness is the only trust boundary. Whatever a
+                                client sends, it bounds what any one account can earn:"
                             </p>
                             <ul class="docs-list">
-                                <li>
-                                    <strong>"00:00 UTC"</strong>
-                                    " — Snapshot all pending contribution scores"
-                                </li>
-                                <li>
-                                    <strong>"00:01 UTC"</strong>
-                                    " — Calculate each contributor's share of the daily emission pool"
-                                </li>
-                                <li>
-                                    <strong>"00:02 UTC"</strong>
-                                    " — Mint new BLS according to the emission schedule"
-                                </li>
-                                <li>
-                                    <strong>"00:03 UTC"</strong>
-                                    " — Distribute BLS proportionally to all contributors"
-                                </li>
-                                <li>
-                                    <strong>"00:05 UTC"</strong>
-                                    " — Treasury drip: convert BLS share to USD, queue Stripe payouts"
-                                </li>
+                                <li><strong>"Known types only."</strong>" A type outside the weight table is rejected."</li>
+                                <li><strong>"One hour per submission."</strong>" Duration is clamped to 1 to 3,600 seconds."</li>
+                                <li><strong>"120 submissions an hour"</strong>" per account."</li>
+                                <li><strong>"Each piece of work once."</strong>" Studio hashes your account, the day, the type, the duration and a chunk counter into every submission, and the witness refuses a hash it has seen in the last 2 days."</li>
+                                <li><strong>"ActiveTime needs presence."</strong>" Credited ActiveTime cannot exceed the time the witness saw you online through heartbeats, and one heartbeat adds at most 150 seconds of presence."</li>
+                                <li><strong>"A daily ceiling."</strong>" Effort score stops at 3,200 per account per UTC day. Sixteen hours of Development on a Full node comes to 3,168."</li>
+                                <li><strong>"The bonus is observed."</strong>" The 1.1x comes from the heartbeat mode, never from the submission."</li>
                             </ul>
-                            <pre class="code-block"><code>{"// Your daily BLS share
-let your_score = your_weighted_contributions;
-let total_score = all_contributors_weighted_sum;
-let daily_emission = total_supply * emission_rate / 365.0;
-
-let your_bls = daily_emission * (your_score / total_score);"}</code></pre>
+                            <p>
+                                "When a limit trims a submission to nothing, Studio puts that time back in its
+                                local tally and offers it again at a later flush."
+                            </p>
+                            <div class="callout callout-advanced">
+                                <img src="/assets/icons/settings.svg" alt="Advanced" />
+                                <div>
+                                    <strong>"A co-signature is a receipt"</strong>
+                                    <p>
+                                        "The witness stamps each accepted submission with a SHA-256 digest of your
+                                        account, the contribution hash and the time. It records that the witness
+                                        accepted the submission under the rules above, which cap what any account
+                                        can earn in a day."
+                                    </p>
+                                </div>
+                            </div>
                         </div>
                     </section>
 
-                    // ─────────────────────────────────────────────────────
-                    // 3. Contribution Types
-                    // ─────────────────────────────────────────────────────
-                    <section id="contributions" class="docs-section">
-                        <h2 class="section-anchor">"3. Contribution Types"</h2>
+                    // =========================================================
+                    // DAILY DISTRIBUTION
+                    // =========================================================
+                    <section id="distribution" class="docs-section">
+                        <h2 class="section-title">
+                            <span class="section-number">"04"</span>
+                            "Daily Distribution"
+                        </h2>
 
-                        <div id="contributions-weights" class="docs-block">
-                            <h3>"Weight Table"</h3>
+                        <div id="distribution-emission" class="subsection">
+                            <h3>"Emission Schedule"</h3>
                             <p>
-                                "Each type of contribution has a weight multiplier that reflects "
-                                "its impact on the ecosystem. Higher weights reward harder, more "
-                                "impactful work:"
+                                "BLS started from a supply of 100,000,000. Each year the supply grows by an
+                                emission rate that halves every 4 years and never falls below 0.5%."
+                            </p>
+                            <div class="stats-grid">
+                                <div class="stat-card">
+                                    <div class="stat-value">"100,000,000"</div>
+                                    <div class="stat-label">"Initial supply"</div>
+                                </div>
+                                <div class="stat-card">
+                                    <div class="stat-value">"5%"</div>
+                                    <div class="stat-label">"First-year rate"</div>
+                                </div>
+                                <div class="stat-card">
+                                    <div class="stat-value">"4 years"</div>
+                                    <div class="stat-label">"Halving period"</div>
+                                </div>
+                                <div class="stat-card">
+                                    <div class="stat-value">"0.5%"</div>
+                                    <div class="stat-label">"Floor, forever"</div>
+                                </div>
+                            </div>
+                            <table class="docs-table">
+                                <thead>
+                                    <tr><th>"Whole years since genesis"</th><th>"Annual rate"</th></tr>
+                                </thead>
+                                <tbody>
+                                    <tr><td>"0 to 3"</td><td>"5%"</td></tr>
+                                    <tr><td>"4 to 7"</td><td>"2.5%"</td></tr>
+                                    <tr><td>"8 to 11"</td><td>"1.25%"</td></tr>
+                                    <tr><td>"12 to 15"</td><td>"0.625%"</td></tr>
+                                    <tr><td>"16 and later"</td><td>"0.5% (the floor)"</td></tr>
+                                </tbody>
+                            </table>
+                            <p>
+                                "Genesis is the date of the first distribution, and a year counts only when 365
+                                whole days have passed. A day's emission ceiling is the current supply times the
+                                annual rate, divided by 365. At the genesis supply that is 100,000,000 x 5% / 365,
+                                about 13,698.63 BLS. Supply grows by exactly what each day mints, so the ceiling
+                                creeps up with it."
+                            </p>
+                        </div>
+
+                        <div id="distribution-gate" class="subsection">
+                            <h3>"The Effort Gate"</h3>
+                            <p>"The ceiling is a maximum, not a promise. A day mints its ceiling scaled by how much work the network did:"</p>
+                            <div class="equation-card">
+                                <div class="equation">"minted = ceiling x min(1, total day score / 1,440)"</div>
+                                <div class="equation-label">"1,440 is 8 hours of Development: 8 x 60 x 3.0"</div>
+                            </div>
+                            <p>
+                                "A day whose contributors scored 1,440 or more in total mints the whole ceiling.
+                                A day at 720 mints half, and the other half is never created. Supply tracks the
+                                work that happened rather than the calendar, while each contributor's share of what
+                                is minted stays proportional to score."
+                            </p>
+                        </div>
+
+                        <div id="distribution-share" class="subsection">
+                            <h3>"Your Share"</h3>
+                            <p>
+                                "After midnight UTC the witness reads every contributor's score for the day that
+                                ended: effort score from co-signing plus any value score from sales. Your credit
+                                is your fraction of the minted pool, rounded down to a hundredth of a BLS:"
+                            </p>
+                            <div class="code-block">
+                                <div class="code-header">
+                                    <span class="code-lang">"Worked example, at the genesis supply"</span>
+                                </div>
+                                <pre><code class="language-text">{r#"ceiling       13,698.63 BLS     100,000,000 x 5% / 365
+day score     720               all contributors together
+utilization   720 / 1,440     = 0.5
+pool          6,849.31 BLS
+your score    180               one hour of Development, Light node
+your credit   180 / 720       = 0.25 of the pool  ->  1,712.32 BLS"#}</code></pre>
+                            </div>
+                            <p>
+                                "Rounding every credit down keeps the total inside the pool, and the leftover
+                                fractions are never minted. Banned accounts receive nothing. Each day is recorded
+                                once, so a rerun of the job credits nobody twice."
+                            </p>
+                            <div class="callout callout-tip">
+                                <img src="/assets/icons/sparkles.svg" alt="Tip" />
+                                <div>
+                                    <strong>"Credit lands after midnight UTC"</strong>
+                                    <p>
+                                        "Work you do today is scored today and credited by the run at 00:00 UTC that
+                                        closes the day. Until then it shows as Pending on the badge."
+                                    </p>
+                                </div>
+                            </div>
+                        </div>
+
+                        <div id="distribution-ledger" class="subsection">
+                            <h3>"The Public Ledger"</h3>
+                            <p>
+                                "Balances are an append-only ledger of integer entries in minor units (1 BLS =
+                                100), and a balance is the sum of its entries. After each nightly run the witness
+                                snapshots the whole ledger to storage. Three read endpoints need no sign-in and
+                                answer any origin, so anyone can re-derive a day's emission by hand:"
                             </p>
                             <table class="docs-table">
                                 <thead>
-                                    <tr>
-                                        <th>"Type"</th>
-                                        <th>"Weight"</th>
-                                        <th>"Description"</th>
-                                    </tr>
+                                    <tr><th>"GET on api.eustress.dev"</th><th>"Returns"</th></tr>
                                 </thead>
                                 <tbody>
-                                    <tr>
-                                        <td><strong>"Development"</strong></td>
-                                        <td>"3.0x"</td>
-                                        <td>"Code commits, bug fixes, new features, engine work"</td>
-                                    </tr>
-                                    <tr>
-                                        <td><strong>"Creation"</strong></td>
-                                        <td>"2.5x"</td>
-                                        <td>"3D models, textures, audio, animations, shaders"</td>
-                                    </tr>
-                                    <tr>
-                                        <td><strong>"Education"</strong></td>
-                                        <td>"2.2x"</td>
-                                        <td>"Tutorials, courses, workshops, mentoring"</td>
-                                    </tr>
-                                    <tr>
-                                        <td><strong>"Collaboration"</strong></td>
-                                        <td>"2.0x"</td>
-                                        <td>"Code reviews, design discussions, pair programming"</td>
-                                    </tr>
-                                    <tr>
-                                        <td><strong>"Optimization"</strong></td>
-                                        <td>"2.0x"</td>
-                                        <td>"Performance improvements, memory reduction, profiling"</td>
-                                    </tr>
-                                    <tr>
-                                        <td><strong>"QualityAssurance"</strong></td>
-                                        <td>"1.8x"</td>
-                                        <td>"Testing, bug reports with reproductions, test suites"</td>
-                                    </tr>
-                                    <tr>
-                                        <td><strong>"Moderation"</strong></td>
-                                        <td>"1.5x"</td>
-                                        <td>"Community moderation, content review, safety"</td>
-                                    </tr>
-                                    <tr>
-                                        <td><strong>"Documentation"</strong></td>
-                                        <td>"1.5x"</td>
-                                        <td>"API docs, guides, README updates, translations"</td>
-                                    </tr>
-                                    <tr>
-                                        <td><strong>"ActiveTime"</strong></td>
-                                        <td>"1.0x"</td>
-                                        <td>"Time spent actively using and testing the platform"</td>
-                                    </tr>
+                                    <tr><td><code>"/api/ledger/summary"</code></td><td>"Supply, total distributed and burned, circulating BLS, the treasury balance, the emission model and the last 60 distributions"</td></tr>
+                                    <tr><td><code>"/api/ledger/distribution/{date}"</code></td><td>"One day's record: ceiling, total score, utilization, and each recipient's score and credit, by account id"</td></tr>
+                                    <tr><td><code>"/api/ledger/history/{account id}"</code></td><td>"One account's balance, day by day"</td></tr>
                                 </tbody>
                             </table>
-                        </div>
-
-                        <div id="contributions-scoring" class="docs-block">
-                            <h3>"Scoring Formula"</h3>
                             <p>
-                                "Your daily contribution score is calculated as the sum of all "
-                                "your verified contributions, each multiplied by its type weight:"
+                                "Signed in on the website, "<a href="/bliss/history">"/bliss/history"</a>" shows
+                                your own Wallet Ledger: balance, credited days, the average per credited day, a
+                                cumulative chart and a row for each credited day. "<a href="/bliss">"/bliss"</a>" shows the
+                                network's live figures, including the treasury balance, supply and the day's
+                                emission ceiling, refreshed every 20 seconds."
                             </p>
-                            <pre class="code-block"><code>{"// Contribution scoring
-struct Contribution {
-    contribution_type: ContributionType,
-    base_score: f64,       // determined by magnitude of work
-    witness_signature: Ed25519Signature,  // co-signed by Worker
-}
-
-fn daily_score(contributions: &[Contribution]) -> f64 {
-    contributions.iter()
-        .map(|c| c.base_score * c.contribution_type.weight())
-        .sum()
-}
-
-// Example: A developer who commits code (3.0x) and writes docs (1.5x)
-// Code commit base_score: 10.0  → 10.0 * 3.0 = 30.0
-// Docs update base_score:  5.0  →  5.0 * 1.5 =  7.5
-// Daily total: 37.5"}</code></pre>
-                            <div class="docs-callout info">
-                                <strong>"Base Score:"</strong>
-                                " The base score for each contribution is determined by the magnitude "
-                                "and quality of the work. A 500-line feature gets a higher base score "
-                                "than a 5-line typo fix. The witness Worker validates the score."
-                            </div>
-                        </div>
-
-                        <div id="contributions-examples" class="docs-block">
-                            <h3>"Examples"</h3>
-                            <p>
-                                "Here are some real-world contribution examples and their approximate "
-                                "daily scores:"
-                            </p>
-                            <div class="principles-grid">
-                                <div class="principle-card">
-                                    <div class="principle-number">"A"</div>
-                                    <h4>"Full-Time Developer"</h4>
-                                    <p>
-                                        "8 hours of engine work: 3 code commits (base 10 each) + "
-                                        "1 code review (base 5) + active time (base 8). "
-                                        "Score: 30*3.0 + 5*2.0 + 8*1.0 = 108.0"
-                                    </p>
-                                </div>
-                                <div class="principle-card">
-                                    <div class="principle-number">"B"</div>
-                                    <h4>"Content Creator"</h4>
-                                    <p>
-                                        "Published a tutorial video (base 15) + wrote companion "
-                                        "docs (base 5) + active time (base 3). "
-                                        "Score: 15*2.2 + 5*1.5 + 3*1.0 = 43.5"
-                                    </p>
-                                </div>
-                                <div class="principle-card">
-                                    <div class="principle-number">"C"</div>
-                                    <h4>"3D Artist"</h4>
-                                    <p>
-                                        "Uploaded 3 asset packs (base 8 each) + active time (base 4). "
-                                        "Score: 24*2.5 + 4*1.0 = 64.0"
-                                    </p>
-                                </div>
-                                <div class="principle-card">
-                                    <div class="principle-number">"D"</div>
-                                    <h4>"Community Moderator"</h4>
-                                    <p>
-                                        "6 hours of moderation (base 12) + filed 2 bug reports with "
-                                        "reproductions (base 6 each). "
-                                        "Score: 12*1.5 + 12*1.8 = 39.6"
-                                    </p>
-                                </div>
-                            </div>
                         </div>
                     </section>
 
-                    // ─────────────────────────────────────────────────────
-                    // 4. Earning BLS
-                    // ─────────────────────────────────────────────────────
-                    <section id="earning-bls" class="docs-section">
-                        <h2 class="section-anchor">"4. Earning BLS"</h2>
+                    // =========================================================
+                    // USD PAYOUTS
+                    // =========================================================
+                    <section id="payouts" class="docs-section">
+                        <h2 class="section-title">
+                            <span class="section-number">"05"</span>
+                            "USD Payouts"
+                        </h2>
 
-                        <div id="earning-bls-witness" class="docs-block">
-                            <h3>"Witness Co-Signing"</h3>
+                        <div id="payouts-treasury" class="subsection">
+                            <h3>"The Treasury"</h3>
+                            <p>"The treasury is a USD balance the witness keeps for contributors. Two things add to it:"</p>
+                            <ul class="docs-list">
+                                <li><strong>"Ticket sales."</strong>" Half of each purchase's net revenue, after the payment channel's fee (see "<a href="#tickets-split">"Where the Money Goes"</a>")."</li>
+                                <li><strong>"Direct funding."</strong>" Anyone can fund it from the Fund the Treasury section of "<a href="/bliss">"/bliss"</a>", one-time or monthly. The witness adds the full amount of each completed checkout; for a monthly subscription that is the first payment, because the witness does not record renewals yet."</li>
+                            </ul>
                             <p>
-                                "Every contribution must be co-signed by a witness Worker running "
-                                "on "<code>"api.eustress.dev"</code>" to prevent fraud. This ensures "
-                                "that only real, verified work earns Bliss:"
+                                "Only the daily payout takes money out, and only by what Stripe actually
+                                transferred. The dollars sit in Eustress's Stripe account until a transfer pays
+                                them out. Funding the treasury is a gift to the contributor pool: it earns the
+                                funder no BLS and no Tickets."
                             </p>
-                            <pre class="code-block"><code>{"// Contribution validation flow
-//
-// 1. Developer performs work (commit, asset upload, etc.)
-// 2. Client submits contribution claim to api.eustress.dev
-// 3. Worker validates the claim:
-//    - Verifies the work exists (commit hash, asset hash, etc.)
-//    - Checks for duplicates (no double-claiming)
-//    - Validates timestamps (no future-dating)
-//    - Assesses base score based on magnitude
-// 4. Worker co-signs with Ed25519 signature
-// 5. Signed contribution is recorded in the ledger
-
-struct WitnessedContribution {
-    contributor: PublicKey,
-    contribution: Contribution,
-    witness: WorkerSignature,    // api.eustress.dev signs this
-    timestamp: DateTime<Utc>,
-    ledger_entry: u64,
-}"}</code></pre>
-                            <div class="docs-callout warning">
-                                <strong>"Anti-Fraud:"</strong>
-                                " Contributions without a valid witness co-signature are rejected. "
-                                "The Worker checks for gaming patterns: artificial commits, bot activity, "
-                                "circular reviews, and inflated active time. Violators are permanently "
-                                "banned from earning."
-                            </div>
                         </div>
 
-                        <div id="earning-bls-nodes" class="docs-block">
-                            <h3>"Node Bonuses"</h3>
-                            <p>
-                                "Contributors who run Eustress nodes earn a bonus multiplier on "
-                                "all their contributions:"
-                            </p>
+                        <div id="payouts-drip" class="subsection">
+                            <h3>"The Daily Drip"</h3>
+                            <p>"After the BLS distribution, the same midnight run pays out a fixed fraction of the treasury:"</p>
                             <table class="docs-table">
                                 <thead>
-                                    <tr>
-                                        <th>"Node Type"</th>
-                                        <th>"Multiplier"</th>
-                                        <th>"Description"</th>
-                                    </tr>
+                                    <tr><th>"Mode"</th><th>"When"</th><th>"Daily drip"</th><th>"Split"</th></tr>
                                 </thead>
                                 <tbody>
-                                    <tr>
-                                        <td>"Light Node"</td>
-                                        <td>"1.0x (no bonus)"</td>
-                                        <td>"Standard client, no additional infrastructure"</td>
-                                    </tr>
-                                    <tr>
-                                        <td>"Full Node"</td>
-                                        <td>"1.1x (+10% bonus)"</td>
-                                        <td>"Runs full validation, relays data, stores ledger"</td>
-                                    </tr>
+                                    <tr><td>"Normal"</td><td>"Treasury above 15% of its high-water mark"</td><td>"0.276% of the treasury"</td><td>"By score"</td></tr>
+                                    <tr><td>"Scarcity"</td><td>"Treasury at or below 15% of its high-water mark"</td><td>"0.136% of the treasury"</td><td>"By score, with the top 25% of contributors counted double"</td></tr>
                                 </tbody>
                             </table>
-                            <pre class="code-block"><code>{"// Node bonus applied to final score
-let base_daily_score = calculate_daily_score(&contributions);
-let node_multiplier = match node_type {
-    NodeType::Light => 1.0,
-    NodeType::Full  => 1.1,  // +10% bonus
-};
+                            <p>
+                                "The high-water mark is the treasury's highest balance. Deposits raise it, and
+                                after each payout run it decays 0.171% a day toward the current balance, so one
+                                large deposit cannot hold the system in scarcity forever. A $10,000 treasury drips
+                                $27.60 in normal mode. With no new deposits and every day's drip paid out, a
+                                balance halves in about 251 days."
+                            </p>
+                            <p>
+                                "The drip is divided by the same day score as BLS, among contributors who have a
+                                connected Stripe account and are not banned. Without a connected account your
+                                score still earns BLS but takes no part in that day's split. Each transfer is
+                                rounded down to the cent, one under $0.50 is skipped and stays in the treasury,
+                                and a day whose whole drip is under $0.50 pays nothing. Every transfer carries an
+                                idempotency key built from the date and your account, so a retried run cannot
+                                pay you twice."
+                            </p>
+                        </div>
 
-let final_score = base_daily_score * node_multiplier;
-
-// Example: 100.0 base score on a Full Node
-// final_score = 100.0 * 1.1 = 110.0"}</code></pre>
-                            <div class="docs-callout info">
-                                <strong>"Full Node Requirements:"</strong>
-                                " Running a Full Node requires stable internet, at least 50GB storage, "
-                                "and uptime of 95%+. The node validates contributions, relays data "
-                                "to peers, and maintains a local copy of the contribution ledger."
+                        <div id="payouts-identity" class="subsection">
+                            <h3>"Identity Verification"</h3>
+                            <p>
+                                "Payouts go to verified adults. Registering on eustress.dev includes identity
+                                verification as step 2 of 3, and the witness checks that record again before it
+                                creates a payout account."
+                            </p>
+                            <ol class="numbered-list">
+                                <li>"Photograph the front of a government photo ID, and the back when it has one. JPEG, PNG, WebP and PDF files up to 12 MB are accepted, and the witness checks that each file's bytes match its type."</li>
+                                <li>"On a desktop without a good camera, scan the QR code and finish on your phone at "<a href="/verify">"/verify"</a>" within 30 minutes. Your name and date of birth stay on the server and never travel through the code."</li>
+                                <li>"The witness sends the images to xAI's Grok model, which checks the document, reads your name and date of birth and screens the application in one call. If that check cannot run, the application is rejected and flagged for manual review rather than approved."</li>
+                            </ol>
+                            <div class="callout callout-info">
+                                <img src="/assets/icons/help.svg" alt="Info" />
+                                <div>
+                                    <strong>"Age is read from the document"</strong>
+                                    <p>
+                                        "The minimum age is 18, raised where the local age of majority is higher:
+                                        19 in Canada and South Korea, 20 in Thailand, and 21 in Singapore, Indonesia,
+                                        the United Arab Emirates and Egypt. The date of birth on the document
+                                        decides; if it cannot be read, verification stops rather than falling back to
+                                        the date you typed. An account the payout gate finds under age is told the
+                                        date payouts unlock."
+                                    </p>
+                                </div>
                             </div>
                         </div>
 
-                        <div id="earning-bls-payouts" class="docs-block">
-                            <h3>"Payout Cycle"</h3>
+                        <div id="payouts-connect" class="subsection">
+                            <h3>"Connecting Stripe"</h3>
                             <p>
-                                "The daily payout cycle works in three phases:"
+                                "Signed in on eustress.dev, open "<a href="/bliss">"/bliss"</a>" and choose "
+                                <strong>"Connect Bank Account"</strong>". The witness checks your verification and
+                                age, then creates a Stripe Connect Custom account in the country recorded when you
+                                verified, with the date of birth read from your document. It passes your ID images
+                                to Stripe and sends you to Stripe's hosted onboarding to add what Stripe needs to
+                                pay you, such as a bank account. When you finish, Stripe returns you to /bliss."
                             </p>
-                            <div class="principles-grid">
-                                <div class="principle-card">
-                                    <div class="principle-number">"I"</div>
-                                    <h4>"Accumulate"</h4>
-                                    <p>
-                                        "Throughout the day (00:00–23:59 UTC), contributions are "
-                                        "witnessed, scored, and accumulated in your pending balance. "
-                                        "You can see your pending score in real time."
-                                    </p>
-                                </div>
-                                <div class="principle-card">
-                                    <div class="principle-number">"II"</div>
-                                    <h4>"Snapshot"</h4>
-                                    <p>
-                                        "At 00:00 UTC, the system snapshots all pending scores. "
-                                        "Your share is your_score / total_all_scores. This ratio "
-                                        "determines your BLS allocation from the daily emission."
-                                    </p>
-                                </div>
-                                <div class="principle-card">
-                                    <div class="principle-number">"III"</div>
-                                    <h4>"Distribute"</h4>
-                                    <p>
-                                        "BLS is minted according to the emission schedule and "
-                                        "distributed proportionally. Treasury drip is calculated "
-                                        "and USD payouts are queued via Stripe Connect."
-                                    </p>
-                                </div>
-                            </div>
+                            <p>
+                                "Your account joins the split at the next midnight run. A transfer Stripe refuses
+                                is skipped, and that amount stays in the treasury."
+                            </p>
                         </div>
                     </section>
 
-                    // ─────────────────────────────────────────────────────
-                    // 5. Tickets (TKT)
-                    // ─────────────────────────────────────────────────────
+                    // =========================================================
+                    // TICKETS
+                    // =========================================================
                     <section id="tickets" class="docs-section">
-                        <h2 class="section-anchor">"5. Tickets (TKT)"</h2>
+                        <h2 class="section-title">
+                            <span class="section-number">"06"</span>
+                            "Tickets"
+                        </h2>
 
-                        <div id="tickets-packages" class="docs-block">
+                        <div id="tickets-packages" class="subsection">
                             <h3>"Packages"</h3>
                             <p>
-                                "Tickets are purchased with USD via Stripe. Five packages are "
-                                "available, with larger packages offering better value:"
+                                "Tickets (TKT) are bought at "<a href="/tickets">"/tickets"</a>" through Stripe
+                                Checkout, in five packages. Larger packages add bonus Tickets:"
                             </p>
                             <table class="docs-table">
                                 <thead>
-                                    <tr>
-                                        <th>"Package"</th>
-                                        <th>"Price (USD)"</th>
-                                        <th>"Tickets"</th>
-                                        <th>"$/Ticket"</th>
-                                        <th>"Bonus"</th>
-                                    </tr>
+                                    <tr><th>"Package"</th><th>"Price"</th><th>"Tickets"</th><th>"Bonus"</th><th>"Total"</th></tr>
                                 </thead>
                                 <tbody>
-                                    <tr>
-                                        <td><strong>"Starter"</strong></td>
-                                        <td>"$4.99"</td>
-                                        <td>"400"</td>
-                                        <td>"$0.01248"</td>
-                                        <td>"—"</td>
-                                    </tr>
-                                    <tr>
-                                        <td><strong>"Standard"</strong></td>
-                                        <td>"$9.99"</td>
-                                        <td>"880"</td>
-                                        <td>"$0.01135"</td>
-                                        <td>"+10%"</td>
-                                    </tr>
-                                    <tr>
-                                        <td><strong>"Mega"</strong></td>
-                                        <td>"$19.99"</td>
-                                        <td>"1,840"</td>
-                                        <td>"$0.01086"</td>
-                                        <td>"+15%"</td>
-                                    </tr>
-                                    <tr>
-                                        <td><strong>"Super"</strong></td>
-                                        <td>"$49.99"</td>
-                                        <td>"5,000"</td>
-                                        <td>"$0.01000"</td>
-                                        <td>"+25%"</td>
-                                    </tr>
-                                    <tr>
-                                        <td><strong>"Ultra"</strong></td>
-                                        <td>"$99.99"</td>
-                                        <td>"10,800"</td>
-                                        <td>"$0.00926"</td>
-                                        <td>"+35%"</td>
-                                    </tr>
+                                    <tr><td>"Starter"</td><td>"$4.99"</td><td>"400"</td><td>"0"</td><td>"400"</td></tr>
+                                    <tr><td>"Standard"</td><td>"$9.99"</td><td>"800"</td><td>"80"</td><td>"880"</td></tr>
+                                    <tr><td>"Mega"</td><td>"$19.99"</td><td>"1,600"</td><td>"240"</td><td>"1,840"</td></tr>
+                                    <tr><td>"Super"</td><td>"$49.99"</td><td>"4,000"</td><td>"1,000"</td><td>"5,000"</td></tr>
+                                    <tr><td>"Ultra"</td><td>"$99.99"</td><td>"8,000"</td><td>"2,800"</td><td>"10,800"</td></tr>
                                 </tbody>
                             </table>
+                            <p>
+                                "Tickets are credited when Stripe confirms the payment through a signed webhook.
+                                The witness refuses a webhook whose signature does not verify or is more than 5
+                                minutes old, and processes each checkout session once."
+                            </p>
                         </div>
 
-                        <div id="tickets-revenue" class="docs-block">
-                            <h3>"Revenue Split"</h3>
+                        <div id="tickets-split" class="subsection">
+                            <h3>"Where the Money Goes"</h3>
                             <p>
-                                "Every dollar spent on Tickets is split exactly 50/50:"
-                            </p>
-                            <div class="principles-grid">
-                                <div class="principle-card">
-                                    <div class="principle-number">"50%"</div>
-                                    <h4>"Bliss Treasury"</h4>
-                                    <p>
-                                        "Funds the treasury that pays contributors daily. This is "
-                                        "the fuel that keeps the earning engine running. Every Ticket "
-                                        "purchase directly supports the developers building Eustress."
-                                    </p>
-                                </div>
-                                <div class="principle-card">
-                                    <div class="principle-number">"50%"</div>
-                                    <h4>"Platform Revenue"</h4>
-                                    <p>
-                                        "Funds Eustress operations: infrastructure, development team, "
-                                        "support, and growth. This ensures the platform itself is "
-                                        "sustainable long-term."
-                                    </p>
-                                </div>
-                            </div>
-                            <pre class="code-block"><code>{"// Revenue split on every Ticket purchase
-fn process_ticket_purchase(usd_amount: f64) {
-    let treasury_share = usd_amount * 0.50;  // 50% → Bliss treasury
-    let platform_share = usd_amount * 0.50;  // 50% → platform ops
-
-    treasury.deposit(treasury_share);
-    platform.deposit(platform_share);
-
-    // Example: Player buys $49.99 Super package
-    // → $24.995 goes to treasury (pays contributors)
-    // → $24.995 goes to platform (pays infrastructure)
-}"}</code></pre>
-                        </div>
-
-                        <div id="tickets-usage" class="docs-block">
-                            <h3>"Usage"</h3>
-                            <p>
-                                "Tickets can be spent on:"
-                            </p>
-                            <ul class="docs-list">
-                                <li>
-                                    <strong>"Marketplace Items"</strong>
-                                    " — 3D models, textures, audio packs, templates, plugins"
-                                </li>
-                                <li>
-                                    <strong>"Game Passes"</strong>
-                                    " — Developer-defined premium access passes for experiences"
-                                </li>
-                                <li>
-                                    <strong>"Cosmetics"</strong>
-                                    " — Avatar items, skins, effects, animations"
-                                </li>
-                                <li>
-                                    <strong>"Premium Content"</strong>
-                                    " — Exclusive tutorials, courses, and workshops"
-                                </li>
-                                <li>
-                                    <strong>"Tips"</strong>
-                                    " — Direct tips to creators and developers you appreciate"
-                                </li>
-                            </ul>
-                            <div class="docs-callout info">
-                                <strong>"No Expiration:"</strong>
-                                " Tickets never expire. Once purchased, they remain in your account "
-                                "indefinitely. There are no maintenance fees or hidden deductions."
-                            </div>
-                        </div>
-                    </section>
-
-                    // ─────────────────────────────────────────────────────
-                    // 6. Treasury
-                    // ─────────────────────────────────────────────────────
-                    <section id="treasury" class="docs-section">
-                        <h2 class="section-anchor">"6. Treasury"</h2>
-
-                        <div id="treasury-funding" class="docs-block">
-                            <h3>"How It Grows"</h3>
-                            <p>
-                                "The treasury is funded exclusively by Ticket sales. 50% of every "
-                                "dollar spent on Tickets flows directly into the treasury. There are "
-                                "no other revenue sources for the treasury — it is purely player-funded."
-                            </p>
-                            <pre class="code-block"><code>{"// Treasury growth (simplified)
-//
-// Day 1: 1,000 Ticket purchases → $500 to treasury
-//         Treasury balance: $500
-//
-// Day 2: 1,500 Ticket purchases → $750 to treasury
-//         Daily drip: $500 * 0.00276 = $1.38 paid to contributors
-//         Treasury balance: $500 - $1.38 + $750 = $1,248.62
-//
-// Day 30: Accumulated deposits far exceed drip
-//          Treasury balance keeps growing
-//
-// The treasury ONLY grows because daily deposits >> daily drip"}</code></pre>
-                            <div class="docs-callout success">
-                                <strong>"One-Way Valve:"</strong>
-                                " The treasury is never deducted from beyond the daily drip. No "
-                                "emergency withdrawals. No investor payouts. No management fees. "
-                                "100% of the drip goes to contributors. The treasury only grows."
-                            </div>
-                        </div>
-
-                        <div id="treasury-drip" class="docs-block">
-                            <h3>"Daily Drip"</h3>
-                            <p>
-                                "The treasury releases funds daily using exponential decay at a "
-                                "rate of 0.276% per day. This means the drip automatically scales "
-                                "with the treasury size:"
-                            </p>
-                            <pre class="code-block"><code>{"// Treasury drip calculation
-const DAILY_DRIP_RATE: f64 = 0.00276; // 0.276% per day
-
-fn daily_drip(treasury_balance: f64) -> f64 {
-    treasury_balance * DAILY_DRIP_RATE
-}
-
-// Examples at different treasury sizes:
-//
-// Treasury: $10,000    → Daily drip: $27.60
-// Treasury: $100,000   → Daily drip: $276.00
-// Treasury: $1,000,000 → Daily drip: $2,760.00
-//
-// As the treasury grows, contributor payouts grow proportionally.
-// The percentage stays constant, so the treasury is never depleted."}</code></pre>
-                            <p>
-                                "The 0.276% daily rate means approximately 63% of the treasury "
-                                "is distributed per year, but since new deposits constantly flow in "
-                                "from Ticket sales, the effective balance grows over time."
+                                "The witness takes the payment channel's fee off the top, then splits the rest
+                                evenly between the treasury and the platform:"
                             </p>
                             <table class="docs-table">
                                 <thead>
-                                    <tr>
-                                        <th>"Treasury Size"</th>
-                                        <th>"Daily Drip"</th>
-                                        <th>"Monthly Drip"</th>
-                                        <th>"Annual Drip"</th>
-                                    </tr>
+                                    <tr><th>"Channel"</th><th>"Fee taken first"</th></tr>
                                 </thead>
                                 <tbody>
-                                    <tr>
-                                        <td>"$10,000"</td>
-                                        <td>"$27.60"</td>
-                                        <td>"$828"</td>
-                                        <td>"$10,074"</td>
-                                    </tr>
-                                    <tr>
-                                        <td>"$100,000"</td>
-                                        <td>"$276"</td>
-                                        <td>"$8,280"</td>
-                                        <td>"$100,740"</td>
-                                    </tr>
-                                    <tr>
-                                        <td>"$1,000,000"</td>
-                                        <td>"$2,760"</td>
-                                        <td>"$82,800"</td>
-                                        <td>"$1,007,400"</td>
-                                    </tr>
-                                    <tr>
-                                        <td>"$10,000,000"</td>
-                                        <td>"$27,600"</td>
-                                        <td>"$828,000"</td>
-                                        <td>"$10,074,000"</td>
-                                    </tr>
+                                    <tr><td>"Web (Stripe)"</td><td>"2.9% + $0.30"</td></tr>
+                                    <tr><td>"iOS, Android, Steam"</td><td>"30%"</td></tr>
                                 </tbody>
                             </table>
+                            <p>"Every purchase today goes through web checkout. On the Standard package:"</p>
+                            <div class="code-block">
+                                <div class="code-header">
+                                    <span class="code-lang">"$9.99 Standard package, web"</span>
+                                </div>
+                                <pre><code class="language-text">{r#"price             $9.99
+channel fee       $9.99 x 2.9% + $0.30   =  $0.59
+net               $9.99 - $0.59          =  $9.40
+to the treasury   50% of net             =  $4.70
+to the platform   50% of net             =  $4.70"#}</code></pre>
+                            </div>
                         </div>
 
-                        <div id="treasury-guarantees" class="docs-block">
-                            <h3>"Guarantees"</h3>
-                            <div class="principles-grid">
-                                <div class="principle-card">
-                                    <div class="principle-number">"01"</div>
-                                    <h4>"100% to Contributors"</h4>
+                        <div id="tickets-sales" class="subsection">
+                            <h3>"Selling for Tickets"</h3>
+                            <p>
+                                "The witness already carries the rule a sale follows. When a buyer spends Tickets
+                                on a creator's product, the creator receives 70% of the price, rounded down to a
+                                whole Ticket, and the platform keeps the rest. The creator also earns value score:
+                                0.5 per Ticket received, added to that day's score with no daily ceiling. A sale of
+                                1,000 Tickets gives the creator 700 Tickets and 350 value score, which counts
+                                toward both the day's BLS and its USD drip."
+                            </p>
+                            <div class="callout callout-info">
+                                <img src="/assets/icons/help.svg" alt="Info" />
+                                <div>
+                                    <strong>"No storefront uses it yet"</strong>
                                     <p>
-                                        "Every cent of the daily drip goes to contributors. Zero "
-                                        "management fees. Zero platform deductions from the treasury. "
-                                        "The platform is funded by its 50% share of Ticket revenue."
-                                    </p>
-                                </div>
-                                <div class="principle-card">
-                                    <div class="principle-number">"02"</div>
-                                    <h4>"Never Depleted"</h4>
-                                    <p>
-                                        "Exponential decay means the treasury asymptotically approaches "
-                                        "zero but never reaches it. Combined with continuous Ticket "
-                                        "sales deposits, it perpetually grows."
-                                    </p>
-                                </div>
-                                <div class="principle-card">
-                                    <div class="principle-number">"03"</div>
-                                    <h4>"Auditable"</h4>
-                                    <p>
-                                        "Treasury balance, daily drip amounts, and all payouts are "
-                                        "recorded on the public ledger. Anyone can verify the math."
-                                    </p>
-                                </div>
-                                <div class="principle-card">
-                                    <div class="principle-number">"04"</div>
-                                    <h4>"No Investor Tokens"</h4>
-                                    <p>
-                                        "The treasury exists to pay builders, not investors. People who "
-                                        "fund the ecosystem do so because they believe in it — not to "
-                                        "extract tokens or returns."
+                                        "The marketplace API returns no listings, so "<a href="/marketplace">"/marketplace"</a>
+                                        " has nothing for sale and Tickets bought today stay in your balance.
+                                        Tickets convert to neither BLS nor dollars."
                                     </p>
                                 </div>
                             </div>
                         </div>
                     </section>
 
-                    // ─────────────────────────────────────────────────────
-                    // 7. USD Payouts
-                    // ─────────────────────────────────────────────────────
-                    <section id="usd-payouts" class="docs-section">
-                        <h2 class="section-anchor">"7. USD Payouts"</h2>
+                    // =========================================================
+                    // WHAT'S NEXT
+                    // =========================================================
+                    <section id="roadmap" class="docs-section">
+                        <h2 class="section-title">
+                            <span class="section-number">"07"</span>
+                            "What's Next"
+                        </h2>
 
-                        <div id="usd-payouts-stripe" class="docs-block">
-                            <h3>"Stripe Connect"</h3>
+                        <div id="roadmap-attestation" class="subsection">
+                            <h3>"Proof of Work"</h3>
                             <p>
-                                "USD payouts are handled through Stripe Connect Custom accounts. "
-                                "This provides bank-grade security, global coverage, and automatic "
-                                "tax handling:"
-                            </p>
-                            <ul class="docs-list">
-                                <li>
-                                    <strong>"Daily Payouts"</strong>
-                                    " — Your earned BLS share is converted to USD and paid out daily"
-                                </li>
-                                <li>
-                                    <strong>"Direct Deposit"</strong>
-                                    " — Funds go directly to your bank account or debit card"
-                                </li>
-                                <li>
-                                    <strong>"Global Coverage"</strong>
-                                    " — Stripe supports 46+ countries for payouts"
-                                </li>
-                                <li>
-                                    <strong>"Instant Payouts"</strong>
-                                    " — Available in supported regions for a small fee"
-                                </li>
-                            </ul>
-                            <pre class="code-block"><code>{"// Payout flow
-//
-// 1. Daily BLS distribution at UTC midnight
-// 2. Your BLS share → converted to USD at current rate
-// 3. USD queued in Stripe Connect
-// 4. Stripe processes payout to your bank (1-2 business days)
-//
-// Minimum payout: $0.50 (below this, balance rolls over)
-// Payout schedule: Daily (configurable to weekly/monthly)"}</code></pre>
-                        </div>
-
-                        <div id="usd-payouts-kyc" class="docs-block">
-                            <h3>"KYC Verification"</h3>
-                            <p>
-                                "To receive USD payouts, you must complete KYC (Know Your Customer) "
-                                "identity verification. This is required by law and handled through "
-                                "Stripe Identity:"
-                            </p>
-                            <div class="docs-callout warning">
-                                <strong>"Required for Payouts:"</strong>
-                                " You can earn BLS without KYC, but converting to USD requires "
-                                "verified identity. Your BLS balance accumulates until verification "
-                                "is complete."
-                            </div>
-                            <p>
-                                "Eustress supports contributors from 72 IRS Qualified Intermediary "
-                                "jurisdictions, covering most of the world:"
-                            </p>
-                            <table class="docs-table">
-                                <thead>
-                                    <tr>
-                                        <th>"Region"</th>
-                                        <th>"Coverage"</th>
-                                    </tr>
-                                </thead>
-                                <tbody>
-                                    <tr>
-                                        <td>"North America"</td>
-                                        <td>"United States, Canada, Mexico"</td>
-                                    </tr>
-                                    <tr>
-                                        <td>"Europe"</td>
-                                        <td>"All EU/EEA countries, UK, Switzerland"</td>
-                                    </tr>
-                                    <tr>
-                                        <td>"Asia-Pacific"</td>
-                                        <td>"Japan, South Korea, Australia, New Zealand, Singapore, and more"</td>
-                                    </tr>
-                                    <tr>
-                                        <td>"Latin America"</td>
-                                        <td>"Brazil, Argentina, Chile, Colombia, and more"</td>
-                                    </tr>
-                                    <tr>
-                                        <td>"Other"</td>
-                                        <td>"Israel, South Africa, UAE, and additional QI jurisdictions"</td>
-                                    </tr>
-                                </tbody>
-                            </table>
-                            <p>
-                                "KYC verification typically takes under 5 minutes and requires a "
-                                "government-issued photo ID and a selfie."
+                                "Contributions will be anchored to artifacts the witness can check for itself,
+                                such as a published Space or a pushed commit, so Development and Creation scores
+                                rest on the work they describe."
                             </p>
                         </div>
 
-                        <div id="usd-payouts-taxes" class="docs-block">
-                            <h3>"Tax Handling"</h3>
+                        <div id="roadmap-marketplace" class="subsection">
+                            <h3>"Marketplace and Spending"</h3>
                             <p>
-                                "Stripe handles tax form generation automatically:"
+                                "Listings will arrive at /marketplace and sell for Tickets under the 70/30 rule
+                                above, with value score for the creator. Inside experiences, "
+                                <code>"MarketplaceService"</code>" will connect to the same catalog; in Luau and
+                                Rune it is a placeholder today, where "<code>"PromptPurchase"</code>" opens nothing
+                                and "<code>"PlayerOwnsGamePass"</code>" returns false. Features that spend BLS will
+                                use the witness's spend endpoint, which burns BLS rather than moving it, so the
+                                emission schedule stays the only source of new BLS."
                             </p>
-                            <ul class="docs-list">
-                                <li>
-                                    <strong>"US Contributors"</strong>
-                                    " — 1099-K or 1099-MISC forms generated by Stripe annually"
-                                </li>
-                                <li>
-                                    <strong>"International Contributors"</strong>
-                                    " — W-8BEN forms collected during KYC; tax reporting follows "
-                                    "local jurisdiction rules"
-                                </li>
-                                <li>
-                                    <strong>"Real-Time Tracking"</strong>
-                                    " — All earnings visible in your dashboard with exportable "
-                                    "CSV reports for your accountant"
-                                </li>
-                            </ul>
-                            <div class="docs-callout info">
-                                <strong>"Tax Responsibility:"</strong>
-                                " Eustress provides the forms; you are responsible for filing taxes "
-                                "according to your jurisdiction's laws. Consult a tax professional "
-                                "for guidance specific to your situation."
+                        </div>
+
+                        <div id="roadmap-chain" class="subsection">
+                            <h3>"The Bliss Chain"</h3>
+                            <p>
+                                "The decentralization plan moves the ledger onto the Bliss chain, run by
+                                independent nodes. Today's emission and treasury rules will become the chain's mint
+                                rule, BLS will gain peer-to-peer transfers, nodes that store published Spaces will
+                                earn from a storage contribution type, and Full nodes will take on real duties."
+                            </p>
+                            <div class="future-cta">
+                                <p><strong>"Build in Studio. The witness keeps the count."</strong></p>
+                                <div class="cta-buttons">
+                                    <a href="/download" class="btn-primary-glow">"Download Eustress"</a>
+                                    <a href="/bliss" class="btn-secondary-steel">"Open Bliss"</a>
+                                </div>
                             </div>
                         </div>
                     </section>
 
-                    // ─────────────────────────────────────────────────────
-                    // 8. Marketplace
-                    // ─────────────────────────────────────────────────────
-                    <section id="marketplace" class="docs-section">
-                        <h2 class="section-anchor">"8. Marketplace"</h2>
-
-                        <div class="docs-callout warning">
-                            <strong>"Not yet live:"</strong>
-                            " The marketplace is specified but not implemented — the API "
-                            "currently returns no listings, and no Tickets change hands. "
-                            "Bliss earning and daily distribution (sections 1–4) ARE live. "
-                            "This section describes the intended design, not shipped behavior."
-                        </div>
-
-                        <div id="marketplace-selling" class="docs-block">
-                            <h3>"Selling Items"</h3>
-                            <p>
-                                "The Eustress Marketplace lets you sell digital items for Tickets. "
-                                "Players spend Tickets to purchase your items, and you earn Tickets "
-                                "from each sale:"
-                            </p>
-                            <ul class="docs-list">
-                                <li>
-                                    <strong>"3D Models"</strong>
-                                    " — Characters, environments, props, vehicles"
-                                </li>
-                                <li>
-                                    <strong>"Textures & Materials"</strong>
-                                    " — PBR materials, texture packs, shaders"
-                                </li>
-                                <li>
-                                    <strong>"Audio"</strong>
-                                    " — Sound effects, music tracks, ambient loops"
-                                </li>
-                                <li>
-                                    <strong>"Templates"</strong>
-                                    " — Project templates, scene templates, UI kits"
-                                </li>
-                                <li>
-                                    <strong>"Plugins"</strong>
-                                    " — Engine plugins, script libraries, tools"
-                                </li>
-                                <li>
-                                    <strong>"Game Passes"</strong>
-                                    " — Access passes for premium experience features"
-                                </li>
-                            </ul>
-                        </div>
-
-                        <div id="marketplace-splits" class="docs-block">
-                            <h3>"Revenue Splits"</h3>
-                            <p>
-                                "When a player purchases your item on the marketplace:"
-                            </p>
-                            <table class="docs-table">
-                                <thead>
-                                    <tr>
-                                        <th>"Recipient"</th>
-                                        <th>"Share"</th>
-                                        <th>"Description"</th>
-                                    </tr>
-                                </thead>
-                                <tbody>
-                                    <tr>
-                                        <td><strong>"Developer"</strong></td>
-                                        <td>"70%"</td>
-                                        <td>"You earn 70% of the Ticket price in Tickets"</td>
-                                    </tr>
-                                    <tr>
-                                        <td><strong>"Platform"</strong></td>
-                                        <td>"30%"</td>
-                                        <td>"Eustress takes 30% to fund marketplace infrastructure"</td>
-                                    </tr>
-                                </tbody>
-                            </table>
-                            <pre class="code-block"><code>{"// Marketplace sale example
-//
-// You list a 3D character model for 500 Tickets
-// A player purchases it
-//
-// You receive:    500 * 0.70 = 350 Tickets
-// Platform gets:  500 * 0.30 = 150 Tickets
-//
-// Your Tickets can be:
-// - Spent on other marketplace items
-// - Held in your account indefinitely"}</code></pre>
-                            <div class="docs-callout info">
-                                <strong>"Dual Income:"</strong>
-                                " Marketplace sales earn you Tickets (TKT), while your contributions "
-                                "to the ecosystem earn you Bliss (BLS). Active developers benefit "
-                                "from both revenue streams simultaneously."
-                            </div>
-                        </div>
-
-                        <div id="marketplace-api" class="docs-block">
-                            <h3>"Scripting API"</h3>
-                            <p>
-                                "The MarketplaceService provides a scripting API for integrating "
-                                "purchases directly into your experiences:"
-                            </p>
-                            <pre class="code-block"><code>{"// MarketplaceService API
-
-// Prompt a player to purchase a product
-// Returns: PurchaseResult (Purchased, Cancelled, Error)
-MarketplaceService::PromptPurchase(player, product_id)
-
-// Get information about a product
-// Returns: ProductInfo { name, price, description, creator }
-MarketplaceService::GetProductInfo(product_id)
-
-// Check if a player owns a specific game pass
-// Returns: bool
-MarketplaceService::PlayerOwnsGamePass(player, pass_id)"}</code></pre>
-                            <p>
-                                "Example usage in a Soul script:"
-                            </p>
-                            <pre class="code-block"><code>{"// vip_door.soul
-//
-// When a player touches the VIP door:
-//   If the player owns the \"VIP Pass\" game pass, open the door.
-//   Otherwise, prompt them to purchase it for 200 Tickets.
-
-When player touches VIPDoor {
-    if MarketplaceService::PlayerOwnsGamePass(player, \"vip-pass-001\") {
-        open_door(VIPDoor)
-        show_message(player, \"Welcome, VIP!\")
-    } else {
-        let result = MarketplaceService::PromptPurchase(player, \"vip-pass-001\")
-        if result == Purchased {
-            open_door(VIPDoor)
-            show_message(player, \"Thanks for purchasing! Welcome, VIP!\")
-        }
-    }
-}"}</code></pre>
-                            <p>
-                                "The full MarketplaceService API reference:"
-                            </p>
-                            <table class="docs-table">
-                                <thead>
-                                    <tr>
-                                        <th>"Method"</th>
-                                        <th>"Parameters"</th>
-                                        <th>"Returns"</th>
-                                        <th>"Description"</th>
-                                    </tr>
-                                </thead>
-                                <tbody>
-                                    <tr>
-                                        <td><code>"PromptPurchase"</code></td>
-                                        <td>"player, product_id"</td>
-                                        <td>"PurchaseResult"</td>
-                                        <td>"Shows purchase dialog to player"</td>
-                                    </tr>
-                                    <tr>
-                                        <td><code>"GetProductInfo"</code></td>
-                                        <td>"product_id"</td>
-                                        <td>"ProductInfo"</td>
-                                        <td>"Fetches product metadata"</td>
-                                    </tr>
-                                    <tr>
-                                        <td><code>"PlayerOwnsGamePass"</code></td>
-                                        <td>"player, pass_id"</td>
-                                        <td>"bool"</td>
-                                        <td>"Checks game pass ownership"</td>
-                                    </tr>
-                                </tbody>
-                            </table>
-                        </div>
-                    </section>
-
-                    // Navigation footer
                     <nav class="docs-nav-footer">
-                        <a href="/docs/publishing" class="nav-prev">
+                        <a href="/docs/website" class="nav-prev">
                             <img src="/assets/icons/arrow-left.svg" alt="Previous" />
                             <div>
                                 <span class="nav-label">"Previous"</span>
-                                <span class="nav-title">"Publishing"</span>
+                                <span class="nav-title">"Website Service"</span>
                             </div>
                         </a>
-                        <a href="/docs/philosophy" class="nav-next">
+                        <a href="/learn/mcp" class="nav-next">
                             <div>
                                 <span class="nav-label">"Next"</span>
-                                <span class="nav-title">"Philosophy"</span>
+                                <span class="nav-title">"MCP Server"</span>
                             </div>
                             <img src="/assets/icons/arrow-right.svg" alt="Next" />
                         </a>

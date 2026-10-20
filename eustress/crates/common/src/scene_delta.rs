@@ -281,9 +281,9 @@ pub const TOPIC_RUNE_SCRIPTS: &str = "rune_scripts";
 /// one full optimize→simulate→Rune→result cycle for workshop convergence analysis.
 pub const TOPIC_WORKSHOP_ITERATIONS: &str = "workshop_iterations";
 
-/// Topic for ARC-AGI-3 (and gym-style) episode records (ArcEpisodeRecord).
+/// Topic for episode records of interactive tasks (EpisodeRecord).
 /// One message per completed episode — carries step history, final score, and efficiency ratio.
-pub const TOPIC_ARC_EPISODES: &str = "arc_episodes";
+pub const TOPIC_EPISODES: &str = "episodes";
 
 /// Simulation watchpoint time-series snapshots (voltage, SOC, temperature, etc.)
 /// One message per tick containing all watchpoint values for that tick.
@@ -412,7 +412,7 @@ pub enum ObservationPayload {
     Ack { message: String },
     /// Error that prevented the command from executing.
     Error { message: String },
-    /// Raw environment observation from an external interactive benchmark (ARC-AGI-3, gym, etc.).
+    /// Raw environment observation from an external interactive environment (a benchmark, a gym, etc.).
     EnvironmentState {
         /// Opaque JSON blob of the env observation (grid, goal, available_actions, step, score).
         json: String,

@@ -94,6 +94,10 @@ pub fn class_is_file_natured(class_name: &str) -> bool {
         // directory loader's env arm; keep FileSystem so they are not
         // skipped on streaming-primary imports.
         | "Atmosphere" | "Sky" | "Clouds" | "DirectionalLight"
+        // Local lights are read by the directory loader's light arm. The
+        // binary path has no light spawner: a light core came back as an
+        // unanchored, collidable block and never lit anything.
+        | "PointLight" | "SpotLight" | "SurfaceLight"
         // Gaussian-splat clouds: essential content is a real `.ply`
         // radiance-field file (referenced by a `[gaussian_splats].path`
         // section), exactly like a custom-mesh part owns its `.glb`. This
@@ -106,6 +110,16 @@ pub fn class_is_file_natured(class_name: &str) -> bool {
         // reconcile sweep trashed it on the next open ("imported splat
         // vanishes on restart").
         | "GaussianSplats"
+        // Particle simulations: their properties are TOML field tables
+        // (`[particle_simulation]` / `[particle_species]`) that a binary core
+        // cannot carry, and a simulation is a container of species folders.
+        | "ParticleSimulation" | "ParticleSpecies"
+        // Terrain layers, for the same reasons: `[terrain_spline]` and its
+        // siblings are field tables, and a spline is a container of point
+        // folders under `Workspace/Terrain/Layers`.
+        | "TerrainSpline" | "TerrainSplinePoint" | "TerrainStamp"
+        | "TerrainFlattenPad" | "TerrainNoise" | "TerrainMaterialFill" | "TerrainScatter"
+        | "TerrainWaterBody"
     )
 }
 
@@ -227,92 +241,147 @@ mod tests {
     }
 }
 
-/// THE single test for "this entity is owned by the binary-ECS / streaming
-/// tier, not by the filesystem tree loader".
-///
-/// Two halves depend on this being one function rather than two agreeing
-/// predicates:
-///
-/// * `file_loader`'s streaming-primary gate SKIPS spawning a tree entity when
-///   this is true, because residency will stream it from the `entities`
-///   partition.
-/// * `bake_cores` CONVERTS a tree entity into a core when this is true.
-///
-/// Written separately, they drift — and the drift is silent in both
-/// directions. If the bake converts something the loader still spawns, the
-/// entity exists TWICE (the double-load that previously pinned huge imports
-/// at ~2 FPS). If the loader skips something the bake did not convert, the
-/// entity vanishes. Neither shows up as an error; both show up as a wrong
-/// world.
-///
-/// `has_children`: a parent must stay folder-form. A core has no tree entry
-/// and no hierarchy — `spawn_binary_core` parents every core flat under
-/// Workspace — so converting a parent strands its descendants.
-///
-/// `has_custom_mesh`: a binary core cannot carry a resolvable mesh path.
-///
-/// The Part subclasses are excluded deliberately: `SpawnLocation`, `Seat` and
-/// `VehicleSeat` render through the widened Part arm and attach a subclass
-/// component, and the streaming path drops that, so they must keep loading
-/// from the tree.
 /// Whether an instance's raw TOML text references a custom mesh.
 ///
 /// Deliberately a TEXT scan rather than a parsed-field check: a mesh path can
 /// appear in `[asset].mesh`, in `[properties.extras]`, or in a section the
 /// `InstanceDefinition` parser does not model, and a binary core cannot carry
-/// any of them. Over-matching is the safe direction — a false positive keeps
-/// an entity in the tree, a false negative converts one the loader still
-/// spawns and creates it twice.
+/// any of them. Over-matching is the safe direction: a false positive keeps an
+/// entity in the tree, a false negative converts one the loader still spawns
+/// and creates it twice.
 ///
-/// Shared so `file_loader` and `bake_cores` cannot answer this differently.
+/// Shared so every caller of [`streams_from_db`] answers this the same way.
 pub fn toml_mentions_custom_mesh(text: &str) -> bool {
     let l = text.to_ascii_lowercase();
     l.contains("mesh") || l.contains(".glb") || l.contains(".obj")
 }
 
-pub fn streams_from_db(class_name: &str, has_children: bool, has_custom_mesh: bool) -> bool {
+/// The class a raw TOML `class_name` resolves to, exactly as the loader
+/// resolves it: the legacy `"Script"` is the Rune script class, and a name
+/// that matches no class loads as a Folder.
+///
+/// [`streams_from_db`] classifies through this, so a caller holding the raw
+/// string (the bake, the publish export) and one holding the loader's parsed
+/// class reach the same answer. Comparing raw strings instead is how a raw
+/// `"Script"` came to be baked by one caller and spawned from the tree by the
+/// other.
+pub fn class_from_toml(raw: &str) -> eustress_common::classes::ClassName {
+    // One rule, shared with a Player's reader of the same records.
+    eustress_common::datamodel::record::class_from_toml(raw)
+}
+
+/// THE single test for "this entity is owned by the binary-ECS / streaming
+/// tier, not by the filesystem tree loader".
+///
+/// Three callers depend on this being one function rather than agreeing
+/// predicates:
+///
+/// * `file_loader`'s streaming-primary gate SKIPS spawning a tree entity when
+///   this is true and a core exists for it, because residency streams it
+///   from the `entities` partition.
+/// * `bake_cores` CONVERTS a tree entity into a core when this is true.
+/// * `echk_export` publishes the core in place of the tree row when this is
+///   true.
+///
+/// Written separately, they drift, and the drift is silent in both
+/// directions: an entity converted but still spawned exists TWICE, one
+/// skipped but never converted vanishes.
+///
+/// It is an ALLOWLIST: a childless, mesh-free `Part` under the Workspace, and
+/// nothing else. A core is flat (`spawn_binary_core` parents every core to
+/// Workspace) and carries no hierarchy, so only an object that means the same
+/// thing flat under Workspace may become one. An exclude-list admitted
+/// Textures, Decals, Welds, Sounds, Luau scripts and Folders from every
+/// service, templates in ReplicatedStorage and ServerStorage included, and
+/// spawned them all under Workspace: a Texture needs a BasePart parent to
+/// render, a script needs its source child to run in Play, and a template does
+/// not belong in the world.
+///
+/// `SpawnLocation`, `Seat` and `VehicleSeat` are classes of their own, so
+/// they fall outside the list: they attach a subclass component the streaming
+/// path does not carry.
+///
+/// `rel_path` is the entity's tree key, e.g.
+/// `Workspace/Map/Brick/_instance.toml`.
+pub fn streams_from_db(
+    class_name: &str,
+    has_children: bool,
+    has_custom_mesh: bool,
+    rel_path: &str,
+) -> bool {
     if has_children || has_custom_mesh {
         return false;
     }
-    if matches!(class_name, "SpawnLocation" | "Seat" | "VehicleSeat") {
+    if !rel_path.starts_with("Workspace/") {
         return false;
     }
-    representation_for(class_name, None) == Representation::BinaryEcs
+    matches!(
+        class_from_toml(class_name),
+        eustress_common::classes::ClassName::Part
+    )
 }
 
 #[cfg(test)]
 mod streams_from_db_tests {
     use super::*;
 
+    const IN_WORKSPACE: &str = "Workspace/Map/Brick/_instance.toml";
+
     #[test]
-    fn a_bare_part_streams() {
-        assert!(streams_from_db("Part", false, false));
+    fn a_bare_part_in_the_workspace_streams() {
+        assert!(streams_from_db("Part", false, false, IN_WORKSPACE));
     }
 
     #[test]
     fn a_parent_never_streams() {
-        assert!(!streams_from_db("Part", true, false));
+        assert!(!streams_from_db("Part", true, false, IN_WORKSPACE));
     }
 
     #[test]
     fn a_custom_mesh_never_streams() {
-        assert!(!streams_from_db("Part", false, true));
+        assert!(!streams_from_db("Part", false, true, IN_WORKSPACE));
     }
 
+    /// Templates and materials live outside the Workspace; a core would spawn
+    /// them into the world. `Workspace_backup` checks the prefix boundary.
     #[test]
-    fn part_subclasses_never_stream() {
-        // The regression this whole function exists to prevent: these are
-        // BinaryEcs by representation, so a naive check would convert them
-        // while `file_loader` still spawns them — one object, twice.
-        for c in ["SpawnLocation", "Seat", "VehicleSeat"] {
-            assert!(!streams_from_db(c, false, false), "{c} must not stream");
+    fn a_part_outside_the_workspace_never_streams() {
+        for rel in [
+            "ReplicatedStorage/Car/Body/_instance.toml",
+            "ServerStorage/Template/_instance.toml",
+            "MaterialService/Plate/_instance.toml",
+            "Workspace_backup/Part/_instance.toml",
+        ] {
+            assert!(!streams_from_db("Part", false, false, rel), "{rel} must not stream");
         }
     }
 
+    /// Everything the old exclude-list admitted, plus the Part subclasses and
+    /// the file-natured classes it already refused.
     #[test]
-    fn file_natured_classes_never_stream() {
-        for c in ["SoulScript", "ScreenGui", "TextLabel", "Atmosphere", "Sky"] {
-            assert!(!streams_from_db(c, false, false), "{c} must not stream");
+    fn only_parts_stream() {
+        for c in [
+            "Texture", "Decal", "Weld", "Sound", "Folder", "Beam", "ParticleEmitter",
+            "LuauScript", "LuauModuleScript", "LuauLocalScript", "Model",
+            "SpawnLocation", "Seat", "VehicleSeat",
+            "SoulScript", "ScreenGui", "TextLabel", "Atmosphere", "Sky",
+            "WedgePart", "TrussPart",
+        ] {
+            assert!(!streams_from_db(c, false, false, IN_WORKSPACE), "{c} must not stream");
+        }
+    }
+
+    /// `file_loader` passes the Debug name of the class it parsed; `bake_cores`
+    /// and `echk_export` pass the raw TOML string. Both must decide alike.
+    #[test]
+    fn raw_and_parsed_class_names_decide_alike() {
+        for raw in ["Part", "Script", "SoulScript", "NoSuchClass", "part", "MeshPart"] {
+            let parsed = format!("{:?}", class_from_toml(raw));
+            assert_eq!(
+                streams_from_db(raw, false, false, IN_WORKSPACE),
+                streams_from_db(&parsed, false, false, IN_WORKSPACE),
+                "{raw} vs {parsed}"
+            );
         }
     }
 }

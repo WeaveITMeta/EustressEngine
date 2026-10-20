@@ -1,6 +1,7 @@
-# PointLight — Omnidirectional point light source
-# Per LIGHTING_AUDIT.md §4.2 — physically-based authoring in lumens / meters.
-# .instance.toml extension causes the file loader to spawn this as an ECS entity.
+# PointLight: omnidirectional light source.
+# Same shape as common/assets/class_schema/PointLight (the template Insert
+# uses), written with described values. `light_classes` reads either.
+# Brightness is a display-referred dial; Range is the light's reach.
 
 [metadata]
 class_name = "PointLight"
@@ -13,11 +14,9 @@ rotation = [0.0, 0.0, 0.0, 1.0]
 scale = [1.0, 1.0, 1.0]
 
 [Light]
-Brightness = { type = "float", value = 100000.0, min = 0.0, max = 1000000.0, description = "Intensity in lumens (physically based)" }
+Brightness = { type = "float", value = 1.0, min = 0.0, max = 100.0, description = "Brightness dial: 1 is a normal lamp, the same on screen by day and by night" }
 Color      = { type = "Color3", value = [1.0, 1.0, 1.0], description = "Light hue" }
-Range      = { type = "float", value = 60.0, min = 0.1, max = 10000.0, description = "Falloff distance in meters" }
-Radius     = { type = "float", value = 0.0, min = 0.0, max = 100.0, description = "Spherical area-light radius — larger = softer shadows" }
-Shadows    = { type = "bool",  value = true, description = "Cast dynamic shadows" }
-
-[Appearance]
-Texture = { type = "asset", value = "", description = "Optional cubemap cookie (KTX2) — for gobos / stained glass" }
+Range      = { type = "float", value = 16.0, min = 0.1, max = 10000.0, description = "Reach in metres: the light fades to nothing here" }
+Radius     = { type = "float", value = 0.0, min = 0.0, max = 100.0, description = "Emitting sphere radius in metres: widens highlights" }
+Shadows    = { type = "bool",  value = false, description = "Cast dynamic shadows (six shadow views per frame)" }
+Enabled    = { type = "bool",  value = true, description = "Emit light" }

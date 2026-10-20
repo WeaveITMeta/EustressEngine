@@ -11,7 +11,10 @@ use eustress_common::simulation::{
     SimulationRecording, TimeSeries, WatchPoint, BreakPoint, Comparison,
 };
 
-use crate::play_mode::{PlayModeState, PlayModeType, StartPlayEvent, StopPlayEvent};
+use crate::play_mode::{PlayModeState, StopPlayEvent, TogglePauseEvent};
+
+use super::command::{drain_sim_command_queues, merged_sim_values, SimQueueDrains, SimRunLedger};
+use super::ipc::{sync_sim_ipc, SimIpc};
 
 /// Bevy Resource mirror of SIM_VALUES thread-local.
 /// Written by `publish_echem_to_sim_values` (Update), read by `record_and_stream_watchpoints` (PostUpdate).
@@ -38,8 +41,8 @@ pub struct SimValuesResource(pub std::collections::HashMap<String, f64>);
 #[derive(Resource, Default)]
 pub struct ScriptSimWrites(pub std::collections::HashMap<String, f64>);
 
-/// Tracks MCP-requested auto-stop target (simulation time in seconds).
-/// Set by `run_simulation` command when `duration_s` is provided;
+/// Requested auto-stop target (simulation time in seconds).
+/// Set by a `run` command that carries `duration_s`;
 /// cleared on stop or when the threshold is crossed.
 #[derive(Resource, Default)]
 pub struct SimAutoStop {
@@ -62,6 +65,9 @@ impl Plugin for SimulationPlugin {
             .init_resource::<super::data_binding::DataBindingRegistry>()
             .init_resource::<ActiveRecording>()
             .init_resource::<TelemetryWriterState>()
+            .init_resource::<SimIpc>()
+            .init_resource::<SimRunLedger>()
+            .init_resource::<SimQueueDrains>()
             .register_type::<SimulationClock>()
             .register_type::<SimulationState>()
             // Sync simulation state with play mode transitions
@@ -69,14 +75,16 @@ impl Plugin for SimulationPlugin {
             .add_systems(OnEnter(PlayModeState::Playing), register_battery_watchpoints)
             .add_systems(OnEnter(PlayModeState::Paused), on_play_pause)
             .add_systems(OnEnter(PlayModeState::Editing), on_play_stop)
-            // Drain MCP sim-commands.jsonl every frame (any state)
-            .add_systems(PreUpdate, drain_sim_commands)
+            // Resolve this instance's IPC paths when the Space changes, then
+            // drain its command queues every frame, in any state, so `run`
+            // works from Edit and `stop` from Play.
+            .add_systems(PreUpdate, (sync_sim_ipc, drain_sim_command_queues).chain())
             // Advance simulation clock when playing
             .add_systems(
                 PreUpdate,
                 advance_simulation_clock
                     .run_if(in_state(PlayModeState::Playing))
-                    .after(drain_sim_commands),
+                    .after(drain_sim_command_queues),
             )
             // Auto-stop when requested duration_s is reached
             .add_systems(
@@ -100,7 +108,7 @@ impl Plugin for SimulationPlugin {
                 PostUpdate,
                 record_and_stream_watchpoints.run_if(in_state(PlayModeState::Playing)),
             )
-            // Write telemetry.jsonl for tail_telemetry MCP tool (1 Hz)
+            // Append to the Universe's telemetry.jsonl for tail_telemetry (1 Hz)
             .add_systems(
                 PostUpdate,
                 write_telemetry_log
@@ -110,12 +118,29 @@ impl Plugin for SimulationPlugin {
     }
 }
 
-/// Called when entering Playing state - ensure simulation is running
-fn on_play_start(mut sim_state: ResMut<SimulationState>) {
+/// Called when entering Playing state - ensure simulation is running, and
+/// open a run in the ledger (a resume from Pause continues the current one).
+fn on_play_start(
+    mut sim_state: ResMut<SimulationState>,
+    clock: Res<SimulationClock>,
+    mut ledger: ResMut<SimRunLedger>,
+    mut stop_writer: MessageWriter<StopPlayEvent>,
+    mut pause_writer: MessageWriter<TogglePauseEvent>,
+) {
     // Always ensure Running mode when entering play
     sim_state.mode = SimulationMode::Running;
     sim_state.completed = false;
     info!("🎮 Simulation started (mode=Running)");
+
+    // A `stop` or `pause` that arrived while this run was still starting is
+    // honoured now that there is a run to apply it to.
+    let (stop_after_start, pause_after_start) = ledger.begin_run(&clock);
+    if stop_after_start {
+        ledger.set_stop_reason("stop_command");
+        stop_writer.write(StopPlayEvent);
+    } else if pause_after_start {
+        pause_writer.write(TogglePauseEvent);
+    }
 }
 
 /// Called when entering Paused state - pause simulation
@@ -133,9 +158,21 @@ fn on_play_stop(
     mut breakpoints: ResMut<BreakPointRegistry>,
     mut auto_stop: ResMut<SimAutoStop>,
     mut recording: ResMut<ActiveRecording>,
+    mut ledger: ResMut<SimRunLedger>,
+    ipc: Res<SimIpc>,
     mut output: Option<ResMut<crate::ui::slint_ui::OutputConsole>>,
     space_root: Option<Res<crate::space::SpaceRoot>>,
 ) {
+    // Capture the run's outcome FIRST: everything below resets it. This is
+    // the only moment the final values still exist, so a client waiting on
+    // the run reads them from the ledger rather than from a snapshot written
+    // after the store was cleared.
+    let final_ticks = sim_clock.tick_count;
+    let final_sim_s = sim_clock.simulation_time_s;
+    let final_values = merged_sim_values(Some(&*sim_values), Some(&*watchpoints));
+    let run_id = ledger.active_run_id();
+    let mut exported_recording = None;
+
     // Stop and auto-export recording BEFORE resetting clock (clock.reset() zeros tick_count)
     if recording.enabled {
         // Write final clock state into recording metadata before stopping
@@ -152,28 +189,26 @@ fn on_play_stop(
                 ticks, sim_duration, series_count);
 
             // Auto-export to Universe knowledge/recordings/{space_name}/
-            let recordings_dir = if let Some(ref sr) = space_root {
-                let space_name = sr.0.file_name()
-                    .and_then(|n| n.to_str())
-                    .unwrap_or("default");
-                // Walk up from space root: spaces/SpaceName → Universe root
-                let universe_root = sr.0.parent() // spaces/
-                    .and_then(|p| p.parent()); // Universe root
-                if let Some(ur) = universe_root {
-                    ur.join(".eustress").join("knowledge").join("recordings").join(space_name)
-                } else {
-                    sr.0.join(".eustress").join("recordings")
-                }
-            } else {
-                // Fallback if no space root
-                crate::space::workspace_root().join(".eustress").join("recordings")
-            };
+            let recordings_dir = ipc.recordings_dir().unwrap_or_else(|| match space_root {
+                Some(ref sr) => sr.0.join(".eustress").join("recordings"),
+                None => crate::space::workspace_root().join(".eustress").join("recordings"),
+            });
             {
                 if let Err(e) = std::fs::create_dir_all(&recordings_dir) {
                     warn!("Failed to create recordings dir: {}", e);
                 } else {
-                    let timestamp = chrono::Utc::now().format("%Y%m%d_%H%M%S");
-                    let json_path = recordings_dir.join(format!("sim_{}.json", timestamp));
+                    // Millisecond timestamp + run id + PID: two engines on the
+                    // same Space (design variants) stopping in the same second
+                    // used to write the same `sim_<seconds>.json`, and the
+                    // second export silently replaced the first.
+                    let timestamp = chrono::Utc::now().format("%Y%m%d_%H%M%S_%3f");
+                    let run_tag = run_id.map(|id| format!("_run{id}")).unwrap_or_default();
+                    let json_path = recordings_dir.join(format!(
+                        "sim_{}{}_pid{}.json",
+                        timestamp,
+                        run_tag,
+                        SimIpc::pid()
+                    ));
                     match rec.export_json(&json_path) {
                         Ok(_) => {
                             let msg = format!("Recording exported to {}", json_path.display());
@@ -181,6 +216,7 @@ fn on_play_stop(
                             if let Some(ref mut out) = output {
                                 out.info(msg);
                             }
+                            exported_recording = Some(json_path.clone());
                         }
                         Err(e) => {
                             warn!("Failed to export recording: {}", e);
@@ -200,6 +236,8 @@ fn on_play_stop(
             }
         }
     }
+
+    ledger.complete_run(final_ticks, final_sim_s, exported_recording, final_values);
 
     // Reset AFTER recording is saved — so tick_count and sim_time are preserved in the export
     sim_clock.reset();
@@ -251,16 +289,18 @@ fn advance_simulation_clock(
     }
 }
 
-/// Stop simulation when the MCP-requested duration is reached.
+/// Stop simulation when the requested duration is reached.
 fn check_auto_stop(
     clock: Res<SimulationClock>,
     mut auto_stop: ResMut<SimAutoStop>,
+    mut ledger: ResMut<SimRunLedger>,
     mut stop_play_writer: MessageWriter<StopPlayEvent>,
 ) {
     if let Some(stop_at) = auto_stop.stop_at_sim_s {
         if clock.simulation_time_s >= stop_at {
             info!("⏹ Auto-stop: sim time {:.3}s reached target {:.3}s", clock.simulation_time_s, stop_at);
             auto_stop.stop_at_sim_s = None;
+            ledger.set_stop_reason("duration_reached");
             // Send the Stop MESSAGE rather than setting the state. Setting
             // `Editing` directly skipped `handle_stop_play` — the system that
             // actually restores transforms and despawns play-spawned entities
@@ -372,9 +412,13 @@ fn register_battery_watchpoints(
         }
     }
 
-    // Start recording automatically
-    recording.start("simulation_run");
-    info!("📊 Registered {} battery watchpoints, recording started", battery_watchpoints.len());
+    // Start recording automatically — once per run. `OnEnter(Playing)` also
+    // fires on every resume from Pause, and restarting here threw away
+    // everything recorded before the pause.
+    if !recording.enabled {
+        recording.start("simulation_run");
+        info!("📊 Registered {} battery watchpoints, recording started", battery_watchpoints.len());
+    }
 }
 
 // ============================================================================
@@ -487,128 +531,7 @@ fn record_and_stream_watchpoints(
 }
 
 // ============================================================================
-// MCP Sim-Command Drain — reads sim-commands.jsonl written by MCP tools
-// ============================================================================
-
-/// Drain `<universe>/.eustress/sim-commands.jsonl` each frame.
-///
-/// MCP tools (`run_simulation`, `stop_simulation`, `set_sim_value`)
-/// append JSON lines to this file. The engine reads and truncates it
-/// every frame, translating commands into ECS state mutations.
-///
-/// This system runs in ANY play state so `run_simulation` can be
-/// issued from Edit mode and `stop_simulation` from Playing mode.
-fn drain_sim_commands(
-    space_root: Option<Res<crate::space::SpaceRoot>>,
-    mut sim_values_res: ResMut<SimValuesResource>,
-    mut script_writes: ResMut<ScriptSimWrites>,
-    mut clock: ResMut<SimulationClock>,
-    mut next_play_state: ResMut<NextState<PlayModeState>>,
-    mut auto_stop: ResMut<SimAutoStop>,
-    mut start_play_writer: MessageWriter<StartPlayEvent>,
-    mut stop_play_writer: MessageWriter<StopPlayEvent>,
-) {
-    let Some(sr) = space_root.as_deref() else { return };
-
-    // Walk up to Universe root (parent of Spaces/)
-    let universe = {
-        let mut cur = sr.0.clone();
-        let mut found = None;
-        for _ in 0..16 {
-            if cur.join("Spaces").is_dir() {
-                found = Some(cur.clone());
-                break;
-            }
-            if !cur.pop() { break; }
-        }
-        match found {
-            Some(u) => u,
-            None => return,
-        }
-    };
-
-    let path = universe.join(".eustress").join("sim-commands.jsonl");
-    let content = match std::fs::read_to_string(&path) {
-        Ok(c) if !c.is_empty() => c,
-        _ => return,
-    };
-
-    // Truncate immediately so commands aren't re-processed on next frame
-    let _ = std::fs::write(&path, "");
-
-    for line in content.lines() {
-        let Ok(cmd) = serde_json::from_str::<serde_json::Value>(line) else { continue };
-        let op = cmd.get("op").and_then(|v| v.as_str()).unwrap_or("");
-
-        match op {
-            "set_sim_value" => {
-                if let (Some(key), Some(value)) = (
-                    cmd.get("key").and_then(|v| v.as_str()),
-                    cmd.get("value").and_then(|v| v.as_f64()),
-                ) {
-                    sim_values_res.0.insert(key.to_string(), value);
-                    // Count as an explicit write so `apply_sim_values_to_ecs`
-                    // honours it over the default mode behaviour — an MCP
-                    // `set_sim_value("battery.current", 0)` should stop the
-                    // cell, not be overwritten on the same frame.
-                    script_writes.0.insert(key.to_string(), value);
-                    // Also write to thread-local so Rune scripts see it
-                    crate::soul::rune_ecs_module::SIM_VALUES.with(|sv| {
-                        sv.borrow_mut().insert(key.to_string(), value);
-                    });
-                    info!("MCP: set_sim_value({} = {})", key, value);
-                }
-            }
-            "run_simulation" => {
-                let scale = cmd.get("time_scale").and_then(|v| v.as_f64()).unwrap_or(1.0);
-                clock.set_time_scale(scale);
-                if let Some(dur) = cmd.get("duration_s").and_then(|v| v.as_f64()) {
-                    auto_stop.stop_at_sim_s = Some(clock.simulation_time_s + dur);
-                    info!("MCP: run_simulation (time_scale={:.1}x, auto-stop at {:.2}s sim-time)",
-                        scale, clock.simulation_time_s + dur);
-                } else {
-                    auto_stop.stop_at_sim_s = None;
-                    info!("MCP: run_simulation (time_scale={:.1}x, indefinite)", scale);
-                }
-                // Drive the SAME message the Play button sends instead of
-                // setting the state directly.
-                //
-                // Setting `PlayModeState::Playing` here skipped
-                // `handle_start_play`, which is the ONLY place a pre-play
-                // snapshot is captured. With no snapshot, the stop-side
-                // `restore_scene_on_enter_edit` hits its
-                // `let Some(snapshot) = ... else { return }` and bails BEFORE
-                // restoring transforms and BEFORE despawning
-                // `SpawnedDuringPlayMode` entities — so an MCP-driven session
-                // left parts wherever physics dropped them and leaked every
-                // runtime-spawned entity into Edit mode. Routing through the
-                // message gives MCP/agent-driven play exactly the same
-                // lifecycle as a human pressing the button.
-                start_play_writer.write(StartPlayEvent {
-                    play_type: PlayModeType::default(),
-                });
-            }
-            "pause_simulation" => {
-                next_play_state.set(PlayModeState::Paused);
-                info!("MCP: pause_simulation");
-            }
-            "stop_simulation" => {
-                auto_stop.stop_at_sim_s = None;
-                // Same reasoning as run_simulation: `handle_stop_play` owns the
-                // full restore (transforms, BasePart flags, despawns) and is
-                // gated on this message.
-                stop_play_writer.write(StopPlayEvent);
-                info!("MCP: stop_simulation");
-            }
-            _ => {
-                warn!("MCP: unknown sim command op '{}'", op);
-            }
-        }
-    }
-}
-
-// ============================================================================
-// Telemetry Writer — appends to telemetry.jsonl for tail_telemetry MCP tool
+// Telemetry Writer — appends to telemetry.jsonl for the tail_telemetry tool
 // ============================================================================
 
 /// Throttle state for the telemetry log writer.
@@ -627,59 +550,42 @@ impl Default for TelemetryWriterState {
     }
 }
 
-/// Write one JSONL line per second to `<universe>/.eustress/telemetry.jsonl`.
+/// Append one JSONL line per second to `<universe>/.eustress/telemetry.jsonl`.
 ///
-/// Each line: `{ "t": "<rfc3339>", "values": { "key": f64, ... } }`
+/// Each line: `{ "t": "<rfc3339>", "pid": u32, "space": "...", "run_id": u64,
+/// "tick": u64, "sim_time_s": f64, "values": { "key": f64, ... } }`
 ///
-/// The file is append-only during a simulation run. It grows unbounded
-/// (acceptable for alpha — a future rotation/compaction system will cap
-/// it at ~10 MB). The `tail_telemetry` MCP tool reads the last N lines.
+/// The file is shared by every engine with a Space of this Universe open, so
+/// each line names the instance, Space and run that wrote it (`tail_telemetry`
+/// filters on them), and is appended with a single write: a line built by
+/// several small writes can interleave with another engine's line mid-way.
+///
+/// The file grows unbounded (acceptable for alpha — a future
+/// rotation/compaction system will cap it at ~10 MB).
 fn write_telemetry_log(
     mut state: ResMut<TelemetryWriterState>,
     sim_values_res: Res<SimValuesResource>,
-    space_root: Option<Res<crate::space::SpaceRoot>>,
+    clock: Res<SimulationClock>,
+    ledger: Res<SimRunLedger>,
+    ipc: Res<SimIpc>,
 ) {
     if state.last_write.elapsed() < state.interval { return }
 
-    let Some(sr) = space_root.as_deref() else { return };
     let sim_values = &sim_values_res.0;
     if sim_values.is_empty() { return }
+    let Some(path) = ipc.telemetry() else { return };
 
-    // Walk up to Universe root
-    let universe = {
-        let mut cur = sr.0.clone();
-        let mut found = None;
-        for _ in 0..16 {
-            if cur.join("Spaces").is_dir() {
-                found = Some(cur.clone());
-                break;
-            }
-            if !cur.pop() { break; }
-        }
-        match found {
-            Some(u) => u,
-            None => return,
-        }
-    };
-
-    let path = universe.join(".eustress").join("telemetry.jsonl");
     let entry = serde_json::json!({
         "t": chrono::Utc::now().to_rfc3339(),
+        "pid": SimIpc::pid(),
+        "space": ipc.space_name,
+        "run_id": ledger.active_run_id(),
+        "tick": clock.tick_count,
+        "sim_time_s": clock.simulation_time_s,
         "values": sim_values,
     });
 
-    let write_result = (|| -> std::io::Result<()> {
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        use std::io::Write as _;
-        let mut f = std::fs::OpenOptions::new()
-            .create(true).append(true).open(&path)?;
-        writeln!(f, "{}", entry)?;
-        Ok(())
-    })();
-
-    if let Err(e) = write_result {
+    if let Err(e) = eustress_bridge_client::append_json_line(&path, &entry) {
         warn!("Failed to write telemetry log: {}", e);
     }
     state.last_write = std::time::Instant::now();

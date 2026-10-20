@@ -273,6 +273,20 @@ test('parseJudgeVerdict refuses generic or missing spatial evidence and bad enum
 
 // ── the pipeline against fake storage ───────────────────────────────────────
 
+test('the judge prompt keeps one stable cacheable prefix across different publishes', async () => {
+  const env = environment();
+  const first = await publishedSim(env);
+  const second = await publishedSim(env, { id: 'a1b2c3d4-0000-4000-8000-00000000000b', name: 'Other Town', pak: 'PAKBYTES-2' });
+  const d = deps(env);
+  await runModerationCase(first.id, env, d);
+  await runModerationCase(second.id, env, d);
+  assert.equal(d.calls.judge.length, 2);
+  const [a, b] = d.calls.judge;
+  assert.equal(a.input[0].text, b.input[0].text, 'block 1 must not vary between publishes');
+  assert.ok(a.input[0].text.length > 15000, 'the policy is the bulk of the prefix');
+  assert.notEqual(a.input.at(-1).text, b.input.at(-1).text, 'the per-case block does vary');
+});
+
 test('a clean publish is approved, listed, and the judge saw the captures', async () => {
   const env = environment();
   const sim = await publishedSim(env);
@@ -282,10 +296,15 @@ test('a clean publish is approved, listed, and the judge saw the captures', asyn
   assert.equal(rec.decision.rating, 'all_ages');
   assert.equal(rec.judge.captures_used.length, 2);
   assert.equal(d.calls.judge.length, 1);
-  const images = d.calls.judge[0].input.filter(i => i.type === 'image_url');
+  const judgeInput = d.calls.judge[0].input;
+  const images = judgeInput.filter(i => i.type === 'image_url');
   assert.equal(images.length, 2);
   assert.equal(images[0].image_url.detail, 'low');
-  assert.match(d.calls.judge[0].input.at(-1).text, /POLICY BEGIN/);
+  // The policy leads, byte-identical on every call, so a prompt cache can
+  // reuse it; per-publish content (images, then the case) follows it.
+  assert.match(judgeInput[0].text, /POLICY BEGIN/);
+  assert.equal(judgeInput[1].type, 'image_url');
+  assert.match(judgeInput.at(-1).text, /Case summary/);
   const after = await simOf(env, sim.id);
   assert.equal(isListable(after), true);
   assert.equal(after.moderation.status, 'approved');

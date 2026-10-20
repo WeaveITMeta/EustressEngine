@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" width="16" height="16">
+  <!-- Sun rays - shafts fanning out from a sun behind the corner -->
+  <path d="M4 4 L15 9.5 L15 12.5 Z" fill="#FFD700" opacity="0.45"/>
+  <path d="M4 4 L12.5 15 L9.5 15 Z" fill="#FFD700" opacity="0.45"/>
+  <path d="M4 4 L15 4.5 L15 6.5 Z" fill="#FFD700" opacity="0.3"/>
+  <path d="M4 4 L5.5 15 L3.5 15 Z" fill="#FFD700" opacity="0.3"/>
+  <circle cx="4" cy="4" r="3" fill="#FFD700"/>
+</svg>

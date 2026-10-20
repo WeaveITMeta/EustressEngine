@@ -157,14 +157,21 @@ fn sync_ecs_to_bindings(
     // entities) — nothing reads the bindings unless scripts are running.
     play: Res<State<crate::play_mode::PlayModeState>>,
     bindings: Res<ECSBindings>,
-    query: Query<(
-        Entity,
-        &Name,
-        Option<&Transform>,
-        Option<&ElectrochemicalState>,
-        Option<&ThermodynamicState>,
-        Option<&MaterialProperties>,
-    )>,
+    // Only entities carrying simulation state: they are all the battery
+    // aggregates below read. Every named entity used to be snapshotted each
+    // Play frame (2 to 4 ms in a game scene) for a per-entity map with no
+    // reader outside this file.
+    query: Query<
+        (
+            Entity,
+            &Name,
+            Option<&Transform>,
+            Option<&ElectrochemicalState>,
+            Option<&ThermodynamicState>,
+            Option<&MaterialProperties>,
+        ),
+        Or<(With<ElectrochemicalState>, With<ThermodynamicState>)>,
+    >,
 ) {
     if *play.get() != crate::play_mode::PlayModeState::Playing {
         return;

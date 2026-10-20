@@ -172,7 +172,6 @@ fn def_from_components(
         .unwrap_or_default();
 
     InstanceDefinition {
-        nuclear: None,
         plasma: None,
         asset: if mesh.is_empty() {
             None
@@ -304,7 +303,25 @@ pub(crate) fn core_from_entity(
 ) -> ArchInstanceCore {
     let mut def = def_from_components(instance, transform, base, tags, mesh);
     fold_spawner_properties(&mut def, world, entity, registry);
+    fold_parameters(&mut def, world, entity);
     arch_instance::instance_to_arch(&def)
+}
+
+/// Fold the entity's Parameters into the definition as the same
+/// `[parameters]` and `[parameter_bindings]` a file-backed instance carries,
+/// so they survive a binary save; the load path reads them back through the
+/// shared `spawn_instance`.
+fn fold_parameters(def: &mut InstanceDefinition, world: &World, entity: Entity) {
+    let Some(params) = world.get::<eustress_common::parameters::InstanceParameters>(entity) else {
+        return;
+    };
+    let (values, bindings) = params.to_toml_tables();
+    if !values.is_empty() {
+        def.parameters = Some(values.into_iter().collect());
+    }
+    if !bindings.is_empty() {
+        def.extra.insert("parameter_bindings".to_string(), toml::Value::Table(bindings));
+    }
 }
 
 /// Synthetic in-Space path for a binary-ECS entity. The entity carries an
@@ -561,6 +578,28 @@ pub(crate) fn spawn_binary_core(
         }
     };
     let t1 = timing.then(std::time::Instant::now);
+
+    // A light core cannot be spawned as what it is: this path builds bare
+    // parts, and a light made that way was an unanchored, collidable block
+    // that lit nothing. Lights load from their folder form instead
+    // (`representation::class_is_file_natured`); cores stored before that
+    // rule are skipped.
+    if matches!(
+        arch.class_name.as_str(),
+        "PointLight" | "SpotLight" | "SurfaceLight" | "DirectionalLight"
+    ) {
+        static SKIPPED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        if SKIPPED.fetch_add(1, std::sync::atomic::Ordering::Relaxed) == 0 {
+            warn!(
+                target: "eustress_engine::world_db",
+                stored_id,
+                class = %arch.class_name,
+                "binary-ECS spawn: skipping a stored light core (lights load from their \
+                 folder form; this path would make it a collidable block)"
+            );
+        }
+        return None;
+    }
 
     let marker = BinaryEcsInstance::from_core(stored_id, &arch);
     let synthetic = synthetic_path(space_root, &arch.class_name, stored_id);
@@ -869,6 +908,9 @@ fn load_binary_ecs_instances(
     // HLOD shares the streaming gate: merged-cell proxies only run for a
     // large Space (the same condition that turns residency streaming on).
     mut hlod: ResMut<super::hlod::HlodState>,
+    // Every live instance, to recognise baked leaves the file loader has
+    // already spawned from the tree (see the boot-load-all branch below).
+    live_instances: Query<&eustress_common::classes::Instance>,
 ) {
     // Already loaded for this Space.
     if latch.0.as_deref() == Some(space_root.0.as_path()) {
@@ -937,12 +979,36 @@ fn load_binary_ecs_instances(
     }
 
     // stored_ids already live this session (runtime-created before boot-load).
-    let existing_ids: std::collections::HashSet<u64> =
+    let mut existing_ids: std::collections::HashSet<u64> =
         existing.iter().map(|b| b.stored_id).collect();
+    // A baked leaf keeps its tree entry next to its core, and below the
+    // streaming threshold the file loader spawns every tree entry (it skips
+    // baked leaves only while STREAMING, when residency owns them). So by the
+    // time this runs, each baked leaf is already live from the tree, and
+    // spawning its core as well put a second copy of it in the scene: 25,003
+    // duplicate parts on Super Station, each rendered, shadowed, collided and
+    // visibility-tested twice. A core is the same entity as a live instance
+    // when its stored id derives from that instance's uuid.
+    //
+    // Both derivations go in: the canonical id, and the legacy one bakes
+    // before v3 wrote. `bake_cores` re-keys legacy cores on open, but if that
+    // upgrade was interrupted, a core it has not reached yet must still be
+    // recognised here, or it spawns a second copy of a live part.
+    let mut live_from_tree = 0usize;
+    for uuid in live_instances
+        .iter()
+        .filter_map(|i| eustress_common::instance_create::uuid_hex_to_bytes(&i.uuid))
+    {
+        live_from_tree += 1;
+        existing_ids.insert(super::bake_cores::stored_id_from_uuid(&uuid));
+        existing_ids.insert(super::bake_cores::legacy_stored_id_from_uuid(&uuid));
+    }
 
     let mut spawned = 0usize;
+    let mut already_live = 0usize;
     for (stored_id, bytes) in cores {
         if existing_ids.contains(&stored_id) {
+            already_live += 1;
             continue;
         }
         if spawn_binary_core(
@@ -964,9 +1030,12 @@ fn load_binary_ecs_instances(
     info!(
         target: "eustress_engine::world_db",
         spawned,
+        already_live,
+        live_from_tree,
         space = %space_root.0.display(),
         "binary-ECS boot-load: spawned entities from the entities partition \
-         into the ECS (visible in viewport + Explorer + Properties)"
+         into the ECS (visible in viewport + Explorer + Properties); cores \
+         whose entity is already live from the tree were skipped"
     );
 }
 
@@ -1256,7 +1325,8 @@ pub fn register(app: &mut App) {
                 load_binary_ecs_instances,
                 super::residency::sys_residency_load,
                 super::hlod::sys_hlod_plan,
-                mirror_binary_ecs_changes,
+                // Play sessions are transient: nothing they move persists.
+                mirror_binary_ecs_changes.run_if(super::world_db_plugin::outside_play_session),
                 super::residency::sys_residency_evict,
                 super::hlod::sys_hlod_visibility,
             )

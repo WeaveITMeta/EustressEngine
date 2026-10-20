@@ -98,6 +98,10 @@ pub struct PartClickExtras<'w, 's> {
 /// The query every viewport pick walks: anything that can be clicked in
 /// edit mode. Shared by the click (`part_selection_system`) and the hover
 /// preview (`hover_highlight_system`) so both resolve the same entity.
+/// A light that is not inside a part (`LightPickable`) is picked by a small
+/// box at its position, the size `light_sync::pick_box_size` gives for the
+/// distance: it has no geometry, and an `Aabb` on it would make Bevy cull
+/// the light itself by that box.
 pub type PickQuery<'w, 's> = Query<
     'w,
     's,
@@ -110,12 +114,14 @@ pub type PickQuery<'w, 's> = Query<
         Option<&'static Mesh3d>,
         Option<&'static BasePart>,
         Option<&'static ChildOf>,
+        Has<crate::light_sync::LightPickable>,
     ),
     Or<(
         With<PartEntityMarker>,
         With<PartEntity>,
         (With<BasePart>, With<Instance>),
         (With<Instance>, With<bevy::camera::primitives::Aabb>, Without<Mesh3d>),
+        (With<Instance>, With<crate::light_sync::LightPickable>),
     )>,
 >;
 
@@ -159,7 +165,7 @@ pub fn pick_under_cursor(
     // entity -> the Model a plain click resolves it to
     let mut candidates: std::collections::HashMap<Entity, Option<Entity>> =
         std::collections::HashMap::new();
-    for (entity, part_entity, part_entity_marker, instance, _transform, _mesh, basepart, child_of) in parts.iter() {
+    for (entity, part_entity, part_entity_marker, instance, _transform, _mesh, basepart, child_of, _light) in parts.iter() {
         if let Some(inst) = instance {
             match inst.class_name {
                 crate::classes::ClassName::Folder
@@ -212,13 +218,17 @@ pub fn pick_under_cursor(
     }
 
     if fallback == ObbFallback::Always || closest.is_none() {
-        for (entity, _pe, _pem, _inst, transform, _mesh, basepart, _child_of) in parts.iter() {
+        for (entity, _pe, _pem, _inst, transform, _mesh, basepart, _child_of, light) in parts.iter() {
             if !candidates.contains_key(&entity) {
                 continue;
             }
             let t = transform.compute_transform();
             let (obb_center, size) = if let Some(bp) = basepart {
                 (t.translation, bp.size)
+            } else if light {
+                // A free light: a box around it that keeps its size on screen.
+                let s = crate::light_sync::pick_box_size(t.translation.distance(ray.origin));
+                (t.translation, Vec3::splat(s))
             } else if let Ok(aabb) = aabb_q.get(entity) {
                 let world_center = t.translation + t.rotation * (Vec3::from(aabb.center) * t.scale);
                 (world_center, Vec3::from(aabb.half_extents) * 2.0 * t.scale)
@@ -272,16 +282,22 @@ pub fn hover_highlight_system(
     selected: Query<(), With<Selected>>,
     tool_states: PartSelectionToolStates,
     viewport_bounds: Option<Res<crate::ui::ViewportBounds>>,
-    ui_focus: Option<Res<crate::ui::SlintUIFocus>>,
+    (ui_focus, play_state): (
+        Option<Res<crate::ui::SlintUIFocus>>,
+        Option<Res<State<crate::play_mode::PlayModeState>>>,
+    ),
     spatial_query: avian3d::prelude::SpatialQuery,
     mut commands: Commands,
     mut probe: Local<HoverProbe>,
 ) {
     let PartSelectionToolStates { move_state, scale_state, rotate_state, studio_state } = tool_states;
-    let select_tool = studio_state
-        .as_ref()
-        .map(|s| s.current_tool == crate::ui::Tool::Select)
-        .unwrap_or(true);
+    // No hover outline during a Play session; the path below clears one left
+    // over from editing.
+    let select_tool = crate::play_mode::editor_input_enabled(play_state)
+        && studio_state
+            .as_ref()
+            .map(|s| s.current_tool == crate::ui::Tool::Select)
+            .unwrap_or(true);
     let dragging = mouse_button.pressed(MouseButton::Left)
         || move_state.as_ref().and_then(|s| s.dragged_axis).is_some()
         || scale_state.as_ref().and_then(|s| s.dragged_axis).is_some()
@@ -372,9 +388,14 @@ pub fn part_selection_system(
     selection_manager: Option<Res<BevySelectionManager>>,
     tool_states: PartSelectionToolStates,
     viewport_bounds: Option<Res<crate::ui::ViewportBounds>>,
-    // Retained so the gate can be reinstated per-widget later; selection itself
-    // is deliberately UI-blind (see the note above the viewport-bounds check).
-    _ui_focus: Option<Res<crate::ui::SlintUIFocus>>,
+    // `_ui_focus` is retained so the gate can be reinstated per-widget later;
+    // selection itself is deliberately UI-blind (see the note above the
+    // viewport-bounds check). Paired with the Play state in one tuple: this
+    // system is at Bevy's 16-parameter ceiling.
+    (_ui_focus, play_state): (
+        Option<Res<crate::ui::SlintUIFocus>>,
+        Option<Res<State<crate::play_mode::PlayModeState>>>,
+    ),
     spatial_query: avian3d::prelude::SpatialQuery,
     // Used to signal "scroll the Explorer to the just-selected entity"
     // when a single-click happens in the 3D viewport. Multi-select
@@ -385,10 +406,22 @@ pub fn part_selection_system(
     // (Ctrl+Alt+Click follows an entity's `Link` attribute).
     mut click_extras: PartClickExtras,
 ) {
+    // During a Play session the mouse belongs to the game: a click that
+    // shoots must not select (or double-click-edit) the scene.
+    if !crate::play_mode::editor_input_enabled(play_state) {
+        return;
+    }
     // Re-expose the bundle fields under their pre-bundle names so the
     // body below needs no further edits. Each field is already the
     // exact `Option<Res<_>>` the body expects.
     let PartSelectionToolStates { move_state, scale_state, rotate_state, studio_state } = tool_states;
+    // The terrain tools own the left button while they are the current
+    // tool: a sculpting click must not select (or deselect) the part under
+    // the brush. Drag, marquee and the handles already stand down on the
+    // tool (`select_tool`, `move_tool`).
+    if studio_state.as_ref().is_some_and(|s| s.current_tool == crate::ui::Tool::Terrain) {
+        return;
+    }
     // Transform mode governs whether the Move gizmo is axis-aligned to
     // world (IDENTITY) or rotated to match the active entity. Hit test
     // must use the same rotation or clicking the rotated handle fails.
@@ -544,10 +577,11 @@ pub fn part_selection_system(
                 // a "MUST match ... exactly!" comment; a comment cannot enforce
                 // that, and the sibling guard in the deselect branch below had
                 // already drifted to an entirely different one.
-                let fov = match projection {
-                    Projection::Perspective(p) => p.fov,
-                    _ => std::f32::consts::FRAC_PI_4,
-                };
+                let fov = crate::camera_controller::gizmo_fov(
+                    projection,
+                    camera_transform.translation(),
+                    center,
+                );
                 let handle_length = crate::move_tool::camera_scale_factor(
                     camera_transform.translation(),
                     center,
@@ -629,10 +663,11 @@ pub fn part_selection_system(
         if scale_count > 0 {
             let group_center = (scale_bmin + scale_bmax) * 0.5;
             let group_extent = (scale_bmax - scale_bmin) * 0.5;
-            let fov_s = match projection {
-                Projection::Perspective(p) => p.fov,
-                _ => std::f32::consts::FRAC_PI_4,
-            };
+            let fov_s = crate::camera_controller::gizmo_fov(
+                projection,
+                camera_transform.translation(),
+                group_center,
+            );
             let screen_scale = crate::scale_tool::compute_scale_screen_scale(
                 group_center, camera_transform.translation(), fov_s,
             );
@@ -825,7 +860,7 @@ pub fn part_selection_system(
                 let mut total_scale = 0.0;
                 let mut count = 0;
                 
-                for (entity, part_entity, part_entity_marker, instance, transform, _mesh, _basepart, _child_of) in part_entities_query.iter() {
+                for (entity, part_entity, part_entity_marker, instance, transform, _mesh, _basepart, _child_of, _light) in part_entities_query.iter() {
                     // Same canonical id as everywhere else. The comment here used
                     // to claim `"indexVgeneration"` while the code preferred the
                     // components' stored `part_id`, which for disk-loaded parts is
@@ -865,10 +900,11 @@ pub fn part_selection_system(
                     // parts are excluded from the hit candidates, so they yield
                     // no hit), which is why both symptoms appeared together and
                     // only while the Move tool was active.
-                    let fov_m = match projection {
-                        Projection::Perspective(p) => p.fov,
-                        _ => std::f32::consts::FRAC_PI_4,
-                    };
+                    let fov_m = crate::camera_controller::gizmo_fov(
+                        projection,
+                        camera_transform.translation(),
+                        center,
+                    );
                     let handle_length = crate::move_tool::camera_scale_factor(
                         camera_transform.translation(),
                         center,
@@ -907,10 +943,11 @@ pub fn part_selection_system(
             if s_count > 0 {
                 let group_center = (s_bmin + s_bmax) * 0.5;
                 let group_extent = (s_bmax - s_bmin) * 0.5;
-                let fov_s = match projection {
-                    Projection::Perspective(p) => p.fov,
-                    _ => std::f32::consts::FRAC_PI_4,
-                };
+                let fov_s = crate::camera_controller::gizmo_fov(
+                    projection,
+                    camera_transform.translation(),
+                    group_center,
+                );
                 let screen_scale = crate::scale_tool::compute_scale_screen_scale(
                     group_center, camera_transform.translation(), fov_s,
                 );
@@ -994,7 +1031,19 @@ pub fn hover_resize_system(
     children_query: Query<&Children>,
     mut billboard_query: Query<&mut eustress_common::classes::BillboardGui>,
     mut resize_events: MessageWriter<crate::scale_tool::ResizePartEvent>,
+    // A wheel resize is an edit like any other: one undo step per gesture.
+    // The local translation is what the undo restores alongside the size;
+    // CAD parts resize through their feature tree and are left to it.
+    mut undo_stack: ResMut<crate::undo::UndoStack>,
+    local_transforms: Query<&Transform>,
+    cad_parts: Query<(), With<crate::cad_plugin::CadPart>>,
+    play_state: Option<Res<State<crate::play_mode::PlayModeState>>>,
 ) {
+    // The wheel is the game's during a Play session.
+    if !crate::play_mode::editor_input_enabled(play_state) {
+        ev_wheel.clear();
+        return;
+    }
     use bevy::input::mouse::MouseScrollUnit;
 
     // Always drain wheel events (avoid buildup) and accumulate this frame's
@@ -1056,6 +1105,20 @@ pub fn hover_resize_system(
     let factor = 1.1_f32.powf(scroll);
     let new_size = (size * factor).max(Vec3::splat(0.05));
     resize_events.write(crate::scale_tool::ResizePartEvent { entity, new_size });
+    // Notches rolled within the coalescing window fold into one step, so a
+    // whole roll of the wheel is one Ctrl+Z.
+    if !cad_parts.contains(entity) {
+        if let Ok(t) = local_transforms.get(entity) {
+            undo_stack.push_coalesced(
+                "wheel-resize",
+                "Resize with wheel",
+                crate::undo::Action::ScaleEntities {
+                    old_states: vec![(entity.to_bits(), t.translation.to_array(), size.to_array())],
+                    new_states: vec![(entity.to_bits(), t.translation.to_array(), new_size.to_array())],
+                },
+            );
+        }
+    }
 
     // Keep the part's child BillboardGui label PROPORTIONAL to the part:
     // scale its STUDS size (UDim2 Scale component) by the SAME factor and

@@ -13,6 +13,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::realism::constants;
 use crate::realism::particles::components::KineticState;
+use crate::services::workspace::{live_gravity, Workspace};
 
 // ============================================================================
 // Buoyancy Body Component
@@ -264,11 +265,16 @@ pub fn righting_moment(weight: f32, gm: f32, heel_angle: f32) -> f32 {
 // ============================================================================
 
 /// Apply buoyancy forces to bodies
+///
+/// Weight and buoyancy both come from the Workspace gravity, the one the
+/// parts around them fall with. Buoyancy pushes against gravity, whichever
+/// way it points.
 pub fn apply_buoyancy_forces(
     mut query: Query<(&BuoyancyBody, &mut KineticState, &Transform)>,
+    workspace: Option<Res<Workspace>>,
 ) {
-    let gravity = 9.81;
-    
+    let gravity = live_gravity(workspace.as_deref());
+
     for (buoyancy, mut kinetic, transform) in query.iter_mut() {
         if !buoyancy.enabled {
             continue;
@@ -283,17 +289,17 @@ pub fn apply_buoyancy_forces(
         
         if fraction <= 0.0 {
             // Above water - only gravity
-            kinetic.apply_force(Vec3::new(0.0, -buoyancy.mass * gravity, 0.0));
+            kinetic.apply_force(buoyancy.mass * gravity);
             continue;
         }
-        
-        // Buoyancy force
+
+        // Buoyancy force: the weight of the displaced fluid, against gravity
         let submerged_vol = buoyancy.volume * fraction;
-        let f_buoyancy = archimedes_force(buoyancy.fluid_density, submerged_vol, gravity);
-        kinetic.apply_force(Vec3::new(0.0, f_buoyancy, 0.0));
-        
+        let buoyancy_force = -buoyancy.fluid_density * submerged_vol * gravity;
+        kinetic.apply_force(buoyancy_force);
+
         // Gravity
-        kinetic.apply_force(Vec3::new(0.0, -buoyancy.mass * gravity, 0.0));
+        kinetic.apply_force(buoyancy.mass * gravity);
         
         // Fluid drag (only on submerged portion)
         if kinetic.velocity.length() > 0.01 {
@@ -310,7 +316,6 @@ pub fn apply_buoyancy_forces(
         // Righting torque from offset center of buoyancy
         if buoyancy.center_of_buoyancy.length_squared() > 1e-6 && fraction > 0.0 {
             let cob_world = transform.rotation * buoyancy.center_of_buoyancy;
-            let buoyancy_force = Vec3::new(0.0, f_buoyancy, 0.0);
             let torque = cob_world.cross(buoyancy_force);
             kinetic.apply_torque(torque);
         }
@@ -350,6 +355,35 @@ mod tests {
         assert!((f - 9810.0).abs() < 1.0);
     }
     
+    /// A body's weight and its buoyancy both follow the Workspace gravity.
+    #[test]
+    fn buoyancy_follows_the_workspace_gravity() {
+        use crate::units::STANDARD_GRAVITY_F32;
+        use bevy::ecs::system::RunSystemOnce;
+
+        // Net force on 1 m³ of wood held fully under water.
+        let force = |gravity: Vec3| {
+            let mut world = World::new();
+            world.insert_resource(Workspace { gravity, ..Default::default() });
+            let wood = BuoyancyBody {
+                volume: 1.0,
+                mass: 700.0,
+                fluid_density: 1000.0,
+                water_level: 10.0,
+                ..default()
+            };
+            let e = world.spawn((wood, KineticState::default(), Transform::default())).id();
+            world.run_system_once(apply_buoyancy_forces).expect("the buoyancy system runs");
+            world.get::<KineticState>(e).unwrap().accumulated_force
+        };
+        // It displaces 300 kg more water than it weighs.
+        let earth = force(Vec3::new(0.0, -STANDARD_GRAVITY_F32, 0.0));
+        assert!((earth.y - 300.0 * STANDARD_GRAVITY_F32).abs() < 0.5, "{earth:?}");
+        let moon = force(Vec3::new(0.0, -1.62, 0.0));
+        assert!((moon.y - 300.0 * 1.62).abs() < 0.1, "{moon:?}");
+        assert_eq!(force(Vec3::ZERO), Vec3::ZERO);
+    }
+
     #[test]
     fn test_will_float() {
         // Wood (density ~700 kg/m³)

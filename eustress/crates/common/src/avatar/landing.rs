@@ -32,10 +32,15 @@ use super::spawn::{AvatarBody, AvatarIntent, AvatarLocomotion};
 use super::{AvatarSystems, SpawnedByAvatarRuntime};
 
 /// Touchdown speed above which a landing costs the player something, m/s.
-/// ~4.1 m of fall. Below this the procedural flex alone reads fine.
+/// ~4.1 m of fall at standard gravity. Below this the procedural flex alone
+/// reads fine.
+///
+/// Both thresholds are speeds, not heights, so they judge a landing by how
+/// hard it hits under whatever gravity the Space has: on the Moon it takes a
+/// 25 m fall to land this hard.
 pub const HARD_LANDING_MPS: f32 = 9.0;
 /// Touchdown speed above which an un-rolled landing becomes a stumble.
-/// ~10.2 m of fall.
+/// ~10 m of fall at standard gravity.
 pub const STUMBLE_MPS: f32 = 14.0;
 /// How long a roll takes.
 const ROLL_DURATION: f32 = 0.72;
@@ -163,6 +168,7 @@ fn drive_landing(
             &AvatarLocomotion,
             &AvatarBody,
             Option<&AvatarClimb>,
+            Option<&super::abilities::AvatarAbilities>,
         ),
         With<SpawnedByAvatarRuntime>,
     >,
@@ -172,7 +178,7 @@ fn drive_landing(
         return;
     }
 
-    for (mut tf, mut vel, mut landing, intent, loco, body, climb) in q.iter_mut() {
+    for (mut tf, mut vel, mut landing, intent, loco, body, climb, abilities) in q.iter_mut() {
         // A climb outranks a landing: dropping onto a ledge grab must not also
         // trigger a roll on the frame the grab lands.
         if climb.map(|c| c.is_climbing()).unwrap_or(false) {
@@ -187,7 +193,9 @@ fn drive_landing(
                     continue;
                 }
                 let wants = intent.direction.with_y(0.0).length_squared() > 1e-4;
-                let outcome = landing_outcome(loco.land_speed_mps, wants);
+                // With rolling off, a hard landing is a stumble or nothing.
+                let may_roll = abilities.map_or(true, |a| a.roll);
+                let outcome = landing_outcome(loco.land_speed_mps, wants && may_roll);
                 if outcome == LandingPhase::None {
                     continue;
                 }
@@ -244,6 +252,12 @@ fn drive_landing(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::units::STANDARD_GRAVITY_F32;
+
+    /// Touchdown speed after falling `h` metres under gravity `g`.
+    fn fall_speed(g: f32, h: f32) -> f32 {
+        (2.0 * g * h).sqrt()
+    }
 
     #[test]
     fn a_gentle_landing_costs_nothing() {
@@ -268,10 +282,9 @@ mod tests {
     /// the same outcome, and under the old 8 m/s normalisation they were.
     #[test]
     fn different_fall_heights_produce_different_outcomes() {
-        let speed = |h: f32| (2.0 * 9.81 * h).sqrt();
         let outcomes: Vec<_> = [1.0_f32, 6.0, 20.0]
             .iter()
-            .map(|h| landing_outcome(speed(*h), false))
+            .map(|h| landing_outcome(fall_speed(STANDARD_GRAVITY_F32, *h), false))
             .collect();
         assert_eq!(outcomes[0], LandingPhase::None, "1 m fall should be free");
         assert_eq!(outcomes[2], LandingPhase::Stumble, "20 m fall must cost something");
@@ -279,6 +292,18 @@ mod tests {
             outcomes[0] != outcomes[2],
             "a 1 m and a 20 m fall produced the same outcome"
         );
+    }
+
+    /// The thresholds are touchdown speeds, so the Space's gravity decides
+    /// how far is too far: a 6 m drop that rolls on Earth lands gently on the
+    /// Moon, where a roll takes more than 25 m.
+    #[test]
+    fn the_same_fall_lands_softer_on_the_moon() {
+        const MOON: f32 = 1.62;
+        assert_eq!(landing_outcome(fall_speed(STANDARD_GRAVITY_F32, 6.0), true), LandingPhase::Roll);
+        assert_eq!(landing_outcome(fall_speed(MOON, 6.0), true), LandingPhase::None);
+        assert_eq!(landing_outcome(fall_speed(MOON, 24.0), true), LandingPhase::None);
+        assert_eq!(landing_outcome(fall_speed(MOON, 26.0), true), LandingPhase::Roll);
     }
 
     #[test]

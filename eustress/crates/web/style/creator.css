@@ -1,0 +1,634 @@
+/* =============================================================================
+   Creator dashboard (/creator) and a listing's pass store
+   =============================================================================
+   The purchases page's surfaces, labels and tabular figures, so the buyer's
+   and the seller's side of the same money read alike. Live mode is marked in
+   amber wherever it is on: a change made there is real.
+   ============================================================================= */
+
+.page-creator,
+.pass-store {
+    --creator-surface: rgba(20, 22, 30, 0.72);
+    --creator-line: rgba(128, 144, 160, 0.18);
+    --creator-line-soft: rgba(128, 144, 160, 0.1);
+    --creator-label: rgba(190, 205, 212, 0.55);
+    --creator-sub: rgba(200, 214, 220, 0.7);
+    --creator-accent: var(--color-eustress-green, #3cba54);
+    --creator-accent-dim: var(--color-eustress-green-dim, rgba(60, 186, 84, 0.14));
+    --creator-live: #f0a33a;
+    --creator-live-dim: rgba(240, 163, 58, 0.14);
+    --creator-error: #ff6b6b;
+}
+
+.creator-wrap {
+    max-width: 1080px;
+    margin: 0 auto;
+    padding: 108px 24px 72px;
+}
+
+/* Header */
+.creator-head {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 16px;
+    margin-bottom: 20px;
+}
+
+.creator-head h1 {
+    font-size: 30px;
+    margin: 0 0 6px;
+    letter-spacing: -0.01em;
+}
+
+.creator-sub {
+    margin: 0;
+    max-width: 64ch;
+    color: var(--creator-sub);
+    font-size: 14px;
+    line-height: 1.55;
+}
+
+.creator-crumb {
+    display: inline-block;
+    margin-bottom: 8px;
+    font-size: 13px;
+    color: var(--creator-accent);
+    text-decoration: none;
+}
+
+.creator-crumb::before {
+    content: "\2190\00a0";
+}
+
+.creator-pill,
+.creator-link {
+    font-size: 13px;
+    color: var(--creator-accent);
+    text-decoration: none;
+    border: 1px solid rgba(60, 186, 84, 0.35);
+    border-radius: var(--radius-full, 999px);
+    padding: 7px 14px;
+    white-space: nowrap;
+}
+
+.creator-pill:hover,
+.creator-link:hover {
+    background: var(--creator-accent-dim);
+}
+
+/* Mode switch */
+.creator-mode {
+    display: inline-flex;
+    border: 1px solid var(--creator-line);
+    border-radius: var(--radius-full, 999px);
+    padding: 3px;
+    background: var(--creator-surface);
+}
+
+.creator-mode button {
+    border: 0;
+    background: transparent;
+    color: var(--creator-sub);
+    font: inherit;
+    font-size: 13px;
+    padding: 6px 16px;
+    border-radius: var(--radius-full, 999px);
+    cursor: pointer;
+}
+
+.creator-mode button.is-active {
+    background: var(--creator-accent-dim);
+    color: var(--creator-accent);
+}
+
+.creator-mode button.is-live.is-active {
+    background: var(--creator-live-dim);
+    color: var(--creator-live);
+}
+
+.creator-mode-note {
+    margin: 0 0 16px;
+    font-size: 13px;
+    color: var(--creator-sub);
+}
+
+.creator-mode-note.is-live {
+    color: var(--creator-live);
+}
+
+/* Tabs */
+.creator-tabs {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    margin-bottom: 16px;
+    border-bottom: 1px solid var(--creator-line-soft);
+}
+
+.creator-tab {
+    border: 0;
+    border-bottom: 2px solid transparent;
+    background: transparent;
+    color: var(--creator-sub);
+    font: inherit;
+    font-size: 14px;
+    padding: 8px 12px 10px;
+    cursor: pointer;
+}
+
+.creator-tab.is-active {
+    color: inherit;
+    border-bottom-color: var(--creator-accent);
+}
+
+/* Cards and states */
+.creator-card {
+    background: var(--creator-surface);
+    border: 1px solid var(--creator-line);
+    border-radius: 14px;
+    padding: 20px 22px;
+    margin-bottom: 16px;
+    min-width: 0;
+}
+
+.creator-center {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 12px;
+    text-align: center;
+}
+
+.creator-center h2 {
+    margin: 0;
+    font-size: 18px;
+}
+
+.creator-center p {
+    margin: 0;
+    max-width: 52ch;
+    color: var(--creator-sub);
+}
+
+.creator-card-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    margin-bottom: 12px;
+}
+
+.creator-h2 {
+    margin: 0;
+    font-size: 16px;
+}
+
+.creator-count,
+.creator-label {
+    font-size: 12px;
+    color: var(--creator-label);
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+}
+
+.creator-hint {
+    margin: 6px 0;
+    font-size: 13px;
+    color: var(--creator-sub);
+}
+
+.creator-notice {
+    margin: 0 0 12px;
+    padding: 10px 12px;
+    border-radius: 10px;
+    background: var(--creator-accent-dim);
+    color: var(--creator-accent);
+    font-size: 13px;
+}
+
+.creator-error p,
+.creator-error-line {
+    color: var(--creator-error);
+    font-size: 13px;
+}
+
+.creator-error-line {
+    margin: 0 0 12px;
+}
+
+/* Simulation list */
+.creator-sims {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+    gap: 12px;
+}
+
+.creator-sim {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    padding: 16px 18px;
+    border: 1px solid var(--creator-line);
+    border-radius: 14px;
+    background: var(--creator-surface);
+    color: inherit;
+    text-decoration: none;
+}
+
+.creator-sim:hover {
+    border-color: rgba(60, 186, 84, 0.45);
+}
+
+.creator-sim-name {
+    font-weight: 600;
+    font-size: 15px;
+}
+
+.creator-sim-meta {
+    font-size: 13px;
+    color: var(--creator-sub);
+}
+
+/* Chips */
+.creator-chip {
+    display: inline-block;
+    align-self: flex-start;
+    font-size: 12px;
+    padding: 3px 10px;
+    border-radius: var(--radius-full, 999px);
+    border: 1px solid var(--creator-line);
+    color: var(--creator-sub);
+    white-space: nowrap;
+}
+
+.creator-chip.is-ok {
+    border-color: rgba(60, 186, 84, 0.35);
+    color: var(--creator-accent);
+}
+
+.creator-chip.is-wait {
+    border-color: rgba(240, 163, 58, 0.4);
+    color: var(--creator-live);
+}
+
+.creator-chip.is-held {
+    border-color: rgba(255, 107, 107, 0.4);
+    color: var(--creator-error);
+    white-space: normal;
+}
+
+/* Rows */
+.creator-rows {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+}
+
+.creator-row {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 12px;
+    padding: 12px 0;
+    border-top: 1px solid var(--creator-line-soft);
+}
+
+.creator-row:first-child {
+    border-top: 0;
+}
+
+.creator-num {
+    min-width: 3ch;
+    font-variant-numeric: tabular-nums;
+    color: var(--creator-label);
+    font-size: 13px;
+}
+
+.creator-row-main {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    flex: 1 1 220px;
+    min-width: 0;
+}
+
+.creator-row-title {
+    font-weight: 600;
+    font-size: 14px;
+    overflow-wrap: anywhere;
+}
+
+.creator-row-sub {
+    font-size: 12px;
+    color: var(--creator-sub);
+    overflow-wrap: anywhere;
+}
+
+.creator-amount {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-end;
+    font-variant-numeric: tabular-nums;
+    font-size: 14px;
+    white-space: nowrap;
+}
+
+.creator-actions {
+    display: flex;
+    gap: 6px;
+}
+
+.creator-btn {
+    border: 1px solid var(--creator-line);
+    background: transparent;
+    color: inherit;
+    font: inherit;
+    font-size: 13px;
+    padding: 6px 12px;
+    border-radius: 8px;
+    cursor: pointer;
+}
+
+.creator-btn:hover:not(:disabled) {
+    border-color: rgba(60, 186, 84, 0.45);
+}
+
+.creator-btn:disabled {
+    opacity: 0.45;
+    cursor: not-allowed;
+}
+
+/* Totals */
+.creator-totals {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+    gap: 12px;
+    margin-bottom: 12px;
+}
+
+.creator-totals > div {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+}
+
+.creator-total {
+    font-size: 20px;
+    font-variant-numeric: tabular-nums;
+}
+
+/* Forms */
+.creator-form,
+.creator-editor {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+    gap: 12px;
+}
+
+.creator-editor {
+    flex-basis: 100%;
+    padding: 12px;
+    border-radius: 10px;
+    background: rgba(255, 255, 255, 0.03);
+}
+
+.creator-form label,
+.creator-editor label {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    font-size: 12px;
+    color: var(--creator-label);
+}
+
+.creator-form-wide {
+    grid-column: 1 / -1;
+}
+
+.creator-form input,
+.creator-form select,
+.creator-editor input {
+    width: 100%;
+    box-sizing: border-box;
+    padding: 9px 11px;
+    border-radius: 8px;
+    border: 1px solid var(--creator-line);
+    background: rgba(0, 0, 0, 0.25);
+    color: inherit;
+    font: inherit;
+    font-size: 14px;
+}
+
+.creator-form-foot,
+.creator-editor-foot {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: flex-end;
+    gap: 10px;
+    margin-top: 12px;
+}
+
+.creator-editor-foot {
+    grid-column: 1 / -1;
+    margin-top: 0;
+}
+
+.creator-form-foot .creator-hint,
+.creator-editor-foot .creator-hint {
+    flex: 1 1 260px;
+    margin: 0;
+}
+
+/* The webhook secret, shown once */
+.creator-secret {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 10px;
+    margin-bottom: 12px;
+    padding: 12px;
+    border-radius: 10px;
+    border: 1px solid rgba(240, 163, 58, 0.4);
+    background: var(--creator-live-dim);
+}
+
+.creator-secret p {
+    flex-basis: 100%;
+    margin: 0;
+    font-size: 13px;
+}
+
+.creator-secret-value {
+    flex: 1 1 280px;
+    user-select: all;
+    overflow-wrap: anywhere;
+    font-size: 13px;
+}
+
+/* ── Pass store on a listing ─────────────────────────────────────────────── */
+
+.pass-store {
+    margin: 20px 0;
+    padding: 18px 20px;
+    border: 1px solid var(--creator-line);
+    border-radius: 14px;
+    background: var(--creator-surface);
+}
+
+.pass-store-head {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 12px;
+}
+
+.pass-store-head h3 {
+    margin: 0;
+    font-size: 17px;
+}
+
+.pass-store-balance,
+.pass-store-sub {
+    font-size: 13px;
+    color: var(--creator-sub);
+}
+
+.pass-store-sub {
+    margin: 4px 0 12px;
+}
+
+.pass-store-message {
+    margin: 0 0 12px;
+    font-size: 13px;
+    color: var(--creator-accent);
+}
+
+.pass-store-message.is-error {
+    color: var(--creator-error);
+}
+
+.pass-store-list {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+}
+
+.pass-store-item {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 10px 0;
+    border-top: 1px solid var(--creator-line-soft);
+}
+
+.pass-store-item:first-child {
+    border-top: 0;
+}
+
+.pass-store-icon {
+    width: 40px;
+    height: 40px;
+    border-radius: 10px;
+    object-fit: cover;
+    flex: none;
+}
+
+.pass-store-text {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    flex: 1 1 auto;
+    min-width: 0;
+}
+
+.pass-store-name {
+    font-weight: 600;
+}
+
+.pass-store-desc {
+    font-size: 13px;
+    color: var(--creator-sub);
+}
+
+.pass-store-price {
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+}
+
+.pass-store-owned {
+    font-size: 13px;
+    color: var(--creator-accent);
+}
+
+.pass-store-signin {
+    font-size: 13px;
+    color: var(--creator-accent);
+    white-space: nowrap;
+}
+
+.pass-store-confirm {
+    margin-top: 12px;
+    padding: 14px 16px;
+    border-radius: 12px;
+    border: 1px solid rgba(240, 163, 58, 0.4);
+    background: var(--creator-live-dim);
+}
+
+.pass-store-confirm h4 {
+    margin: 0 0 6px;
+    font-size: 15px;
+}
+
+.pass-store-confirm p {
+    margin: 0 0 6px;
+    font-size: 13px;
+}
+
+.pass-store-confirm-actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: 8px;
+    margin-top: 8px;
+}
+
+.pass-store .creator-btn {
+    border: 1px solid var(--creator-line);
+    background: transparent;
+    color: inherit;
+    font: inherit;
+    font-size: 13px;
+    padding: 6px 12px;
+    border-radius: 8px;
+    cursor: pointer;
+}
+
+/* The Projects page's API keys: a commerce key, and a failed create or revoke */
+.key-type-badge.commerce {
+    color: var(--color-eustress-green, #3cba54);
+}
+
+.keys-error {
+    margin: 0 0 12px;
+    font-size: 13px;
+    color: #ff6b6b;
+}
+
+@media (max-width: 640px) {
+    .creator-wrap {
+        padding: 92px 16px 56px;
+    }
+
+    .creator-amount {
+        align-items: flex-start;
+    }
+
+    .pass-store-item {
+        flex-wrap: wrap;
+    }
+}

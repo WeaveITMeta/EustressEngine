@@ -112,10 +112,11 @@ pub fn call_engine_with_timeout(
     // find the live engine even when it launched into a DIFFERENT universe
     // than the one it's configured for.
     //
-    // NOTE: this discovery is per-Universe and therefore single-instance —
-    // two engines open on two Spaces of the SAME Universe overwrite each
-    // other's port file. Anything driving several instances at once must
-    // address them by port instead: see [`call_port`] and [`list_instances`].
+    // NOTE: this discovery is per-Universe and so reaches ONE engine: the
+    // Universe's owner, whichever engine wrote `engine.port` last (or took
+    // it over when that one exited). Anything driving several instances of
+    // one Universe must address them by port instead: see [`call_port`] and
+    // [`list_instances`].
     let universe_port = universe_dir.join(".eustress").join("engine.port");
     let global_port = universe_dir
         .parent()
@@ -342,21 +343,119 @@ pub fn list_instances_unchecked(workspace_root: &Path) -> Vec<InstanceRecord> {
     out
 }
 
-/// Every LIVE instance: reads the registry and pings each recorded port,
-/// deleting the record of any instance that no longer answers (a crashed
-/// engine never gets to remove its own file). This is the call an
-/// orchestrator should make before deciding what to drive.
+/// Every LIVE instance: reads the registry and probes each recorded port,
+/// deleting the record (and the private IPC directory) of any instance that
+/// is gone — a crashed engine never gets to remove its own files. This is
+/// the call an orchestrator should make before deciding what to drive.
+///
+/// "Gone" means nothing listens on the port any more. The probe is a bare
+/// connect rather than a `ping` round-trip on purpose: an engine that is
+/// merely busy (a long `sim.step`, a heavy frame) would miss a ping
+/// deadline, and pruning it would unregister a live engine for good and
+/// throw away the commands queued for it.
 pub fn list_instances(workspace_root: &Path) -> Vec<InstanceRecord> {
     list_instances_unchecked(workspace_root)
         .into_iter()
         .filter(|rec| {
-            let alive = call_port(rec.port, "ping", serde_json::json!({})).is_ok();
+            let alive = port_is_live(rec.port);
             if !alive {
                 let _ = std::fs::remove_file(instance_file_path(workspace_root, rec.pid));
+                let _ = std::fs::remove_dir_all(instance_dir(workspace_root, rec.pid));
             }
             alive
         })
         .collect()
+}
+
+/// How long [`port_is_live`] waits. A live loopback listener accepts in
+/// well under a millisecond; the bound matters only for a dead port, which
+/// Windows otherwise retries for about two seconds before refusing.
+const LIVENESS_TIMEOUT: Duration = Duration::from_millis(500);
+
+/// A bare loopback connect — true while a listener is bound to `port`, even
+/// if the process behind it is too busy to answer a request.
+pub fn port_is_live(port: u16) -> bool {
+    let addr = SocketAddr::from(([127, 0, 0, 1], port));
+    TcpStream::connect_timeout(&addr, LIVENESS_TIMEOUT).is_ok()
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Sim IPC paths — the one definition shared by the engine and its clients
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// Two scopes, and the difference is the whole point:
+//
+// * PER-INSTANCE (`<workspace>/.eustress/instances/<pid>/`): exactly one
+//   engine reads the command queue and exactly one writes the snapshot, so
+//   parallel engines in one Universe cannot see each other's traffic. This is
+//   how anything addresses ONE specific engine without a TCP connection —
+//   including tools running INSIDE that engine, which must never call their
+//   own bridge (bridge `tools.call` executes on the engine's main thread, so a
+//   round-trip to itself would deadlock).
+// * PER-UNIVERSE (`<universe>/.eustress/`): the legacy single-slot files. They
+//   still work, but belong to exactly one engine — the Universe's OWNER, the
+//   instance whose port is in `<universe>/.eustress/engine.port`. Non-owners
+//   ignore them, so a command written there reaches the same engine that
+//   `call_engine` would, instead of whichever engine polled first.
+
+/// `<workspace>/.eustress/instances/<pid>/` — one engine's private IPC files.
+pub fn instance_dir(workspace_root: &Path, pid: u32) -> std::path::PathBuf {
+    instances_dir(workspace_root).join(pid.to_string())
+}
+
+/// That engine's command queue (JSON lines, drained by that engine only).
+pub fn instance_sim_commands_path(workspace_root: &Path, pid: u32) -> std::path::PathBuf {
+    instance_dir(workspace_root, pid).join("sim-commands.jsonl")
+}
+
+/// That engine's live runtime snapshot (rewritten ~4 Hz by that engine only).
+pub fn instance_snapshot_path(workspace_root: &Path, pid: u32) -> std::path::PathBuf {
+    instance_dir(workspace_root, pid).join("snapshot.json")
+}
+
+/// The Universe's legacy command queue — drained by the Universe owner only.
+pub fn universe_sim_commands_path(universe: &Path) -> std::path::PathBuf {
+    universe.join(".eustress").join("sim-commands.jsonl")
+}
+
+/// The Universe's legacy runtime snapshot — written by the Universe owner only.
+pub fn universe_snapshot_path(universe: &Path) -> std::path::PathBuf {
+    universe.join(".eustress").join("runtime-snapshot.json")
+}
+
+/// The Universe's telemetry log. Shared by every instance in the Universe;
+/// each line carries `pid`, `space` and `run_id` so readers can separate
+/// them.
+pub fn universe_telemetry_path(universe: &Path) -> std::path::PathBuf {
+    universe.join(".eustress").join("telemetry.jsonl")
+}
+
+/// Parse a port file's contents (`engine.port`). `None` when missing or
+/// malformed.
+pub fn read_port_file(path: &Path) -> Option<u16> {
+    std::fs::read_to_string(path).ok()?.trim().parse().ok()
+}
+
+/// Append one JSON value as one line, in ONE write.
+///
+/// `writeln!(file, "{}", value)` looks equivalent and is not: `Display` for a
+/// JSON value emits it in many small pieces, and on an unbuffered `File` each
+/// piece is its own write. Two processes appending concurrently then
+/// interleave INSIDE a line, and the reader silently drops the corrupt line —
+/// a lost command, a missing telemetry sample. Serializing first and writing
+/// the finished line with a single `write_all` keeps each record atomic with
+/// respect to other appenders (an append-mode write of a small buffer lands
+/// whole on every platform this runs on).
+pub fn append_json_line(path: &Path, value: &Value) -> std::io::Result<()> {
+    use std::io::Write as _;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let mut line = serde_json::to_vec(value)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+    line.push(b'\n');
+    let mut f = std::fs::OpenOptions::new().create(true).append(true).open(path)?;
+    f.write_all(&line)
 }
 
 /// The default Eustress workspace root (the parent of all Universes; where

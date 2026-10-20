@@ -29,7 +29,7 @@ impl Plugin for ChemistryPlugin {
                 update_cstr_system,
                 update_batch_system,
                 update_reactor_temperature_system,
-            ).chain());
+            ).chain().in_set(crate::realism::PhysicsDomain::Chemistry));
         info!("ChemistryPlugin ready — reactions, combustion, equilibrium active");
     }
 }

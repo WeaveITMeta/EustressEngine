@@ -47,7 +47,9 @@ fn registry() -> &'static ToolRegistry {
         r.register(crate::bridge_tools::EquipToolTool);
         r.register(crate::bridge_tools::SelectEntityTool);
         r.register(crate::bridge_tools::GetEditorStateTool);
+        r.register(crate::bridge_tools::ReadOutputTool);
         r.register(crate::bridge_tools::InvokeActionTool);
+        r.register(crate::bridge_tools::PlayInputTool);
         r.register(crate::bridge_tools::CaptureViewportTool);
         // Causal op-log read surface (Phase 1, Way 8) — the AI's audit trail.
         r.register(crate::bridge_tools::OplogTailTool);
@@ -60,6 +62,27 @@ fn registry() -> &'static ToolRegistry {
         r.register(crate::bridge_tools::AiCameraOrbitTool);
         r.register(crate::bridge_tools::AiCameraFrameTool);
         r.register(crate::bridge_tools::AiCameraCaptureTool);
+        // PhysicsService: which physics domains step, gravity, clock speed.
+        r.register(crate::bridge_tools::GetPhysicsSettingsTool);
+        r.register(crate::bridge_tools::SetPhysicsSettingsTool);
+        // Terrain: the reads (stats, surface samples, terrain-only raycasts,
+        // voxels), then the edits, each through the engine's own terrain
+        // command path as one undo step. Generate and flat only queue work
+        // that finishes on later frames; carve and clear remove ground and
+        // are Destructive.
+        r.register(crate::bridge_tools::TerrainStatsTool);
+        r.register(crate::bridge_tools::TerrainQueryTool);
+        r.register(crate::bridge_tools::TerrainRaycastTool);
+        r.register(crate::bridge_tools::TerrainReadVoxelsTool);
+        r.register(crate::bridge_tools::TerrainGenerateTool);
+        r.register(crate::bridge_tools::TerrainFlatTool);
+        r.register(crate::bridge_tools::TerrainSculptTool);
+        r.register(crate::bridge_tools::TerrainPaintTool);
+        r.register(crate::bridge_tools::TerrainFillTool);
+        r.register(crate::bridge_tools::TerrainCarveTool);
+        r.register(crate::bridge_tools::TerrainReplaceMaterialTool);
+        r.register(crate::bridge_tools::TerrainLayerCreateTool);
+        r.register(crate::bridge_tools::TerrainClearTool);
         // Binary-ECS entity CRUD: OVERRIDE the disk entity tools by name so
         // they operate on binary cores via the bridge when the engine is
         // live, and fall back to the disk tool (FileSystem rep) when it's
@@ -88,6 +111,20 @@ fn registry() -> &'static ToolRegistry {
         // out for reading rather than changing what owns an entity, and it
         // covers streamed-out entities that promote can't touch.
         r.register(crate::bridge_tools::ExportInstancesTomlTool);
+        // Mode / discipline / tab / tool surface. Discovery first
+        // (list_modes -> list_mode_tools), then set_mode + invoke_mode_tool to
+        // drive it by NAME, with ui_click as the escape hatch for widgets that
+        // have no tool id and ui_sequence to compose an ordered task.
+        r.register(crate::bridge_tools::ListModesTool);
+        r.register(crate::bridge_tools::ListModeToolsTool);
+        r.register(crate::bridge_tools::SetModeTool);
+        r.register(crate::bridge_tools::InvokeModeToolTool);
+        r.register(crate::bridge_tools::UiClickTool);
+        r.register(crate::bridge_tools::UiSequenceTool);
+        // Publishing: readiness is a separate call from the act, so an agent
+        // can establish every precondition and still leave the decision open.
+        r.register(crate::bridge_tools::PublishStatusTool);
+        r.register(crate::bridge_tools::PublishSpaceTool);
         // Disk world-container tools — create Universes / Spaces (no engine).
         r.register(crate::bridge_tools::NewUniverseTool);
         r.register(crate::bridge_tools::NewSpaceTool);
@@ -111,7 +148,9 @@ pub const BRIDGE_TOOL_NAMES: &[&str] = &[
     "equip_tool",
     "select_entity",
     "get_editor_state",
+    "read_output",
     "invoke_action",
+    "play_input",
     "capture_viewport",
     "oplog_tail",
     "sim_step",
@@ -120,7 +159,33 @@ pub const BRIDGE_TOOL_NAMES: &[&str] = &[
     "ai_camera_orbit",
     "ai_camera_frame",
     "ai_camera_capture",
+    // Both read or write the RUNNING engine's PhysicsService resource.
+    "get_physics_settings",
+    "set_physics_settings",
     "export_instances_toml",
+    // Every terrain read and edit reaches the RUNNING engine's terrain.
+    "terrain_stats",
+    "terrain_query",
+    "terrain_raycast",
+    "terrain_read_voxels",
+    "terrain_generate",
+    "terrain_flat",
+    "terrain_sculpt",
+    "terrain_paint",
+    "terrain_fill",
+    "terrain_carve",
+    "terrain_replace_material",
+    "terrain_layer_create",
+    "terrain_clear",
+    // The UI surface and publishing all reach the RUNNING engine.
+    "list_modes",
+    "list_mode_tools",
+    "set_mode",
+    "invoke_mode_tool",
+    "ui_click",
+    "ui_sequence",
+    "publish_status",
+    "publish_space",
     // Bridge-only too: both fail outright without a live engine, so pointing
     // them at the server's nominal default Universe rather than the running
     // one just produces "engine is not running" against a Universe that was
@@ -413,6 +478,27 @@ pub fn to_mcp_json(result: ToolResult) -> Value {
 mod tests {
     use super::*;
 
+    /// Every tool this server actually SERVES must have a capability class.
+    ///
+    /// The tools crate guards its own registry, but the bridge tools are
+    /// registered here on top of it, out of that guard's sight. That is how
+    /// twelve of them -- invoke_action, select_entity, capture_viewport, the
+    /// ai_camera_* set and more -- were advertised in `tools/list` and then
+    /// refused at dispatch.
+    #[test]
+    fn every_served_tool_is_classified() {
+        let unclassified: Vec<&str> = registry()
+            .all_tools()
+            .into_iter()
+            .map(|d| d.name)
+            .filter(|name| eustress_tools::capability::capability_of(name).is_none())
+            .collect();
+        assert!(
+            unclassified.is_empty(),
+            "served over MCP but unclassified, so refused at dispatch: {unclassified:?}"
+        );
+    }
+
     fn result_with(content: &str, data: Option<Value>) -> ToolResult {
         ToolResult {
             tool_name: "t".into(),
@@ -503,6 +589,40 @@ mod tests {
         // Every bridge tool must resolve against the LIVE engine's Universe.
         for name in ["export_instances_toml", "promote_entity", "demote_entity"] {
             assert!(is_bridge_tool(name), "{name} should be a bridge tool");
+        }
+    }
+
+    #[test]
+    fn terrain_tools_are_registered_classified_and_live() {
+        use eustress_tools::capability::{capability_of, Capability};
+
+        let tools = list_shared_tools();
+        let expected = [
+            ("terrain_stats", Capability::Read),
+            ("terrain_query", Capability::Read),
+            ("terrain_raycast", Capability::Read),
+            ("terrain_read_voxels", Capability::Read),
+            ("terrain_generate", Capability::Write),
+            ("terrain_flat", Capability::Write),
+            ("terrain_sculpt", Capability::Write),
+            ("terrain_paint", Capability::Write),
+            ("terrain_fill", Capability::Write),
+            ("terrain_replace_material", Capability::Write),
+            ("terrain_layer_create", Capability::Write),
+            ("terrain_carve", Capability::Destructive),
+            ("terrain_clear", Capability::Destructive),
+        ];
+        for (name, class) in expected {
+            assert!(tools.iter().any(|t| t["name"] == name), "{name} is registered");
+            assert_eq!(capability_of(name), Some(class), "{name} capability");
+            // Every terrain tool must resolve against the LIVE engine's Universe.
+            assert!(is_bridge_tool(name), "{name} should be a bridge tool");
+            // Only the reads advertise themselves as safe to auto-approve.
+            assert_eq!(annotation(&tools, name, "readOnlyHint"), class == Capability::Read, "{name} readOnlyHint");
+        }
+        // Removing ground, or replacing a whole terrain, always asks first.
+        for name in ["terrain_carve", "terrain_clear", "terrain_generate", "terrain_flat"] {
+            assert_eq!(annotation(&tools, name, "destructiveHint"), true, "{name} destructiveHint");
         }
     }
 

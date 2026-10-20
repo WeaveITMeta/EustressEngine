@@ -237,6 +237,91 @@ fn trace_instance_change_storm(
     }
 }
 
+/// World shape, every 10 s under `EUSTRESS_PROFILE`: how many archetypes
+/// and tables hold entities, how many of those tables are tiny, and which
+/// components split the most archetypes. Every change-filtered query visits
+/// each matching table every frame, so a world cut into many small tables
+/// pays a per-table cost in every such query, and the splitters named here
+/// are what cut it.
+fn log_world_shape(
+    archetypes: &bevy::ecs::archetype::Archetypes,
+    components: &bevy::ecs::component::Components,
+    time: Res<Time>,
+    mut timer: Local<f32>,
+    // Calibration walks, timed on the report frame in the same schedule
+    // (and alongside the same parallel systems) as the real consumers.
+    changed_instances: Query<(), Changed<eustress_common::classes::Instance>>,
+    all_instances: Query<&eustress_common::classes::Instance>,
+) {
+    static ARMED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    if !*ARMED.get_or_init(|| std::env::var("EUSTRESS_PROFILE").is_ok()) {
+        return;
+    }
+    *timer += time.delta_secs();
+    if *timer < 10.0 {
+        return;
+    }
+    *timer = 0.0;
+
+    let mut table_rows: HashMap<u32, u32> = HashMap::new();
+    let mut in_archetypes: HashMap<bevy::ecs::component::ComponentId, u32> = HashMap::new();
+    let mut live = 0u32;
+    for archetype in archetypes.iter() {
+        if archetype.is_empty() {
+            continue;
+        }
+        live += 1;
+        *table_rows.entry(archetype.table_id().as_u32()).or_default() += archetype.len();
+        for &component in archetype.components() {
+            *in_archetypes.entry(component).or_default() += 1;
+        }
+    }
+    let tiny_tables = table_rows.values().filter(|&&rows| rows <= 4).count();
+    // A component present in about half of the archetypes splits the most:
+    // rank by the smaller side of the split it makes.
+    let mut splitters: Vec<(bevy::ecs::component::ComponentId, u32)> =
+        in_archetypes.into_iter().collect();
+    splitters.sort_by_key(|&(_, n)| std::cmp::Reverse(n.min(live - n)));
+    let named: Vec<String> = splitters
+        .iter()
+        .take(12)
+        .map(|&(id, n)| {
+            let name = components
+                .get_name(id)
+                .map(|d| d.shortname().to_string())
+                .unwrap_or_else(|| format!("{id:?}"));
+            format!("{name} in {n}")
+        })
+        .collect();
+    info!(
+        "🧬 world shape: {} archetypes hold entities ({} in total), across {} tables, {} of which hold 4 or fewer entities; top splitters: {}",
+        live,
+        archetypes.len(),
+        table_rows.len(),
+        tiny_tables,
+        named.join(", "),
+    );
+
+    // What one change-filtered walk over every instance costs in situ,
+    // against a plain walk of the same entities.
+    let t0 = std::time::Instant::now();
+    let changed = changed_instances.iter().count();
+    let changed_walk = t0.elapsed();
+    let t1 = std::time::Instant::now();
+    let total = all_instances.iter().count();
+    let plain_walk = t1.elapsed();
+    let per = |d: Duration| d.as_secs_f64() * 1e9 / total.max(1) as f64;
+    info!(
+        "🧬 walk calibration over {} instances: Changed<Instance> {:.2} ms ({:.1} ns each, {} changed), plain &Instance {:.2} ms ({:.1} ns each)",
+        total,
+        changed_walk.as_secs_f64() * 1000.0,
+        per(changed_walk),
+        changed,
+        plain_walk.as_secs_f64() * 1000.0,
+        per(plain_walk),
+    );
+}
+
 pub struct FrameDiagnosticsPlugin;
 
 impl Plugin for FrameDiagnosticsPlugin {
@@ -247,6 +332,6 @@ impl Plugin for FrameDiagnosticsPlugin {
         app.insert_resource(FrameTimeTracker::default())
             .add_systems(Last, track_frame_time)
             // Perf diagnostic — dormant unless EUSTRESS_PROFILE is set.
-            .add_systems(Update, trace_instance_change_storm);
+            .add_systems(Update, (trace_instance_change_storm, log_world_shape));
     }
 }

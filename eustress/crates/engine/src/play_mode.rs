@@ -72,6 +72,14 @@ pub enum PlayModeState {
     Paused,
 }
 
+/// Run condition for the editor's own input handlers (selection, tools,
+/// gizmos, shortcuts): they listen only outside a Play session, so the keys
+/// and clicks that play a game never select, drag or delete the scene.
+/// True in apps with no Play mode at all.
+pub fn editor_input_enabled(state: Option<Res<State<PlayModeState>>>) -> bool {
+    state.map_or(true, |s| *s.get() == PlayModeState::Editing)
+}
+
 /// Play mode type
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum PlayModeType {
@@ -634,7 +642,7 @@ pub struct CharacterInput {
 /// systems cap out at 16 `SystemParam`s in Bevy, and this system's param
 /// list sits right at that ceiling.
 #[derive(bevy::ecs::system::SystemParam)]
-struct PlayStartResources<'w> {
+struct PlayStartResources<'w, 's> {
     player_service: Res<'w, PlayerService>,
     asset_server: Res<'w, AssetServer>,
     meshes: ResMut<'w, Assets<Mesh>>,
@@ -645,6 +653,11 @@ struct PlayStartResources<'w> {
     /// sits at Bevy's 16-`SystemParam` ceiling.
     spawn_avatar: MessageWriter<'w, eustress_common::avatar::profile::SpawnSavedAvatar>,
     avatar_auth: Option<Res<'w, crate::auth::AuthState>>,
+    /// The open Space's characters and `Players.CharacterAutoLoads`, which
+    /// this system refreshes as each Play begins.
+    characters: SpaceCharacters<'w, 's>,
+    /// Render order of the avatar camera, which the avatar-free camera shares.
+    avatar_host: Option<Res<'w, eustress_common::avatar::AvatarHostConfig>>,
 }
 
 /// Handle start play event - captures full world snapshot and spawns client-like character
@@ -710,6 +723,12 @@ fn handle_start_play(
         pause_toggle_writer.write(TogglePauseEvent);
         return;
     }
+
+    // The open Space's characters and `Players.CharacterAutoLoads`, read as
+    // this Play begins. Whatever wrote the request (the toolbar, `--play`, a
+    // host, MCP, the simulation runner), the start follows the Space being
+    // played, never the previous Play's values.
+    res.characters.refresh();
 
     // --- Original handle_start_play logic below ---
     {
@@ -849,6 +868,33 @@ fn handle_start_play(
                 // In networked mode, server spawns character, client spawns camera after receiving it
                 // For local testing, we do both here
                 
+                let auto_loads = res.characters.auto_loads.0;
+
+                // The play camera for every moment without an avatar: the
+                // whole session when the Space loads no character, otherwise
+                // only after a script destroys it. It opens on the editor's
+                // view; `show_script_camera_without_avatar` keeps it active
+                // exactly while no avatar camera exists, and Stop removes it
+                // with the other `PlayModeCamera`s.
+                let start_view = runtime
+                    .editor_camera_transform
+                    .unwrap_or_else(|| Transform::from_xyz(0.0, 12.0, 24.0).looking_at(Vec3::ZERO, Vec3::Y));
+                let camera_order = res.avatar_host.as_deref().map_or(10, |h| h.seams.camera_order);
+                commands.spawn((
+                    Camera3d::default(),
+                    Camera { order: camera_order, is_active: !auto_loads, ..default() },
+                    Projection::Perspective(PerspectiveProjection {
+                        fov: eustress_common::avatar::control::AVATAR_FOV_DEG.to_radians(),
+                        ..default()
+                    }),
+                    // The avatar camera's tonemapper, so both look the same.
+                    bevy::core_pipeline::tonemapping::Tonemapping::Reinhard,
+                    start_view,
+                    crate::play_datamodel::camera::ScriptedPlayCamera,
+                    PlayModeCamera,
+                    Name::new("ScriptedPlayCamera"),
+                ));
+
                 // Find spawn position from SpawnLocation entities, or use default
                 let (spawn_pos, spawn_protection) = get_spawn_position_or_default(
                     spawn_locations.iter(),
@@ -856,21 +902,23 @@ fn handle_start_play(
                     res.player_service.spawn_position,
                 );
 
-                if spawn_protection > 0.0 {
-                    info!("🛡️ Spawn protection: {:.1}s", spawn_protection);
-                }
+                if auto_loads {
+                    if spawn_protection > 0.0 {
+                        info!("🛡️ Spawn protection: {:.1}s", spawn_protection);
+                    }
 
-                // Spawn through the sealed avatar runtime — the SAME path the
-                // Client uses. Studio cannot pass a model or a sex here, which
-                // is what let it default Female/XBot while the Client defaulted
-                // Male/YBot out of "shared" code.
-                //
-                res.spawn_avatar.write(
-                    eustress_common::avatar::profile::SpawnSavedAvatar {
-                        token: res.avatar_auth.as_ref().and_then(|a| a.get_token()).map(str::to_owned),
-                        at: spawn_pos,
-                    },
-                );
+                    // Spawn through the sealed avatar runtime — the SAME path the
+                    // Client uses. Studio cannot pass a model or a sex here, which
+                    // is what let it default Female/XBot while the Client defaulted
+                    // Male/YBot out of "shared" code.
+                    //
+                    res.spawn_avatar.write(
+                        eustress_common::avatar::profile::SpawnSavedAvatar {
+                            token: res.avatar_auth.as_ref().and_then(|a| a.get_token()).map(str::to_owned),
+                            at: spawn_pos,
+                        },
+                    );
+                }
 
                 // The runtime owns the play camera (order 10 via HostSeams), so
                 // the editor camera only needs deactivating.
@@ -900,7 +948,11 @@ fn handle_start_play(
                 
                 runtime.physics_enabled = true;
                 
-                info!("👤 Play mode started - character at {:?} (third-person, right-click to orbit)", spawn_pos);
+                if auto_loads {
+                    info!("👤 Play mode started - character at {:?} (third-person, right-click to orbit)", spawn_pos);
+                } else {
+                    info!("👤 Play mode started with no avatar (Players.CharacterAutoLoads is off): scripts own the camera");
+                }
             }
             PlayModeType::Server => {
                 // SERVER MODE: Start in-process server + connect as client
@@ -981,7 +1033,14 @@ fn handle_stop_play(
         if play_mode_despawned > 0 {
             info!("🎮 Despawned {} play mode entities (character/camera)", play_mode_despawned);
         }
-        
+
+        // The avatar belongs to the avatar runtime (`SpawnedByAvatarRuntime`),
+        // which neither query above matches, and the runtime tears down the
+        // body and its camera itself. Left standing, it and its camera outlived
+        // Stop, and the next Play added a second pair: the character binding
+        // then flipped between the two bodies every few seconds.
+        despawn_avatars.write(eustress_common::avatar::DespawnAllAvatars);
+
         // Clean up runtime tracking
         cleanup_play_mode_entities(&mut commands, &mut runtime);
         play_mode.player_character = None;
@@ -1660,6 +1719,11 @@ impl Plugin for PlayModeCorePlugin {
             eustress_common::avatar::AvatarHost::Studio,
         ));
 
+        // Animation built from instances: every Animator in the Play tree
+        // plays its tracks on its rig, the local avatar's included once its
+        // character's Animator binds it. `play_datamodel` orders its sets.
+        app.add_plugins(eustress_common::animation::AnimatorPlugin);
+
         // Legacy skinned/animation plugins. Inert on avatar-runtime entities
         // (their systems gate on `SkinnedCharacter` / `PlayModeCharacter`,
         // which the runtime does not insert) and still used by authored
@@ -1670,6 +1734,21 @@ impl Plugin for PlayModeCorePlugin {
 
         // Add the runtime plugin for play mode specific handling
         app.add_plugins(crate::play_mode_runtime::PlayModeRuntimePlugin);
+
+        // Luau (and the tree Rune reads) against the live scene. Seeding runs
+        // after the GUI snapshot, so Stop restores the StarterGui it hides,
+        // and before physics activation, so hidden templates stay put.
+        app.add_plugins(crate::play_datamodel::PlayDataModelPlugin);
+        app.add_systems(
+            OnEnter(PlayModeState::Playing),
+            crate::play_datamodel::seed::seed_session
+                .after(snapshot_gui_on_play)
+                .before(activate_physics_for_unanchored_parts),
+        );
+
+        // Gravity a script or tool changes during Play comes back on every
+        // stop path, like the scene and the terrain.
+        crate::plugins::physics_plugin::add_gravity_play_snapshot(app);
 
         app
             // State
@@ -1700,6 +1779,14 @@ impl Plugin for PlayModeCorePlugin {
             .init_resource::<crate::soul::rune_play::RunePlayBridges>()
             .add_systems(Startup, crate::soul::rune_api::register_engine_rune_modules)
 
+            // The open Space's characters and movement switches, which
+            // `handle_start_play` refreshes as each Play begins.
+            .init_resource::<eustress_common::avatar::space_character::SpaceCharacterPolicy>()
+            .init_resource::<CharacterAutoLoads>()
+            // `player:LoadCharacter()`: a body on demand, for Spaces that
+            // start without one and for respawns.
+            .add_systems(Update, load_character_requests.run_if(in_state(PlayModeState::Playing)))
+
             // Message-driven play/pause/stop handlers — see PlayModeSystems doc.
             .add_systems(Update, (
                 handle_start_play,
@@ -1716,24 +1803,14 @@ impl Plugin for PlayModeCorePlugin {
 
             // Systems that run when entering/exiting play mode
             .add_systems(OnEnter(PlayModeState::Playing), activate_physics_for_unanchored_parts)
-            .add_systems(OnEnter(PlayModeState::Playing), start_play_server_if_server_mode)
             .add_systems(OnEnter(PlayModeState::Playing), crate::soul::rune_api::compile_scripts_on_play)
             // Fresh `Instance::new()` registry + clean raycast state per Play
             // session (both Play-with-character and Run — they share
             // PlayModeState::Playing, so scripts behave identically in each).
             .add_systems(OnEnter(PlayModeState::Playing), crate::soul::rune_play::start_rune_session
                 .after(crate::soul::rune_api::compile_scripts_on_play))
-            // Luau analogue of compile_scripts_on_play: spawn each Luau script
-            // body as a live scheduler coroutine (task.wait / Heartbeat / input
-            // become real). Runs after Rune compile so ordering is deterministic.
-            .add_systems(OnEnter(PlayModeState::Playing), crate::soul::rune_api::start_luau_scripts_on_play
-                .after(crate::soul::rune_api::compile_scripts_on_play))
             .add_systems(OnEnter(PlayModeState::Playing), snapshot_gui_on_play)
             .add_systems(OnExit(PlayModeState::Playing), deactivate_physics_for_parts)
-            .add_systems(OnExit(PlayModeState::Playing), stop_play_server_if_server_mode)
-            // Tear down live Luau coroutines / connections so Stop fully stops
-            // script activity and the next Play starts from a clean VM.
-            .add_systems(OnExit(PlayModeState::Playing), crate::soul::rune_api::stop_luau_scripts_on_exit)
             // on_exit() on all scripts before cleanup (Godot-style _exit_tree).
             // Goes through `stop_rune_session` rather than the bare
             // `run_script_exit` so `on_exit` runs with the script bridges still
@@ -1747,6 +1824,18 @@ impl Plugin for PlayModeCorePlugin {
             // sim auto-stop, keyboard F8/Escape) — not just the Slint Stop
             // button that handle_stop_play is gated on.
             .add_systems(OnEnter(PlayModeState::Editing), restore_scene_on_enter_edit)
+            // Terrain edits made during Play (scripts, MCP tools) come undone on
+            // every stop path too, after the scripts' `on_exit` has run. A
+            // snapshot a session left behind is dropped as the next session
+            // starts from Edit mode: `OnTransition`, since resuming from Pause
+            // also enters Playing.
+            .init_resource::<crate::terrain_commands::TerrainPlaySnapshot>()
+            .add_systems(OnEnter(PlayModeState::Editing), crate::terrain_commands::restore_terrain_play_snapshot
+                .after(crate::soul::rune_api::cleanup_scripts_on_stop))
+            .add_systems(
+                OnTransition { exited: PlayModeState::Editing, entered: PlayModeState::Playing },
+                crate::terrain_commands::clear_terrain_play_snapshot,
+            )
 
             // Dynamic-script runtimes. LuauRuntimeState is registered
             // here so the Luau hot-reload system has somewhere to write
@@ -1779,19 +1868,6 @@ impl Plugin for PlayModeCorePlugin {
             .add_systems(Update, crate::soul::rune_api::drain_script_errors_to_output)
             .add_systems(Update, (
                 crate::soul::rune_api::hot_recompile_dirty_rune_scripts,
-                crate::soul::rune_api::hot_reload_dirty_luau_scripts,
-                // Pump keyboard/mouse into UserInputService (live IsKeyDown +
-                // InputBegan/Ended/Changed) before the frame driver, so input
-                // pressed this frame is visible in the same Heartbeat tick.
-                eustress_common::luau::sync_luau_input
-                    .after(crate::soul::rune_api::hot_reload_dirty_luau_scripts),
-                // Heartbeat of the live Luau VM: advance the coroutine scheduler
-                // and fire RunService.Stepped/RenderStepped/Heartbeat each frame.
-                eustress_common::luau::drive_luau_frame
-                    .after(eustress_common::luau::sync_luau_input),
-                // Translate Avian collisions into Luau Touched/TouchEnded.
-                crate::soul::rune_api::read_luau_collisions
-                    .after(eustress_common::luau::drive_luau_frame),
                 // Keep the live-hierarchy + tag snapshots the `Instance`
                 // handle API resolves against fresh. Change-gated, so a
                 // static scene costs one empty query.
@@ -1804,11 +1880,17 @@ impl Plugin for PlayModeCorePlugin {
                 // Bevy's multi-threaded executor installs them on one worker
                 // thread and reads them from another, which is why scripts
                 // used to tick without being able to affect anything.
+                //
+                // It runs among the Play frame's scripts, after Luau's: it
+                // reads this frame's pulled input, seats and collisions, and
+                // the instances it creates get entities in the same frame's
+                // Apply.
                 crate::soul::rune_play::drive_rune_frame
-                    .after(crate::soul::rune_play::refresh_rune_scene_snapshot),
+                    .after(crate::soul::rune_play::refresh_rune_scene_snapshot)
+                    .after(crate::play_datamodel::drive_luau),
                 crate::soul::rune_api::drain_script_logs_to_output
                     .after(crate::soul::rune_play::drive_rune_frame),
-            ).run_if(in_state(PlayModeState::Playing)))
+            ).in_set(crate::play_datamodel::PlayScriptSet::Scripts).run_if(in_state(PlayModeState::Playing)))
 
             // Real-time anchored state sync during play mode
             .add_systems(Update, sync_anchored_to_rigidbody.run_if(in_state(PlayModeState::Playing)));
@@ -1847,7 +1929,192 @@ impl Plugin for PlayModeUiPlugin {
             // because that window is a single system by design.
             .add_systems(Update, dispatch_gui_button_clicks
                 .after(crate::soul::rune_play::drive_rune_frame)
-                .run_if(in_state(PlayModeState::Playing)));
+                .run_if(in_state(PlayModeState::Playing)))
+            // `--play`: Play with the character once the Space has loaded.
+            .add_systems(Update, play_on_launch.before(PlayModeSystems));
+    }
+}
+
+/// `player:LoadCharacter()` in Play: give the local player a body now, at a
+/// SpawnLocation, replacing the one it has. The Luau call raises the
+/// player's `__respawn` flag; this answers it. A respawn takes two frames:
+/// the old body goes first, then the new one is requested, so the avatar
+/// runtime's despawn-all cannot take the new body with it.
+fn load_character_requests(
+    dm: Option<Res<crate::play_datamodel::PlayDataModel>>,
+    spawn_locations: Query<(&Transform, &SpawnLocation)>,
+    player_service: Res<PlayerService>,
+    avatar_auth: Option<Res<crate::auth::AuthState>>,
+    avatars: Query<(), With<eustress_common::avatar::LocalAvatar>>,
+    mut despawn: MessageWriter<eustress_common::avatar::DespawnAllAvatars>,
+    mut spawn: MessageWriter<eustress_common::avatar::profile::SpawnSavedAvatar>,
+    mut respawning: Local<bool>,
+) {
+    let spawn_now = |spawn: &mut MessageWriter<eustress_common::avatar::profile::SpawnSavedAvatar>| {
+        let (at, _) = get_spawn_position_or_default(spawn_locations.iter(), None, player_service.spawn_position);
+        spawn.write(eustress_common::avatar::profile::SpawnSavedAvatar {
+            token: avatar_auth.as_ref().and_then(|a| a.get_token()).map(str::to_owned),
+            at,
+        });
+    };
+    if *respawning {
+        *respawning = false;
+        spawn_now(&mut spawn);
+        return;
+    }
+    let Some(dm) = dm else { return };
+    let asked = {
+        let mut g = dm.dm.lock();
+        let Some(player) = g.local_player else { return };
+        let asked = g.get_prop(player, "__respawn").and_then(|v| v.as_bool()).unwrap_or(false);
+        if asked {
+            g.set_prop_from_engine(player, "__respawn", eustress_common::datamodel::DmValue::Bool(false));
+        }
+        asked
+    };
+    if !asked {
+        return;
+    }
+    if avatars.is_empty() {
+        info!("🧍 LoadCharacter: spawning the local player's avatar");
+        spawn_now(&mut spawn);
+    } else {
+        info!("🧍 LoadCharacter: respawning the local player's avatar");
+        despawn.write(eustress_common::avatar::DespawnAllAvatars);
+        *respawning = true;
+    }
+}
+
+/// `Players.CharacterAutoLoads`: whether Play gives the local player an
+/// avatar as it starts. A Space turns it off with `character_auto_loads =
+/// false` in `Players/_service.toml` for games played without a body (Pong,
+/// a board game, a strategy map seen from above). Play then starts with no
+/// avatar: scripts read input as usual (UserInputService, attributes they
+/// set) and own `workspace.CurrentCamera`, and `player:LoadCharacter()`
+/// still gives the player a body when a script asks for one.
+#[derive(Resource, Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CharacterAutoLoads(pub bool);
+
+impl Default for CharacterAutoLoads {
+    fn default() -> Self {
+        Self(true)
+    }
+}
+
+/// The open Space's characters: `StarterPlayer/Characters/*.rig.toml` (its
+/// own body per body option), StarterPlayer's movement switches
+/// (`JumpEnabled`, `ClimbingEnabled`, ..., stored snake_case in
+/// `_service.toml`), and Players' `character_auto_loads`
+/// ([`CharacterAutoLoads`]). `handle_start_play` refreshes them as each Play
+/// begins, before it opens the camera and requests the avatar.
+///
+/// [`SpaceCharacterPolicy`]: eustress_common::avatar::space_character::SpaceCharacterPolicy
+#[derive(bevy::ecs::system::SystemParam)]
+struct SpaceCharacters<'w, 's> {
+    space_root: Option<Res<'w, crate::space::SpaceRoot>>,
+    services: Query<'w, 's, &'static crate::space::service_loader::ServiceComponent>,
+    policy: ResMut<'w, eustress_common::avatar::space_character::SpaceCharacterPolicy>,
+    auto_loads: ResMut<'w, CharacterAutoLoads>,
+}
+
+impl SpaceCharacters<'_, '_> {
+    /// Read [`SpaceCharacterPolicy`] and [`CharacterAutoLoads`] from the
+    /// open Space, in place.
+    fn refresh(&mut self) {
+        use crate::space::service_loader::PropertyValue;
+        use eustress_common::avatar::abilities::AvatarAbilities;
+        use eustress_common::avatar::space_character::SpaceCharacterPolicy;
+
+        // Read before the Space root check: a Space opened from the world
+        // database alone still has its services.
+        let loads = match self
+            .services
+            .iter()
+            .find(|s| s.class_name == "Players")
+            .and_then(|p| p.properties.get("character_auto_loads").or_else(|| p.properties.get("CharacterAutoLoads")))
+        {
+            Some(PropertyValue::Bool(on)) => *on,
+            _ => true,
+        };
+        if self.auto_loads.0 != loads || !loads {
+            info!("avatar: Players.CharacterAutoLoads = {loads}{}", if loads { "" } else { ": Play starts with no avatar" });
+        }
+        self.auto_loads.0 = loads;
+        let Some(root) = self.space_root.as_deref() else { return };
+        let (mut loaded, warnings) = SpaceCharacterPolicy::load(&root.0);
+        for w in &warnings {
+            warn!("avatar: StarterPlayer/Characters/{w}");
+        }
+        // `_service.toml` stores properties snake_case: ClimbingEnabled -> climbing_enabled.
+        let snake = |name: &str| {
+            let mut out = String::with_capacity(name.len() + 4);
+            for (i, c) in name.chars().enumerate() {
+                if c.is_ascii_uppercase() {
+                    if i > 0 {
+                        out.push('_');
+                    }
+                    out.push(c.to_ascii_lowercase());
+                } else {
+                    out.push(c);
+                }
+            }
+            out
+        };
+        if let Some(sp) = self.services.iter().find(|s| s.class_name == "StarterPlayer") {
+            for name in AvatarAbilities::PROPERTIES {
+                let value = sp.properties.get(&snake(name)).or_else(|| sp.properties.get(name));
+                if let Some(PropertyValue::Bool(on)) = value {
+                    loaded.abilities.set(name, *on);
+                }
+            }
+        }
+        let off: Vec<&str> = AvatarAbilities::PROPERTIES
+            .iter()
+            .copied()
+            .filter(|n| loaded.abilities.get(n) == Some(false))
+            .collect();
+        info!(
+            "avatar: Space characters: {} body option(s){}{}",
+            loaded.rigs.len(),
+            if loaded.fallback.is_some() { " plus a default" } else { "" },
+            if off.is_empty() { String::new() } else { format!("; off: {}", off.join(", ")) },
+        );
+        *self.policy = loaded;
+    }
+}
+
+/// `eustress-engine --play`: start Play with the character once the Space
+/// has finished loading (its scripts included), as if F5 were pressed. The
+/// flag used to be parsed and never read.
+fn play_on_launch(
+    args: Option<Res<crate::startup::StartupArgs>>,
+    load: Option<Res<crate::space::file_loader::LoadInProgress>>,
+    state: Res<State<PlayModeState>>,
+    mut seen_loading: Local<bool>,
+    mut done: Local<bool>,
+    mut start_writer: MessageWriter<StartPlayEvent>,
+) {
+    if *done {
+        return;
+    }
+    if !args.is_some_and(|a| a.play_mode) {
+        *done = true;
+        return;
+    }
+    // `active` is false before the load begins as well as after it settles,
+    // so wait to have seen it true first.
+    let loading = load.is_some_and(|l| l.active);
+    if loading {
+        *seen_loading = true;
+        return;
+    }
+    if !*seen_loading {
+        return;
+    }
+    *done = true;
+    if matches!(state.get(), PlayModeState::Editing) {
+        info!("▶️ --play: starting Play with the character");
+        start_writer.write(StartPlayEvent { play_type: PlayModeType::WithCharacter });
     }
 }
 
@@ -2167,19 +2434,21 @@ fn build_scene_for_server(
 // Physics Activation Systems
 // ============================================================================
 
-/// Marker component to track parts that had their physics activated during play mode
-#[derive(Component)]
-pub struct PlayModePhysicsActivated;
+pub use eustress_common::play_session::PlayModePhysicsActivated;
 
 /// Marker component for entities spawned during play mode (should be despawned on stop)
 #[derive(Component)]
 pub struct SpawnedDuringPlayMode;
 
-/// Activate physics for unanchored parts when entering play mode
+/// Activate physics for unanchored parts when entering play mode. Parts in
+/// storage services (hidden for the session) stay static.
 fn activate_physics_for_unanchored_parts(
     mut commands: Commands,
     mut physics_time: ResMut<Time<Physics>>,
-    parts_query: Query<(Entity, &BasePart, Option<&avian3d::prelude::Collider>), (With<Part>, Without<PlayModeCharacter>)>,
+    parts_query: Query<
+        (Entity, &BasePart, Option<&avian3d::prelude::Collider>),
+        (With<Part>, Without<PlayModeCharacter>, Without<crate::play_datamodel::HiddenForPlay>),
+    >,
 ) {
     physics_time.unpause();
     info!("⚡ Physics simulation started");
@@ -2385,31 +2654,103 @@ fn restore_gui_on_stop(
     commands.remove_resource::<GuiPlaySnapshot>();
 }
 
-// ============================================================================
-// Play Server Integration
-// ============================================================================
+// Multiplayer hosting is not a play-mode type: Start Server (F9) hosts the
+// Space and enters Play with a character. See `crate::multiplayer`.
 
-/// Start the in-process play server when entering play mode with Server type
-fn start_play_server_if_server_mode(
-    play_mode: Res<PlayMode>,
-    mut start_server: MessageWriter<crate::play_server::StartPlayServerMessage>,
-) {
-    if play_mode.play_type == PlayModeType::Server {
-        info!("🖥️ Starting in-process play server...");
-        start_server.write(crate::play_server::StartPlayServerMessage {
-            port: 0, // Auto-allocate port
-            max_players: 8,
+#[cfg(test)]
+mod start_tests {
+    use super::*;
+    use crate::space::service_loader::{PropertyValue, ServiceComponent};
+    use eustress_common::avatar::profile::SpawnSavedAvatar;
+
+    /// Avatars requested so far.
+    #[derive(Resource, Default)]
+    struct Requested(usize);
+
+    /// A pending Play request, written by a system of its own that runs
+    /// before the handler and is ordered against nothing else, as the
+    /// toolbar's drain, `--play` and a host's start all are.
+    #[derive(Resource, Default)]
+    struct PressPlay(bool);
+
+    fn press_play(mut press: ResMut<PressPlay>, mut starts: MessageWriter<StartPlayEvent>) {
+        if std::mem::take(&mut press.0) {
+            starts.write(StartPlayEvent { play_type: PlayModeType::WithCharacter });
+        }
+    }
+
+    fn count_requests(mut spawns: MessageReader<SpawnSavedAvatar>, mut requested: ResMut<Requested>) {
+        requested.0 += spawns.read().count();
+    }
+
+    fn app() -> App {
+        let mut app = App::new();
+        app.add_plugins((MinimalPlugins, AssetPlugin::default(), bevy::state::app::StatesPlugin));
+        app.init_asset::<Mesh>().init_asset::<StandardMaterial>();
+        app.init_state::<PlayModeState>()
+            .init_resource::<PlayMode>()
+            .init_resource::<PlayModeRuntime>()
+            .init_resource::<SnapshotStack>()
+            .init_resource::<PlayModeCharacterConfig>()
+            .init_resource::<PlayerService>()
+            .init_resource::<eustress_common::avatar::space_character::SpaceCharacterPolicy>()
+            .init_resource::<CharacterAutoLoads>()
+            .init_resource::<Requested>()
+            .init_resource::<PressPlay>()
+            .add_message::<StartPlayEvent>()
+            .add_message::<TogglePauseEvent>()
+            .add_message::<SpawnSavedAvatar>()
+            .add_systems(Update, press_play.before(PlayModeSystems))
+            .add_systems(Update, handle_start_play.in_set(PlayModeSystems))
+            .add_systems(Update, count_requests.after(PlayModeSystems));
+        app
+    }
+
+    /// The open Space's Players service, with `character_auto_loads` set.
+    fn open_space(app: &mut App, loads: bool) {
+        let world = app.world_mut();
+        let old: Vec<Entity> = world.query_filtered::<Entity, With<ServiceComponent>>().iter(world).collect();
+        for e in old {
+            world.despawn(e);
+        }
+        let mut properties = HashMap::new();
+        properties.insert("character_auto_loads".to_string(), PropertyValue::Bool(loads));
+        world.spawn(ServiceComponent {
+            class_name: "Players".into(),
+            toml_path: std::path::PathBuf::from("Players/_service.toml"),
+            icon: String::new(),
+            description: String::new(),
+            can_have_children: true,
+            properties,
         });
     }
-}
 
-/// Stop the in-process play server when exiting play mode
-fn stop_play_server_if_server_mode(
-    play_mode: Res<PlayMode>,
-    mut stop_server: MessageWriter<crate::play_server::StopPlayServerMessage>,
-) {
-    if play_mode.play_type == PlayModeType::Server {
-        info!("🛑 Stopping in-process play server...");
-        stop_server.write(crate::play_server::StopPlayServerMessage);
+    /// Press Play, let the frame run, and Stop as far as the start cares.
+    fn play_once(app: &mut App) -> usize {
+        let before = app.world().resource::<Requested>().0;
+        app.world_mut().resource_mut::<PressPlay>().0 = true;
+        app.update();
+        app.world_mut().resource_mut::<PlayMode>().started_at = None;
+        app.world().resource::<Requested>().0 - before
+    }
+
+    /// Box Head after Pong, and Pong after Box Head, in one app: each Play
+    /// follows the Space being played. Before, the refresh could run after
+    /// the start, and Box Head started with Pong's `false`: no character.
+    #[test]
+    fn each_play_follows_the_open_spaces_character_auto_loads() {
+        let mut app = app();
+        app.update();
+
+        open_space(&mut app, false);
+        assert_eq!(play_once(&mut app), 0, "Pong: no avatar");
+        assert!(!app.world().resource::<CharacterAutoLoads>().0);
+
+        open_space(&mut app, true);
+        assert_eq!(play_once(&mut app), 1, "Box Head, after Pong: the avatar is requested");
+        assert!(app.world().resource::<CharacterAutoLoads>().0);
+
+        open_space(&mut app, false);
+        assert_eq!(play_once(&mut app), 0, "Pong again, after Box Head: no avatar");
     }
 }

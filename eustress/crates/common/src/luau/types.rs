@@ -15,6 +15,39 @@ use crate::scripting::{Vector3, CFrame, Color3};
 #[cfg(feature = "luau")]
 use mlua::{UserData, UserDataMethods, UserDataFields, Lua, Result as LuaResult, Value, MetaMethod, FromLua};
 
+/// Read a script value type out of its userdata without holding a borrow.
+///
+/// `AnyUserData::borrow` takes an exclusive lock under mlua's `send`
+/// feature, so it fails whenever the same object is already borrowed: as
+/// `self` inside its own metamethod (`v + v`, `v:Dot(v)`, `a == a`). A
+/// scoped borrow takes a shared lock and copies the value out.
+#[cfg(feature = "luau")]
+pub trait UserDataPeek {
+    fn peek<T: Clone + 'static>(&self) -> LuaResult<T>;
+}
+
+#[cfg(feature = "luau")]
+impl UserDataPeek for mlua::AnyUserData {
+    fn peek<T: Clone + 'static>(&self) -> LuaResult<T> {
+        self.borrow_scoped::<T, T>(|v| v.clone())
+    }
+}
+
+/// `__eq` for script value types. Luau calls `__eq` even when both
+/// operands are the same object, so identity answers first and only two
+/// distinct objects are compared by value.
+#[cfg(feature = "luau")]
+pub fn userdata_eq<T: Clone + 'static>(a: &Value, b: &Value, same: impl Fn(&T, &T) -> bool) -> bool {
+    let (Value::UserData(x), Value::UserData(y)) = (a, b) else { return false };
+    if x == y {
+        return true;
+    }
+    match (x.peek::<T>(), y.peek::<T>()) {
+        (Ok(p), Ok(q)) => same(&p, &q),
+        _ => false,
+    }
+}
+
 // ============================================================================
 // 1. LuauVector3 — UserData wrapper for Vector3
 // ============================================================================
@@ -48,6 +81,8 @@ impl From<LuauVector3> for Vector3 {
 #[cfg(feature = "luau")]
 impl UserData for LuauVector3 {
     fn add_fields<F: UserDataFields<Self>>(fields: &mut F) {
+        // `typeof(v) == "Vector3"`, as in Roblox.
+        fields.add_meta_field("__type", "Vector3");
         fields.add_field_method_get("X", |_, this| Ok(this.0.x));
         fields.add_field_method_get("Y", |_, this| Ok(this.0.y));
         fields.add_field_method_get("Z", |_, this| Ok(this.0.z));
@@ -86,31 +121,25 @@ impl UserData for LuauVector3 {
             Ok(LuauVector3(this.0 - other.0))
         });
 
-        methods.add_meta_method(MetaMethod::Mul, |_, this, value: Value| {
-            match value {
-                Value::Number(n) => Ok(LuauVector3(this.0 * n)),
-                Value::Integer(i) => Ok(LuauVector3(this.0 * (i as f64))),
-                Value::UserData(ud) => {
-                    if let Ok(other) = ud.borrow::<LuauVector3>() {
-                        // Component-wise multiplication
-                        Ok(LuauVector3(Vector3::new(
-                            this.0.x * other.0.x,
-                            this.0.y * other.0.y,
-                            this.0.z * other.0.z,
-                        )))
-                    } else {
-                        Err(mlua::Error::RuntimeError("Expected number or Vector3".into()))
-                    }
-                }
-                _ => Err(mlua::Error::RuntimeError("Expected number or Vector3".into())),
+        // `*` and `/` are functions, not methods: Luau passes the operands in
+        // source order, so `2 * v` arrives as (2, v) and a method would try to
+        // read the number as a Vector3.
+        methods.add_meta_function(MetaMethod::Mul, |_, (a, b): (Value, Value)| {
+            match (vector3_operand(&a), vector3_operand(&b), number_operand(&a), number_operand(&b)) {
+                // Component-wise multiplication
+                (Some(x), Some(y), _, _) => Ok(LuauVector3(Vector3::new(x.x * y.x, x.y * y.y, x.z * y.z))),
+                (Some(x), None, _, Some(n)) => Ok(LuauVector3(x * n)),
+                (None, Some(y), Some(n), _) => Ok(LuauVector3(y * n)),
+                _ => Err(mlua::Error::RuntimeError("Vector3 * expects a number or Vector3".into())),
             }
         });
 
-        methods.add_meta_method(MetaMethod::Div, |_, this, value: Value| {
-            match value {
-                Value::Number(n) => Ok(LuauVector3(this.0 / n)),
-                Value::Integer(i) => Ok(LuauVector3(this.0 / (i as f64))),
-                _ => Err(mlua::Error::RuntimeError("Expected number".into())),
+        methods.add_meta_function(MetaMethod::Div, |_, (a, b): (Value, Value)| {
+            match (vector3_operand(&a), vector3_operand(&b), number_operand(&a), number_operand(&b)) {
+                (Some(x), Some(y), _, _) => Ok(LuauVector3(Vector3::new(x.x / y.x, x.y / y.y, x.z / y.z))),
+                (Some(x), None, _, Some(n)) => Ok(LuauVector3(x / n)),
+                (None, Some(y), Some(n), _) => Ok(LuauVector3(Vector3::new(n / y.x, n / y.y, n / y.z))),
+                _ => Err(mlua::Error::RuntimeError("Vector3 / expects a number or Vector3".into())),
             }
         });
 
@@ -118,8 +147,8 @@ impl UserData for LuauVector3 {
             Ok(LuauVector3(-this.0))
         });
 
-        methods.add_meta_method(MetaMethod::Eq, |_, this, other: LuauVector3| {
-            Ok(this.0 == other.0)
+        methods.add_meta_function(MetaMethod::Eq, |_, (a, b): (Value, Value)| {
+            Ok(userdata_eq::<LuauVector3>(&a, &b, |p, q| p.0 == q.0))
         });
 
         methods.add_meta_method(MetaMethod::ToString, |_, this, ()| {
@@ -129,12 +158,29 @@ impl UserData for LuauVector3 {
 }
 
 #[cfg(feature = "luau")]
+fn vector3_operand(v: &Value) -> Option<Vector3> {
+    match v {
+        Value::UserData(ud) => ud.peek::<LuauVector3>().ok().map(|x| x.0),
+        _ => None,
+    }
+}
+
+#[cfg(feature = "luau")]
+fn number_operand(v: &Value) -> Option<f64> {
+    match v {
+        Value::Number(n) => Some(*n),
+        Value::Integer(i) => Some(*i as f64),
+        _ => None,
+    }
+}
+
+#[cfg(feature = "luau")]
 impl FromLua for LuauVector3 {
     fn from_lua(value: Value, _lua: &Lua) -> LuaResult<Self> {
         match value {
             Value::UserData(ud) => {
-                let v = ud.borrow::<LuauVector3>()?;
-                Ok(*v)
+                let v = ud.peek::<LuauVector3>()?;
+                Ok(v)
             }
             _ => Err(mlua::Error::FromLuaConversionError {
                 from: value.type_name(),
@@ -183,8 +229,24 @@ impl From<LuauCFrame> for CFrame {
 #[cfg(feature = "luau")]
 impl UserData for LuauCFrame {
     fn add_fields<F: UserDataFields<Self>>(fields: &mut F) {
+        fields.add_meta_field("__type", "CFrame");
         fields.add_field_method_get("Position", |_, this| {
             Ok(LuauVector3(this.0.position))
+        });
+        fields.add_field_method_get("p", |_, this| {
+            Ok(LuauVector3(this.0.position))
+        });
+        fields.add_field_method_get("Rotation", |_, this| {
+            Ok(LuauCFrame(this.0.rotation_only()))
+        });
+        fields.add_field_method_get("XVector", |_, this| {
+            Ok(LuauVector3(this.0.right_vector()))
+        });
+        fields.add_field_method_get("YVector", |_, this| {
+            Ok(LuauVector3(this.0.up_vector()))
+        });
+        fields.add_field_method_get("ZVector", |_, this| {
+            Ok(LuauVector3(this.0.back_vector()))
         });
         fields.add_field_method_get("X", |_, this| Ok(this.0.position.x));
         fields.add_field_method_get("Y", |_, this| Ok(this.0.position.y));
@@ -250,8 +312,13 @@ impl UserData for LuauCFrame {
         });
 
         methods.add_method("ToEulerAnglesYXZ", |_, this, ()| {
-            let (ry, rx, rz) = this.0.to_euler_angles_yxz();
-            Ok((ry, rx, rz))
+            let (rx, ry, rz) = this.0.to_euler_angles_yxz();
+            Ok((rx, ry, rz))
+        });
+
+        methods.add_method("ToOrientation", |_, this, ()| {
+            let (rx, ry, rz) = this.0.to_euler_angles_yxz();
+            Ok((rx, ry, rz))
         });
 
         // Axis-angle
@@ -264,9 +331,9 @@ impl UserData for LuauCFrame {
         methods.add_meta_method(MetaMethod::Mul, |lua, this, value: Value| {
             match value {
                 Value::UserData(ud) => {
-                    if let Ok(other) = ud.borrow::<LuauCFrame>() {
+                    if let Ok(other) = ud.peek::<LuauCFrame>() {
                         Ok(Value::UserData(lua.create_userdata(LuauCFrame(this.0 * other.0))?))
-                    } else if let Ok(vec) = ud.borrow::<LuauVector3>() {
+                    } else if let Ok(vec) = ud.peek::<LuauVector3>() {
                         // CFrame * Vector3 = transform point
                         Ok(Value::UserData(lua.create_userdata(LuauVector3(this.0.point_to_world_space(vec.0)))?))
                     } else {
@@ -285,8 +352,8 @@ impl UserData for LuauCFrame {
             Ok(LuauCFrame(this.0 - offset.0))
         });
 
-        methods.add_meta_method(MetaMethod::Eq, |_, this, other: LuauCFrame| {
-            Ok(this.0 == other.0)
+        methods.add_meta_function(MetaMethod::Eq, |_, (a, b): (Value, Value)| {
+            Ok(userdata_eq::<LuauCFrame>(&a, &b, |p, q| p.0 == q.0))
         });
 
         methods.add_meta_method(MetaMethod::ToString, |_, this, ()| {
@@ -301,8 +368,8 @@ impl FromLua for LuauCFrame {
     fn from_lua(value: Value, _lua: &Lua) -> LuaResult<Self> {
         match value {
             Value::UserData(ud) => {
-                let cf = ud.borrow::<LuauCFrame>()?;
-                Ok(*cf)
+                let cf = ud.peek::<LuauCFrame>()?;
+                Ok(cf)
             }
             _ => Err(mlua::Error::FromLuaConversionError {
                 from: value.type_name(),
@@ -346,6 +413,7 @@ impl From<LuauColor3> for Color3 {
 #[cfg(feature = "luau")]
 impl UserData for LuauColor3 {
     fn add_fields<F: UserDataFields<Self>>(fields: &mut F) {
+        fields.add_meta_field("__type", "Color3");
         fields.add_field_method_get("R", |_, this| Ok(this.0.r));
         fields.add_field_method_get("G", |_, this| Ok(this.0.g));
         fields.add_field_method_get("B", |_, this| Ok(this.0.b));
@@ -369,8 +437,8 @@ impl UserData for LuauColor3 {
         });
 
         // Metamethods
-        methods.add_meta_method(MetaMethod::Eq, |_, this, other: LuauColor3| {
-            Ok(this.0 == other.0)
+        methods.add_meta_function(MetaMethod::Eq, |_, (a, b): (Value, Value)| {
+            Ok(userdata_eq::<LuauColor3>(&a, &b, |p, q| p.0 == q.0))
         });
 
         methods.add_meta_method(MetaMethod::ToString, |_, this, ()| {
@@ -384,8 +452,8 @@ impl FromLua for LuauColor3 {
     fn from_lua(value: Value, _lua: &Lua) -> LuaResult<Self> {
         match value {
             Value::UserData(ud) => {
-                let c = ud.borrow::<LuauColor3>()?;
-                Ok(*c)
+                let c = ud.peek::<LuauColor3>()?;
+                Ok(c)
             }
             _ => Err(mlua::Error::FromLuaConversionError {
                 from: value.type_name(),
@@ -424,22 +492,53 @@ pub fn inject_types(lua: &Lua) -> LuaResult<()> {
     // CFrame constructor table
     let cframe_table = lua.create_table()?;
 
-    cframe_table.set("new", lua.create_function(|_, args: mlua::Variadic<f64>| {
-        let args: Vec<f64> = args.into_iter().collect();
-        match args.len() {
-            0 => Ok(LuauCFrame(CFrame::IDENTITY)),
-            3 => Ok(LuauCFrame::new(args[0], args[1], args[2])),
-            12 => {
-                // Full matrix constructor
-                Ok(LuauCFrame(CFrame::from_matrix(
-                    Vector3::new(args[0], args[1], args[2]),
-                    Vector3::new(args[3], args[4], args[5]),
-                    Vector3::new(args[6], args[7], args[8]),
-                    Vector3::new(args[9], args[10], args[11]),
-                )))
+    cframe_table.set("new", lua.create_function(|_, args: mlua::Variadic<Value>| {
+        let args: Vec<Value> = args.into_iter().collect();
+        // CFrame.new(pos) / CFrame.new(pos, lookAt): the Vector3 forms are
+        // the most common in real scripts.
+        if let Some(Value::UserData(first)) = args.first() {
+            let pos = first.peek::<LuauVector3>()?.0;
+            return match args.get(1) {
+                Some(Value::UserData(second)) => {
+                    let target = second.peek::<LuauVector3>()?.0;
+                    Ok(LuauCFrame(CFrame::look_at(pos, target, None)))
+                }
+                _ => Ok(LuauCFrame(CFrame::from_position(pos))),
+            };
+        }
+        let mut nums = Vec::with_capacity(args.len());
+        for v in &args {
+            match v {
+                Value::Number(n) => nums.push(*n),
+                Value::Integer(i) => nums.push(*i as f64),
+                other => {
+                    return Err(mlua::Error::RuntimeError(format!(
+                        "CFrame.new: expected number, got {}",
+                        other.type_name()
+                    )))
+                }
             }
+        }
+        match nums.len() {
+            0 => Ok(LuauCFrame(CFrame::IDENTITY)),
+            3 => Ok(LuauCFrame::new(nums[0], nums[1], nums[2])),
+            // x, y, z, qx, qy, qz, qw
+            7 => {
+                let mut cf = CFrame::from_quaternion([nums[3], nums[4], nums[5], nums[6]]);
+                cf.position = Vector3::new(nums[0], nums[1], nums[2]);
+                Ok(LuauCFrame(cf))
+            }
+            // x, y, z, R00, R01, R02, R10, R11, R12, R20, R21, R22 (row-major)
+            12 => Ok(LuauCFrame(CFrame::from_rotation_matrix(
+                Vector3::new(nums[0], nums[1], nums[2]),
+                [
+                    [nums[3], nums[4], nums[5]],
+                    [nums[6], nums[7], nums[8]],
+                    [nums[9], nums[10], nums[11]],
+                ],
+            ))),
             _ => Err(mlua::Error::RuntimeError(
-                "CFrame.new expects 0, 3, or 12 arguments".into()
+                "CFrame.new expects 0, 3, 7 or 12 numbers, or one or two Vector3".into()
             )),
         }
     })?)?;
@@ -452,8 +551,12 @@ pub fn inject_types(lua: &Lua) -> LuaResult<()> {
         Ok(LuauCFrame(CFrame::from_euler_angles_xyz(rx, ry, rz)))
     })?)?;
 
-    cframe_table.set("fromEulerAnglesYXZ", lua.create_function(|_, (ry, rx, rz): (f64, f64, f64)| {
-        Ok(LuauCFrame(CFrame::from_euler_angles_yxz(ry, rx, rz)))
+    cframe_table.set("fromEulerAnglesYXZ", lua.create_function(|_, (rx, ry, rz): (f64, f64, f64)| {
+        Ok(LuauCFrame(CFrame::from_euler_angles_yxz(rx, ry, rz)))
+    })?)?;
+
+    cframe_table.set("fromOrientation", lua.create_function(|_, (rx, ry, rz): (f64, f64, f64)| {
+        Ok(LuauCFrame(CFrame::from_euler_angles_yxz(rx, ry, rz)))
     })?)?;
 
     cframe_table.set("fromAxisAngle", lua.create_function(|_, (axis, angle): (LuauVector3, f64)| {
@@ -600,6 +703,7 @@ impl LuauUDim {
 #[cfg(feature = "luau")]
 impl UserData for LuauUDim {
     fn add_fields<F: UserDataFields<Self>>(fields: &mut F) {
+        fields.add_meta_field("__type", "UDim");
         fields.add_field_method_get("Scale", |_, this| Ok(this.scale));
         fields.add_field_method_get("Offset", |_, this| Ok(this.offset));
     }
@@ -624,8 +728,8 @@ impl FromLua for LuauUDim {
     fn from_lua(value: Value, _lua: &Lua) -> LuaResult<Self> {
         match value {
             Value::UserData(ud) => {
-                let u = ud.borrow::<LuauUDim>()?;
-                Ok(*u)
+                let u = ud.peek::<LuauUDim>()?;
+                Ok(u)
             }
             _ => Err(mlua::Error::FromLuaConversionError {
                 from: value.type_name(),
@@ -666,6 +770,7 @@ impl LuauUDim2 {
 #[cfg(feature = "luau")]
 impl UserData for LuauUDim2 {
     fn add_fields<F: UserDataFields<Self>>(fields: &mut F) {
+        fields.add_meta_field("__type", "UDim2");
         fields.add_field_method_get("X", |_, this| {
             Ok(LuauUDim::new(this.x_scale, this.x_offset))
         });
@@ -720,8 +825,8 @@ impl FromLua for LuauUDim2 {
     fn from_lua(value: Value, _lua: &Lua) -> LuaResult<Self> {
         match value {
             Value::UserData(ud) => {
-                let u = ud.borrow::<LuauUDim2>()?;
-                Ok(*u)
+                let u = ud.peek::<LuauUDim2>()?;
+                Ok(u)
             }
             _ => Err(mlua::Error::FromLuaConversionError {
                 from: value.type_name(),
@@ -785,8 +890,8 @@ impl FromLua for LuauTweenInfo {
     fn from_lua(value: Value, _lua: &Lua) -> LuaResult<Self> {
         match value {
             Value::UserData(ud) => {
-                let t = ud.borrow::<LuauTweenInfo>()?;
-                Ok(*t)
+                let t = ud.peek::<LuauTweenInfo>()?;
+                Ok(t)
             }
             _ => Err(mlua::Error::FromLuaConversionError {
                 from: value.type_name(),

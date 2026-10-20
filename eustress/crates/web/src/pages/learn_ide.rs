@@ -1,9 +1,9 @@
 // =============================================================================
 // Eustress Web - IDE Integration Documentation Page
 // =============================================================================
-// Covers the @eustress/rune-lsp VS Code extension: what it does, why it's
-// useful, how to install it, the commands/settings it exposes, real-world
-// use cases, and a closing recap.
+// IDE Integration: editing Eustress scripts in your own editor. Scripts are
+// files Studio reloads on save, and the Eustress Rune LSP extension connects
+// VS Code and editors built on it to the Rune language server Studio starts.
 // =============================================================================
 
 use leptos::prelude::*;
@@ -25,53 +25,100 @@ struct TocSubsection {
 fn get_toc() -> Vec<TocSection> {
     vec![
         TocSection {
-            id: "intro",
-            title: "Introduction",
+            id: "overview",
+            title: "Overview",
             subsections: vec![
-                TocSubsection { id: "intro-what", title: "What It Does" },
-                TocSubsection { id: "intro-why", title: "Why It's Useful" },
+                TocSubsection { id: "overview-files", title: "Scripts Are Files" },
+                TocSubsection { id: "overview-editors", title: "Choosing an Editor" },
             ],
         },
         TocSection {
-            id: "how-to",
-            title: "How to Use It",
+            id: "disk",
+            title: "Editing on Disk",
             subsections: vec![
-                TocSubsection { id: "how-install", title: "Install the Extension" },
-                TocSubsection { id: "how-launch", title: "Launch Eustress Engine" },
-                TocSubsection { id: "how-open", title: "Open a Script" },
-                TocSubsection { id: "how-multi", title: "Multiple Universes" },
+                TocSubsection { id: "disk-open", title: "Open the Universe" },
+                TocSubsection { id: "disk-reload", title: "Save and Reload" },
+                TocSubsection { id: "disk-limits", title: "What the Watcher Skips" },
             ],
         },
         TocSection {
-            id: "api",
-            title: "API Reference",
+            id: "extension",
+            title: "VS Code Extension",
             subsections: vec![
-                TocSubsection { id: "api-commands", title: "Commands" },
-                TocSubsection { id: "api-settings", title: "Settings" },
-                TocSubsection { id: "api-features", title: "Language Features" },
-                TocSubsection { id: "api-protocol", title: "Transport Protocol" },
+                TocSubsection { id: "extension-install", title: "Install" },
+                TocSubsection { id: "extension-connect", title: "How It Finds Studio" },
+                TocSubsection { id: "extension-status", title: "Status and Commands" },
+                TocSubsection { id: "extension-standalone", title: "Without Studio" },
             ],
         },
         TocSection {
-            id: "use-cases",
-            title: "Use Cases",
+            id: "other",
+            title: "Other Editors",
             subsections: vec![
-                TocSubsection { id: "uc-engine", title: "Alongside the Engine" },
-                TocSubsection { id: "uc-headless", title: "Headless Script Editing" },
-                TocSubsection { id: "uc-team", title: "Team Collaboration" },
+                TocSubsection { id: "other-lsp", title: "Any LSP Client" },
+                TocSubsection { id: "other-luau", title: "Luau Files" },
             ],
         },
         TocSection {
-            id: "conclusion",
-            title: "Conclusion",
-            subsections: vec![],
+            id: "roadmap",
+            title: "What's Next",
+            subsections: vec![
+                TocSubsection { id: "roadmap-luau", title: "Luau in Your Editor" },
+                TocSubsection { id: "roadmap-packages", title: "One Install Everywhere" },
+            ],
         },
     ]
 }
 
+/// How an editor reaches the language server Studio starts: Studio launches
+/// eustress-lsp, the server records its port inside the Universe, and the
+/// extension reads that port and connects over loopback TCP.
+#[component]
+fn ConnectionDiagram() -> impl IntoView {
+    view! {
+        <figure class="docs-figure">
+            <svg class="docs-diagram" viewBox="0 0 640 230" role="img"
+                aria-label="Studio starts eustress-lsp. The server writes its port number to .eustress/lsp.port in the Universe folder. The editor extension reads that file and connects to the server over TCP on 127.0.0.1.">
+                <defs>
+                    <marker id="ide-arrow" viewBox="0 0 10 10" refX="9" refY="5"
+                        markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+                        <path d="M 0 0 L 10 5 L 0 10 z" class="dg-arrowhead"></path>
+                    </marker>
+                </defs>
+
+                // Top row: Studio starts the server, the server writes its port.
+                <rect x="20" y="40" width="150" height="54" rx="8" class="dg-box"></rect>
+                <text x="95" y="72" class="dg-label" text-anchor="middle">"Eustress Studio"</text>
+                <rect x="245" y="40" width="150" height="54" rx="8" class="dg-box dg-box-accent"></rect>
+                <text x="320" y="72" class="dg-label" text-anchor="middle">"eustress-lsp"</text>
+                <rect x="470" y="40" width="150" height="54" rx="8" class="dg-box dg-box-muted"></rect>
+                <text x="545" y="72" class="dg-label" text-anchor="middle">".eustress/lsp.port"</text>
+                <line x1="170" y1="67" x2="243" y2="67" class="dg-line" marker-end="url(#ide-arrow)"></line>
+                <text x="207" y="58" class="dg-note" text-anchor="middle">"starts"</text>
+                <line x1="395" y1="67" x2="468" y2="67" class="dg-line" marker-end="url(#ide-arrow)"></line>
+                <text x="432" y="58" class="dg-note" text-anchor="middle">"writes port"</text>
+
+                // Bottom: the editor reads the port, then talks to the server.
+                <rect x="245" y="160" width="150" height="54" rx="8" class="dg-box dg-box-violet"></rect>
+                <text x="320" y="192" class="dg-label" text-anchor="middle">"Your editor"</text>
+                <line x1="530" y1="94" x2="397" y2="170" class="dg-line dg-line-dashed" marker-end="url(#ide-arrow)"></line>
+                <text x="470" y="152" class="dg-note">"reads port"</text>
+                <line x1="320" y1="158" x2="320" y2="96" class="dg-line dg-line-accent" marker-start="url(#ide-arrow)" marker-end="url(#ide-arrow)"></line>
+                <text x="310" y="131" class="dg-note" text-anchor="end">"LSP over TCP, 127.0.0.1"</text>
+            </svg>
+            <figcaption>
+                "Studio starts the server and records its port inside the Universe. The extension
+                reads the port from that file and connects on the loopback address, so the server
+                only accepts connections from your own machine."
+            </figcaption>
+        </figure>
+    }
+}
+
+/// IDE Integration documentation page.
 #[component]
 pub fn LearnIdePage() -> impl IntoView {
-    let active_section = RwSignal::new("intro".to_string());
+    let active_section = RwSignal::new("overview".to_string());
 
     view! {
         <div class="page page-docs">
@@ -79,13 +126,13 @@ pub fn LearnIdePage() -> impl IntoView {
 
             <div class="docs-bg">
                 <div class="docs-grid-overlay"></div>
-                <div class="docs-glow glow-networking"></div>
+                <div class="docs-glow glow-ide"></div>
             </div>
 
             <div class="docs-layout">
                 <aside class="docs-toc">
                     <div class="toc-header">
-                        <img src="/assets/icons/code.svg" alt="IDE" class="toc-icon" />
+                        <img src="/assets/icons/edit.svg" alt="IDE Integration" class="toc-icon" />
                         <h2>"IDE Integration"</h2>
                     </div>
                     <nav class="toc-nav">
@@ -135,295 +182,444 @@ pub fn LearnIdePage() -> impl IntoView {
                         </div>
                         <h1 class="docs-title">"IDE Integration"</h1>
                         <p class="docs-subtitle">
-                            "Bring Rune script intelligence into VS Code, Windsurf, and Cursor.
-                            The " <code>"@eustress/rune-lsp"</code> " extension attaches to any running Eustress
-                            Engine instance over TCP and delivers diagnostics, hover, and navigation
-                            for every Rune script in your Universe."
+                            "IDE integration means editing Eustress scripts in the code editor you already
+                            use. Scripts are plain files in the Space folder, Studio reloads Rune scripts
+                            when you save, and the Eustress Rune LSP extension connects VS Code and editors
+                            built on it to the Rune language server that Studio starts."
                         </p>
                         <div class="docs-meta">
                             <span class="meta-item">
                                 <img src="/assets/icons/clock.svg" alt="Time" />
-                                "10 min read"
+                                "8 min read"
                             </span>
                             <span class="meta-item">
-                                <img src="/assets/icons/code.svg" alt="Level" />
+                                <img src="/assets/icons/cube.svg" alt="Level" />
                                 "Beginner"
                             </span>
                             <span class="meta-item">
                                 <img src="/assets/icons/check.svg" alt="Updated" />
-                                "v0.3.0"
+                                "Updated Sep 2026"
                             </span>
                         </div>
                     </header>
 
-                    // ── Introduction ─────────────────────────────────────
-                    <section id="intro" class="docs-section">
-                        <h2 class="section-anchor">"Introduction"</h2>
+                    // =========================================================
+                    // OVERVIEW
+                    // =========================================================
+                    <section id="overview" class="docs-section">
+                        <h2 class="section-title">
+                            <span class="section-number">"01"</span>
+                            "Overview"
+                        </h2>
 
-                        <div id="intro-what" class="docs-block">
-                            <h3>"What It Does"</h3>
+                        <div id="overview-files" class="subsection">
+                            <h3>"Scripts Are Files"</h3>
                             <p>
-                                "The Eustress IDE extension is a thin shim around the " <code>"eustress-lsp"</code>
-                                " binary that ships inside every engine install. When you open a "
-                                <code>".rune"</code> " file in VS Code (or any VS Code-derivative like Windsurf
-                                or Cursor), the extension finds the running engine, connects to its
-                                language server over TCP, and surfaces:"
+                                "A script in Eustress is a text file inside a Space folder: "
+                                <code>".rune"</code>" for Rune, "<code>".luau"</code>" (or "
+                                <code>".lua"</code>") for Luau. Studio keeps each script as a file in the
+                                Space folder and watches that folder while the Space is open, so you can edit
+                                scripts in any editor that saves text files."
                             </p>
+                            <p>
+                                "Inserting a "<strong>"Script"</strong>" from the Studio ribbon writes a
+                                folder of three files. With nothing selected in the Explorer, the folder goes
+                                into the Space's "<code>"SoulService"</code>" folder; otherwise it goes into
+                                the selected item's folder on disk."
+                            </p>
+                            <div class="code-block">
+                                <div class="code-header">
+                                    <span class="code-lang">"Universe folder"</span>
+                                </div>
+                                <pre><code class="language-text">{r#"MyUniverse/
+  .eustress/
+    lsp.port                 port of the language server Studio started
+    runtime-snapshot.json    simulation values, rewritten 4 times a second
+  Spaces/
+    MySpace/
+      SoulService/
+        SoulScript/
+          _instance.toml     says what the folder is
+          SoulScript.rune    the code you edit
+          SoulScript.md      a short summary"#}</code></pre>
+                            </div>
+                            <p>
+                                "The "<code>"_instance.toml"</code>" names the class and points at the source
+                                file. The "<strong>"LocalScript"</strong>" and "<strong>"ModuleScript"</strong>
+                                " inserts write "<code>"LuauLocalScript"</code>" and "
+                                <code>"LuauModuleScript"</code>" folders with a "<code>".luau"</code>
+                                " source instead."
+                            </p>
+                            <div class="code-block">
+                                <div class="code-header">
+                                    <span class="code-lang">"SoulScript/_instance.toml"</span>
+                                </div>
+                                <pre><code class="language-toml">{r#"[metadata]
+class_name = "SoulScript"
+archivable = true
+
+[script]
+source = "SoulScript.rune""#}</code></pre>
+                            </div>
+                        </div>
+
+                        <div id="overview-editors" class="subsection">
+                            <h3>"Choosing an Editor"</h3>
+                            <p>
+                                "Every option below edits the same files. They differ in how much the editor
+                                understands about Rune:"
+                            </p>
+                            <table class="docs-table">
+                                <thead>
+                                    <tr><th>"Editor"</th><th>"Rune support"</th><th>"Setup"</th></tr>
+                                </thead>
+                                <tbody>
+                                    <tr>
+                                        <td>"VS Code, Cursor, Windsurf"</td>
+                                        <td>"Highlighting, diagnostics, hover, completion, go to definition, rename"</td>
+                                        <td>"Install the Eustress Rune LSP extension"</td>
+                                    </tr>
+                                    <tr>
+                                        <td>"Neovim, Helix, other LSP clients"</td>
+                                        <td>"The same language features, from the same server"</td>
+                                        <td>"Point the client at "<code>"eustress-lsp"</code></td>
+                                    </tr>
+                                    <tr>
+                                        <td>"Studio's script editor"</td>
+                                        <td>"Squiggles and the Problems panel, from the same analyzer"</td>
+                                        <td>"Built in"</td>
+                                    </tr>
+                                    <tr>
+                                        <td>"Any other text editor"</td>
+                                        <td>"Plain editing; Studio still reloads Rune scripts on save"</td>
+                                        <td>"None"</td>
+                                    </tr>
+                                </tbody>
+                            </table>
+                            <div class="callout callout-info">
+                                <img src="/assets/icons/help.svg" alt="Info" />
+                                <div>
+                                    <strong>"One analyzer everywhere"</strong>
+                                    <p>
+                                        "Studio's squiggles, its Problems panel and the external language server
+                                        all run the same Rune analyzer, so a script reports the same errors, in
+                                        the same words, in every editor."
+                                    </p>
+                                </div>
+                            </div>
+                        </div>
+                    </section>
+
+                    // =========================================================
+                    // EDITING ON DISK
+                    // =========================================================
+                    <section id="disk" class="docs-section">
+                        <h2 class="section-title">
+                            <span class="section-number">"02"</span>
+                            "Editing on Disk"
+                        </h2>
+
+                        <div id="disk-open" class="subsection">
+                            <h3>"Open the Universe"</h3>
+                            <p>
+                                "Open the Universe folder, the one that contains "<code>"Spaces/"</code>
+                                ", as your editor's workspace. The language server walks up from the
+                                workspace to that folder and indexes every "<code>".rune"</code>" file below
+                                it, which is what lets go to definition and rename reach across scripts."
+                            </p>
+                            <p>
+                                "Opening a single Space folder works as well, because the server walks up
+                                from there to the Universe. A folder outside any Universe limits those
+                                features to the file you have open."
+                            </p>
+                        </div>
+
+                        <div id="disk-reload" class="subsection">
+                            <h3>"Save and Reload"</h3>
+                            <p>
+                                "Studio watches the folder of the Space that is open. After a save, the
+                                watcher waits 300 ms for the file system to settle, then until 350 ms pass
+                                with no new changes (1.2 s at most), and applies the whole batch at once, so
+                                a single save reaches Studio in under a second. Editors that save by writing a
+                                temporary file and renaming it over the original are treated as an ordinary
+                                edit."
+                            </p>
+                            <table class="docs-table">
+                                <thead>
+                                    <tr><th>"When you save a Rune script"</th><th>"What Studio does"</th></tr>
+                                </thead>
+                                <tbody>
+                                    <tr>
+                                        <td>"During Play"</td>
+                                        <td>"Recompiles the script right away and runs its "<code>"on_init"</code>" again against the new code. Compile errors appear in the Output panel."</td>
+                                    </tr>
+                                    <tr>
+                                        <td>"While editing"</td>
+                                        <td>"Keeps the new text and compiles it when you press Play."</td>
+                                    </tr>
+                                </tbody>
+                            </table>
+                            <p>"Live reload covers Rune scripts only in this build."</p>
+                            <p>"To see the loop work:"</p>
+                            <ol class="numbered-list">
+                                <li>"Open a Space that has a Rune script and press "<strong>"Play"</strong>"."</li>
+                                <li>"In your editor, delete a closing brace from the script and save."</li>
+                                <li>"The Output panel shows the compile error, tagged "<code>"rune"</code>"."</li>
+                                <li>"Put the brace back and save. The script recompiles and its "<code>"on_init"</code>" runs again."</li>
+                            </ol>
+                        </div>
+
+                        <div id="disk-limits" class="subsection">
+                            <h3>"What the Watcher Skips"</h3>
+                            <div class="callout callout-advanced">
+                                <img src="/assets/icons/settings.svg" alt="Advanced" />
+                                <div>
+                                    <strong>"Saves in the first 5 seconds are ignored"</strong>
+                                    <p>
+                                        "For 5 seconds after a Space opens, the watcher ignores changes to
+                                        files that already exist, because the operating system reports a burst
+                                        of spurious edits while the watch starts. If you saved in that window,
+                                        save again."
+                                    </p>
+                                </div>
+                            </div>
                             <ul class="docs-list">
-                                <li>"Real-time parse and compile errors as red squiggles"</li>
-                                <li>"Hover tooltips with types and documentation"</li>
-                                <li>"Go-to-definition (F12) and find-references (Shift+F12)"</li>
-                                <li>"Symbol-aware completion"</li>
-                                <li>"Cross-file rename across the entire Universe"</li>
+                                <li><strong>"Other Spaces."</strong>" Studio watches the Space that is open, not the whole Universe."</li>
+                                <li><strong>"Hidden folders."</strong>" Anything inside a folder whose name starts with a dot, such as "<code>".eustress"</code>", is ignored."</li>
+                                <li><strong>"Studio's own writes."</strong>" A file Studio wrote in the last 2 seconds is not reloaded, so its saves never loop back as edits."</li>
                             </ul>
                         </div>
-
-                        <div id="intro-why" class="docs-block">
-                            <h3>"Why It's Useful"</h3>
-                            <p>
-                                "Eustress Engine has a built-in script editor, but many creators prefer
-                                their daily driver editor — VS Code for keyboard muscle memory, Windsurf
-                                or Cursor for AI completion. The IDE extension lets you stay in that
-                                editor while the engine keeps running in the background, hot-reloading
-                                scripts as you save."
-                            </p>
-                            <div class="docs-callout info">
-                                <strong>"No vendor lock-in:"</strong>
-                                " the protocol is stock LSP over TCP. If tomorrow someone writes a Neovim
-                                or Zed adapter, it will work against the same running engine."
-                            </div>
-                        </div>
                     </section>
 
-                    // ── How to Use It ────────────────────────────────────
-                    <section id="how-to" class="docs-section">
-                        <h2 class="section-anchor">"How to Use It"</h2>
+                    // =========================================================
+                    // VS CODE EXTENSION
+                    // =========================================================
+                    <section id="extension" class="docs-section">
+                        <h2 class="section-title">
+                            <span class="section-number">"03"</span>
+                            "VS Code Extension"
+                        </h2>
 
-                        <div id="how-install" class="docs-block">
-                            <h3>"Install the Extension"</h3>
+                        <div id="extension-install" class="subsection">
+                            <h3>"Install"</h3>
                             <p>
-                                "Install from "
-                                <a href="https://open-vsx.org/extension/WeaveITMeta/rune-lsp" target="_blank" rel="noopener">"Open VSX"</a>
-                                " (the registry Windsurf, Cursor, VSCodium, and most VS Code forks use), or drop in the VSIX that ships with Eustress Engine:"
-                            </p>
-                            <pre class="code-block"><code>{"# Windsurf / Cursor / VSCodium / any Open VSX-enabled editor:
-#   UI:  Extensions panel → search 'Rune LSP' → Install
-#   CLI:
-code --install-extension WeaveITMeta.rune-lsp
-
-# Or sideload the bundled VSIX from the engine install directory:
-code --install-extension %INSTALL%/extensions/rune-lsp-0.3.6.vsix"}</code></pre>
-                            <p>
-                                "Direct link: "
-                                <a href="https://open-vsx.org/extension/WeaveITMeta/rune-lsp" target="_blank" rel="noopener">
-                                    "open-vsx.org/extension/WeaveITMeta/rune-lsp"
-                                </a>
-                            </p>
-                        </div>
-
-                        <div id="how-launch" class="docs-block">
-                            <h3>"Launch Eustress Engine"</h3>
-                            <p>
-                                "Open your Universe in Eustress Engine. On startup the engine spawns "
-                                <code>"eustress-lsp --tcp"</code> " and writes the assigned port to "
-                                <code>".eustress/lsp.port"</code> " inside the Universe root. Nothing else to do."
-                            </p>
-                        </div>
-
-                        <div id="how-open" class="docs-block">
-                            <h3>"Open a Script"</h3>
-                            <p>
-                                "In VS Code, open any file under the Universe. The extension walks up
-                                the directory tree looking for " <code>".eustress/lsp.port"</code> ", connects
-                                to that port, and binds the document to the matching engine instance.
-                                A status bar indicator (" <code>"Rune: connected"</code> ") confirms the link."
-                            </p>
-                        </div>
-
-                        <div id="how-multi" class="docs-block">
-                            <h3>"Multiple Universes"</h3>
-                            <p>
-                                "If you have two engines running in two different Universes, each writes
-                                its own port file. The extension maintains one client per Universe, keyed
-                                by the discovered port, and scopes each client's " <code>"documentSelector"</code>
-                                " to that Universe's directory. Cross-Universe routing happens automatically —
-                                no editor restart needed when you swap projects."
-                            </p>
-                        </div>
-                    </section>
-
-                    // ── API Reference ────────────────────────────────────
-                    <section id="api" class="docs-section">
-                        <h2 class="section-anchor">"API Reference"</h2>
-
-                        <div id="api-commands" class="docs-block">
-                            <h3>"Commands"</h3>
-                            <div class="api-table">
-                                <div class="api-row">
-                                    <code>"rune.restart"</code>
-                                    <span>"Stop every LSP client and re-scan for running engines"</span>
-                                </div>
-                                <div class="api-row">
-                                    <code>"rune.showOutput"</code>
-                                    <span>"Reveal the extension's Output channel for debugging"</span>
-                                </div>
-                                <div class="api-row">
-                                    <code>"rune.reconnectActive"</code>
-                                    <span>"Force-reconnect the client for the active file's Universe"</span>
-                                </div>
-                            </div>
-                        </div>
-
-                        <div id="api-settings" class="docs-block">
-                            <h3>"Settings"</h3>
-                            <div class="api-table">
-                                <div class="api-row">
-                                    <code>"rune.serverPath"</code>
-                                    <span>"Override the eustress-lsp binary (defaults to bundled / engine-adjacent / PATH)"</span>
-                                </div>
-                                <div class="api-row">
-                                    <code>"rune.transport"</code>
-                                    <span>"\"tcp\" (default — connect to running engine) or \"stdio\" (spawn a private server)"</span>
-                                </div>
-                                <div class="api-row">
-                                    <code>"rune.traceServer"</code>
-                                    <span>"\"off\" | \"messages\" | \"verbose\" — LSP JSON-RPC tracing"</span>
-                                </div>
-                                <div class="api-row">
-                                    <code>"rune.startupNotification"</code>
-                                    <span>"Show the connection status toast on attach (default: true)"</span>
-                                </div>
-                            </div>
-                        </div>
-
-                        <div id="api-features" class="docs-block">
-                            <h3>"Language Features"</h3>
-                            <p>"The server advertises the following LSP capabilities:"</p>
-                            <div class="api-table">
-                                <div class="api-row">
-                                    <code>"textDocument/publishDiagnostics"</code>
-                                    <span>"Push-model diagnostics on every change (80 ms debounce)"</span>
-                                </div>
-                                <div class="api-row">
-                                    <code>"textDocument/hover"</code>
-                                    <span>"Symbol kind, span, docstring, and diagnostic-under-cursor"</span>
-                                </div>
-                                <div class="api-row">
-                                    <code>"textDocument/definition"</code>
-                                    <span>"Jump to the declaration site of a symbol"</span>
-                                </div>
-                                <div class="api-row">
-                                    <code>"textDocument/references"</code>
-                                    <span>"Find every usage of a symbol across the open document"</span>
-                                </div>
-                                <div class="api-row">
-                                    <code>"textDocument/completion"</code>
-                                    <span>"Prefix-filtered completions drawn from the symbol index"</span>
-                                </div>
-                                <div class="api-row">
-                                    <code>"textDocument/rename"</code>
-                                    <span>"Comment- and string-aware rename across the document"</span>
-                                </div>
-                                <div class="api-row">
-                                    <code>"textDocument/codeAction"</code>
-                                    <span>"Quick fixes for the current diagnostic (when applicable)"</span>
-                                </div>
-                                <div class="api-row">
-                                    <code>"textDocument/documentSymbol"</code>
-                                    <span>"Outline: functions, structs, constants, modules"</span>
-                                </div>
-                            </div>
-                        </div>
-
-                        <div id="api-protocol" class="docs-block">
-                            <h3>"Transport Protocol"</h3>
-                            <p>
-                                "The extension uses stock " <code>"vscode-languageclient"</code> " talking to a "
-                                <code>"tower-lsp"</code> " server. Transport is either:"
+                                "The extension is "<strong>"Eustress Rune LSP"</strong>", published on the
+                                Open VSX registry as "<code>"WeaveITMeta.rune-lsp"</code>" (version 0.3.6). It
+                                needs VS Code 1.85 or newer, or an editor built on it."
                             </p>
                             <ul class="docs-list">
-                                <li>
-                                    <strong>"TCP"</strong>
-                                    " (default): the engine writes " <code>".eustress/lsp.port"</code>
-                                    " at startup; the extension connects to " <code>"127.0.0.1:{port}"</code>
-                                </li>
-                                <li>
-                                    <strong>"stdio"</strong>
-                                    ": the extension spawns its own " <code>"eustress-lsp"</code>
-                                    " subprocess and speaks LSP over stdin/stdout"
-                                </li>
+                                <li><strong>"Editors that install from Open VSX"</strong>": search the Extensions view for Eustress Rune LSP."</li>
+                                <li><strong>"VS Code"</strong>": Microsoft's marketplace does not list the extension. Download "<code>"WeaveITMeta.rune-lsp-0.3.6.vsix"</code>" from "<a href="https://open-vsx.org/extension/WeaveITMeta/rune-lsp">"its Open VSX page"</a>", then run "<strong>"Extensions: Install from VSIX"</strong>" from the Command Palette, or install it from a terminal."</li>
                             </ul>
-                            <div class="docs-callout info">
-                                <strong>"Privacy:"</strong>
-                                " the TCP socket is bound to loopback only. Nothing leaves your machine."
+                            <div class="code-block">
+                                <div class="code-header">
+                                    <span class="code-lang">"Terminal"</span>
+                                </div>
+                                <pre><code class="language-bash">{r#"code --install-extension WeaveITMeta.rune-lsp-0.3.6.vsix"#}</code></pre>
+                            </div>
+                            <p>
+                                "Besides the server connection, the extension registers a "<code>"rune"</code>
+                                " language for "<code>".rune"</code>" files: a TextMate grammar that colors
+                                Rune before the server connects, "<code>"//"</code>" and "<code>"/* */"</code>
+                                " comments, bracket matching and auto-closing, and folding between "
+                                <code>"// #region"</code>" and "<code>"// #endregion"</code>" markers."
+                            </p>
+                            <p>
+                                "Its source lives in the Eustress repository under "
+                                <code>"infrastructure/extensions/lsp/vscode"</code>", and "
+                                <code>"infrastructure/extensions/lsp/scripts/build-vsix.sh"</code>
+                                " packages a "<code>".vsix"</code>" of your own."
+                            </p>
+                        </div>
+
+                        <div id="extension-connect" class="subsection">
+                            <h3>"How It Finds Studio"</h3>
+                            <ol class="numbered-list">
+                                <li>"When a Space is open, Studio starts "<code>"eustress-lsp"</code>" in TCP mode, and the server writes its port number to "<code>".eustress/lsp.port"</code>" in the Universe folder."</li>
+                                <li>"The extension activates in any workspace that contains a "<code>".rune"</code>" file or a "<code>".eustress/lsp.port"</code>" file."</li>
+                                <li>"When you open a "<code>".rune"</code>" file, it walks up to the Universe folder, reads the port file and connects to "<code>"127.0.0.1"</code>" on that port. A connection attempt is abandoned after 1.5 seconds, so a stale port file never hangs the editor."</li>
+                                <li>"Each Universe gets its own connection, limited to its own "<code>".rune"</code>" files, so one window can edit scripts from Universes open in two copies of Studio."</li>
+                            </ol>
+                            <ConnectionDiagram />
+                            <div class="callout callout-tip">
+                                <img src="/assets/icons/sparkles.svg" alt="Tip" />
+                                <div>
+                                    <strong>"After Studio replaces its server"</strong>
+                                    <p>
+                                        "Studio runs one server per Universe and replaces it when you open a
+                                        Space in a different Universe. Run "
+                                        <strong>"Eustress: Restart Rune Language Server"</strong>
+                                        " to reconnect."
+                                    </p>
+                                </div>
                             </div>
                         </div>
+
+                        <div id="extension-status" class="subsection">
+                            <h3>"Status and Commands"</h3>
+                            <p>"A status bar item on the right shows the connection:"</p>
+                            <table class="docs-table">
+                                <thead>
+                                    <tr><th>"Status bar"</th><th>"Meaning"</th><th>"Click to"</th></tr>
+                                </thead>
+                                <tbody>
+                                    <tr><td><code>"Rune LSP"</code>" with a check mark"</td><td>"Connected"</td><td>"Restart the connections"</td></tr>
+                                    <tr><td><code>"Rune LSP: starting…"</code></td><td>"Connecting to Studio or launching a server"</td><td>"Show the server path"</td></tr>
+                                    <tr><td><code>"Rune LSP: engine not running"</code></td><td>"No port file, and no standalone server found"</td><td>"Open setup help"</td></tr>
+                                    <tr><td><code>"Rune LSP: error"</code></td><td>"The connection or the server failed"</td><td>"Open the output"</td></tr>
+                                </tbody>
+                            </table>
+                            <p>"The Command Palette has four commands:"</p>
+                            <table class="docs-table">
+                                <thead>
+                                    <tr><th>"Command"</th><th>"What it does"</th></tr>
+                                </thead>
+                                <tbody>
+                                    <tr><td><strong>"Eustress: Restart Rune Language Server"</strong></td><td>"Stops every connection, then reconnects each open Rune file"</td></tr>
+                                    <tr><td><strong>"Eustress: Set up Rune Language Server…"</strong></td><td>"Offers the Eustress download page, this page, or the server path setting"</td></tr>
+                                    <tr><td><strong>"Eustress: Show resolved server path"</strong></td><td>"Shows the standalone server the extension would launch, and the live connections"</td></tr>
+                                    <tr><td><strong>"Eustress: Show Rune Language Server output"</strong></td><td>"Opens the output of the first connection; each Universe has its own channel"</td></tr>
+                                </tbody>
+                            </table>
+                        </div>
+
+                        <div id="extension-standalone" class="subsection">
+                            <h3>"Without Studio"</h3>
+                            <p>
+                                "With no port file to follow, the extension launches a server of its own over
+                                stdio, using the first of these that exists:"
+                            </p>
+                            <ol class="numbered-list">
+                                <li>"The "<code>"eustress.serverPath"</code>" setting"</li>
+                                <li>"The "<code>"EUSTRESS_LSP_PATH"</code>" environment variable"</li>
+                                <li><code>"target/release/eustress-lsp"</code>", then "<code>"target/debug/eustress-lsp"</code>", in the first workspace folder (a source build of Eustress)"</li>
+                                <li>"A server packaged inside the extension, if the package has one"</li>
+                                <li><code>"eustress-lsp"</code>" on your "<code>"PATH"</code></li>
+                            </ol>
+                            <p>
+                                "If "<code>"eustress.serverPath"</code>" names a file that does not exist, the
+                                search stops there and the server is reported missing. When nothing is found,
+                                the status bar shows "<code>"Rune LSP: engine not running"</code>" and a
+                                prompt offers the download page."
+                            </p>
+                            <p>
+                                "The Windows installer puts "<code>"eustress-lsp.exe"</code>" beside the
+                                engine, in "<code>"C:\\Program Files\\Eustress Engine"</code>" by default, but
+                                does not add that folder to "<code>"PATH"</code>". Point the setting at it:"
+                            </p>
+                            <div class="code-block">
+                                <div class="code-header">
+                                    <span class="code-lang">"settings.json"</span>
+                                </div>
+                                <pre><code class="language-json">{r#"{
+  "eustress.serverPath": "C:\\Program Files\\Eustress Engine\\eustress-lsp.exe"
+}"#}</code></pre>
+                            </div>
+                            <p>
+                                "A standalone server runs the same code as the one Studio starts, so every
+                                language feature is the same."
+                            </p>
+                        </div>
                     </section>
 
-                    // ── Use Cases ────────────────────────────────────────
-                    <section id="use-cases" class="docs-section">
-                        <h2 class="section-anchor">"Use Cases"</h2>
+                    // =========================================================
+                    // OTHER EDITORS
+                    // =========================================================
+                    <section id="other" class="docs-section">
+                        <h2 class="section-title">
+                            <span class="section-number">"04"</span>
+                            "Other Editors"
+                        </h2>
 
-                        <div id="uc-engine" class="docs-block">
-                            <h3>"Alongside the Engine"</h3>
+                        <div id="other-lsp" class="subsection">
+                            <h3>"Any LSP Client"</h3>
                             <p>
-                                "Keep Eustress Engine open on one monitor for the 3D viewport,
-                                Explorer, and Properties panels. Drive script editing from VS Code on
-                                the other monitor. Saves flow through the same file-system watcher the
-                                engine uses, so hot-reload Just Works."
+                                "Editors with a built-in LSP client, such as Neovim and Helix, need no
+                                extension. Tell the client three things:"
+                            </p>
+                            <table class="docs-table">
+                                <thead>
+                                    <tr><th>"Setting"</th><th>"Value"</th></tr>
+                                </thead>
+                                <tbody>
+                                    <tr><td>"Command"</td><td><code>"eustress-lsp"</code>", or its full path if its folder is not on "<code>"PATH"</code></td></tr>
+                                    <tr><td>"Files"</td><td><code>".rune"</code>", as a language named "<code>"rune"</code></td></tr>
+                                    <tr><td>"Root marker"</td><td><code>"Spaces"</code>", the folder that makes a directory a Universe"</td></tr>
+                                </tbody>
+                            </table>
+                            <p>
+                                "The server talks over stdio unless you pass "<code>"--tcp"</code>". The "
+                                <a href="/learn/lsp#setup">"Rune LSP"</a>" page has ready-to-paste Neovim and
+                                Helix configurations, and the flags for sharing one server over TCP."
                             </p>
                         </div>
 
-                        <div id="uc-headless" class="docs-block">
-                            <h3>"Headless Script Editing"</h3>
+                        <div id="other-luau" class="subsection">
+                            <h3>"Luau Files"</h3>
                             <p>
-                                "Writing Rune scripts on a low-powered laptop while your desktop runs
-                                the simulation? SSH in, run " <code>"eustress-lsp --tcp --port 0"</code>
-                                " bare (no engine), and point VS Code at the resulting port. You still get
-                                full language intelligence without the Bevy render cost."
+                                "Language features for Luau are not part of Eustress yet: "
+                                <code>"eustress-lsp"</code>" analyzes Rune only, and Studio writes no Luau
+                                type definitions or "<code>".luaurc"</code>" for other tools to read. Editor
+                                support for "<code>".luau"</code>" files comes from whatever Luau tooling you
+                                install, without knowledge of the Eustress API."
                             </p>
-                        </div>
-
-                        <div id="uc-team" class="docs-block">
-                            <h3>"Team Collaboration"</h3>
                             <p>
-                                "Every teammate can use their preferred editor. The extension's output
-                                matches what the engine's Problems panel shows, so bug reports across editors
-                                are consistent."
+                                "The "<a href="/docs/scripting">"Scripting"</a>" page covers both languages
+                                and the API they share."
                             </p>
                         </div>
                     </section>
 
-                    // ── Conclusion ───────────────────────────────────────
-                    <section id="conclusion" class="docs-section">
-                        <h2 class="section-anchor">"Conclusion"</h2>
-                        <p>
-                            "The IDE extension is the shortest path to Rune intelligence outside the
-                            the engine. Install once, launch Eustress Engine, and your editor of choice becomes
-                            a first-class Eustress workspace. Under the hood it's stock LSP — no magic,
-                            no lock-in, and the same analyzer the engine runs internally."
-                        </p>
-                        <div class="docs-callout info">
-                            <strong>"Next:"</strong>
-                            " if you want your AI assistant to reason about the Universe (not just the
-                            current file), read the " <a href="/learn/mcp">"MCP Server"</a>
-                            " guide. If you want to understand the server itself, read the "
-                            <a href="/learn/lsp">"Rune LSP"</a> " guide."
+                    // =========================================================
+                    // WHAT'S NEXT
+                    // =========================================================
+                    <section id="roadmap" class="docs-section">
+                        <h2 class="section-title">
+                            <span class="section-number">"05"</span>
+                            "What's Next"
+                        </h2>
+
+                        <div id="roadmap-luau" class="subsection">
+                            <h3>"Luau in Your Editor"</h3>
+                            <p>
+                                "Luau will catch up with Rune on two fronts: a type-definition file for the
+                                engine's Luau API, so standard Luau language servers can check Eustress
+                                scripts, and live reload during Play, so a saved "<code>".luau"</code>" file
+                                takes effect the way a saved "<code>".rune"</code>" file does."
+                            </p>
+                        </div>
+
+                        <div id="roadmap-packages" class="subsection">
+                            <h3>"One Install Everywhere"</h3>
+                            <p>
+                                "Today only the Windows installer places "<code>"eustress-lsp"</code>" beside
+                                the engine; the Windows zip, the macOS disk image and the Linux archive do not
+                                include it yet. Every package will include the server, so Studio starts it
+                                on any platform without a source build, and the extension will be listed on
+                                Microsoft's marketplace as well as Open VSX."
+                            </p>
+                            <div class="future-cta">
+                                <p><strong>"Write scripts in the editor you know. Press Play in Studio."</strong></p>
+                                <div class="cta-buttons">
+                                    <a href="/download" class="btn-primary-glow">"Download Eustress"</a>
+                                    <a href="/learn/lsp" class="btn-secondary-steel">"Rune LSP Docs"</a>
+                                </div>
+                            </div>
                         </div>
                     </section>
 
                     <nav class="docs-nav-footer">
-                        <a href="/docs/networking" class="nav-prev">
+                        <a href="/learn/cli" class="nav-prev">
                             <img src="/assets/icons/arrow-left.svg" alt="Previous" />
                             <div>
                                 <span class="nav-label">"Previous"</span>
-                                <span class="nav-title">"Networking"</span>
+                                <span class="nav-title">"CLI & Headless"</span>
                             </div>
                         </a>
-                        <a href="/learn/mcp" class="nav-next">
+                        <a href="/learn/lsp" class="nav-next">
                             <div>
                                 <span class="nav-label">"Next"</span>
-                                <span class="nav-title">"MCP Server"</span>
+                                <span class="nav-title">"Rune LSP"</span>
                             </div>
                             <img src="/assets/icons/arrow-right.svg" alt="Next" />
                         </a>

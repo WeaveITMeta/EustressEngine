@@ -1,0 +1,36 @@
+# TerrainSpline: a road, path, river, canyon or embankment baked over the
+# terrain along a spline through its TerrainSplinePoint children. The
+# terrain's own heights stay as they are; disable or delete the spline and
+# the ground comes back. Lives under Workspace/Terrain/Layers.
+#
+# mode: Road cuts and fills a flat bed to the smoothed elevation profile
+# and lays a drivable surface (a ribbon with its own collider) on it,
+# Path paints and smooths, River and Canyon carve depth below the profile,
+# Embankment raises depth above it. Widths and depth are metres; smoothing
+# is 0 to 1. Materials are built-in terrain material names, or "None".
+# water_surface and water_fill (River only) lay a flowing water surface along
+# the channel, filled to water_fill (0 to 1) of its depth; they carve nothing
+# and nothing collides with the water. Moving the spline moves every point
+# with it.
+
+[transform]
+position = [0.0, 0.0, 0.0]
+rotation = [0.0, 0.0, 0.0, 1.0]
+scale = [1.0, 1.0, 1.0]
+
+[terrain_spline]
+enabled = true
+order = 0
+mode = "Road"
+width = 8.0
+shoulder_width = 4.0
+depth = 3.0
+smoothing = 0.5
+bed_material = "Asphalt"
+shoulder_material = "Dirt"
+water_surface = true
+water_fill = 0.6
+
+[metadata]
+class_name = "TerrainSpline"
+archivable = true

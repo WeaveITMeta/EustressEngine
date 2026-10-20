@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 description = "Synchronous std-only client for the engine's TCP JSON-RPC Engine Bridge. Shared by the MCP server and the eustress CLI so both drive a live engine or eustress-headless the same way."
 authors = ["EustressEngine Contributors"]
-license = "MIT OR Apache-2.0"
+license = "PolyForm-Shield-1.0.0"
 
 [dependencies]
 # The wire format is JSON-RPC over newline-delimited JSON. Deliberately

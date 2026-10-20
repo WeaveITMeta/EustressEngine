@@ -259,9 +259,17 @@ pub struct AvatarRig {
     /// Mixamo clips animate hips translation — that is root motion. On a
     /// physics-driven character the capsule owns all translation, so the
     /// clip's displacement fights it: the mesh drifts off the capsule and
-    /// snaps back when the clip loops. Pinning hips to this value each frame
-    /// keeps the animation in place and leaves movement to the controller.
+    /// snaps back when the clip loops.
     pub bind_hips_translation: Vec3,
+    /// The bind-pose hips position in the skeleton root's PARENT space.
+    ///
+    /// The retarget replaces the skeleton root's transform (its rotation
+    /// becomes the clip's up-axis correction), which turns a bind-pose LOCAL
+    /// hips value into a different point. This one does not move with that
+    /// swap: `lock_root_motion` maps it back through the skeleton root's
+    /// current transform, so the pelvis stays where the body's own bind pose
+    /// puts it, over the capsule, whatever frame the clips use.
+    pub bind_hips_in_root_parent: Vec3,
     /// Stable identity of this skeleton's shape, used to key the retarget
     /// cache so clip rekeying happens once per (clip, rig) pair.
     pub signature: u64,
@@ -324,6 +332,8 @@ fn on_scene_ready(
     descriptors: Query<&super::AvatarDescriptor>,
     mesh_handles: Query<&Mesh3d>,
     mesh_assets: Option<Res<Assets<Mesh>>>,
+    skins: Query<&bevy::mesh::skinning::SkinnedMesh>,
+    bindposes: Option<Res<Assets<bevy::mesh::skinning::SkinnedMeshInverseBindposes>>>,
 ) {
     // Walk up from the scene root to the character root carrying the marker.
     let mut root = ready.entity;
@@ -353,6 +363,9 @@ fn on_scene_ready(
     // slider driven from it would have shrunk the avatar by ~130x.
     let mut stack = vec![(root, *root_tf_identity())];
     let mut visited = 0usize;
+    // Every node's composed transform, for placing skinned meshes after the walk.
+    let mut composed: HashMap<Entity, Transform> = HashMap::new();
+    let mut skinned_meshes: Vec<Entity> = Vec::new();
     while let Some((e, parent_tf)) = stack.pop() {
         visited += 1;
         if visited > 4096 {
@@ -364,10 +377,19 @@ fn on_scene_ready(
             Ok(local) => parent_tf.mul_transform(*local),
             Err(_) => parent_tf,
         };
+        composed.insert(e, world);
         let y = world.translation.y;
         // Geometry bounds exclude exporter end markers that can sit at the
         // origin or far outside the body. Custom armor also extends above Head.
-        if let (Ok(handle), Some(assets)) = (mesh_handles.get(e), mesh_assets.as_ref()) {
+        //
+        // A skinned mesh is drawn through its joints and glTF ignores its own
+        // node's transform, so it is measured after the walk. Measured through
+        // its node instead, a Mixamo body picked up the Armature's 0.01 scale
+        // a second time (its vertices are already metres): it read 0.018 m,
+        // `rig_scale` floored that to 0.5 and drew the body 3.5 times too big.
+        if skins.contains(e) {
+            skinned_meshes.push(e);
+        } else if let (Ok(handle), Some(assets)) = (mesh_handles.get(e), mesh_assets.as_ref()) {
             if let Some(mesh) = assets.get(&handle.0) {
                 if let Some(bevy::mesh::VertexAttributeValues::Float32x3(positions)) = mesh.attribute(Mesh::ATTRIBUTE_POSITION) {
                     for position in positions {
@@ -403,6 +425,32 @@ fn on_scene_ready(
             for k in kids.iter() {
                 stack.push((k, world));
             }
+        }
+    }
+
+    // A skinned vertex is drawn at `joint_world * inverse_bind * vertex`. In
+    // the bind pose every joint gives the same product, so the first joint's
+    // places the whole mesh. A mesh whose joint or inverse binds are missing
+    // is skipped; with no mesh measured, the bone bounds below stand in.
+    for e in skinned_meshes {
+        let (Ok(skin), Ok(handle)) = (skins.get(e), mesh_handles.get(e)) else { continue };
+        let Some(joint_world) = skin.joints.first().and_then(|j| composed.get(j)) else { continue };
+        let Some(inverse_bind) = bindposes
+            .as_ref()
+            .and_then(|a| a.get(&skin.inverse_bindposes))
+            .and_then(|m| m.first().copied())
+        else {
+            continue;
+        };
+        let Some(mesh) = mesh_assets.as_ref().and_then(|a| a.get(&handle.0)) else { continue };
+        let Some(bevy::mesh::VertexAttributeValues::Float32x3(positions)) = mesh.attribute(Mesh::ATTRIBUTE_POSITION) else {
+            continue;
+        };
+        let placement = joint_world.to_matrix() * inverse_bind;
+        for position in positions {
+            let y = placement.transform_point3(Vec3::from_array(*position)).y;
+            mesh_lowest_y = mesh_lowest_y.min(y);
+            mesh_highest_y = mesh_highest_y.max(y);
         }
     }
 
@@ -488,12 +536,18 @@ fn on_scene_ready(
         .map(|t| t.scale.y.abs().max(1e-4))
         .unwrap_or(1.0);
 
+    let bind_hips_in_root_parent = skeleton_root
+        .and_then(|e| transforms.get(e).ok())
+        .map(|t| t.transform_point(bind_hips_translation))
+        .unwrap_or(bind_hips_translation);
+
     commands.entity(root).remove::<AwaitingRigBind>().insert(AvatarRig {
         bones,
         by_key,
         skeleton_root,
         armature_scale,
         bind_hips_translation,
+        bind_hips_in_root_parent,
         unresolved,
         bind_height_m: measured,
         foot_half_separation: foot_sep,

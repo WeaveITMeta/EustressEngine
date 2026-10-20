@@ -343,6 +343,7 @@ impl PropertyAccess for Attachment {
             PropertyDescriptor { name: "Name".to_string(), property_type: "string".to_string(), read_only: false, category: "Data".to_string() },
             PropertyDescriptor { name: "Position".to_string(), property_type: "Vector3".to_string(), read_only: false, category: "Transform".to_string() },
             PropertyDescriptor { name: "Orientation".to_string(), property_type: "Vector3".to_string(), read_only: false, category: "Transform".to_string() },
+            PropertyDescriptor { name: "CFrame".to_string(), property_type: "CFrame".to_string(), read_only: true, category: "Transform".to_string() },
         ]
     }
 }
@@ -507,33 +508,93 @@ impl PropertyAccess for EustressCamera {
 // PropertyAccess Implementation for EustressPointLight
 // ============================================================================
 
+// ----------------------------------------------------------------------------
+// Light classes: value coercions shared by the four impls. Scripts hand
+// numbers over as integers as often as floats (Rune's `2` is an Int), and
+// colours as `Color3` triples as often as `Color`; a light takes all of them.
+// A face is the label (Top, Bottom, Front, Back, Left, Right) from any
+// spelling; it reads back as `NormalId.<Face>`, the enum a Roblox script
+// compares against.
+// ----------------------------------------------------------------------------
+
+fn light_number(value: &PropertyValue) -> Option<f32> {
+    match value {
+        PropertyValue::Float(f) => Some(*f),
+        PropertyValue::Int(i) => Some(*i as f32),
+        _ => None,
+    }
+    .filter(|v| v.is_finite())
+}
+
+fn light_color(value: &PropertyValue) -> Option<Color> {
+    match value {
+        PropertyValue::Color(c) => Some(*c),
+        PropertyValue::Color3(c) => Some(Color::srgb(c[0], c[1], c[2])),
+        _ => None,
+    }
+}
+
+fn light_face(value: &PropertyValue) -> Option<String> {
+    match value {
+        PropertyValue::String(s) | PropertyValue::Enum(s) => {
+            Some(crate::plugins::light_classes::normalize_face(s).to_string())
+        }
+        PropertyValue::Int(i) => Some(crate::plugins::light_classes::normalize_face(&i.to_string()).to_string()),
+        _ => None,
+    }
+}
+
+fn light_face_value(face: &str) -> PropertyValue {
+    PropertyValue::Enum(format!("NormalId.{}", crate::plugins::light_classes::normalize_face(face)))
+}
+
+fn light_descriptor(name: &str, property_type: &str) -> PropertyDescriptor {
+    PropertyDescriptor {
+        name: name.to_string(),
+        property_type: property_type.to_string(),
+        read_only: false,
+        category: "Light".to_string(),
+    }
+}
+
+fn wrong_type(name: &str) -> String {
+    format!("Unsupported value for light property {}", name)
+}
+
 impl PropertyAccess for EustressPointLight {
     fn get_property(&self, name: &str) -> Option<PropertyValue> {
         match name {
             "Brightness" => Some(PropertyValue::Float(self.brightness)),
             "Color" => Some(PropertyValue::Color(self.color)),
             "Range" => Some(PropertyValue::Float(self.range)),
+            "Radius" => Some(PropertyValue::Float(self.radius)),
             "Shadows" => Some(PropertyValue::Bool(self.shadows)),
+            "Enabled" => Some(PropertyValue::Bool(self.enabled)),
             _ => None,
         }
     }
-    
+
     fn set_property(&mut self, name: &str, value: PropertyValue) -> Result<(), String> {
-        match (name, value) {
-            ("Brightness", PropertyValue::Float(f)) => { self.brightness = f.max(0.0); Ok(()) }
-            ("Color", PropertyValue::Color(c)) => { self.color = c; Ok(()) }
-            ("Range", PropertyValue::Float(f)) => { self.range = f.max(0.0); Ok(()) }
-            ("Shadows", PropertyValue::Bool(b)) => { self.shadows = b; Ok(()) }
-            _ => Err(format!("Unknown property: {}", name)),
+        match (name, &value) {
+            ("Brightness", v) => self.brightness = light_number(v).ok_or_else(|| wrong_type(name))?.max(0.0),
+            ("Color", v) => self.color = light_color(v).ok_or_else(|| wrong_type(name))?,
+            ("Range", v) => self.range = light_number(v).ok_or_else(|| wrong_type(name))?.max(0.0),
+            ("Radius", v) => self.radius = light_number(v).ok_or_else(|| wrong_type(name))?.max(0.0),
+            ("Shadows", PropertyValue::Bool(b)) => self.shadows = *b,
+            ("Enabled", PropertyValue::Bool(b)) => self.enabled = *b,
+            _ => return Err(format!("Unknown property: {}", name)),
         }
+        Ok(())
     }
-    
+
     fn list_properties(&self) -> Vec<PropertyDescriptor> {
         vec![
-            PropertyDescriptor { name: "Brightness".to_string(), property_type: "float".to_string(), read_only: false, category: "Light".to_string() },
-            PropertyDescriptor { name: "Color".to_string(), property_type: "Color".to_string(), read_only: false, category: "Light".to_string() },
-            PropertyDescriptor { name: "Range".to_string(), property_type: "float".to_string(), read_only: false, category: "Light".to_string() },
-            PropertyDescriptor { name: "Shadows".to_string(), property_type: "bool".to_string(), read_only: false, category: "Light".to_string() },
+            light_descriptor("Brightness", "float"),
+            light_descriptor("Color", "Color"),
+            light_descriptor("Range", "float"),
+            light_descriptor("Radius", "float"),
+            light_descriptor("Shadows", "bool"),
+            light_descriptor("Enabled", "bool"),
         ]
     }
 }
@@ -549,27 +610,36 @@ impl PropertyAccess for EustressSpotLight {
             "Color" => Some(PropertyValue::Color(self.color)),
             "Range" => Some(PropertyValue::Float(self.range)),
             "Shadows" => Some(PropertyValue::Bool(self.shadows)),
+            "Enabled" => Some(PropertyValue::Bool(self.enabled)),
             "Angle" => Some(PropertyValue::Float(self.angle)),
+            "Face" => Some(light_face_value(&self.face)),
             _ => None,
         }
     }
-    
+
     fn set_property(&mut self, name: &str, value: PropertyValue) -> Result<(), String> {
-        match (name, value) {
-            ("Brightness", PropertyValue::Float(f)) => { self.brightness = f.max(0.0); Ok(()) }
-            ("Color", PropertyValue::Color(c)) => { self.color = c; Ok(()) }
-            ("Range", PropertyValue::Float(f)) => { self.range = f.max(0.0); Ok(()) }
-            ("Shadows", PropertyValue::Bool(b)) => { self.shadows = b; Ok(()) }
-            ("Angle", PropertyValue::Float(f)) => { self.angle = f.clamp(0.0, 180.0); Ok(()) }
-            _ => Err(format!("Unknown property: {}", name)),
+        match (name, &value) {
+            ("Brightness", v) => self.brightness = light_number(v).ok_or_else(|| wrong_type(name))?.max(0.0),
+            ("Color", v) => self.color = light_color(v).ok_or_else(|| wrong_type(name))?,
+            ("Range", v) => self.range = light_number(v).ok_or_else(|| wrong_type(name))?.max(0.0),
+            ("Shadows", PropertyValue::Bool(b)) => self.shadows = *b,
+            ("Enabled", PropertyValue::Bool(b)) => self.enabled = *b,
+            ("Angle", v) => self.angle = light_number(v).ok_or_else(|| wrong_type(name))?.clamp(0.0, 180.0),
+            ("Face", v) => self.face = light_face(v).ok_or_else(|| wrong_type(name))?,
+            _ => return Err(format!("Unknown property: {}", name)),
         }
+        Ok(())
     }
-    
+
     fn list_properties(&self) -> Vec<PropertyDescriptor> {
         vec![
-            PropertyDescriptor { name: "Brightness".to_string(), property_type: "float".to_string(), read_only: false, category: "Light".to_string() },
-            PropertyDescriptor { name: "Color".to_string(), property_type: "Color".to_string(), read_only: false, category: "Light".to_string() },
-            PropertyDescriptor { name: "Angle".to_string(), property_type: "float".to_string(), read_only: false, category: "Light".to_string() },
+            light_descriptor("Brightness", "float"),
+            light_descriptor("Color", "Color"),
+            light_descriptor("Range", "float"),
+            light_descriptor("Angle", "float"),
+            light_descriptor("Face", "Face"),
+            light_descriptor("Shadows", "bool"),
+            light_descriptor("Enabled", "bool"),
         ]
     }
 }
@@ -992,27 +1062,36 @@ impl PropertyAccess for SurfaceLight {
             "Color" => Some(PropertyValue::Color(self.color)),
             "Range" => Some(PropertyValue::Float(self.range)),
             "Shadows" => Some(PropertyValue::Bool(self.shadows)),
-            "Face" => Some(PropertyValue::String(self.face.clone())),
+            "Enabled" => Some(PropertyValue::Bool(self.enabled)),
+            "Angle" => Some(PropertyValue::Float(self.angle)),
+            "Face" => Some(light_face_value(&self.face)),
             _ => None,
         }
     }
-    
+
     fn set_property(&mut self, name: &str, value: PropertyValue) -> Result<(), String> {
-        match (name, value) {
-            ("Brightness", PropertyValue::Float(f)) => { self.brightness = f.max(0.0); Ok(()) }
-            ("Color", PropertyValue::Color(c)) => { self.color = c; Ok(()) }
-            ("Range", PropertyValue::Float(f)) => { self.range = f.max(0.0); Ok(()) }
-            ("Shadows", PropertyValue::Bool(b)) => { self.shadows = b; Ok(()) }
-            ("Face", PropertyValue::String(s)) => { self.face = s; Ok(()) }
-            _ => Err(format!("Unknown property: {}", name)),
+        match (name, &value) {
+            ("Brightness", v) => self.brightness = light_number(v).ok_or_else(|| wrong_type(name))?.max(0.0),
+            ("Color", v) => self.color = light_color(v).ok_or_else(|| wrong_type(name))?,
+            ("Range", v) => self.range = light_number(v).ok_or_else(|| wrong_type(name))?.max(0.0),
+            ("Shadows", PropertyValue::Bool(b)) => self.shadows = *b,
+            ("Enabled", PropertyValue::Bool(b)) => self.enabled = *b,
+            ("Angle", v) => self.angle = light_number(v).ok_or_else(|| wrong_type(name))?.clamp(0.0, 180.0),
+            ("Face", v) => self.face = light_face(v).ok_or_else(|| wrong_type(name))?,
+            _ => return Err(format!("Unknown property: {}", name)),
         }
+        Ok(())
     }
-    
+
     fn list_properties(&self) -> Vec<PropertyDescriptor> {
         vec![
-            PropertyDescriptor { name: "Brightness".to_string(), property_type: "float".to_string(), read_only: false, category: "Light".to_string() },
-            PropertyDescriptor { name: "Color".to_string(), property_type: "Color".to_string(), read_only: false, category: "Light".to_string() },
-            PropertyDescriptor { name: "Face".to_string(), property_type: "Face".to_string(), read_only: false, category: "Light".to_string() },
+            light_descriptor("Brightness", "float"),
+            light_descriptor("Color", "Color"),
+            light_descriptor("Range", "float"),
+            light_descriptor("Angle", "float"),
+            light_descriptor("Face", "Face"),
+            light_descriptor("Shadows", "bool"),
+            light_descriptor("Enabled", "bool"),
         ]
     }
 }
@@ -1481,12 +1560,32 @@ impl PropertyAccess for PVInstance {
 
 impl PropertyAccess for EustressDirectionalLight {
     fn get_property(&self, name: &str) -> Option<PropertyValue> {
-        match name { "Brightness" => Some(PropertyValue::Float(self.brightness)), "Shadows" => Some(PropertyValue::Bool(self.shadows)), _ => None }
+        match name {
+            "Brightness" => Some(PropertyValue::Float(self.brightness)),
+            "Color" => Some(PropertyValue::Color(self.color)),
+            "Shadows" => Some(PropertyValue::Bool(self.shadows)),
+            "Enabled" => Some(PropertyValue::Bool(self.enabled)),
+            _ => None,
+        }
     }
     fn set_property(&mut self, name: &str, value: PropertyValue) -> Result<(), String> {
-        match (name, value) { ("Brightness", PropertyValue::Float(f)) => { self.brightness = f; Ok(()) }, ("Shadows", PropertyValue::Bool(b)) => { self.shadows = b; Ok(()) }, _ => Err(format!("Unknown: {}", name)) }
+        match (name, &value) {
+            ("Brightness", v) => self.brightness = light_number(v).ok_or_else(|| wrong_type(name))?.max(0.0),
+            ("Color", v) => self.color = light_color(v).ok_or_else(|| wrong_type(name))?,
+            ("Shadows", PropertyValue::Bool(b)) => self.shadows = *b,
+            ("Enabled", PropertyValue::Bool(b)) => self.enabled = *b,
+            _ => return Err(format!("Unknown: {}", name)),
+        }
+        Ok(())
     }
-    fn list_properties(&self) -> Vec<PropertyDescriptor> { vec![PropertyDescriptor { name: "Brightness".to_string(), property_type: "float".to_string(), read_only: false, category: "Light".to_string() }] }
+    fn list_properties(&self) -> Vec<PropertyDescriptor> {
+        vec![
+            light_descriptor("Brightness", "float"),
+            light_descriptor("Color", "Color"),
+            light_descriptor("Shadows", "bool"),
+            light_descriptor("Enabled", "bool"),
+        ]
+    }
 }
 
 impl PropertyAccess for Atmosphere {

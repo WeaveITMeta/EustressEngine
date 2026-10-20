@@ -390,25 +390,26 @@ impl WorkshopIterationRecord {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// ArcEpisodeRecord — one complete ARC-AGI-3 / gym-style episode
+// EpisodeRecord — one complete episode of an interactive task
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// One complete ARC-AGI-3 (or any gym-style) episode.
-/// Published to Iggy topic `eustress/arc_episodes`.
+/// One complete episode of an interactive task: a puzzle, a gym-style
+/// environment, a benchmark level.
+/// Published to Iggy topic `eustress/episodes`.
 #[derive(Archive, RkyvSerialize, RkyvDeserialize, Serialize, Deserialize, Debug, Clone, PartialEq)]
 #[rkyv(derive(Debug, PartialEq))]
-pub struct ArcEpisodeRecord {
+pub struct EpisodeRecord {
     /// Unique episode identifier (UUID v4 as u128).
     pub episode_id: u128,
-    /// ARC task identifier e.g. "ls20".
+    /// Task identifier, e.g. "ls20".
     pub task_id: String,
     /// Steps taken in this episode.
     pub total_steps: u32,
     /// Whether the goal was reached.
     pub goal_reached: bool,
-    /// Final score 0.0–1.0 per ARC scorecard.
+    /// Final score 0.0–1.0, as the task's scorer reports it.
     pub final_score: f32,
-    /// Human baseline step count from ARC benchmark metadata.
+    /// Human baseline step count from the task's metadata.
     pub human_baseline_steps: u32,
     /// total_steps / human_baseline_steps (lower = better).
     pub efficiency_ratio: f32,
@@ -424,7 +425,7 @@ pub struct ArcEpisodeRecord {
     pub session_id: u128,
 }
 
-impl ArcEpisodeRecord {
+impl EpisodeRecord {
     /// Serialize to rkyv bytes for Iggy publishing.
     pub fn to_bytes(&self) -> Result<Vec<u8>, rkyv::rancor::Error> {
         rkyv::to_bytes::<rkyv::rancor::Error>(self).map(|b| b.to_vec())
@@ -537,8 +538,8 @@ mod tests {
     }
 
     #[test]
-    fn arc_episode_record_round_trip() {
-        let r = ArcEpisodeRecord {
+    fn episode_record_round_trip() {
+        let r = EpisodeRecord {
             episode_id: 0xabcd_1234_5678_9abc_def0_1234_5678_9abc,
             task_id: "ls20".to_string(),
             total_steps: 12,
@@ -553,7 +554,7 @@ mod tests {
             session_id: 7,
         };
         let bytes = r.to_bytes().expect("serialize");
-        let back = ArcEpisodeRecord::from_bytes(&bytes).expect("deserialize");
+        let back = EpisodeRecord::from_bytes(&bytes).expect("deserialize");
         assert_eq!(r, back);
     }
 }

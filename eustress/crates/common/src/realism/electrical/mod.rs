@@ -53,7 +53,7 @@ impl Plugin for ElectricalPlugin {
                 update_buck_converter_system,
                 update_boost_converter_system,
                 update_power_bus_system,
-            ));
+            ).in_set(crate::realism::PhysicsDomain::Electricity));
         info!("ElectricalPlugin ready — circuits, motors, power electronics active");
     }
 }

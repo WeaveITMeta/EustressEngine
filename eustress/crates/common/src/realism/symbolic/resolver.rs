@@ -136,7 +136,7 @@ impl EquivEntry {
     /// Update on episode outcome.
     ///
     /// `outcome` is a value in [0.0, 1.0] representing how successful the
-    /// episode was (e.g. `final_score` from `ArcEpisodeRecord`).  Values
+    /// episode was (e.g. `final_score` from `EpisodeRecord`).  Values
     /// above 0.5 are treated as a success; below as a failure.
     pub fn update(&mut self, outcome: f32) {
         if outcome >= 0.5 {
@@ -268,7 +268,7 @@ impl SymbolResolver {
 
     /// Record episode outcome to update bandit belief for a formula pair.
     ///
-    /// `outcome` — 0.0–1.0 (e.g. `ArcEpisodeRecord::final_score` or
+    /// `outcome` — 0.0–1.0 (e.g. `EpisodeRecord::final_score` or
     ///             `efficiency_ratio.min(1.0)`).
     pub fn learn_from_episode(
         &mut self,

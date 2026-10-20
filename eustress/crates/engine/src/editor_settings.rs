@@ -20,7 +20,6 @@
 #![allow(dead_code)]
 
 use bevy::prelude::*;
-use bevy::gizmos::config::{GizmoConfigStore, DefaultGizmoConfigGroup};
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::PathBuf;
@@ -89,6 +88,11 @@ pub struct EditorSettings {
     /// Most recently opened Space paths, newest first, for File > Recent.
     #[serde(default)]
     pub recent_spaces: Vec<String>,
+    /// Most recent inserts, newest first, as the id after `insert:`
+    /// ("PointLight", "sphere"). The Insert menu's Recent section; kept by
+    /// `ui::insert_classes::recent_after_insert`.
+    #[serde(default)]
+    pub recent_inserts: Vec<String>,
 
     /// Modern (dark/glass, high-tech) vs Classic (today's flat look)
     /// theme. Classic is the default for new/never-saved settings — see
@@ -149,6 +153,10 @@ pub struct EditorSettings {
     /// toggle). Same reasoning: an explicit opt-out must survive a restart.
     #[serde(default = "default_bliss_enabled")]
     pub bliss_enabled: bool,
+
+    /// The Ribbon's tool rows are folded away (menu bar and tab row only).
+    #[serde(default)]
+    pub ribbon_collapsed: bool,
 }
 
 fn default_usage_telemetry_enabled() -> bool {
@@ -229,6 +237,7 @@ impl Default for EditorSettings {
             saved_identities: Vec::new(),
             last_space_path: None,
             recent_spaces: Vec::new(),
+            recent_inserts: Vec::new(),
 
             theme_modern: false,
             active_theme_id: Some("classic".to_string()),
@@ -239,6 +248,7 @@ impl Default for EditorSettings {
             telemetry_notice_shown: false,
             bliss_node_mode: default_bliss_node_mode(),
             bliss_enabled: default_bliss_enabled(),
+            ribbon_collapsed: false,
         }
     }
 }
@@ -361,8 +371,6 @@ impl Plugin for EditorSettingsPlugin {
         app
             .insert_resource(EditorSettings::load())
             .init_resource::<AutoSaveState>()
-            .add_systems(Startup, setup_grid_gizmo_config)
-            .add_systems(Update, draw_grid_overlay)
             .add_systems(Update, auto_save_settings)
             .add_systems(Update, auto_save_scene_system)
             .add_systems(Update, track_recent_spaces);
@@ -415,97 +423,6 @@ fn auto_save_settings(
     }
 }
 
-/// Configure grid gizmos — normal depth testing so grid renders at ground level
-fn setup_grid_gizmo_config(
-    mut config_store: ResMut<GizmoConfigStore>,
-) {
-    let (config, _) = config_store.config_mut::<DefaultGizmoConfigGroup>();
-    // depth_bias = 0.0: normal depth testing. Grid lines at y=0.01 render
-    // on the ground plane. Positive = towards camera in Bevy 0.18 reversed-Z.
-    config.depth_bias = 0.0;
-}
-
-/// Draw grid overlay in viewport - follows camera on X/Z plane
-/// Origin axes (red X, blue Z) stay fixed at world origin
-fn draw_grid_overlay(
-    mut gizmos: Gizmos,
-    settings: Res<EditorSettings>,
-    camera_query: Query<&Transform, With<Camera3d>>,
-) {
-    if !settings.show_grid {
-        return;
-    }
-    
-    // Get camera position to center grid around it
-    let camera_pos = camera_query.iter().next()
-        .map(|t| t.translation)
-        .unwrap_or(Vec3::ZERO);
-    
-    let grid_size = settings.grid_size;  // Spacing between grid lines
-    let grid_half_extent = 100.0;  // How far the grid extends from camera
-    let grid_divisions = (grid_half_extent * 2.0 / grid_size) as i32;
-    
-    // Snap grid center to grid increments so lines don't jitter when camera moves
-    let grid_center_x = (camera_pos.x / grid_size).round() * grid_size;
-    let grid_center_z = (camera_pos.z / grid_size).round() * grid_size;
-    
-    // Render grid slightly above ground (y = 0.01) to prevent z-fighting
-    let grid_y = 0.01;
-    
-    // Grid line color
-    let grid_color = Color::srgba(0.4, 0.4, 0.4, 0.5);
-    
-    // Draw grid lines centered around camera position
-    for i in 0..=grid_divisions {
-        let offset = (i as f32 * grid_size) - grid_half_extent;
-        
-        // Lines parallel to X axis (running along X, at different Z positions)
-        let z_pos = grid_center_z + offset;
-        gizmos.line(
-            Vec3::new(grid_center_x - grid_half_extent, grid_y, z_pos),
-            Vec3::new(grid_center_x + grid_half_extent, grid_y, z_pos),
-            grid_color,
-        );
-        
-        // Lines parallel to Z axis (running along Z, at different X positions)
-        let x_pos = grid_center_x + offset;
-        gizmos.line(
-            Vec3::new(x_pos, grid_y, grid_center_z - grid_half_extent),
-            Vec3::new(x_pos, grid_y, grid_center_z + grid_half_extent),
-            grid_color,
-        );
-    }
-    
-    // ════════════════════════════════════════════════════════════════════════
-    // Origin axes - ALWAYS at world origin (0, 0, 0)
-    // These extend far enough to be visible from anywhere
-    // ════════════════════════════════════════════════════════════════════════
-    
-    let axis_extent = 10000.0;  // Very long so always visible
-    let origin_y = 0.02;  // Slightly above grid to render on top
-    
-    // X-axis (RED) - runs along X at Z=0
-    gizmos.line(
-        Vec3::new(-axis_extent, origin_y, 0.0),
-        Vec3::new(axis_extent, origin_y, 0.0),
-        Color::srgba(1.0, 0.2, 0.2, 0.9),
-    );
-    
-    // Z-axis (BLUE) - runs along Z at X=0
-    gizmos.line(
-        Vec3::new(0.0, origin_y, -axis_extent),
-        Vec3::new(0.0, origin_y, axis_extent),
-        Color::srgba(0.2, 0.2, 1.0, 0.9),
-    );
-    
-    // Small Y-axis indicator at origin (GREEN)
-    gizmos.line(
-        Vec3::new(0.0, 0.0, 0.0),
-        Vec3::new(0.0, 5.0, 0.0),
-        Color::srgba(0.2, 1.0, 0.2, 0.9),
-    );
-}
-
 // ============================================================================
 // Auto-Save Scene System
 // ============================================================================
@@ -519,25 +436,24 @@ fn draw_grid_overlay(
 /// editor) already knows, and piggybacks on git's delta compression
 /// so autosaves cost effectively nothing on disk past the first one.
 ///
-/// The Space's live on-disk state is already authoritative (every tool
-/// edits TOML files directly via `write_instance_changes_system`) —
-/// autosave only needs to capture a commit boundary, not re-derive the
-/// scene from the ECS. That also makes autosave a no-op when nothing's
-/// changed since the last tick, which is the common case while the
-/// user is just looking around.
+/// Entity edits already reach disk as they happen (every tool edits TOML
+/// files directly via `write_instance_changes_system`), so for them autosave
+/// only needs to capture a commit boundary. Terrain is the exception: brush,
+/// road, Part to Terrain and volume edits live in memory until
+/// `save_terrain_to_disk` writes them, so when the terrain itself changed
+/// since its last save the autosave writes it through that same function
+/// Save uses before it commits. Nothing changed makes autosave a no-op,
+/// which is the common case while the user is just looking around.
+///
+/// The work runs as a queued command, which gets the whole `World` the
+/// terrain save needs.
 fn auto_save_scene_system(
+    mut commands: Commands,
     time: Res<Time>,
     settings: Res<EditorSettings>,
     mut auto_save: ResMut<AutoSaveState>,
-    mut notifications: ResMut<crate::notifications::NotificationManager>,
     space_root: Option<Res<crate::space::SpaceRoot>>,
     auth: Option<Res<crate::auth::AuthState>>,
-    // The title asterisk and the exit prompt count edits since the last
-    // snapshot; an autosave is one.
-    mut snapshot_state: (
-        Option<ResMut<crate::ui::StudioState>>,
-        Option<Res<crate::undo::UndoStack>>,
-    ),
 ) {
     // Skip if auto-save is disabled
     if !settings.auto_save_enabled || settings.auto_save_interval <= 0.0 {
@@ -567,6 +483,26 @@ fn auto_save_scene_system(
     let identity = auth
         .as_deref()
         .and_then(git_identity_from_auth);
+
+    auto_save.last_save = Some(std::time::Instant::now());
+    commands.queue(move |world: &mut World| autosave_space(world, space_path, identity));
+}
+
+/// One autosave: write the terrain when it changed since its last save,
+/// commit the Space to git off the main thread, and record the snapshot for
+/// the title asterisk and the exit prompt.
+fn autosave_space(world: &mut World, space_path: PathBuf, identity: Option<GitIdentity>) {
+    // Read before the snapshot below resets it. Terrain undo and redo push
+    // the saved sequence back (`mark_terrain_unsaved`), so they count too.
+    let sequence = world.get_resource::<crate::undo::UndoStack>().map(|undo| undo.sequence());
+    let unsaved = match (world.get_resource::<crate::ui::StudioState>(), sequence) {
+        (Some(state), Some(sequence)) => state.has_unsaved_changes || state.saved_undo_sequence != sequence,
+        _ => true,
+    };
+    // Only terrain edits need the whole-terrain rewrite; entity edits are
+    // already on disk and just need the git commit below.
+    let terrain_unsaved = crate::ui::file_event_handler::terrain_changed_since_save(world, unsaved)
+        && crate::ui::file_event_handler::save_terrain_to_disk(world);
 
     // Dispatch the git work to a background thread. `git add -A` +
     // commit can hit the filesystem harder than we want to pay for on
@@ -600,13 +536,16 @@ fn auto_save_scene_system(
         }
     });
 
-    auto_save.last_save = Some(std::time::Instant::now());
-    if let (Some(state), undo) = (snapshot_state.0.as_mut(), snapshot_state.1.as_ref()) {
-        state.saved_undo_sequence = undo.map(|u| u.sequence()).unwrap_or(0);
-        state.has_unsaved_changes = false;
+    // The title asterisk and the exit prompt count edits since the last
+    // snapshot; an autosave is one. Terrain edits that did not reach storage
+    // keep the Space unsaved, the saved sequence left one behind as a
+    // terrain undo leaves it, since the UI sync derives the marker from it.
+    if let Some(mut state) = world.get_resource_mut::<crate::ui::StudioState>() {
+        let sequence = sequence.unwrap_or(0);
+        state.saved_undo_sequence = if terrain_unsaved { sequence.wrapping_sub(1) } else { sequence };
+        state.has_unsaved_changes = terrain_unsaved;
         state.snapshot_status = format!("Autosaved {}", chrono::Local::now().format("%H:%M"));
     }
-    let _ = &notifications; // toast now reported truthfully from the git thread
 }
 
 pub(crate) enum GitAutosave {

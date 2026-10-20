@@ -345,6 +345,10 @@ impl Default for EditorClipboard {
     }
 }
 
+/// Copies made in this run, so no two copies of one source mint the same uuid
+/// (see [`EditorClipboard::remap_uuids`]).
+static COPY_SERIAL: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
 impl EditorClipboard {
     /// Check if clipboard is empty
     pub fn is_empty(&self) -> bool {
@@ -507,7 +511,15 @@ impl EditorClipboard {
         // on the first paste). The trailing `batch_idx` makes
         // within-batch collisions impossible even when two entities
         // share a source_uuid.
-        let copy_counter_base = (self.paste_count as u64) + 1;
+        //
+        // `paste_count` restarts at 0 with every Ctrl+C, so on its own,
+        // copying the same source twice (Ctrl+D on one layer, then Ctrl+D
+        // again) minted the same uuid for both copies; a terrain layer's id
+        // is its uuid's first half, so the second copy and the first were
+        // one layer to the bake and to scatter. `COPY_SERIAL` is a count no
+        // copy repeats within a run, folded into the counter.
+        let serial = COPY_SERIAL.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let copy_counter_base = (self.paste_count as u64) + 1 + (serial << 16);
         for (batch_idx, entity_data) in self.entities.iter().enumerate() {
             let counter = copy_counter_base
                 .wrapping_mul(0x100)
@@ -524,7 +536,7 @@ impl EditorClipboard {
         }
 
         // Apply the new uuids to each entity + rewrite parent_uuid links.
-        let copy_counter_base = (self.paste_count as u64) + 1;
+        // The same base as above, serial included.
         for (batch_idx, entity_data) in self.entities.iter_mut().enumerate() {
             if !entity_data.uuid.is_empty() {
                 if let Some(new_uuid) = self.uuid_mapping.get(&entity_data.uuid) {
@@ -1115,18 +1127,39 @@ pub fn handle_paste_event(
 
         // Spawn entities from clipboard — write TOML files for Parts (same as Insert)
         for entity_data in &clipboard.entities {
+            // A terrain layer is a layer of this Space's terrain wherever it
+            // is copied from, and a spline point belongs in its spline's
+            // folder: the copy goes there, not into the Workspace beside
+            // everything else, where the Client never reads it, Clear and
+            // regenerate never touch it, and a point joins no path. Paste
+            // Into names its own folder and keeps it.
+            let entity_dest = match (event.target_parent, entity_data.source_folder_path.as_deref(), space_root.as_ref()) {
+                (None, Some(src), Some(space)) => {
+                    crate::terrain_layers::duplicate_destination(&entity_data.class, std::path::Path::new(src), &space.0)
+                }
+                _ => None,
+            }
+            .unwrap_or_else(|| dest_dir.clone());
             let spawned = spawn_pasted_entity(
                 &mut commands,
                 &asset_server,
                 &mut materials,
                 entity_data,
                 offset,
-                &dest_dir,
+                &entity_dest,
                 material_registry.as_deref_mut(),
                 mesh_cache.as_deref_mut(),
                 file_registry.as_deref_mut(),
                 &mut paste_queue,
             );
+            // A copy of a terrain layer is a layer of its own: fresh uuids all
+            // the way down, its own name, and for a point a place in its
+            // spline. A move keeps the identity it has.
+            if !clipboard.is_cut {
+                if let (Some(dst), Some(src)) = (spawned.path.as_deref(), entity_data.source_folder_path.as_deref()) {
+                    crate::terrain_layers::finish_duplicate(&entity_data.class, std::path::Path::new(src), dst);
+                }
+            }
 
             if spawned.path.is_none() && spawned.entity.is_none() {
                 unrecorded += 1;
@@ -1584,15 +1617,15 @@ fn patch_root_toml_with_live_state(
         data.rotation[2].to_radians(),
     );
     let floats = |v: &[f32]| toml::Value::Array(v.iter().map(|f| toml::Value::Float(*f as f64)).collect());
+    // The pose and size in the copied file's own unit (`[metadata] unit`),
+    // so a copy of a part imported in feet stays in feet.
+    let _ = crate::space::instance_loader::set_authored_transform_toml(
+        &mut doc,
+        new_pos,
+        rot,
+        Some(Vec3::from_array(data.scale)),
+    );
     if let Some(table) = doc.as_table_mut() {
-        let tform = table
-            .entry("transform")
-            .or_insert_with(|| toml::Value::Table(toml::value::Table::new()));
-        if let Some(tform_table) = tform.as_table_mut() {
-            tform_table.insert("position".to_string(), floats(&[new_pos.x, new_pos.y, new_pos.z]));
-            tform_table.insert("rotation".to_string(), floats(&[rot.x, rot.y, rot.z, rot.w]));
-            tform_table.insert("scale".to_string(), floats(&data.scale));
-        }
         let meta = table
             .entry("metadata")
             .or_insert_with(|| toml::Value::Table(toml::value::Table::new()));
@@ -1810,7 +1843,6 @@ fn spawn_pasted_entity(
 
             // Build InstanceDefinition (same structure as toolbox insert)
             let instance_def = crate::space::instance_loader::InstanceDefinition {
-                nuclear: None,
                 plasma: None,
                 asset: Some(crate::space::instance_loader::AssetReference {
                     mesh: mesh_path.to_string(),
@@ -1929,15 +1961,28 @@ fn spawn_pasted_entity(
             let instance = Instance { name: data.name.clone(), class_name, archivable: true, id: data.id, ..Default::default() };
             Some(spawn_folder(commands, instance))
         }
-        ClassName::PointLight => {
+        ClassName::PointLight
+        | ClassName::SpotLight
+        | ClassName::SurfaceLight
+        | ClassName::DirectionalLight => {
+            // No source folder to copy (the usual path): rebuild the light
+            // from its source file's `[light]` when the copy carried one, so
+            // the paste keeps the copied values instead of class defaults.
             let instance = Instance { name: data.name.clone(), class_name, archivable: true, id: data.id, ..Default::default() };
-            let transform = Transform { translation: pos, rotation: rot, scale };
-            Some(spawn_point_light(commands, instance, EustressPointLight::default(), transform))
-        }
-        ClassName::SpotLight => {
-            let instance = Instance { name: data.name.clone(), class_name, archivable: true, id: data.id, ..Default::default() };
-            let transform = Transform { translation: pos, rotation: rot, scale };
-            Some(spawn_spot_light(commands, instance, EustressSpotLight::default(), transform))
+            let _ = scale; // a light is never scaled
+            let transform = Transform { translation: pos, rotation: rot, scale: Vec3::ONE };
+            let section = data
+                .source_toml
+                .as_deref()
+                .and_then(|t| t.parse::<toml::Value>().ok())
+                .map(|doc| eustress_common::plugins::light_classes::LightSection::from_document(&doc))
+                .unwrap_or_default();
+            Some(match class_name {
+                ClassName::PointLight => spawn_point_light(commands, instance, section.point(), transform),
+                ClassName::SpotLight => spawn_spot_light(commands, instance, section.spot(), transform),
+                ClassName::SurfaceLight => spawn_surface_light(commands, instance, section.surface(), transform),
+                _ => spawn_directional_light(commands, instance, section.directional(), transform),
+            })
         }
         _ if !data.service_folder.is_empty() && data.source_toml.is_some() => {
             // Generic service child (Sky, Atmosphere, Star/Sun, Moon, or any
@@ -2276,6 +2321,29 @@ mod uuid_tests {
             "paste from A into B and from A into C must produce different uuids \
              (§3.4 — target_space_id in the seed)"
         );
+    }
+
+    /// Copying the same source again, with the clipboard cleared in between
+    /// (every fresh Ctrl+C and Ctrl+D starts from `clear()`), must not repeat
+    /// an earlier copy's uuid: both copies exist, and a terrain layer's id is
+    /// its uuid's first half.
+    #[test]
+    fn copying_the_same_source_again_mints_a_new_uuid() {
+        let source_uuid = "4f3a8c2b1e9d7654a0b8c2e3f4d5a6b7";
+        let space_id = target_space_a();
+        let mut minted: Vec<String> = Vec::new();
+        for _ in 0..3 {
+            let mut cb = EditorClipboard::default();
+            cb.clear();
+            cb.is_cut = false;
+            cb.entities.push(entry(1, source_uuid));
+            cb.remap_uuids(&space_id);
+            minted.push(cb.entities[0].uuid.clone());
+        }
+        assert_ne!(minted[0], minted[1]);
+        assert_ne!(minted[1], minted[2]);
+        assert_ne!(minted[0], minted[2]);
+        assert!(minted.iter().all(|u| is_valid_uuid(u)), "{minted:?}");
     }
 
     /// `clear()` resets `paste_count` so a fresh Ctrl+C starts the

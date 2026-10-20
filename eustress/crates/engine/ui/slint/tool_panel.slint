@@ -19,7 +19,7 @@
 // `use_panel` flag (mirroring `ModalTool::prefers_panel()`) tells main
 // to render either the bar OR the panel — never both.
 
-import { Theme } from "theme.slint";
+import { Theme, FloatingPanelHeader } from "theme.slint";
 import { ComboBox, ScrollView } from "std-widgets.slint";
 import { ToolOptionControlData } from "tool_options_bar.slint";
 import { NumericField } from "numeric_field.slint";
@@ -164,76 +164,14 @@ export component ToolPanel inherits Rectangle {
         spacing: 0;
 
         // ── Header ────────────────────────────────────────────────
-        Rectangle {
-            height: 44px;
-            background: transparent;
-
-            HorizontalLayout {
-                padding-left: 12px;
-                padding-right: 8px;
-                spacing: 10px;
-                alignment: center;
-
-                // Icon disc — matches the bar style for visual consistency.
-                Rectangle {
-                    width: 28px; height: 28px;
-                    border-radius: 14px;
-                    background: Theme.accent-eustress.with-alpha(0.18);
-                    border-width: 1px;
-                    border-color: Theme.accent-eustress.with-alpha(0.4);
-                    Image {
-                        x: (parent.width - self.width) / 2;
-                        y: (parent.height - self.height) / 2;
-                        width: 16px; height: 16px;
-                        source: root.tool-icon;
-                        image-fit: contain;
-                        colorize: Theme.accent-eustress;
-                    }
-                }
-
-                // Title + step label stack. Step label appears under the
-                // tool name as a small hint (panels don't multi-step
-                // pick, but tools may still surface state hints —
-                // e.g. "3×1×3 = 9 instances").
-                VerticalLayout {
-                    horizontal-stretch: 1;
-                    alignment: center;
-                    spacing: 2px;
-
-                    Text {
-                        text: root.tool-name;
-                        color: Theme.text-primary;
-                        font-size: 13px;
-                        font-weight: 600;
-                    }
-                    if root.step-label != "": Text {
-                        text: root.step-label;
-                        color: Theme.text-secondary;
-                        font-size: 11px;
-                    }
-                }
-
-                // Cancel × in the header (Apply lives in the footer).
-                Rectangle {
-                    width: 28px; height: 28px;
-                    background: cancel-touch.has-hover
-                        ? Theme.accent-red.with-alpha(0.2)
-                        : transparent;
-                    border-radius: Theme.radius-sm;
-                    Text {
-                        text: "×";
-                        color: cancel-touch.has-hover ? Theme.accent-red : Theme.text-secondary;
-                        font-size: 18px;
-                        font-weight: 700;
-                        horizontal-alignment: center;
-                        vertical-alignment: center;
-                    }
-                    cancel-touch := TouchArea {
-                        mouse-cursor: pointer;
-                        clicked => { root.cancel(); }
-                    }
-                }
-            }
+        // The shared floating-panel header. The step label rides as the
+        // subtitle (e.g. "3×1×3 = 9 instances"); the × cancels, and Apply
+        // lives in the footer.
+        FloatingPanelHeader {
+            icon: root.tool-icon;
+            title: root.tool-name;
+            subtitle: root.step-label;
+            close => { root.cancel(); }
         }
 
         // 1px divider header ↔ body

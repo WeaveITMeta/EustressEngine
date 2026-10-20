@@ -119,6 +119,9 @@ pub enum MethodName {
     /// Read live editor state (active tool + current selection) so the AI
     /// can query the result of its own actions. The queryable complement.
     StateGet,
+    /// The newest lines of the Output panel: script prints, warnings and
+    /// runtime errors, so an agent can see what its scripts did in Play.
+    OutputTail,
     /// Invoke any editor Action by name (Copy/Cut/Paste/Duplicate/Group/
     /// Ungroup/Delete/SelectAll/Undo/Redo/SaveScene/tool switches/…) — the
     /// AI "press the keyboard shortcut" surface. Writes the same
@@ -126,6 +129,11 @@ pub enum MethodName {
     /// path runs identically to a real key press. The core of systematic
     /// editor testing over MCP.
     ActionInvoke,
+    /// Play-test input for running scripts: a virtual cursor plus held,
+    /// released and tapped keys and mouse buttons, merged with the real
+    /// devices (see `play_datamodel::pull::InjectedInput`). The real mouse
+    /// never moves, so an AI can play a game beside a working user.
+    InputInject,
     /// Capture the primary window (3D viewport + UI overlay) to a PNG on
     /// disk and return its path — the AI's "eyes". The viewport renders to
     /// the window, so this is exactly what a human sees. Read the returned
@@ -143,6 +151,14 @@ pub enum MethodName {
     /// user's window). On-demand: powers the off-screen camera up only for
     /// the capture.
     AiCameraCapture,
+    /// Read the physics settings: the Workspace's live gravity, PhysicsService
+    /// time scale and substeps, and every physics domain's flag alongside
+    /// whether that domain is actually running.
+    PhysicsGet,
+    /// Apply a partial update to PhysicsService. Validated all or nothing,
+    /// applied live, and saved to the Space exactly like a properties panel
+    /// edit.
+    PhysicsSet,
     /// List every registered Workshop tool — MCP's `tools/list` proxies
     /// to this so external IDEs see the same 52+ tool surface Workshop has.
     ToolsList,
@@ -215,6 +231,69 @@ pub enum MethodName {
     /// The orchestrator's `eustress close` verb; the multi-instance
     /// counterpart of `eustress open`.
     EngineShutdown,
+    /// Start a run (from Edit), resume a paused one, or retune a running
+    /// one: `{time_scale?, duration_s?, ticket?}`. Answers with the run id.
+    /// The same interpreter serves the per-instance and Universe command
+    /// queues (`simulation::command`), so a run started here is the same
+    /// run a queued command would start.
+    SimRun,
+    /// Pause the current run.
+    SimPause,
+    /// Stop the current run (full Play-stop lifecycle: restore + despawn).
+    SimStop,
+    /// Write sim values: `{key, value}` or `{values: {key: value, …}}`.
+    SimSet,
+    /// Play state, sim clock, auto-stop target, and the run ledger (current
+    /// run, completed runs with final values, ticket acknowledgements).
+    SimState,
+    /// Enumerate the mode / discipline / tab taxonomy, with per-mode counts of
+    /// how many of each mode's tools are actually wired.
+    UiModes,
+    /// List the tools of a mode/discipline, filterable and paginated, each
+    /// carrying the `wired` flag that says whether it does anything.
+    UiTools,
+    /// Invoke one ribbon tool through the same queue a real click uses.
+    /// Refuses an unwired id rather than reporting a false success.
+    UiInvokeTool,
+    /// Switch the active mode and discipline.
+    UiSetMode,
+    /// Synthetic pointer input, for surfaces that have no tool id.
+    UiClick,
+    /// Whether a publish could run right now, without running one.
+    PublishStatus,
+    /// Start a publish of the open Space/Universe.
+    PublishSubmit,
+    // Terrain (see `terrain.rs`). Reads answer for the ground the user sees,
+    // layers included; each edit is one undo step through the terrain command
+    // path the editor and scripts share; generation only queues.
+    /// Whether the Space has a terrain: its grid, height range, material
+    /// histogram, volume, layers, water, and meshing or generation state.
+    TerrainStats,
+    /// Height, material, normal and hole flag at world XZ points or over a
+    /// grid.
+    TerrainQuery,
+    /// A ray against the terrain alone: the heightfield plus caves and
+    /// overhangs.
+    TerrainRaycast,
+    /// Roblox-style ReadVoxels over a world box: materials and occupancies.
+    TerrainReadVoxels,
+    /// Queue a procedural world from one of the Terrain ribbon's presets.
+    TerrainGenerate,
+    /// Queue a flat plate, the Terrain ribbon's Generate > Flat.
+    TerrainFlat,
+    /// Raise, lower, flatten or smooth the ground with a round brush.
+    TerrainSculpt,
+    /// Paint a material onto the surface with a round brush.
+    TerrainPaint,
+    /// Fill a ball, block, cylinder or region with a material or water, or
+    /// carve it to air.
+    TerrainFill,
+    /// Replace one material with another inside a world box.
+    TerrainReplaceMaterial,
+    /// Create a terrain layer instance under Workspace/Terrain/Layers.
+    TerrainLayerCreate,
+    /// Delete the terrain's files and entities, like the ribbon's Clear.
+    TerrainClear,
     Unknown(String),
 }
 
@@ -232,12 +311,16 @@ where
         "tool.equip" => MethodName::ToolEquip,
         "selection.set" => MethodName::SelectionSet,
         "state.get" => MethodName::StateGet,
+        "output.tail" => MethodName::OutputTail,
         "action.invoke" => MethodName::ActionInvoke,
+        "input.inject" => MethodName::InputInject,
         "viewport.capture" => MethodName::ViewportCapture,
         "ai_camera.set_pose" => MethodName::AiCameraSetPose,
         "ai_camera.orbit" => MethodName::AiCameraOrbit,
         "ai_camera.frame" => MethodName::AiCameraFrame,
         "ai_camera.capture" => MethodName::AiCameraCapture,
+        "physics.get" => MethodName::PhysicsGet,
+        "physics.set" => MethodName::PhysicsSet,
         "tools.list" => MethodName::ToolsList,
         "tools.call" => MethodName::ToolsCall,
         "entity.create" => MethodName::EntityCreate,
@@ -258,7 +341,31 @@ where
         "data.bindings" => MethodName::DataBindings,
         "data.unbind" => MethodName::DataUnbind,
         "db.export_toml" => MethodName::DbExportToml,
+        "ui.modes" => MethodName::UiModes,
+        "ui.tools" => MethodName::UiTools,
+        "ui.invoke_tool" => MethodName::UiInvokeTool,
+        "ui.set_mode" => MethodName::UiSetMode,
+        "ui.click" => MethodName::UiClick,
+        "publish.status" => MethodName::PublishStatus,
+        "publish.submit" => MethodName::PublishSubmit,
         "engine.shutdown" => MethodName::EngineShutdown,
+        "sim.run" => MethodName::SimRun,
+        "sim.pause" => MethodName::SimPause,
+        "sim.stop" => MethodName::SimStop,
+        "sim.set" => MethodName::SimSet,
+        "sim.state" => MethodName::SimState,
+        "terrain.stats" => MethodName::TerrainStats,
+        "terrain.query" => MethodName::TerrainQuery,
+        "terrain.raycast" => MethodName::TerrainRaycast,
+        "terrain.read_voxels" => MethodName::TerrainReadVoxels,
+        "terrain.generate" => MethodName::TerrainGenerate,
+        "terrain.flat" => MethodName::TerrainFlat,
+        "terrain.sculpt" => MethodName::TerrainSculpt,
+        "terrain.paint" => MethodName::TerrainPaint,
+        "terrain.fill" => MethodName::TerrainFill,
+        "terrain.replace_material" => MethodName::TerrainReplaceMaterial,
+        "terrain.layer_create" => MethodName::TerrainLayerCreate,
+        "terrain.clear" => MethodName::TerrainClear,
         _ => MethodName::Unknown(s),
     })
 }
@@ -287,6 +394,50 @@ pub mod handlers {
                 "pid": std::process::id(),
             }),
         )
+    }
+
+    /// `sim.run` / `sim.pause` / `sim.stop` / `sim.set` — one simulation
+    /// command, applied by the interpreter every transport shares. `op` is
+    /// the command (`run`, `pause`, `stop`, `set`); the params are the
+    /// command's fields, plus an optional `ticket` recorded in the ledger.
+    pub fn sim_command(world: &mut World, req: &BridgeRequest, op: &str) -> BridgeResponse {
+        let mut line = match &req.params {
+            Value::Object(m) => m.clone(),
+            Value::Null => serde_json::Map::new(),
+            _ => {
+                return BridgeResponse::error(
+                    req.id.clone(),
+                    BridgeError::invalid_params("params must be an object"),
+                )
+            }
+        };
+        // Queue lines carry their ticket as `id`; over the bridge `id` is
+        // the JSON-RPC id, so the ticket travels as `ticket`.
+        line.remove("id");
+        if let Some(ticket) = line.remove("ticket") {
+            line.insert("id".into(), ticket);
+        }
+        line.insert("op".into(), Value::from(op));
+
+        let (cmd, ticket) = match crate::simulation::command::SimCommand::from_queue_line(&Value::Object(line)) {
+            Ok(parsed) => parsed,
+            Err(e) => return BridgeResponse::error(req.id.clone(), BridgeError::invalid_params(e)),
+        };
+        let origin = crate::simulation::command::Origin { source: "bridge", ticket };
+        match crate::simulation::command::apply(world, cmd, &origin) {
+            Ok(mut ack) => {
+                if let Value::Object(ref mut m) = ack {
+                    m.insert("pid".into(), Value::from(std::process::id()));
+                }
+                BridgeResponse::ok(req.id.clone(), ack)
+            }
+            Err(e) => BridgeResponse::error(req.id.clone(), BridgeError::internal(e)),
+        }
+    }
+
+    /// `sim.state` — see [`crate::simulation::command::state_json`].
+    pub fn sim_state(world: &mut World, req: &BridgeRequest) -> BridgeResponse {
+        BridgeResponse::ok(req.id.clone(), crate::simulation::command::state_json(world))
     }
 
     /// Trivial health check — lets siblings verify the bridge is alive
@@ -374,6 +525,12 @@ pub mod handlers {
         if let Some(mut pt) = world.get_resource_mut::<Time<avian3d::prelude::Physics>>() {
             pt.unpause();
         }
+        // Stepped ticks are deterministic: particle simulations pay each
+        // tick's whole debt instead of holding to their real-time FrameBudget.
+        use eustress_common::realism::particle_sim::ParticleSimControl;
+        let particles_budgeted = world
+            .get_resource_mut::<ParticleSimControl>()
+            .map(|mut c| std::mem::replace(&mut c.budgeted, false));
 
         let started = std::time::Instant::now();
         let mut ran = 0;
@@ -388,6 +545,9 @@ pub mod handlers {
             }
         }
 
+        if let (Some(was), Some(mut c)) = (particles_budgeted, world.get_resource_mut::<ParticleSimControl>()) {
+            c.budgeted = was;
+        }
         // Leave physics PAUSED so the world is frozen between steps.
         if let Some(mut pt) = world.get_resource_mut::<Time<avian3d::prelude::Physics>>() {
             pt.pause();
@@ -578,7 +738,6 @@ pub mod handlers {
             let now = chrono::Utc::now().to_rfc3339();
 
             let def = InstanceDefinition {
-                nuclear: None,
                 plasma: None,
                 asset: Some(AssetReference { mesh: mesh.to_string(), scene: "Scene0".to_string() }),
                 transform: TransformData {
@@ -2413,6 +2572,89 @@ pub mod handlers {
         )
     }
 
+    /// `output.tail`: the newest lines of the Output panel, oldest first.
+    /// Script prints, warnings and runtime errors from Luau and Rune land
+    /// there, along with Studio's own messages.
+    ///
+    /// Params: `limit` (default 50, at most 500), `level` (the lowest level
+    /// included: "debug", "info", "warn" or "error"; default "info") and
+    /// `contains` (a case-insensitive substring every line must hold).
+    pub fn output_tail(world: &mut World, req: &BridgeRequest) -> BridgeResponse {
+        use crate::ui::slint_ui::{LogLevel, OutputConsole};
+        fn rank(level: LogLevel) -> u8 {
+            match level {
+                LogLevel::Debug => 0,
+                LogLevel::Info => 1,
+                LogLevel::Warn => 2,
+                LogLevel::Error => 3,
+            }
+        }
+        let limit = req
+            .params
+            .get("limit")
+            .and_then(|v| v.as_u64())
+            .map(|n| n.clamp(1, 500) as usize)
+            .unwrap_or(50);
+        let min = match req.params.get("level").and_then(|v| v.as_str()).unwrap_or("info") {
+            "debug" => 0,
+            "info" => 1,
+            "warn" | "warning" => 2,
+            "error" => 3,
+            other => {
+                return BridgeResponse::error(
+                    req.id.clone(),
+                    BridgeError::invalid_params(format!(
+                        "output.tail: unknown level '{other}'; use debug, info, warn or error"
+                    )),
+                )
+            }
+        };
+        let contains = req
+            .params
+            .get("contains")
+            .and_then(|v| v.as_str())
+            .map(str::to_lowercase)
+            .filter(|s| !s.is_empty());
+        let Some(console) = world.get_resource::<OutputConsole>() else {
+            return BridgeResponse::ok(
+                req.id.clone(),
+                serde_json::json!({ "count": 0, "matching": 0, "total": 0, "lines": [] }),
+            );
+        };
+        let matching: Vec<_> = console
+            .entries
+            .iter()
+            .filter(|e| rank(e.level) >= min)
+            .filter(|e| contains.as_ref().map_or(true, |c| e.message.to_lowercase().contains(c)))
+            .collect();
+        let start = matching.len().saturating_sub(limit);
+        let lines: Vec<Value> = matching[start..]
+            .iter()
+            .map(|e| {
+                serde_json::json!({
+                    "level": match e.level {
+                        LogLevel::Debug => "debug",
+                        LogLevel::Info => "info",
+                        LogLevel::Warn => "warn",
+                        LogLevel::Error => "error",
+                    },
+                    "source": e.source,
+                    "time": e.timestamp,
+                    "message": e.message,
+                })
+            })
+            .collect();
+        BridgeResponse::ok(
+            req.id.clone(),
+            serde_json::json!({
+                "count": lines.len(),
+                "matching": matching.len(),
+                "total": console.entries.len(),
+                "lines": lines,
+            }),
+        )
+    }
+
     /// `action.invoke` — fire any editor `Action` by its enum-variant name
     /// (param `action`, e.g. "Copy", "Cut", "Paste", "Duplicate", "Group",
     /// "Ungroup", "Delete", "SelectAll", "Undo", "Redo", "SaveScene",
@@ -2438,9 +2680,11 @@ pub mod handlers {
                     return BridgeResponse::error(
                         req.id.clone(),
                         BridgeError::internal(format!(
-                            "unknown action '{}' — use the Action enum variant name \
-                             (Copy, Cut, Paste, Duplicate, Group, Ungroup, Delete, \
-                             SelectAll, Undo, Redo, SaveScene, MoveTool, ScaleTool, …)",
+                            "unknown action '{}' — use the Action enum variant name. The \
+                             accepted set is the WHOLE enum, not a safe subset: alongside \
+                             Copy/Cut/Paste/Duplicate/Group/Ungroup/SelectAll/Undo/Redo/\
+                             SaveScene/MoveTool/ScaleTool it includes irreversible actions \
+                             (Delete) and outward-facing ones (PublishSpace, PublishUniverse).",
                             name
                         )),
                     );
@@ -2544,6 +2788,27 @@ pub mod handlers {
             return true;
         }
         false
+    }
+
+    /// `physics.get` — the PhysicsService settings, each domain's flag, and
+    /// whether each domain is actually running. Backs `get_physics_settings`.
+    pub fn physics_get(world: &mut World, req: &BridgeRequest) -> BridgeResponse {
+        match crate::plugins::physics_plugin::bridge_physics_get(world) {
+            Ok(v) => BridgeResponse::ok(req.id.clone(), v),
+            Err(e) => BridgeResponse::error(req.id.clone(), BridgeError::internal(e)),
+        }
+    }
+
+    /// `physics.set` — apply a partial update to PhysicsService. Params: an
+    /// object of settings keyed by property name, for example
+    /// `{"chemistry": false, "gravity": [0, -3.71, 0]}`. Backs
+    /// `set_physics_settings`. An unknown key or bad value rejects the whole
+    /// request with nothing applied.
+    pub fn physics_set(world: &mut World, req: &BridgeRequest) -> BridgeResponse {
+        match crate::plugins::physics_plugin::bridge_physics_set(world, &req.params) {
+            Ok(v) => BridgeResponse::ok(req.id.clone(), v),
+            Err(e) => BridgeResponse::error(req.id.clone(), BridgeError::invalid_params(e)),
+        }
     }
 
     /// `ai_camera.set_pose` — place the AI camera. Params: `position`

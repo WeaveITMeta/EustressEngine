@@ -44,6 +44,8 @@ pub struct ScriptAnalysis {
     /// compare against their last seen generation to decide whether to
     /// rebuild models.
     pub generation: u64,
+    /// `StudioState::script_content_revision` last acted on.
+    seen_revision: u64,
 
     // ── debounce state ────────────────────────────────────────────────
     /// Wall-clock time of the most recent source change.
@@ -205,7 +207,9 @@ pub fn update_space_diag_from_editor(
 }
 
 /// Walk `<space_root>/SoulService/` (and fall back to the whole Space root)
-/// for every `.rune` and `.luau` file and run the analyzer on each.
+/// for every `.rune` file and run the Rune analyzer on each. Luau files have
+/// their own language service; the Rune compiler would report every one of
+/// them as a Rune parse error.
 fn scan_space_scripts(space_root: &std::path::Path) -> HashMap<String, Vec<Diagnostic>> {
     let soul_dir = space_root.join("SoulService");
     let scan_root = if soul_dir.is_dir() { soul_dir } else { space_root.to_path_buf() };
@@ -237,7 +241,7 @@ fn walk_for_scripts(
             walk_for_scripts(&path, depth + 1, out);
         } else if ft.is_file() {
             let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
-            if ext == "rune" || ext == "luau" {
+            if ext == "rune" {
                 if let Ok(source) = std::fs::read_to_string(&path) {
                     let result = analyzer::analyze(&source);
                     if !result.diagnostics.is_empty() {
@@ -269,17 +273,18 @@ impl Plugin for ScriptAnalysisPlugin {
     }
 }
 
-/// Read the active editor tab's code content and hand it to the analyzer.
-/// Only fires on `script_content_dirty` to avoid re-submitting the same
-/// source every frame. Summary (markdown) tabs are ignored — there's no
-/// Rune to parse.
+/// Read the active editor tab's code content and hand it to the Rune
+/// analyzer. Runs once per applied edit (`script_content_revision`); the
+/// highlighter owns `script_content_dirty`. Summary (markdown) views and
+/// non-Rune files are not submitted.
 fn submit_active_script(
-    state: Option<ResMut<crate::ui::StudioState>>,
+    state: Option<Res<crate::ui::StudioState>>,
     tab_manager: Option<Res<crate::ui::center_tabs::CenterTabManager>>,
     mut analysis: ResMut<ScriptAnalysis>,
 ) {
-    let Some(mut state) = state else { return };
-    if !state.script_content_dirty { return }
+    let Some(state) = state else { return };
+    if state.script_content_revision == analysis.seen_revision { return }
+    analysis.seen_revision = state.script_content_revision;
 
     // Determine whether the active tab is a Rune code view. Summary markdown
     // is ignored; the analyzer would emit noise on markdown prose.
@@ -294,14 +299,37 @@ fn submit_active_script(
         ))
         .unwrap_or(false);
 
-    if is_code {
+    let path = tab_manager.as_deref()
+        .and_then(|mgr| mgr.tabs.get(mgr.active_tab))
+        .and_then(|t| t.file_path.as_ref())
+        .map(|p| p.display().to_string());
+    // Rune source opens as a SoulScript tab (a `.rs` file opens as a plain
+    // CodeEditor tab, and must never reach the Rune compiler). Its
+    // `script_language` is resolved from the source file: "Rust" is the
+    // grammar Rune highlights with, empty means not yet resolved.
+    let is_script_tab = tab_manager.as_deref()
+        .and_then(|mgr| mgr.tabs.get(mgr.active_tab))
+        .map(|t| matches!(t.tab_type, crate::ui::center_tabs::CenterTabType::SoulScript { .. }))
+        .unwrap_or(false);
+    let is_rune = is_script_tab
+        && (state.script_language.is_empty() || state.script_language == "Rust");
+
+    if is_code && is_rune {
         analysis.submit(state.script_editor_content.clone());
         // Track which file the analyzer is operating on — Problems panel
         // uses this for "jump to line" routing.
-        analysis.active_path = tab_manager.as_deref()
-            .and_then(|mgr| mgr.tabs.get(mgr.active_tab))
-            .and_then(|t| t.file_path.as_ref())
-            .map(|p| p.display().to_string());
+        analysis.active_path = path;
+    } else if !analysis.result.diagnostics.is_empty()
+        || analysis.pending_source.is_some()
+        || analysis.in_flight.is_some()
+    {
+        // Another language, or no code view: drop the previous file's Rune
+        // results so they never draw on this text.
+        analysis.pending_source = None;
+        analysis.pending_change = None;
+        analysis.in_flight = None;
+        analysis.result = analyzer::AnalysisResult::default();
+        analysis.generation = analysis.generation.wrapping_add(1);
+        analysis.active_path = path;
     }
-    state.script_content_dirty = false;
 }

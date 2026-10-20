@@ -8,8 +8,10 @@ use leptos::prelude::*;
 use leptos::task::spawn_local;
 use leptos_router::hooks::use_params_map;
 use serde::Deserialize;
+use crate::api::{get_purchase_summary, ApiClient, PurchaseSummary};
 use crate::components::{CentralNav, Footer};
 use crate::state::{AppState, AuthState};
+use crate::utils::{format_bliss_exact, format_count};
 
 const API_URL: &str = "https://api.eustress.dev";
 
@@ -279,7 +281,15 @@ pub fn ProfilePage() -> impl IntoView {
                         </button>
                     </div>
                 </div>
-                
+
+                // The account holder's own spending. `Show` keeps the card
+                // mounted across the app's minute-by-minute session refresh,
+                // and it is never mounted on anyone else's profile: the
+                // summary it reads is the viewer's, not the profile's.
+                <Show when=is_own_profile>
+                    <SpendSummaryCard />
+                </Show>
+
                 // Badges section
                 <section class="profile-section">
                     <div class="section-header-industrial">
@@ -400,6 +410,76 @@ pub fn ProfilePage() -> impl IntoView {
             
             <Footer />
         </div>
+    }
+}
+
+/// Tickets and Bliss spent, for the account holder alone.
+///
+/// Reads `/api/purchases/summary`, which answers for the bearer's own account
+/// and takes no account id, so the numbers cannot belong to anyone else.
+#[component]
+fn SpendSummaryCard() -> impl IntoView {
+    let api_url = expect_context::<AppState>().api_url.clone();
+    let summary = RwSignal::new(Option::<PurchaseSummary>::None);
+    let failed = RwSignal::new(false);
+
+    // An effect, so the request goes out in the browser once the card mounts.
+    Effect::new(move |_| {
+        let api_url = api_url.clone();
+        spawn_local(async move {
+            match get_purchase_summary(&ApiClient::new(api_url)).await {
+                Ok(s) => summary.set(Some(s)),
+                Err(_) => failed.set(true),
+            }
+        });
+    });
+
+    let figure = move |pick: fn(&PurchaseSummary) -> String| {
+        move || summary.with(|s| s.as_ref().map(pick).unwrap_or_else(|| "\u{2026}".to_string()))
+    };
+
+    view! {
+        <section class="profile-spend" aria-labelledby="profile-spend-h">
+            <div class="profile-spend-head">
+                <h2 id="profile-spend-h">"Your spending"</h2>
+                <span class="profile-spend-private">
+                    <img src="/assets/icons/shield.svg" alt="" />
+                    "Only you can see this"
+                </span>
+            </div>
+            {move || if failed.get() {
+                view! {
+                    <p class="profile-spend-error">"Your spending could not be loaded right now."</p>
+                }.into_any()
+            } else {
+                view! {
+                    <div class="profile-spend-stats">
+                        <div class="profile-spend-stat">
+                            <span class="profile-spend-label">"Tickets spent"</span>
+                            <span class="profile-spend-value">
+                                {figure(|s| format_count(s.totals.tickets))}
+                                <span class="profile-spend-unit">"TKT"</span>
+                            </span>
+                        </div>
+                        <div class="profile-spend-stat profile-spend-stat-bls">
+                            <span class="profile-spend-label">"Bliss spent"</span>
+                            <span class="profile-spend-value">
+                                {figure(|s| format_bliss_exact(s.totals.bliss))}
+                                <span class="profile-spend-unit">"BLS"</span>
+                            </span>
+                        </div>
+                        <div class="profile-spend-stat">
+                            <span class="profile-spend-label">"Purchases"</span>
+                            <span class="profile-spend-value">{figure(|s| format_count(s.totals.purchases))}</span>
+                        </div>
+                    </div>
+                }.into_any()
+            }}
+            <a href="/purchases" class="profile-spend-link">
+                "See every purchase"
+                <span aria-hidden="true">"\u{2192}"</span>
+            </a>
+        </section>
     }
 }
 

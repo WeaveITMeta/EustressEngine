@@ -4,12 +4,24 @@
 //! find the LSP.
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 /// Owns the written file so the shutdown system can clean it up via
 /// `Drop`. We still *want* explicit deletion on `AppExit` for
 /// correctness (the `Drop` runs only if the resource is removed or
 /// the app is dropped cleanly), but the Drop gives us a second chance
 /// if shutdown isn't graceful.
+///
+/// ## Several engines, one Universe
+///
+/// The file is a single slot: the last engine to write it is the one a
+/// Universe-addressed client reaches, and it is the Universe's OWNER for
+/// the other single-slot files (`simulation::ipc`). So every removal is
+/// compare-and-delete — a file is removed only while it still names OUR
+/// port. Deleting unconditionally meant the first engine to exit wiped the
+/// port of the engine that had written after it, leaving the Universe
+/// with no reachable owner. When the owner does exit (or crashes), a
+/// surviving engine re-claims the slot ([`PortFile::reclaim_if_released`]).
 pub struct PortFile {
     path: PathBuf,
     /// Global fallback copy at the shared workspace root (parent of all
@@ -17,6 +29,12 @@ pub struct PortFile {
     /// universe still discover the live engine. `None` for placeholders / when
     /// the universe has no parent. Cleaned up on `Drop` alongside `path`.
     global_path: Option<PathBuf>,
+    /// Cleared by [`PortFile::disarm_global`] when a successor `PortFile`
+    /// of this same engine has taken over `global_path`, so dropping this
+    /// one doesn't delete the copy the successor just wrote.
+    global_armed: AtomicBool,
+    /// The port written — what `Drop` compares against before deleting.
+    port: u16,
     /// When true, we never actually wrote anything to disk — the
     /// placeholder variant used when no Universe is loaded yet at
     /// startup. Prevents `Drop` from trying to delete a nonexistent
@@ -50,7 +68,13 @@ impl PortFile {
             Some(gp)
         });
 
-        Ok(Self { path, global_path, placeholder: false })
+        Ok(Self {
+            path,
+            global_path,
+            global_armed: AtomicBool::new(true),
+            port,
+            placeholder: false,
+        })
     }
 
     /// Back-compat convenience: resolve the Universe ourselves (no
@@ -64,7 +88,13 @@ impl PortFile {
     /// port is still reachable via env var / log output, just not via
     /// the sentinel convention.
     pub fn placeholder() -> Self {
-        Self { path: PathBuf::new(), global_path: None, placeholder: true }
+        Self {
+            path: PathBuf::new(),
+            global_path: None,
+            global_armed: AtomicBool::new(false),
+            port: 0,
+            placeholder: true,
+        }
     }
 
     pub fn display_path(&self) -> String {
@@ -81,6 +111,61 @@ impl PortFile {
     pub fn path(&self) -> &Path {
         &self.path
     }
+
+    /// The workspace-level copy's path, if one was written.
+    pub fn global_path(&self) -> Option<&Path> {
+        self.global_path.as_deref()
+    }
+
+    /// Hand `global_path` over to a successor: this `PortFile`'s `Drop`
+    /// will leave it alone. Used when re-pointing to another Universe of the
+    /// same workspace — the successor rewrites the same global file with the
+    /// same port, which compare-and-delete alone cannot tell apart.
+    pub fn disarm_global(&self) {
+        self.global_armed.store(false, Ordering::Relaxed);
+    }
+
+    /// Re-write our port into any of our slots its owner has released:
+    /// removed on a clean exit (compare-and-delete removes only the
+    /// owner's own port), or still naming a port nothing listens on
+    /// because the owner crashed. Returns true if the Universe slot was
+    /// re-claimed. A slot that names another live engine is left alone:
+    /// that engine owns it.
+    pub fn reclaim_if_released(&self) -> bool {
+        if self.placeholder {
+            return false;
+        }
+        let reclaimed = slot_released(&self.path, self.port)
+            && std::fs::write(&self.path, self.port.to_string()).is_ok();
+        if self.global_armed.load(Ordering::Relaxed) {
+            if let Some(gp) = &self.global_path {
+                if slot_released(gp, self.port) {
+                    let _ = std::fs::write(gp, self.port.to_string());
+                }
+            }
+        }
+        reclaimed
+    }
+}
+
+/// True when `path` is free for `ours` to take: missing or unreadable, or
+/// naming another port with no listener behind it.
+fn slot_released(path: &Path, ours: u16) -> bool {
+    match eustress_bridge_client::read_port_file(path) {
+        None => true,
+        Some(p) if p == ours => false,
+        Some(p) => !port_is_listening(p),
+    }
+}
+
+/// A bare loopback connect: a live bridge's listener accepts it in the
+/// kernel backlog even while its engine is busy, so this measures only
+/// whether the process is alive. The timeout bounds the probe on Windows,
+/// where a refused loopback connect is retried for about two seconds
+/// before failing.
+fn port_is_listening(port: u16) -> bool {
+    let addr = std::net::SocketAddr::from(([127, 0, 0, 1], port));
+    std::net::TcpStream::connect_timeout(&addr, std::time::Duration::from_millis(50)).is_ok()
 }
 
 impl Drop for PortFile {
@@ -88,10 +173,19 @@ impl Drop for PortFile {
         if self.placeholder {
             return;
         }
-        let _ = std::fs::remove_file(&self.path);
-        if let Some(gp) = &self.global_path {
-            let _ = std::fs::remove_file(gp);
+        remove_if_ours(&self.path, self.port);
+        if self.global_armed.load(Ordering::Relaxed) {
+            if let Some(gp) = &self.global_path {
+                remove_if_ours(gp, self.port);
+            }
         }
+    }
+}
+
+/// Delete `path` only while it still holds `port`.
+fn remove_if_ours(path: &Path, port: u16) {
+    if eustress_bridge_client::read_port_file(path) == Some(port) {
+        let _ = std::fs::remove_file(path);
     }
 }
 

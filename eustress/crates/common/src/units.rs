@@ -13,7 +13,7 @@
 //!         │   convert + epsilon_snap (jitter-free formatter)
 //!         ▼
 //!   [ Engine-Native ]      ← always meters. 1 unit = 1 meter.
-//!         ▲                  Avian gravity 9.81, BasePart.size in m,
+//!         ▲                  gravity in m/s², BasePart.size in m,
 //!         │                  Transform.translation in m, raycasts in m,
 //!         │                  gizmo math in m, mesh AABBs in m.
 //!         │   convert (authored ↔ meters)
@@ -71,6 +71,8 @@
 //! - [`ENGINE_NATIVE_UNIT`] — `Unit::Meter`. The one constant the rest
 //!   of the engine should reach for when asking "what unit does ECS
 //!   store?"
+//! - [`STANDARD_GRAVITY`]: g₀, 9.80665 m/s². The default gravity, and
+//!   the constant for quantities defined at standard gravity.
 
 use bevy::prelude::{Component, Resource};
 use serde::{Deserialize, Serialize};
@@ -220,6 +222,29 @@ impl Unit {
 /// AABBs, raycast distances, gizmo offsets — all are in this unit.
 /// Other surfaces (disk, Properties panel) convert at their boundary.
 pub const ENGINE_NATIVE_UNIT: Unit = Unit::Meter;
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Standard gravity
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Standard gravity, g₀, in m/s²: exactly 9.80665 by definition.
+///
+/// Two kinds of code use it, and they must not be confused:
+///
+/// - **Defaults.** A new Space's `Workspace.gravity` and the Avian `Gravity`
+///   inserted at startup start here. Once a Space runs, the live value is
+///   `Workspace.gravity`, which `sync_workspace_gravity_to_avian` copies into
+///   Avian's `Gravity` every frame; scripts and tools change it there.
+/// - **Quantities defined at standard gravity.** A character's authored jump
+///   apex, specific impulse, or the depth-pressure of a formula documented
+///   for Earth. These stay fixed when a Space changes its gravity.
+///
+/// Anything that simulates a falling or floating body reads the live gravity
+/// instead, so it follows a Space set to the Moon.
+pub const STANDARD_GRAVITY: f64 = 9.80665;
+
+/// [`STANDARD_GRAVITY`] as `f32`, for Bevy and Avian vectors.
+pub const STANDARD_GRAVITY_F32: f32 = STANDARD_GRAVITY as f32;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // MeasureUnit component
@@ -530,6 +555,22 @@ mod tests {
         assert_eq!(Unit::Millimeter.to_meters(), 0.001);
         // 1 ft = 12 in (within fp precision)
         assert!((Unit::Foot.to_meters() - 12.0 * Unit::Inch.to_meters()).abs() < FUZZ);
+    }
+
+    /// Crates below `common` cannot name [`STANDARD_GRAVITY`], so they keep
+    /// their own copies; every copy must be the same value.
+    #[test]
+    fn every_standard_gravity_copy_agrees() {
+        assert_eq!(STANDARD_GRAVITY, 9.80665);
+        assert_eq!(eustress_avatar_schema::GRAVITY_MPS2, STANDARD_GRAVITY_F32);
+        assert_eq!(
+            eustress_particle_sim::SimParams::default().gravity.to_array(),
+            [0.0, -STANDARD_GRAVITY_F32, 0.0],
+        );
+        assert_eq!(
+            crate::services::workspace::Workspace::default().gravity.to_array(),
+            [0.0, -STANDARD_GRAVITY_F32, 0.0],
+        );
     }
 
     /// Stud derives from the engine's gravity tuning.

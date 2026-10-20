@@ -1,16 +1,17 @@
-"""Blender: build animated X/Y Bot website previews and copy the Voltec GLB.
+"""Blender: build animated X/Y Bot and size-bounded Voltec website previews.
 Run after build_voltec.py. Engine X/Y source assets remain untouched.
 """
 import bpy
 import sys
 import json
-import shutil
 from pathlib import Path
 ROOT=Path(__file__).resolve().parents[1]
 sys.path.insert(0,str(Path(__file__).resolve().parent))
 from mixamo_bake import bake_mixamo, install_tracks
+from web_avatar_preview import build_preview, PAGES_MAX_BYTES
 WEB=ROOT.parents[2]/'web/assets/characters'
 WEB.mkdir(parents=True,exist_ok=True)
+(WEB/'voltec_supreme.glb').unlink(missing_ok=True)
 catalog=[]
 for identity,body,label,sex,prefix in [('M','y_bot','Y Bot','Male','male'),('F','x_bot','X Bot','Female','female'),('R','voltec_supreme','Voltec Supreme',None,'robot')]:
     catalog.append(dict(id=body,label=label,identity=identity,body_asset=f'bundled://characters/{body}.glb',
@@ -27,11 +28,14 @@ for identity,body,label,sex,prefix in [('M','y_bot','Y Bot','Male','male'),('F',
         bpy.ops.export_scene.gltf(filepath=str(WEB/(body+'.glb')),export_format='GLB',use_selection=True,
             export_animations=True,export_animation_mode='NLA_TRACKS',export_skins=True,export_yup=True,export_force_sampling=True)
     else:
-        shutil.copyfile(ROOT/(body+'.glb'),WEB/(body+'.glb'))
+        build_preview(ROOT/(body+'.glb'),WEB/(body+'_preview.glb'))
 catalog_path=WEB/'rigs.json'
 if catalog_path.exists():
     existing=json.loads(catalog_path.read_text(encoding='utf-8'))
     builtin_ids={r['id'] for r in catalog}
     catalog.extend(r for r in existing if r['id'] not in builtin_ids)
 catalog_path.write_text(json.dumps(catalog,indent=2)+'\n',encoding='utf-8')
+for path in WEB.rglob('*'):
+    if path.is_file() and path.stat().st_size >= PAGES_MAX_BYTES:
+        raise ValueError(f'{path.name} exceeds the Pages 25 MiB file cap')
 print('WEB AVATARS READY',flush=True)

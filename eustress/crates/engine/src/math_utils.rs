@@ -829,3 +829,90 @@ pub fn find_drag_surface<T: bevy::ecs::query::QueryFilter>(
         (None, None) => None,
     }
 }
+
+/// Grid-snap a part by its lower corner, measured in `frame` (a surface's
+/// own axes, or the world when `frame_rot` is identity), instead of by its
+/// center or by the point under the cursor.
+///
+/// Snapping the grabbed point left the part off the grid by wherever the
+/// user happened to grab it, so touching an aligned part knocked it out of
+/// alignment; snapping the center misaligns every part with an odd size.
+/// Snapping the corner puts a part whose size is a multiple of the grid
+/// edge to edge with its neighbours, and leaves a part that is already on
+/// the grid exactly where it is. The component along `surface_normal`
+/// (when given) is kept, so a part resting on a surface stays flush.
+pub fn snap_part_by_corner(
+    center: Vec3,
+    size: Vec3,
+    rotation: Quat,
+    frame_origin: Vec3,
+    frame_rot: Quat,
+    surface_normal: Option<Vec3>,
+    snap: f32,
+) -> Vec3 {
+    if snap <= 0.0 || !center.is_finite() {
+        return center;
+    }
+    let inv = frame_rot.inverse();
+    // Half extents of the part along the frame's axes.
+    let r = Mat3::from_quat(inv * rotation);
+    let h = size.abs() * 0.5;
+    let half = Vec3::new(
+        r.x_axis.x.abs() * h.x + r.y_axis.x.abs() * h.y + r.z_axis.x.abs() * h.z,
+        r.x_axis.y.abs() * h.x + r.y_axis.y.abs() * h.y + r.z_axis.y.abs() * h.z,
+        r.x_axis.z.abs() * h.x + r.y_axis.z.abs() * h.y + r.z_axis.z.abs() * h.z,
+    );
+    let local_center = inv * (center - frame_origin);
+    let corner = local_center - half;
+    let mut snapped = (corner / snap).round() * snap + half;
+    if let Some(n) = surface_normal {
+        let a = (inv * n).abs();
+        if a.x >= a.y && a.x >= a.z {
+            snapped.x = local_center.x;
+        } else if a.y >= a.z {
+            snapped.y = local_center.y;
+        } else {
+            snapped.z = local_center.z;
+        }
+    }
+    frame_origin + frame_rot * snapped
+}
+
+#[cfg(test)]
+mod corner_snap_tests {
+    use super::*;
+
+    #[test]
+    fn an_aligned_part_does_not_move() {
+        // 1x1x1 at 0.5 has its corner on 0: it is already on a 1 m grid.
+        let c = Vec3::new(0.5, 0.5, 2.5);
+        let out = snap_part_by_corner(c, Vec3::ONE, Quat::IDENTITY, Vec3::ZERO, Quat::IDENTITY, None, 1.0);
+        assert!((out - c).length() < 1e-5, "{out:?}");
+    }
+
+    #[test]
+    fn odd_sizes_land_edge_on_grid() {
+        // A 3 m wide part near x = 0.2 snaps so its edges sit on whole metres.
+        let out = snap_part_by_corner(Vec3::new(0.2, 0.5, 0.0), Vec3::new(3.0, 1.0, 1.0), Quat::IDENTITY, Vec3::ZERO, Quat::IDENTITY, None, 1.0);
+        let min_x = out.x - 1.5;
+        assert!((min_x - min_x.round()).abs() < 1e-5, "{out:?}");
+    }
+
+    #[test]
+    fn the_surface_normal_component_is_kept() {
+        let c = Vec3::new(0.3, 1.237, 0.3);
+        let out = snap_part_by_corner(c, Vec3::ONE, Quat::IDENTITY, Vec3::ZERO, Quat::IDENTITY, Some(Vec3::Y), 1.0);
+        assert!((out.y - c.y).abs() < 1e-6);
+        assert!((out.x - 0.5).abs() < 1e-5 && (out.z - 0.5).abs() < 1e-5, "{out:?}");
+    }
+
+    #[test]
+    fn snaps_in_a_rotated_frame() {
+        let frame_rot = Quat::from_rotation_y(0.4);
+        let origin = Vec3::new(10.0, 0.0, -3.0);
+        let local = Vec3::new(0.5, 0.5, 1.5);
+        let c = origin + frame_rot * local;
+        let out = snap_part_by_corner(c, Vec3::ONE, frame_rot, origin, frame_rot, None, 1.0);
+        assert!((out - c).length() < 1e-4, "{out:?} vs {c:?}");
+    }
+}

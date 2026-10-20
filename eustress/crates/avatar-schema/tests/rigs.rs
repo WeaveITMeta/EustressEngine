@@ -70,6 +70,23 @@ fn rig_assets_cannot_escape_the_installed_character_directory() {
 }
 
 #[test]
+fn space_rig_assets_stay_inside_the_space() {
+    let mut rig = RigDefinition::builtin(AvatarIdentity::Male);
+    rig.body_asset = "space://StarterPlayer/Characters/BoxheadHero.glb".into();
+    rig.validate().unwrap();
+    for bad in [
+        "space://../escape.glb",
+        "space:///absolute.glb",
+        "space://C:/rig.glb",
+        "space://with space.glb",
+        "space://rig.glb#Scene1",
+    ] {
+        rig.body_asset = bad.into();
+        assert!(rig.validate().is_err(), "accepted {bad}");
+    }
+}
+
+#[test]
 fn every_builtin_body_and_motion_is_shipped() {
     let assets = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../common/assets");
     for identity in AvatarIdentity::ALL {

@@ -443,7 +443,7 @@ both_sides = true
 name = "Shell1"
 kind = "feature"
 op = "shell"
-open_faces = []
+open_faces = ["Extrude1.cap_end"]
 wall_thickness = "wall"
 "#;
 

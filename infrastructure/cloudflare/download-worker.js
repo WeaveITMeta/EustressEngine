@@ -6,6 +6,12 @@
 //   - DOWNLOADS: R2 bucket (eustress-downloads)
 //   - ANALYTICS: Analytics Engine dataset
 //   - JWT_SECRET: Secret (same as auth worker uses to sign JWTs)
+//
+// Two products publish into the one bucket, each under its own key prefix:
+// Studio at the root, where every updater already in the field looks, and the
+// Player under player/ (.github/workflows/player-release.yml). Every public
+// route below takes the same optional player/ segment, so the Player's
+// manifest, permanent links and artifacts mirror Studio's one for one.
 // =============================================================================
 
 export default {
@@ -27,7 +33,10 @@ export default {
       // itself. The other two spellings are kept because downloads.eustress.dev
       // has served them since 2025-12.
       if (path === '/latest.json' || path === '/api/releases/latest' || path === '/api/latest') {
-        return handleLatest(env, cors);
+        return handleLatest(env, cors, '');
+      }
+      if (path === '/player/latest.json') {
+        return handleLatest(env, cors, 'player/');
       }
 
       // Public: a permanent URL per platform, redirecting to the current
@@ -37,17 +46,18 @@ export default {
       //
       // Platform names are the keys of latest.json, so this cannot drift from
       // what the build actually produced.
-      const latest = path.match(/^\/latest\/([a-z0-9-]+)$/);
+      const latest = path.match(/^\/(player\/)?latest\/([a-z0-9-]+)$/);
       if (latest) {
-        const manifestObj = await env.DOWNLOADS.get('latest.json');
+        const prefix = latest[1] || '';
+        const manifestObj = await env.DOWNLOADS.get(`${prefix}latest.json`);
         if (!manifestObj) {
           return jsonResponse({ error: 'No releases available' }, 404, cors);
         }
         const manifest = await manifestObj.json();
-        const entry = manifest.platforms?.[latest[1]];
+        const entry = manifest.platforms?.[latest[2]];
         if (!entry) {
           return jsonResponse({
-            error: `Platform '${latest[1]}' not found`,
+            error: `Platform '${latest[2]}' not found`,
             available: Object.keys(manifest.platforms || {}),
           }, 404, cors);
         }
@@ -56,7 +66,7 @@ export default {
         return new Response(null, {
           status: 302,
           headers: {
-            Location: `/v${manifest.version}/${entry.file}`,
+            Location: `/${prefix}v${manifest.version}/${entry.file}`,
             'Cache-Control': 'public, max-age=60',
             ...cors,
           },
@@ -70,16 +80,17 @@ export default {
       // sign-in-to-download flow, which buys attribution and per-user
       // analytics rather than secrecy: the build is free either way.
       //
-      // The pattern is the whole boundary. It admits only vX.Y.Z/filename, so
-      // no other key in the bucket is reachable through this route.
-      const artifact = path.match(/^\/(v\d+\.\d+\.\d+)\/([A-Za-z0-9._-]+)$/);
+      // The pattern is the whole boundary. It admits only vX.Y.Z/filename and
+      // player/vX.Y.Z/filename, so no other key in the bucket is reachable
+      // through this route.
+      const artifact = path.match(/^\/(player\/)?(v\d+\.\d+\.\d+)\/([A-Za-z0-9._-]+)$/);
       if (artifact && request.method === 'GET') {
-        const object = await env.DOWNLOADS.get(`${artifact[1]}/${artifact[2]}`);
+        const object = await env.DOWNLOADS.get(`${artifact[1] || ''}${artifact[2]}/${artifact[3]}`);
         if (!object) return jsonResponse({ error: 'Not found' }, 404, cors);
         return new Response(object.body, {
           headers: {
             'Content-Type': 'application/octet-stream',
-            'Content-Disposition': `attachment; filename="${artifact[2]}"`,
+            'Content-Disposition': `attachment; filename="${artifact[3]}"`,
             // A version path never changes content, so this is cacheable
             // forever and a repeat download costs the origin nothing.
             'Cache-Control': 'public, max-age=31536000, immutable',
@@ -108,8 +119,8 @@ export default {
 
 // ── Latest manifest (public) ────────────────────────────────────────────────
 
-async function handleLatest(env, cors) {
-  const object = await env.DOWNLOADS.get('latest.json');
+async function handleLatest(env, cors, prefix) {
+  const object = await env.DOWNLOADS.get(`${prefix}latest.json`);
   if (!object) {
     return jsonResponse({ error: 'No releases available' }, 404, cors);
   }
@@ -143,13 +154,21 @@ async function handleDownload(request, env, ctx, cors) {
   }
 
   // Get platform from query string
-  const platform = new URL(request.url).searchParams.get('platform');
+  const params = new URL(request.url).searchParams;
+  const platform = params.get('platform');
   if (!platform) {
     return jsonResponse({ error: 'Missing platform parameter' }, 400, cors);
   }
 
+  // Studio unless ?product=player.
+  const product = params.get('product') || 'studio';
+  if (product !== 'studio' && product !== 'player') {
+    return jsonResponse({ error: `Unknown product '${product}'` }, 400, cors);
+  }
+  const prefix = product === 'player' ? 'player/' : '';
+
   // Look up the latest version manifest
-  const manifestObj = await env.DOWNLOADS.get('latest.json');
+  const manifestObj = await env.DOWNLOADS.get(`${prefix}latest.json`);
   if (!manifestObj) {
     return jsonResponse({ error: 'No releases available' }, 404, cors);
   }
@@ -165,6 +184,7 @@ async function handleDownload(request, env, ctx, cors) {
 
   // Extract R2 key from the URL
   // URL format: https://downloads.eustress.dev/v0.3.5/eustress-engine-v0.3.5-windows-x64.zip
+  // or, for the Player, https://downloads.eustress.dev/player/v0.1.0/EustressPlayer-Setup.exe
   const downloadUrl = new URL(platformData.url);
   const r2Key = downloadUrl.pathname.replace(/^\//, ''); // Remove leading slash
 
@@ -183,6 +203,7 @@ async function handleDownload(request, env, ctx, cors) {
           request.headers.get('cf-ipcountry') || 'XX',
           user.sub || 'unknown',
           manifest.version || 'unknown',
+          product,
         ],
         doubles: [1, object.size],
         indexes: [platform],

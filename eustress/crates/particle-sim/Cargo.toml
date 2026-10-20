@@ -1,0 +1,12 @@
+[package]
+name = "eustress-particle-sim"
+version = "0.1.0"
+edition = "2021"
+description = "The solver behind the ParticleSimulation class: SPH fluids (DFSPH and WCSPH), charged particles in fields, particle-in-cell electrostatics and Drude conduction, stepped on the CPU with rayon"
+
+[dependencies]
+# Vec3 and Quat only. `std` is a subset of the features the engine already
+# enables for bevy_math, so this dependency changes no other crate's build.
+bevy_math = { version = "0.19", default-features = false, features = ["std"] }
+rayon = "1.10"
+bytemuck = { version = "1.14", features = ["derive"] }

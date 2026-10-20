@@ -6,11 +6,10 @@
 //! `plugins::lighting_plugin::hydrate_lighting_entities` and stays out
 //! of scope here (see AGENT_DISPATCH.md "Pre-existing Systems").
 //!
-//! Brightness uses the legacy `spawn.rs::spawn_directional_light` scale:
-//! `bevy::prelude::DirectionalLight::illuminance = brightness × 10_000.0`.
-//! The audit calls this out at §4.5 — the multiplier keeps the
-//! authoring float small (1.0 means a typical outdoor sun) while
-//! letting Bevy run physically-based lux internally.
+//! The rendered `bevy::prelude::DirectionalLight` is built from the
+//! authoring component by `eustress_common::plugins::light_classes`
+//! (brightness 1 is 10,000 lux at daylight exposure, display-referred), so
+//! this spawner attaches only the authoring component.
 //!
 //! Per §4.5 "LOD policy" directional lights have no falloff and aren't
 //! LOD-tiered — `lod_components` returns an empty bundle for every
@@ -30,12 +29,6 @@ use super::toml_helpers::{
     read_transform_section, transform_to_toml,
 };
 use super::wire;
-
-/// Brightness → Bevy `illuminance` (lux) scale. Pulled out as a named
-/// constant so a future migration that changes the scale only has to
-/// touch one site. Mirrors the magic 10_000.0 in
-/// `spawn.rs::spawn_directional_light:500`.
-const ILLUMINANCE_PER_BRIGHTNESS: f32 = 10_000.0;
 
 #[derive(Default)]
 pub struct DirectionalLightSpawner;
@@ -70,19 +63,14 @@ impl ClassSpawner for DirectionalLightSpawner {
             .filter(|s| !s.is_empty())
             .map(|s| s.to_string());
 
+        let enabled = props.get_bool("light.enabled").unwrap_or(defaults.enabled);
+
         let transform = props.get_transform("transform").copied().unwrap_or_default();
 
         ctx.commands
             .spawn((
-                DirectionalLight {
-                    color,
-                    illuminance: brightness * ILLUMINANCE_PER_BRIGHTNESS,
-                    shadow_maps_enabled: shadows,
-                    shadow_depth_bias,
-                    shadow_normal_bias,
-                    ..default()
-                },
                 transform,
+                Visibility::default(),
                 Instance {
                     name: name.clone(),
                     class_name: ClassName::DirectionalLight,
@@ -95,6 +83,7 @@ impl ClassSpawner for DirectionalLightSpawner {
                     color,
                     brightness,
                     shadows,
+                    enabled,
                     shadow_depth_bias,
                     shadow_normal_bias,
                     texture,
@@ -189,24 +178,12 @@ impl ClassSpawner for DirectionalLightSpawner {
             if let Some(t) = props.get_string("appearance.texture") {
                 e.texture = if t.is_empty() { None } else { Some(t.to_string()) };
             }
-        }
-        if let Some(mut dl) = world.entity_mut(entity).get_mut::<DirectionalLight>() {
-            if let Some(c) = read_color(props, "light.color") {
-                dl.color = c;
-            }
-            if let Some(b) = props.get_f32("light.brightness") {
-                dl.illuminance = b * ILLUMINANCE_PER_BRIGHTNESS;
-            }
-            if let Some(s) = props.get_bool("light.shadows") {
-                dl.shadow_maps_enabled = s;
-            }
-            if let Some(b) = props.get_f32("shadows.depth_bias") {
-                dl.shadow_depth_bias = b;
-            }
-            if let Some(b) = props.get_f32("shadows.normal_bias") {
-                dl.shadow_normal_bias = b;
+            if let Some(en) = props.get_bool("light.enabled") {
+                e.enabled = en;
             }
         }
+        // The rendered DirectionalLight follows the authoring component
+        // through `light_classes`; nothing here writes it.
         false
     }
 
@@ -358,6 +335,7 @@ mod tests {
                     color: Color::srgb(1.0, 0.97, 0.92),
                     brightness: 1.5,
                     shadows: true,
+                    enabled: true,
                     shadow_depth_bias: 0.025,
                     shadow_normal_bias: 2.0,
                     texture: None,
@@ -374,21 +352,18 @@ mod tests {
     }
 
     #[test]
-    fn apply_edit_brightness_scales_to_illuminance() {
+    fn apply_edit_updates_the_authoring_component() {
         let mut world = World::new();
         let entity = world
-            .spawn((
-                DirectionalLight::default(),
-                EustressDirectionalLight::default(),
-                Transform::default(),
-            ))
+            .spawn((EustressDirectionalLight::default(), Transform::default()))
             .id();
         let mut bag = PropertyBag::new();
         bag.set("light.brightness", PropertyValue::Float(2.0));
+        bag.set("light.enabled", PropertyValue::Bool(false));
         let respawn = DirectionalLightSpawner.apply_edit(&mut world, entity, &bag);
         assert!(!respawn);
-        let dl = world.entity(entity).get::<DirectionalLight>().unwrap();
-        // 2.0 * 10_000.0 == 20_000.0 lux
-        assert!((dl.illuminance - 20_000.0).abs() < 1e-3);
+        let light = world.entity(entity).get::<EustressDirectionalLight>().unwrap();
+        assert_eq!(light.brightness, 2.0);
+        assert!(!light.enabled);
     }
 }

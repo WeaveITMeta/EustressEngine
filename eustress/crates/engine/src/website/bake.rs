@@ -804,8 +804,8 @@ fn json_value(scalar: &Scalar, key: &str) -> Result<serde_json::Value, BakeError
 
 /// A resolved manifest waiting for the two fields the upload produces.
 ///
-/// `publish_hash` is a digest of the packaged `.pak` and `simulation_id` comes
-/// back from `POST /api/simulations/publish`, so neither exists while the
+/// `publish_hash` is the digest of the published world's manifest and
+/// `simulation_id` is the Universe's listing, so neither exists while the
 /// `World` is still in hand. This carries the resolved values across the thread
 /// boundary and [`PendingManifest::finalize`] stamps the rest in.
 #[derive(Clone, Debug)]

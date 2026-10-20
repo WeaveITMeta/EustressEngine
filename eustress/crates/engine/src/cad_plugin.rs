@@ -194,26 +194,68 @@ pub struct CadSketchCanvasSetVisibleEvent {
     pub visible: bool,
 }
 
+/// One sketch entity as the Sketch panel shows it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CadSketchEntityUi {
+    pub index: usize,
+    /// `line`, `rect`, `circle`, `arc`, `point` or `construction`: the glyph.
+    pub kind: &'static str,
+    /// "Line", "Rectangle", ...
+    pub label: &'static str,
+    /// Size and position in the status-bar display unit.
+    pub summary: String,
+    /// `free`, `construction`, `fixed` or `full`: the glyph's colour, from
+    /// the sketch state palette in DRAFTING_UX.md.
+    pub state: &'static str,
+}
+
+/// One constraint as the Sketch panel shows it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CadSketchConstraintUi {
+    pub index: usize,
+    /// The constraint's file name (`perpendicular`, `equal_length`): the glyph.
+    pub kind: &'static str,
+    /// "Perpendicular", "Equal length"
+    pub label: String,
+    /// The entities it names: "e0, e1", "e2 end, e3 start".
+    pub detail: String,
+}
+
 /// UI projection of the selected CadPart's first sketch (for Slint).
 #[derive(Resource, Debug, Clone, Default)]
 pub struct CadSketchUiState {
     pub visible: bool,
     pub force_open: bool,
     /// Part the user explicitly closed the panel for. Auto-open stays
-    /// suppressed while this part remains selected — without it, the
+    /// suppressed while this part remains selected; without it, the
     /// close button is overwritten by `update_sketch_ui_state` in the
     /// same frame and the panel can never be dismissed.
     pub dismissed_for: Option<Entity>,
     pub part_entity: Option<Entity>,
     pub part_name: String,
     pub sketch_name: String,
-    pub solve_status: String,
-    pub entities: Vec<(usize, String, String)>, // index, kind, summary
-    pub constraints: Vec<(usize, String, String)>, // index, kind, detail
-    /// Entity indices picked in the panel for the next constraint —
-    /// unary (H/V) uses `selected_a`; binary (⊥/⊙) needs both.
+    /// `full`, `under`, `over` or `failed`; empty before the first solve.
+    pub solve_state: String,
+    /// Freedoms left when `solve_state` is `under`.
+    pub free_dof: i32,
+    /// Why the sketch or its part is in trouble; empty when all is well.
+    pub status_detail: String,
+    pub entities: Vec<CadSketchEntityUi>,
+    pub constraints: Vec<CadSketchConstraintUi>,
+    /// Entity indices picked in the panel for the next constraint:
+    /// Horizontal and Vertical use `selected_a`; the binary ones need both.
     pub selected_a: Option<usize>,
     pub selected_b: Option<usize>,
+    /// Bumped whenever the rows or the solve state change, so the Slint
+    /// side rebuilds its list models only then. Replacing a model resets
+    /// every row's hover and press state.
+    pub rev: u64,
+    /// Hash of what the rows were built from: part, tree, status, unit.
+    content_key: u64,
+    /// The part has a sketch to show.
+    has_sketch: bool,
+    /// The part's tree does not parse.
+    parse_failed: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -580,11 +622,13 @@ fn handle_cad_insert(
     mut notifications: Option<ResMut<NotificationManager>>,
     mut undo: Option<ResMut<crate::undo::UndoStack>>,
     mut registry: Option<ResMut<crate::space::SpaceFileRegistry>>,
+    space_root_res: Option<Res<crate::space::SpaceRoot>>,
 ) {
     for event in events.read() {
         let pos = event.position.unwrap_or_else(|| camera_forward_spawn(&cameras));
         let toml = template_toml(event.template);
         let label = template_label(event.template);
+        let space_root = crate::space::open_space_root(space_root_res.as_deref());
 
         match spawn_cad_entity(
             &mut commands,
@@ -593,6 +637,7 @@ fn handle_cad_insert(
             toml,
             pos,
             label,
+            &space_root,
         ) {
             Ok((entity, folder)) => {
                 if let Some(folder) = folder {
@@ -630,7 +675,7 @@ fn handle_cad_insert(
                         reg.register(instance_toml, entity, metadata);
                     }
                     if let Some(ref mut u) = undo {
-                        let trash = crate::space::default_space_root()
+                        let trash = space_root
                             .join(".eustress")
                             .join("trash")
                             .join(chrono::Utc::now().format("%Y%m%d_%H%M%S_%f").to_string())
@@ -681,6 +726,7 @@ fn spawn_cad_entity(
     tree_toml: String,
     position: Vec3,
     name: &str,
+    space_root: &std::path::Path,
 ) -> Result<(Entity, Option<std::path::PathBuf>), String> {
     let tree = parse_tree(&tree_toml).map_err(|e| format!("parse: {e}"))?;
     let out = evaluate_tree(&tree).map_err(|e| format!("eval: {e}"))?;
@@ -718,7 +764,7 @@ fn spawn_cad_entity(
     let uuid = eustress_common::instance_create::fresh_uuid_for_create();
 
     // Auto-save folder on insert so CadParts are git-diffable immediately.
-    let (instance_file, display_name) = persist_cad_folder(name, &tree_toml, position, size, &uuid)
+    let (instance_file, display_name) = persist_cad_folder(space_root, name, &tree_toml, position, size, &uuid)
         .unwrap_or((None, name.to_string()));
 
     let half = size * 0.5;
@@ -743,7 +789,11 @@ fn spawn_cad_entity(
             ok: true,
             message: status,
         },
-        Collider::cuboid(half.x.max(0.001), half.y.max(0.001), half.z.max(0.001)),
+        // Avian's `Collider::cuboid` takes FULL side lengths and halves them
+        // itself (avian3d 0.7: `SharedShape::cuboid(x_length * 0.5, ..)`).
+        // Passing the already-halved `half` halved it twice and gave a
+        // collider HALF the visible part's size. Same idiom as spawn.rs.
+        Collider::cuboid(half.x.max(0.001) * 2.0, half.y.max(0.001) * 2.0, half.z.max(0.001) * 2.0),
         RigidBody::Static,
         Name::new(display_name),
         PartEntity {
@@ -768,13 +818,13 @@ fn spawn_cad_entity(
 /// Write `Workspace/{Name}/_instance.toml` + `features.toml` and return
 /// the InstanceFile component. Unique-suffixes the folder name if needed.
 fn persist_cad_folder(
+    space_root: &std::path::Path,
     base_name: &str,
     tree_toml: &str,
     position: Vec3,
     size: Vec3,
     uuid: &str,
 ) -> Result<(Option<crate::space::instance_loader::InstanceFile>, String), String> {
-    let space_root = crate::space::default_space_root();
     let workspace = space_root.join("Workspace");
     std::fs::create_dir_all(&workspace).map_err(|e| format!("mkdir Workspace: {e}"))?;
 
@@ -901,7 +951,6 @@ fn update_sketch_ui_state(
     mut state: ResMut<CadSketchUiState>,
     selection: Option<Res<SelectionSyncManager>>,
     cad_q: Query<(Entity, &CadPart, Option<&Name>, Option<&CadPartStatus>)>,
-    instances: Query<(Entity, &Instance)>,
     display_unit: Option<Res<eustress_common::units::DisplayUnit>>,
 ) {
     // Sketch coordinates are meters on disk; the panel shows them in
@@ -910,8 +959,6 @@ fn update_sketch_ui_state(
     let du = display_unit
         .map(|d| d.0)
         .unwrap_or(eustress_common::units::ENGINE_NATIVE_UNIT);
-    let cv = |v: f64| eustress_common::units::convert(v, eustress_common::units::ENGINE_NATIVE_UNIT, du);
-    let sym = du.symbol();
     // Resolve selected CadPart
     let selected_cad = selection.as_ref().and_then(|sel| {
         let ids = sel.0.read().get_selected();
@@ -921,8 +968,6 @@ fn update_sketch_ui_state(
             }) {
                 return Some((e, cad, name, status));
             }
-            // Also match by selection even if query order differs
-            let _ = instances;
         }
         None
     });
@@ -931,17 +976,21 @@ fn update_sketch_ui_state(
         if !state.force_open {
             state.visible = false;
             state.part_entity = None;
-            state.entities.clear();
-            state.constraints.clear();
             state.selected_a = None;
             state.selected_b = None;
+            if !state.entities.is_empty() || !state.constraints.is_empty() {
+                state.entities.clear();
+                state.constraints.clear();
+                state.content_key = 0;
+                state.rev = state.rev.wrapping_add(1);
+            }
         }
         return;
     };
 
     // Selecting a different part lifts the per-part dismissal and
-    // drops any entity picks — indices are only meaningful within
-    // the sketch they were picked from.
+    // drops any entity picks: indices are only meaningful within the
+    // sketch they were picked from.
     if state.dismissed_for.is_some() && state.dismissed_for != Some(entity) {
         state.dismissed_for = None;
     }
@@ -950,16 +999,73 @@ fn update_sketch_ui_state(
         state.selected_b = None;
     }
     let dismissed = !state.force_open && state.dismissed_for == Some(entity);
+    state.part_entity = Some(entity);
 
-    let Ok(tree) = parse_tree(&cad.tree_toml) else {
-        state.visible = !dismissed;
-        state.part_entity = Some(entity);
-        state.part_name = name.map(|n| n.as_str().to_string()).unwrap_or_else(|| "CadPart".into());
-        state.sketch_name = "(parse error)".into();
-        state.solve_status = status.map(|s| s.message.clone()).unwrap_or_default();
-        state.entities.clear();
-        state.constraints.clear();
-        return;
+    // Rebuild only when what the rows show can have changed. Parsing the
+    // tree and solving the sketch every frame was work for nothing, and
+    // it rebuilt the panel's lists under the cursor.
+    let key = {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        entity.to_bits().hash(&mut h);
+        cad.tree_toml.hash(&mut h);
+        status.map(|s| (s.ok, s.message.as_str())).hash(&mut h);
+        name.map(|n| n.as_str()).hash(&mut h);
+        du.hash(&mut h);
+        h.finish()
+    };
+    if key != state.content_key {
+        state.content_key = key;
+        rebuild_sketch_rows(&mut state, cad, name, status, du);
+        state.rev = state.rev.wrapping_add(1);
+    }
+
+    state.visible = if state.has_sketch || state.parse_failed {
+        !dismissed
+    } else {
+        state.force_open
+    };
+
+    // Drop picks that no longer name a real row (a constraint just
+    // changed the sketch, or the file was edited by hand): a stale index
+    // would silently target the wrong entity on the next constraint click.
+    let n = state.entities.len();
+    if state.selected_a.is_some_and(|i| i >= n) {
+        state.selected_a = None;
+    }
+    if state.selected_b.is_some_and(|i| i >= n) {
+        state.selected_b = None;
+    }
+}
+
+/// Build the Sketch panel's rows and solve state from a part's tree.
+fn rebuild_sketch_rows(
+    state: &mut CadSketchUiState,
+    cad: &CadPart,
+    name: Option<&Name>,
+    status: Option<&CadPartStatus>,
+    du: eustress_common::units::Unit,
+) {
+    use eustress_cad::SketchEntity as E;
+
+    state.part_name = name.map(|n| n.as_str().to_string()).unwrap_or_else(|| "CadPart".into());
+    state.entities.clear();
+    state.constraints.clear();
+    state.solve_state.clear();
+    state.free_dof = 0;
+    state.status_detail.clear();
+    state.has_sketch = false;
+    state.parse_failed = false;
+
+    let tree = match parse_tree(&cad.tree_toml) {
+        Ok(t) => t,
+        Err(e) => {
+            state.parse_failed = true;
+            state.sketch_name = "Sketch".into();
+            state.solve_state = "failed".into();
+            state.status_detail = format!("The part's file does not parse: {e}");
+            return;
+        }
     };
 
     let first_sketch = tree.entries.iter().find_map(|e| match e {
@@ -968,63 +1074,113 @@ fn update_sketch_ui_state(
         }
         _ => None,
     });
-
     let Some((sk_name, sk)) = first_sketch else {
-        if !state.force_open {
-            state.visible = false;
-        }
-        state.part_entity = Some(entity);
-        state.entities.clear();
-        state.constraints.clear();
-        state.sketch_name = "(no sketch)".into();
+        state.sketch_name = "No sketch".into();
         return;
     };
-
-    state.visible = !dismissed;
-    state.part_entity = Some(entity);
-    state.part_name = name.map(|n| n.as_str().to_string()).unwrap_or_else(|| "CadPart".into());
+    state.has_sketch = true;
     state.sketch_name = sk_name;
-    state.solve_status = status
-        .map(|s| {
-            if s.ok {
-                format!("✓ {}", s.message)
-            } else {
-                format!("✗ {}", s.message)
-            }
-        })
-        .unwrap_or_else(|| "ready — add constraints + Solve".into());
 
+    // The chip. The solver is cheap next to a regeneration, and this runs
+    // only when the tree changes.
+    let (solve_state, free_dof, trouble) = match eustress_cad::solve_sketch(sk, &tree.variables) {
+        Ok(r) => match r.status {
+            eustress_cad::SolveStatus::FullyConstrained => ("full", 0, None),
+            eustress_cad::SolveStatus::UnderConstrained => ("under", r.free_dof, None),
+            eustress_cad::SolveStatus::OverConstrained => (
+                "over",
+                0,
+                Some("Some constraints restate others. Undo the last one, or remove the extras.".to_string()),
+            ),
+            eustress_cad::SolveStatus::Failed => (
+                "failed",
+                r.free_dof,
+                Some("The constraints conflict and cannot all hold.".to_string()),
+            ),
+        },
+        Err(e) => ("failed", 0, Some(cad_error_reason(&e))),
+    };
+    state.solve_state = solve_state.into();
+    state.free_dof = free_dof;
+    // The sketch's own trouble first; otherwise whatever stopped the part
+    // from regenerating. It stands alone under the chip, so it starts with
+    // a capital even where the kernel's reason does not.
+    let detail = trouble
+        .or_else(|| status.filter(|s| !s.ok).map(|s| s.message.clone()))
+        .unwrap_or_default();
+    let mut chars = detail.chars();
+    state.status_detail = match chars.next() {
+        Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
+        None => String::new(),
+    };
+    let pinned = matches!(solve_state, "full" | "over");
+
+    let fixed: std::collections::HashSet<usize> = sk
+        .constraints
+        .iter()
+        .filter(|c| c.kind == eustress_cad::ConstraintKind::Fix)
+        .map(|c| c.e1)
+        .collect();
+    let cv = |v: f64| eustress_common::units::convert(v, eustress_common::units::ENGINE_NATIVE_UNIT, du);
+    let sym = du.symbol();
+    let line = |a: [f64; 2], b: [f64; 2]| {
+        let (dx, dy) = (b[0] - a[0], b[1] - a[1]);
+        format!(
+            "{} {sym} at {}°",
+            fmt_ui_number(cv((dx * dx + dy * dy).sqrt())),
+            fmt_ui_number(dy.atan2(dx).to_degrees())
+        )
+    };
     state.entities = sk
         .entities
         .iter()
         .enumerate()
         .map(|(i, ent)| {
-            let (kind, summary) = match ent {
-                eustress_cad::SketchEntity::Line { p1, p2 } => (
-                    "line".into(),
-                    format!("({:.2},{:.2})→({:.2},{:.2}) {sym}", cv(p1[0]), cv(p1[1]), cv(p2[0]), cv(p2[1])),
+            let (kind, label, summary) = match ent {
+                E::Line { p1, p2 } => ("line", "Line", line(*p1, *p2)),
+                E::Construction { p1, p2 } => ("construction", "Construction", line(*p1, *p2)),
+                E::Rectangle { p1, p2 } => (
+                    "rect",
+                    "Rectangle",
+                    format!(
+                        "{} × {} {sym}",
+                        fmt_ui_number(cv((p2[0] - p1[0]).abs())),
+                        fmt_ui_number(cv((p2[1] - p1[1]).abs()))
+                    ),
                 ),
-                eustress_cad::SketchEntity::Rectangle { p1, p2 } => (
-                    "rect".into(),
-                    format!("({:.2},{:.2})–({:.2},{:.2}) {sym}", cv(p1[0]), cv(p1[1]), cv(p2[0]), cv(p2[1])),
+                E::Circle { center, radius } => (
+                    "circle",
+                    "Circle",
+                    format!(
+                        "r {} {sym} at ({}, {})",
+                        fmt_ui_number(cv(*radius)),
+                        fmt_ui_number(cv(center[0])),
+                        fmt_ui_number(cv(center[1]))
+                    ),
                 ),
-                eustress_cad::SketchEntity::Circle { center, radius } => (
-                    "circle".into(),
-                    format!("c=({:.2},{:.2}) r={:.2} {sym}", cv(center[0]), cv(center[1]), cv(*radius)),
+                E::Arc { radius, sweep, .. } => (
+                    "arc",
+                    "Arc",
+                    format!("r {} {sym}, {}°", fmt_ui_number(cv(*radius)), fmt_ui_number(sweep.to_degrees().abs())),
                 ),
-                eustress_cad::SketchEntity::Arc { center, radius, .. } => (
-                    "arc".into(),
-                    format!("c=({:.2},{:.2}) r={:.2} {sym}", cv(center[0]), cv(center[1]), cv(*radius)),
-                ),
-                eustress_cad::SketchEntity::Point { p } => {
-                    ("point".into(), format!("({:.2},{:.2}) {sym}", cv(p[0]), cv(p[1])))
-                }
-                eustress_cad::SketchEntity::Construction { p1, p2 } => (
-                    "construction".into(),
-                    format!("({:.2},{:.2})→({:.2},{:.2}) {sym}", cv(p1[0]), cv(p1[1]), cv(p2[0]), cv(p2[1])),
+                E::Point { p } => (
+                    "point",
+                    "Point",
+                    format!("({}, {}) {sym}", fmt_ui_number(cv(p[0])), fmt_ui_number(cv(p[1]))),
                 ),
             };
-            (i, kind, summary)
+            // Construction is its own kind of geometry; a Fix is the
+            // user's explicit word; otherwise the sketch's state decides.
+            let glyph_state = if matches!(ent, E::Construction { .. }) {
+                "construction"
+            } else if fixed.contains(&i) {
+                "fixed"
+            } else if pinned {
+                "full"
+            } else {
+                "free"
+            };
+            CadSketchEntityUi { index: i, kind, label, summary, state: glyph_state }
         })
         .collect();
 
@@ -1032,25 +1188,92 @@ fn update_sketch_ui_state(
         .constraints
         .iter()
         .enumerate()
-        .map(|(i, c)| {
-            let detail = match c.e2 {
-                Some(e2) => format!("e{} · e{}", c.e1, e2),
-                None => format!("e{}", c.e1),
-            };
-            (i, format!("{:?}", c.kind).to_lowercase(), detail)
+        .map(|(i, c)| CadSketchConstraintUi {
+            index: i,
+            kind: constraint_key(c.kind),
+            label: constraint_label(c.kind),
+            detail: constraint_detail(c),
         })
         .collect();
+}
 
-    // Drop picks that no longer name a real row (constraint just
-    // added a row, Solve reordered nothing but a manual TOML edit
-    // could shrink the list) — a stale index would silently target
-    // the wrong entity on the next constraint click.
-    let n = state.entities.len();
-    if state.selected_a.is_some_and(|i| i >= n) {
-        state.selected_a = None;
+/// A length or angle for the UI: at most two decimals, no trailing zeros.
+fn fmt_ui_number(v: f64) -> String {
+    let s = format!("{v:.2}");
+    let s = s.trim_end_matches('0').trim_end_matches('.');
+    if s == "-0" { "0".to_string() } else { s.to_string() }
+}
+
+/// A constraint kind's name in the part's file, which is also the glyph
+/// key the Sketch panel uses.
+fn constraint_key(k: eustress_cad::ConstraintKind) -> &'static str {
+    use eustress_cad::ConstraintKind as K;
+    match k {
+        K::Coincident => "coincident",
+        K::Concentric => "concentric",
+        K::Collinear => "collinear",
+        K::Parallel => "parallel",
+        K::Perpendicular => "perpendicular",
+        K::Tangent => "tangent",
+        K::Horizontal => "horizontal",
+        K::Vertical => "vertical",
+        K::EqualLength => "equal_length",
+        K::EqualRadius => "equal_radius",
+        K::Symmetric => "symmetric",
+        K::Fix => "fix",
+        K::Midpoint => "midpoint",
+        K::PointOnLine => "point_on_line",
+        K::PointOnCircle => "point_on_circle",
     }
-    if state.selected_b.is_some_and(|i| i >= n) {
-        state.selected_b = None;
+}
+
+/// "Perpendicular", "Equal length", "Point on line".
+fn constraint_label(k: eustress_cad::ConstraintKind) -> String {
+    let words = constraint_key(k).replace('_', " ");
+    let mut chars = words.chars();
+    match chars.next() {
+        Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
+        None => String::new(),
+    }
+}
+
+/// The entities a constraint names: "e0, e1", "e2 end, e3 start",
+/// "e0, e1, axis e4".
+fn constraint_detail(c: &eustress_cad::SketchConstraint) -> String {
+    use eustress_cad::sketch::PointRef;
+    let at = |e: usize, p: Option<PointRef>| match p {
+        Some(PointRef::Start) => format!("e{e} start"),
+        Some(PointRef::End) => format!("e{e} end"),
+        Some(PointRef::Center) => format!("e{e} center"),
+        None => format!("e{e}"),
+    };
+    let mut parts = vec![at(c.e1, c.p1)];
+    if let Some(e2) = c.e2 {
+        parts.push(at(e2, c.p2));
+    }
+    if let Some(e3) = c.e3 {
+        parts.push(format!("axis e{e3}"));
+    }
+    parts.join(", ")
+}
+
+/// A kernel error's reason, without the "feature evaluation failed at
+/// 'SketchSolver'" prefix its `Display` adds.
+fn cad_error_reason(e: &eustress_cad::CadError) -> String {
+    match e {
+        eustress_cad::CadError::EvalFailed { reason, .. } => reason.clone(),
+        other => other.to_string(),
+    }
+}
+
+/// A solve result the way the panel's chip says it.
+fn solve_phrase(r: &eustress_cad::SolveReport) -> String {
+    match r.status {
+        eustress_cad::SolveStatus::FullyConstrained => "fully constrained".into(),
+        eustress_cad::SolveStatus::UnderConstrained if r.free_dof == 1 => "1 DOF free".into(),
+        eustress_cad::SolveStatus::UnderConstrained => format!("{} DOF free", r.free_dof),
+        eustress_cad::SolveStatus::OverConstrained => "over-constrained".into(),
+        eustress_cad::SolveStatus::Failed => "does not solve".into(),
     }
 }
 
@@ -1083,71 +1306,76 @@ fn handle_cad_add_constraint(
             }
             continue;
         }
+        let label = constraint_label(event.kind);
         let mut tree = match parse_tree(&cad.tree_toml) {
             Ok(t) => t,
             Err(e) => {
                 if let Some(ref mut n) = notifications {
-                    n.warning(format!("Add constraint: parse error: {e}"));
+                    n.warning(format!("Can't add {label}: the part's file does not parse ({e})"));
                 }
                 continue;
             }
         };
-        let mut applied = false;
-        for entry in &mut tree.entries {
-            if let FeatureEntry::Sketch { body, .. } = entry {
-                if event.e1 >= body.entities.len() {
-                    continue;
-                }
-                if let Some(e2) = event.e2 {
-                    if e2 >= body.entities.len() {
-                        continue;
-                    }
-                }
-                body.constraints.push(SketchConstraint {
-                    kind: event.kind,
-                    e1: event.e1,
-                    e2: event.e2,
-                });
-                // Immediately solve this sketch.
-                match eustress_cad::solve_sketch(body, &tree.variables) {
-                    Ok(report) => {
-                        eustress_cad::apply_solve(body, &report);
-                        if let Some(ref mut n) = notifications {
-                            n.info(format!(
-                                "Constraint {:?} added — {:?} r={:.2e}",
-                                event.kind, report.status, report.residual_norm
-                            ));
-                        }
-                    }
-                    Err(e) => {
-                        if let Some(ref mut n) = notifications {
-                            n.warning(format!(
-                                "Constraint {:?} added but solve failed: {e}",
-                                event.kind
-                            ));
-                        }
-                    }
-                }
-                applied = true;
-                break; // first sketch only
-            }
-        }
-        if !applied {
+
+        // The sketch the panel shows: the part's first.
+        let Some((sketch_name, body)) = tree.entries.iter_mut().find_map(|e| match e {
+            FeatureEntry::Sketch { name, body } => Some((name.clone(), body)),
+            _ => None,
+        }) else {
             if let Some(ref mut n) = notifications {
-                n.warning("Add constraint: no suitable sketch/entities");
+                n.warning(format!("Can't add {label}: this part has no sketch"));
+            }
+            continue;
+        };
+        let count = body.entities.len();
+        if let Some(bad) = [Some(event.e1), event.e2].into_iter().flatten().find(|&i| i >= count) {
+            if let Some(ref mut n) = notifications {
+                n.warning(format!("Can't add {label} to {sketch_name}: it has no entity e{bad}"));
             }
             continue;
         }
+
+        // Refuse a constraint that leaves the sketch worse than it found
+        // it: one the solver has no formula for, one that conflicts, or one
+        // that only restates what already holds. The panel cannot delete a
+        // constraint, so a bad one kept here would stay until an undo;
+        // refusing says why at the moment it is asked for.
+        let before = eustress_cad::solve_sketch(body, &tree.variables).ok();
+        body.constraints.push(SketchConstraint::new(event.kind, event.e1, event.e2));
+        let after = eustress_cad::solve_sketch(body, &tree.variables);
+        let refusal = match (&before, &after) {
+            (Some(_), Err(e)) => Some(cad_error_reason(e)),
+            (Some(b), Ok(a)) if b.converged && !a.converged => {
+                Some("it conflicts with the constraints already there".to_string())
+            }
+            (Some(b), Ok(a)) if a.converged && a.redundant > b.redundant => {
+                Some("the sketch already holds it".to_string())
+            }
+            _ => None,
+        };
+        if let Some(why) = refusal {
+            if let Some(ref mut n) = notifications {
+                n.warning(format!("Can't add {label} to {sketch_name}: {why}"));
+            }
+            continue;
+        }
+        let (solved, toast) = match after {
+            Ok(report) => {
+                eustress_cad::apply_solve(body, &report);
+                (report.converged, format!("Added {label} to {sketch_name}: {}", solve_phrase(&report)))
+            }
+            Err(e) => (
+                false,
+                format!("Added {label} to {sketch_name}, which does not solve: {}", cad_error_reason(&e)),
+            ),
+        };
+
         match tree_to_toml(&tree) {
             Ok(s) => {
-                if let Err(e) = write_features_toml(inst_file, cad.source.as_deref(), &s) {
-                    if let Some(ref mut n) = notifications {
-                        n.warning(format!("Add constraint: {e}"));
-                    }
-                }
+                let saved = write_features_toml(inst_file, cad.source.as_deref(), &s);
                 if let Some(ref mut u) = undo {
                     if s != cad.tree_toml {
-                        let verb = format!("Add {:?} constraint", event.kind);
+                        let verb = format!("Add {label} constraint");
                         u.push_labeled(
                             verb.clone(),
                             crate::undo::Action::CadTreeEdit {
@@ -1160,10 +1388,19 @@ fn handle_cad_add_constraint(
                     }
                 }
                 cad.tree_toml = s;
+                if let Some(ref mut n) = notifications {
+                    match saved {
+                        Err(e) => n.warning(format!(
+                            "Added {label} to {sketch_name}, but the part's file was not saved: {e}"
+                        )),
+                        Ok(()) if solved => n.success(toast),
+                        Ok(()) => n.warning(toast),
+                    }
+                }
             }
             Err(e) => {
                 if let Some(ref mut n) = notifications {
-                    n.warning(format!("Add constraint: serialize failed: {e} — change lost"));
+                    n.warning(format!("Can't add {label}: the part could not be written ({e})"));
                 }
             }
         }
@@ -1211,19 +1448,27 @@ fn handle_cad_solve_sketch(
             }
         };
         let mut reports = Vec::new();
+        let mut all_solved = true;
         for entry in &mut tree.entries {
             if let eustress_cad::FeatureEntry::Sketch { name, body } = entry {
                 match eustress_cad::solve_sketch(body, &tree.variables) {
                     Ok(report) => {
                         eustress_cad::apply_solve(body, &report);
-                        reports.push(format!(
-                            "{name}: {:?} r={:.2e} dof={}",
-                            report.status, report.residual_norm, report.free_dof
-                        ));
+                        all_solved &= report.converged;
+                        reports.push(format!("{name}: {}", solve_phrase(&report)));
                     }
-                    Err(e) => reports.push(format!("{name}: err {e}")),
+                    Err(e) => {
+                        all_solved = false;
+                        reports.push(format!("{name} does not solve ({})", cad_error_reason(&e)));
+                    }
                 }
             }
+        }
+        if reports.is_empty() {
+            if let Some(ref mut n) = notifications {
+                n.warning("Nothing to solve: this part has no sketch");
+            }
+            continue;
         }
         match tree_to_toml(&tree) {
             Ok(s) => {
@@ -1247,7 +1492,11 @@ fn handle_cad_solve_sketch(
                 }
                 cad.tree_toml = s;
                 if let Some(ref mut n) = notifications {
-                    n.success(format!("Sketch solved — {}", reports.join("; ")));
+                    if all_solved {
+                        n.success(format!("Solved {}", reports.join("; ")));
+                    } else {
+                        n.warning(reports.join("; "));
+                    }
                 }
             }
             Err(e) => {
@@ -1553,17 +1802,25 @@ impl ColliderFidelity {
 /// `center` is subtracted because the render mesh is recentred on the
 /// entity origin before upload, and a collider in a different frame from
 /// its mesh is worse than no collider at all.
+///
+/// `single_body` must be false for a multi-body part: two separate convex
+/// bodies have no reflex edge between them either, and one hull around
+/// both would fill the gap between them.
 fn cad_collider(
     eval: &EvalMesh,
     topo: &eustress_cad::TopoReport,
     center: Vec3,
     half: Vec3,
+    single_body: bool,
 ) -> (Collider, ColliderFidelity) {
+    // Avian's `Collider::cuboid` takes FULL side lengths and halves them
+    // itself, so the half extents are doubled here; passed as given they
+    // built a box half the size of the part.
     let bbox = || {
         Collider::cuboid(
-            half.x.max(0.001),
-            half.y.max(0.001),
-            half.z.max(0.001),
+            half.x.max(0.001) * 2.0,
+            half.y.max(0.001) * 2.0,
+            half.z.max(0.001) * 2.0,
         )
     };
     let verts: Vec<Vec3> = eval
@@ -1578,7 +1835,7 @@ fn cad_collider(
 
     // A convex body's hull is the body. No decomposition to run, and no
     // approximation to disclose.
-    if topo.is_convex() {
+    if single_body && topo.is_convex() {
         if let Some(c) = Collider::convex_hull(verts.clone()) {
             return (c, ColliderFidelity::Hull);
         }
@@ -1683,6 +1940,7 @@ fn regenerate_cad_parts(
                 continue;
             }
         };
+        let body_count = out.bodies.len();
         let Some(eval_mesh) = out.mesh.filter(|m| !m.indices.is_empty()) else {
             fail(&mut commands, entity, "no mesh produced".into());
             continue;
@@ -1714,7 +1972,7 @@ fn regenerate_cad_parts(
                 .mesh_tolerance
                 .unwrap_or(eustress_cad::DEFAULT_MESH_TOLERANCE);
             let topo = eustress_cad::topology(&eval_mesh, tol);
-            let (shape, how) = cad_collider(&eval_mesh, &topo, center_local, half);
+            let (shape, how) = cad_collider(&eval_mesh, &topo, center_local, half, body_count <= 1);
             fidelity = Some(how);
             if let Some(mut col) = collider {
                 *col = shape;
@@ -1815,6 +2073,7 @@ fn handle_cad_export_glb(
         Option<&crate::space::instance_loader::InstanceFile>,
     )>,
     mut notifications: Option<ResMut<NotificationManager>>,
+    space_root_res: Option<Res<crate::space::SpaceRoot>>,
 ) {
     for event in events.read() {
         let Ok((cad, name, inst_file)) = query.get(event.entity) else {
@@ -1878,7 +2137,12 @@ fn handle_cad_export_glb(
             Ok(()) => {
                 // Round-trip into the Space asset library so Toolbox / Insert
                 // can pick the mesh up as a standard GLB part.
-                let library_note = publish_glb_to_asset_library(&label, &path, &tree.variables);
+                let library_note = publish_glb_to_asset_library(
+                    &crate::space::open_space_root(space_root_res.as_deref()),
+                    &label,
+                    &path,
+                    &tree.variables,
+                );
                 if let Some(ref mut n) = notifications {
                     n.success(format!(
                         "Exported GLB → {}{}",
@@ -1900,11 +2164,11 @@ fn handle_cad_export_glb(
 /// Copy exported GLB into `Workspace/Assets/Cad/{label}.glb` + a small
 /// `_instance.toml` stub so the Asset Manager / Toolbox can discover it.
 fn publish_glb_to_asset_library(
+    space_root: &std::path::Path,
     label: &str,
     source_glb: &std::path::Path,
     variables: &std::collections::HashMap<String, String>,
 ) -> Option<String> {
-    let space_root = crate::space::default_space_root();
     let lib_dir = space_root.join("Workspace").join("Assets").join("Cad");
     std::fs::create_dir_all(&lib_dir).ok()?;
     let safe: String = label
@@ -2014,7 +2278,7 @@ mod collider_tests {
         let (min, max) = mesh_bounds(mesh);
         let center = (min + max) * 0.5;
         let half = (max - min).max(Vec3::splat(0.01)) * 0.5;
-        cad_collider(mesh, &topo, center, half).1
+        cad_collider(mesh, &topo, center, half, true).1
     }
 
     #[test]
@@ -2058,7 +2322,7 @@ mod collider_tests {
     fn an_empty_mesh_falls_back_and_says_so() {
         let mesh = EvalMesh::default();
         let topo = eustress_cad::topology(&mesh, eustress_cad::DEFAULT_MESH_TOLERANCE);
-        let how = cad_collider(&mesh, &topo, Vec3::ZERO, Vec3::splat(0.05)).1;
+        let how = cad_collider(&mesh, &topo, Vec3::ZERO, Vec3::splat(0.05), true).1;
         assert_eq!(how, ColliderFidelity::BoundingBox);
         // The status line has to carry the caveat, or this is the old
         // silent box wearing a new name.

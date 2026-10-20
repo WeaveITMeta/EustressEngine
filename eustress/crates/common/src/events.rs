@@ -192,8 +192,8 @@ pub mod topics {
     pub const SIM_RESULTS: &str = "sim_results";
     /// Rune/Luau script source change notifications.
     pub const RUNE_SCRIPTS: &str = "rune_scripts";
-    /// ARC-AGI episode records.
-    pub const ARC_EPISODES: &str = "arc_episodes";
+    /// Episode records of interactive tasks.
+    pub const EPISODES: &str = "episodes";
 }
 
 /// Bridge an `EventBus` to a `ChangeQueue` so that:

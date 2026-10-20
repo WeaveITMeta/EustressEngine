@@ -21,7 +21,7 @@ use parking_lot::RwLock;
 // Slint software renderer imports
 use slint::platform::software_renderer::PremultipliedRgbaColor;
 use slint::{LogicalPosition, PhysicalSize, Model};
-use slint::platform::WindowEvent;
+use slint::platform::{PointerEventButton, WindowEvent};
 
 use crate::class_registry::AddDrainResourceExt;
 use crate::commands::{SelectionManager, TransformManager};
@@ -31,7 +31,6 @@ use super::file_icons::load_file_icon;
 use super::spawn_events::SpawnEventsPlugin;
 use super::menu_events::MenuActionEvent;
 use super::{SlintUIFocus};
-use super::world_view::{WorldViewPlugin, UIWorldSnapshot};
 
 // Include Slint modules - this creates StudioWindow type + Slint structs (HighlightLine, etc.)
 slint::include_modules!();
@@ -291,6 +290,8 @@ pub enum SlintAction {
     Delete,
     Duplicate,
     SelectAll,
+    Group,
+    Ungroup,
     
     // Tool selection
     SelectTool(String),
@@ -323,9 +324,11 @@ pub enum SlintAction {
     SketchCanvasClose,
 
     /// Status-bar display unit dropdown picked a new symbol.
-    /// Carries the canonical symbol ("m" / "cm" / "mm" / "ft" / "in" /
-    /// "studs"); the drain handler validates it via `Unit::from_symbol`
-    /// and rejects unknown values so a typo doesn't poison state.
+    /// Carries the symbol ("m" / "cm" / "mm" / "ft" / "in" / "stud"); the
+    /// drain handler parses it with `Unit::from_any`, so any spelling picks
+    /// the current stud (never the legacy one, which only a file's own
+    /// unit can name), and rejects unknown values so a typo doesn't poison
+    /// state.
     SetDisplayUnit(String),
 
     // (PickWheel removed: the BrickColor wheel drill is now local to the Slint
@@ -365,11 +368,6 @@ pub enum SlintAction {
     CloseSpace,
     
     // Panel toggles (from Slint → Bevy state sync)
-    ToggleCommandBar,
-    ShowKeybindings,
-    ShowSoulSettings,
-    ShowSettings,
-    ShowFind,
     
     // Explorer (unified: entities + files)
     SelectNode(i32, String, bool, bool), // (id, node_type, ctrl, shift)      // (id, node_type: "entity"|"file")
@@ -397,6 +395,11 @@ pub enum SlintAction {
     // History panel
     HistoryJumpTo(i32),
     HistoryClear,
+    // History panel, Restore points view (`restore_points.rs`).
+    RestorePointsShown,
+    RestorePointSave(String),
+    RestorePointRevert(String),
+    RestorePointCancelPending,
 
     // Procurement — RFQ Builder and Purchase Order Tracker. Every mutation
     // routes through the Odoo state machine in `manufacturing::purchase` and is
@@ -422,6 +425,17 @@ pub enum SlintAction {
     AttributeConfirmed(String, String, String, bool),
     /// Delete a custom attribute by name from the selected entity.
     AttributeDeleted(String),
+    /// Parameters "+": Rust fills the modal's Domain and Connector lists,
+    /// resets its fields and opens it.
+    ParameterAddRequested,
+    /// Gear on a Parameter row: Rust opens the modal prefilled, binding
+    /// included. `(label)`
+    ParameterEditRequested(String),
+    /// Add/Edit Parameter modal confirmed. Rust reads the fields and applies
+    /// them, or says in the modal why not.
+    ParameterConfirmed,
+    /// Trash on a Parameter row: remove it and any binding. `(label)`
+    ParameterDeleted(String),
     /// Tag system. Add a tag to / remove a tag from the selected entity.
     TagAdded(String),
     TagRemoved(String),
@@ -446,6 +460,12 @@ pub enum SlintAction {
     /// Execute a script from the command bar: (language, source_code)
     ExecuteScript(String, String),
     ClearScriptOutput,
+    /// Output: copy one line and its stack (by entry id).
+    CopyOutputLine(i32),
+    /// Output: copy every line the filters show.
+    CopyOutputVisible,
+    /// Output: show or hide a line's stack (by entry id).
+    ToggleOutputStack(i32),
     
     // Bottom panel mode (Output / Timeline tab switch)
     SetBottomPanel(String),
@@ -474,9 +494,13 @@ pub enum SlintAction {
     GenerateWorld { seed: String, preset: String },
     ToggleTerrainEditMode,
     SetTerrainBrush(String),
-    BrushSizeChanged(f32),
-    BrushStrengthChanged(f32),
-    BrushFalloffChanged(String),
+    /// Terrain panel / Paint brush settings: paint with this material slot
+    /// (Slint passes an `int`; the drain checks it names a defined slot).
+    SetTerrainPaintMaterial(i32),
+    /// Terrain panel "Add material": write a new custom slot's `.mat.toml`
+    /// into the open Space, named by the text field (empty picks a name),
+    /// starting from the material currently picked for painting.
+    AddTerrainMaterial(String),
     ImportHeightmap,
     ExportHeightmap,
     
@@ -486,11 +510,39 @@ pub enum SlintAction {
     ConnectForge,
     DisconnectForge,
     AllocateForgeServer,
+    /// Data > Sync Domain to Object Type: open, pick a Dataset, preview,
+    /// run (spacing x/y/z), and the background run's result.
+    OpenSyncDomain,
+    SyncDomainPicked(String),
+    SyncDomainPreview(f32, f32, f32),
+    SyncDomainRun(f32, f32, f32),
+    SyncDomainDone { container: std::path::PathBuf, created: usize, skipped: usize, error: Option<String> },
+    /// Data > Manage Global Sources dialog. Indices are rows of the list
+    /// last pushed to the dialog.
+    DataSourceAdd,
+    DataSourceRemove(i32),
+    DataSourceEdit(i32),
+    DataSourceTest(i32),
+    DataSourceTestDone { dir: std::path::PathBuf, ok: bool, detail: String },
+    /// Find & Replace dialog.
+    FindSearch,
+    FindStep(i32),
+    FindSelectResult(i32),
+    FindReplaceOne,
+    FindReplaceAll,
+    FindClosed,
+    /// Settings > Soul > Test Connection, and its background result.
+    SoulTestConnection,
+    SoulTestConnectionDone(Vec<crate::soul::KeyProbe>),
+    /// A control whose backend is not built yet: "server" | "network-panel"
+    /// | "collaboration" | "stress-test". Answered with a notification.
+    UnbuiltFeature(String),
+    /// Fold the Ribbon's tool rows away (true) or bring them back (false).
+    SetRibbonCollapsed(bool),
     SpawnSyntheticClients(i32),
     DisconnectAllClients,
     
     // Stress test
-    ShowStressTest,
     StartStressTest { clients: i32, rate: i32, duration: i32, movement: bool, interactions: bool },
     StopStressTest,
 
@@ -499,10 +551,6 @@ pub enum SlintAction {
     OpenDomains,
     OpenGlobalVariables,
     
-    // MindSpace
-    ToggleMindspace,
-    MindspaceAddLabel,
-    MindspaceConnect,
 
     // Generic plugin action (from ribbon buttons)
     PluginAction(String),
@@ -540,7 +588,17 @@ pub enum SlintAction {
     ReopenClosedTab,
     SelectCenterTab(i32),
     ScriptContentChanged(String),
-    ReorderCenterTab(i32, i32), // (from_index, to_index)
+    /// (from_index, drop slot). Both count non-Scene tabs from 0; the slot
+    /// is the gap BEFORE that index, and `len` is the gap after the last tab.
+    ReorderCenterTab(i32, i32),
+    /// Tab context menu. Indices count non-Scene tabs from 0; -1 is the
+    /// Space tab itself, so "Close Others" there closes every closable tab.
+    CloseOtherTabs(i32),
+    CloseTabsToRight(i32),
+    CloseAllTabs,
+    RevealTabInExplorer(i32),
+    /// "name" or "type".
+    SortCenterTabs(String),
     ToggleTabMode(i32),         // Toggle summary/code for tab at StudioState index (1-based)
     /// Right-click on a script-editor tab → "Copy Path". Copies the tab's
     /// filesystem path (folder for entity-backed tabs, file for plain
@@ -562,16 +620,20 @@ pub enum SlintAction {
     RemoveSimOutputBinding(i32),
 
     // Layout
-    ApplyLayoutPreset(i32),
     SaveLayoutToFile,
     LoadLayoutFromFile,
-    ResetLayoutToDefault,
     ToggleThemeEditor,
     ApplyThemeSettings(bool, bool, f32), // dark-mode, high-contrast, ui-scale
     SetThemeModern(bool), // Classic/Modern live theme switch (legacy bool path)
     SelectTheme(String), // TOML theme by id (Settings > Theme) — live swap + persist
     RescanThemes,        // reload built-ins + user Themes folder
     ResetToDefaults,     // Settings > Reset Defaults — theme resets to Classic
+    /// Synthetic pointer input from an agent over the engine bridge, in
+    /// LOGICAL UI coordinates. Dispatched into the same Slint window events
+    /// real mouse input produces, so a scripted click and a human click are
+    /// indistinguishable to the UI. `action` is click|press|release|move|double,
+    /// `button` is left|right|middle.
+    SyntheticPointer { x: f32, y: f32, button: String, action: String },
     SelectMode(String),  // Eustress Mode by id — ribbon-tab filter + accent overlay + persist
     SelectSubmode(String, String), // (mode-id, submode-id) — activates the parent mode too
     DetachPanelToWindow(String),
@@ -651,6 +713,16 @@ pub enum SlintAction {
     WorkshopGauntletToggled(bool),
     /// Auto mode: run approval-gated Workshop tools without prompting.
     WorkshopAutoToggled(bool),
+    /// Stop button or Escape while an agent turn is running.
+    WorkshopStopAgent,
+    /// Run every tool call currently waiting for approval.
+    WorkshopApproveAll,
+    /// Skip every tool call currently waiting for approval.
+    WorkshopSkipAll,
+    /// × on a queued-message chip, by index into the queue.
+    WorkshopRemoveQueued(i32),
+    /// Copy a reply, a tool's input or a tool's result to the clipboard.
+    WorkshopCopyText(String),
 
     // Problems panel — VS Code-style diagnostic list
     /// Click a row → jump the editor to that file/line/column.
@@ -667,6 +739,23 @@ pub enum SlintAction {
     /// Caret moved in the code editor, 1-based (line, column). Drives the
     /// completion list.
     ScriptCaretMoved(i32, i32),
+    /// Save the active script or code tab: the Save button, or Ctrl+S while
+    /// the editor has focus.
+    ScriptSave,
+    /// The unsaved-changes prompt's three answers.
+    UnsavedChangesSave,
+    UnsavedChangesDiscard,
+    UnsavedChangesCancel,
+    /// An editing key the engine applies (script_editor::editing): the key,
+    /// then the selection's anchor and cursor as byte offsets.
+    ScriptEditorKey(String, i32, i32),
+    /// The find bar: a query with its case sensitivity, a step, a replace.
+    ScriptFind(String, bool),
+    ScriptFindStep(bool),
+    ScriptReplace(String),
+    ScriptReplaceAll(String),
+    ScriptFindClose,
+    ScriptGoToLine(i32),
     /// Accept completion item at this index.
     ScriptCompletionAccept(i32),
     /// Move the selection by a delta (-1/+1 arrows, -10/+10 page keys).
@@ -765,6 +854,10 @@ pub struct OutputConsole {
     pub max_entries: usize,
     pub auto_scroll: bool,
     pub filter_level: LogLevel,
+    /// Bumped on every change to `entries`. The panel rebuilds its text when
+    /// this moves; the entry count alone stops moving once the buffer is full
+    /// and every push trims one line.
+    pub revision: u64,
 }
 
 impl OutputConsole {
@@ -790,8 +883,36 @@ impl OutputConsole {
 
     /// Push with an explicit source tag for filtering (e.g. "rune", "luau")
     pub fn push_with_source(&mut self, level: LogLevel, message: String, source: &str) {
+        self.push_script(level, source, message, "", "", 0, Vec::new());
+    }
+
+    /// Push a line a script produced, with where it came from: the script's
+    /// instance path (`script`, e.g. "Workspace.Zombie.AI"), its source file
+    /// and line (the Output row opens that line), and the stack frames, top
+    /// first. Empty strings and line 0 mean unknown.
+    pub fn push_script(
+        &mut self,
+        level: LogLevel,
+        source: &str,
+        message: String,
+        script: &str,
+        file: &str,
+        line: u32,
+        stack: Vec<String>,
+    ) {
         let timestamp = chrono::Local::now().format("%H:%M:%S").to_string();
-        self.entries.push(LogEntry { level, message, timestamp, source: source.to_string() });
+        self.revision = self.revision.wrapping_add(1);
+        self.entries.push(LogEntry {
+            id: self.revision,
+            level,
+            message,
+            timestamp,
+            source: source.to_string(),
+            script: script.to_string(),
+            file: file.to_string(),
+            line,
+            stack,
+        });
 
         // Default cap bumped from 1k → 10k so hot-reload diagnostics
         // and flood-style per-frame logging stay visible long enough
@@ -807,6 +928,7 @@ impl OutputConsole {
 
     pub fn clear(&mut self) {
         self.entries.clear();
+        self.revision = self.revision.wrapping_add(1);
     }
 
     /// Persist the current buffer to `<space_root>/.eustress/output.log`.
@@ -831,6 +953,10 @@ impl OutputConsole {
                 message: e.message.clone(),
                 timestamp: e.timestamp.clone(),
                 source: e.source.clone(),
+                script: e.script.clone(),
+                file: e.file.clone(),
+                line: e.line,
+                stack: e.stack.clone(),
             })
             .collect();
         match serde_json::to_string(&serializable) {
@@ -847,11 +973,15 @@ impl OutputConsole {
     /// Replaces the current entries. Missing file = empty buffer (first open).
     pub fn load_from_space(&mut self, space_root: &std::path::Path) {
         self.entries.clear();
+        self.revision = self.revision.wrapping_add(1);
         let path = space_root.join(".eustress").join("output.log");
         let Ok(text) = std::fs::read_to_string(&path) else { return };
         let Ok(entries): Result<Vec<SerializableLogEntry>, _> = serde_json::from_str(&text)
             else { return };
-        self.entries = entries.into_iter().map(|e| LogEntry {
+        let first_id = self.revision;
+        self.revision = self.revision.wrapping_add(entries.len() as u64);
+        self.entries = entries.into_iter().enumerate().map(|(i, e)| LogEntry {
+            id: first_id.wrapping_add(1 + i as u64),
             level: match e.level.as_str() {
                 "warn" => LogLevel::Warn,
                 "error" => LogLevel::Error,
@@ -861,6 +991,10 @@ impl OutputConsole {
             message: e.message,
             timestamp: e.timestamp,
             source: e.source,
+            script: e.script,
+            file: e.file,
+            line: e.line,
+            stack: e.stack,
         }).collect();
     }
 }
@@ -873,16 +1007,36 @@ struct SerializableLogEntry {
     message: String,
     timestamp: String,
     source: String,
+    // Absent from logs saved before these fields existed.
+    #[serde(default)]
+    script: String,
+    #[serde(default)]
+    file: String,
+    #[serde(default)]
+    line: u32,
+    #[serde(default)]
+    stack: Vec<String>,
 }
 
 /// Log entry
 #[derive(Clone, Debug)]
 pub struct LogEntry {
+    /// Unique and increasing within a session, so a row keeps its identity
+    /// when the buffer trims from the front.
+    pub id: u64,
     pub level: LogLevel,
     pub message: String,
     pub timestamp: String,
-    /// Source tag for filtering: "rune", "luau", "system", etc.
+    /// Source tag for filtering: "rune", "luau", "play", "system", etc.
     pub source: String,
+    /// The script's instance path ("Workspace.Zombie.AI"), or "".
+    pub script: String,
+    /// The script's source file (absolute), or "".
+    pub file: String,
+    /// The line in `file`, or 0.
+    pub line: u32,
+    /// Stack frames, top first; empty when there is none.
+    pub stack: Vec<String>,
 }
 
 /// Log level
@@ -948,10 +1102,6 @@ pub struct UnifiedExplorerState {
     pub expanded_dirs: std::collections::HashSet<std::path::PathBuf>,
     /// Search query for filtering
     pub search_query: String,
-    /// Space root directory — the filesystem scope for the Explorer.
-    /// Defaults to the user's Documents folder. All file browsing is
-    /// relative to this path so the Explorer doesn't show the entire OS.
-    pub project_root: std::path::PathBuf,
     /// Cached filesystem tree
     pub file_cache: FileTreeCache,
     /// Whether cache needs refresh
@@ -1049,10 +1199,6 @@ pub struct UnifiedExplorerState {
     pub load_more_id_cache: std::collections::HashMap<i32, String>,
 }
 
-fn default_space_root() -> std::path::PathBuf {
-    crate::space::default_space_root()
-}
-
 impl Default for UnifiedExplorerState {
     fn default() -> Self {
         Self {
@@ -1063,7 +1209,6 @@ impl Default for UnifiedExplorerState {
             expanded_services: ["Workspace"].iter().map(|s| s.to_string()).collect(),
             expanded_dirs: std::collections::HashSet::new(),
             search_query: String::new(),
-            project_root: default_space_root(),
             file_cache: FileTreeCache::default(),
             dirty: true,
             file_path_cache: std::collections::HashMap::new(),
@@ -1212,23 +1357,59 @@ pub fn handle_window_close_request(
     mut exit_events: MessageWriter<bevy::app::AppExit>,
     keyboard: Res<ButtonInput<KeyCode>>,
     mut close_events: MessageReader<bevy::window::WindowCloseRequested>,
+    windows: Query<(&Window, Has<bevy::window::PrimaryWindow>)>,
+    mut floating: Option<ResMut<super::floating_windows::FloatingWindowManager>>,
+    mut commands: Commands,
+    mut tab_manager: Option<ResMut<super::center_tabs::CenterTabManager>>,
 ) {
     let Some(mut state) = state else { return };
-    // Handle Alt+F4
-    if keyboard.just_pressed(KeyCode::F4) && keyboard.pressed(KeyCode::AltLeft) {
+    fn request_exit(
+        state: &mut StudioState,
+        exit_events: &mut MessageWriter<bevy::app::AppExit>,
+        tabs: Option<&mut super::center_tabs::CenterTabManager>,
+    ) {
+        // Unsaved script edits ask first; the answer continues the exit.
+        if let Some(tabs) = tabs {
+            let exit = super::center_tabs::TabCloseRequest::AppExit;
+            if !tabs.dirty_tabs_closed_by(exit).is_empty() {
+                tabs.pending_close = Some(exit);
+                return;
+            }
+        }
         if state.has_unsaved_changes {
             state.show_exit_confirmation = true;
         } else {
             exit_events.write(bevy::app::AppExit::Success);
         }
     }
-    
-    // Handle window X button click
-    for _event in close_events.read() {
-        if state.has_unsaved_changes {
-            state.show_exit_confirmation = true;
-        } else {
-            exit_events.write(bevy::app::AppExit::Success);
+
+    // Alt+F4 reaches the keyboard whichever window has focus; it quits only
+    // from Studio's own window. A detached panel's window gets the close
+    // request the OS sends for it, handled below.
+    let primary_focused = windows.iter().any(|(window, primary)| primary && window.focused);
+    if primary_focused && keyboard.just_pressed(KeyCode::F4) && keyboard.pressed(KeyCode::AltLeft) {
+        request_exit(&mut state, &mut exit_events, tab_manager.as_deref_mut());
+    }
+
+    // A window's X button. Studio's own window quits; a detached panel's
+    // window closes by itself (automatic closing is off, so nothing else
+    // would), taking its camera and UI root with it.
+    for event in close_events.read() {
+        let is_primary = windows.get(event.window).map_or(false, |(_, primary)| primary);
+        if is_primary {
+            request_exit(&mut state, &mut exit_events, tab_manager.as_deref_mut());
+            continue;
+        }
+        let panel = floating.as_ref().and_then(|manager| {
+            manager.windows.iter().find(|(_, window)| **window == event.window).map(|(id, _)| id.clone())
+        });
+        match (panel, floating.as_mut()) {
+            (Some(panel), Some(manager)) => manager.pending_closes.push(panel),
+            _ => {
+                if let Ok(mut window) = commands.get_entity(event.window) {
+                    window.despawn();
+                }
+            }
         }
     }
 }
@@ -1332,7 +1513,6 @@ impl Plugin for StudioUiPlugin {
             .add_message::<crate::commands::HistoryActionEvent>()
             // Plugins
             .add_plugins(SpawnEventsPlugin)
-            .add_plugins(WorldViewPlugin)
             .add_plugins(super::floating_windows::FloatingWindowsPlugin)
             // Systems
             .init_resource::<super::file_event_handler::PendingFileActions>()
@@ -1434,15 +1614,19 @@ impl Plugin for SlintUiPlugin {
             // when an impact clears the material's Griffith energy threshold.
             crate::physics::FractureBridgePlugin,
             crate::interaction::InteractionPlugin,
+            // ParticleSimulation rendering + domain outlines (the simulation
+            // and its engine bridge run in the core plugins, headless too).
+            crate::particles::ParticlesPlugin,
         ));
 
         app
+            // Play start, pause, resume and stop, in the Output panel.
+            .add_systems(Update, log_play_state_to_output)
             // UI state resources
             .init_resource::<StudioState>()
             .init_resource::<OutputConsole>()
             .init_resource::<CommandBarState>()
             .init_resource::<CollaborationState>()
-            .insert_resource(BrushState::new())
             .init_resource::<ToolboxState>()
             .init_resource::<StudioDockState>()
             .init_resource::<UnifiedExplorerState>()
@@ -1474,11 +1658,19 @@ impl Plugin for SlintUiPlugin {
             // API Reference: build catalog once at startup, init filter state
             .insert_resource(crate::workshop::api_reference::ApiCatalog::build())
             .init_resource::<ApiFilterState>()
+            .init_resource::<FindState>()
+            .init_resource::<DataSourcesPanel>()
+            .init_resource::<SyncDomainState>()
+            .init_resource::<DataOverlay>()
+            // After the material sync (Update), so a part it just re-materialed
+            // is tinted again in the same frame.
+            .add_systems(PostUpdate, apply_data_overlay)
+            .add_systems(Update, sync_data_sources_dialog.after(SlintSystems::Drain))
             // Services Browser: one-shot init pushed to Slint on first frame
             .init_resource::<ServicesBrowserInitialized>()
-            // Insert menu: one-shot push of the data-driven class catalog
-            // (ClassRegistry → grouped descriptors) to Slint.
-            .init_resource::<InsertClassesInitialized>()
+            // Insert menu: the catalog last pushed to Slint, rebuilt from the
+            // class templates on disk each time the menu or dialog opens.
+            .init_resource::<InsertMenuState>()
             // Theme: one-shot push of the persisted active theme into the
             // Theme global on first frame + signature-gated list re-push.
             .init_resource::<ThemeInitialized>()
@@ -1495,9 +1687,7 @@ impl Plugin for SlintUiPlugin {
             .add_message::<crate::commands::HistoryActionEvent>()
             // Plugins
             .add_plugins(SpawnEventsPlugin)
-            .add_plugins(WorldViewPlugin)
             .add_plugins(super::webview::WebViewPlugin)
-            .add_plugins(super::monaco_bridge::MonacoBridgePlugin)
             // Slint software renderer overlay systems
             .add_systems(Startup, setup_slint_overlay)
             .add_systems(Update, forward_input_to_slint.before(SlintSystems::Drain))
@@ -1516,7 +1706,12 @@ impl Plugin for SlintUiPlugin {
             // viewport-menu action a silent no-op (the drain would fail
             // param validation and skip ALL UI clicks).
             .init_resource::<super::viewport_context_menu::ViewportContextTarget>()
-            .add_systems(Update, super::viewport_context_menu::detect_viewport_right_click)
+            // Right-click is the game's during a Play session.
+            .add_systems(
+                Update,
+                super::viewport_context_menu::detect_viewport_right_click
+                    .run_if(crate::play_mode::editor_input_enabled),
+            )
             // Insert-by-template selection: `create_instance` writes files and
             // lets the file watcher spawn them, so the entity doesn't exist
             // when the action returns. This polls for it and finishes the
@@ -1547,6 +1742,8 @@ impl Plugin for SlintUiPlugin {
             .add_systems(Update, push_brick_color_honeycombs.after(SlintSystems::Drain))
             .add_systems(Update, sync_selection_summary_to_slint.after(SlintSystems::Drain))
             .add_systems(Update, sync_universe_browser.after(SlintSystems::Drain))
+            .init_resource::<GuiElementsChanged>()
+            .add_systems(Update, probe_gui_element_changes.before(sync_gui_elements_to_slint).run_if(crate::space::file_loader::ui_sync_tick))
             .add_systems(Update, sync_gui_elements_to_slint.after(SlintSystems::Drain).run_if(crate::space::file_loader::ui_sync_tick))
             // `.after(handle_window_resize)`: on a resize frame the staging
             // buffer, Slint texture, overlay quad, and camera projection are
@@ -1563,6 +1760,9 @@ impl Plugin for SlintUiPlugin {
             .add_systems(Update, sync_load_progress_to_slint.after(SlintSystems::Drain))
             // Generate World busy flag + phase/progress text (Terrain panel)
             .add_systems(Update, sync_worldgen_progress_to_slint.after(SlintSystems::Drain))
+            // Terrain material picker: slot list + the Paint brush's slot.
+            // Its resources come from EngineTerrainPlugin; both are Option.
+            .add_systems(Update, sync_terrain_materials_to_slint.after(SlintSystems::Drain))
             // Performance tracking
             .add_systems(Update, update_ui_performance)
             // Simulation clock display in ribbon
@@ -1570,10 +1770,12 @@ impl Plugin for SlintUiPlugin {
             // Axis orientation gizmo (bottom-right of viewport)
             // History panel sync
             .add_systems(Update, sync_history_to_slint.after(SlintSystems::Drain))
+            .add_plugins(super::restore_points::RestorePointsPlugin)
             .init_resource::<super::procurement_bridge::ProcurementFocus>()
             .add_systems(Update, sync_procurement_to_slint.after(SlintSystems::Drain))
-            // Publish dialog state sync (for camera blocking)
-            .add_systems(Update, sync_publish_dialog_state.after(SlintSystems::Drain))
+            // Dialog visibility mirror (camera blocking) + Forge dialog status
+            .add_systems(Update, sync_dialog_state.after(SlintSystems::Drain))
+            .add_systems(Update, announce_unbuilt_actions)
             // Bridge: viewport click → SelectionManager → UnifiedExplorerState
             // Must run AFTER part_selection_system and SlintSystems::Drain
             .add_systems(Update, sync_viewport_selection_to_explorer.after(SlintSystems::Drain))
@@ -1581,12 +1783,22 @@ impl Plugin for SlintUiPlugin {
             // The slow tick: during a bulk load the tree changes every frame,
             // and each push replaces the whole Slint model (every row
             // re-instantiated on the next paint). Every 2 s is plenty then.
+            .init_resource::<ExplorerStructureChanged>()
+            .add_systems(Update, probe_explorer_structure.before(sync_unified_explorer_to_slint).run_if(crate::space::file_loader::ui_sync_tick_slow))
             .add_systems(Update, sync_unified_explorer_to_slint.after(sync_viewport_selection_to_explorer).run_if(crate::space::file_loader::ui_sync_tick_slow))
             // Properties sync (throttled internally)
             .add_systems(Update, sync_properties_to_slint.after(sync_viewport_selection_to_explorer))
+            // Live Runtime rows of a selected ParticleSimulation / species,
+            // patched in place (never a model replace).
+            .add_systems(
+                Update,
+                super::particle_sim_panel::refresh_runtime_rows.after(sync_properties_to_slint),
+            )
             // Tag chips/registry sync — NOT focus-gated, so tags added via the
             // (focused) add-field refresh immediately. Rebuilds on selection /
             // Changed<Tags> only.
+            .init_resource::<TagsChanged>()
+            .add_systems(Update, probe_tag_changes.before(sync_tags_to_slint).run_if(crate::space::file_loader::ui_sync_tick))
             .add_systems(Update, sync_tags_to_slint.after(sync_viewport_selection_to_explorer).run_if(crate::space::file_loader::ui_sync_tick))
             // Enter on a selected part → open the Edit-Label modal for its
             // first TextLabel descendant. Runs after focus tracking so we
@@ -1627,10 +1839,17 @@ impl Plugin for SlintUiPlugin {
             .add_systems(Update, sync_api_reference_to_slint.after(SlintSystems::Drain))
             // Services Browser: one-shot push of static catalog to Slint
             .add_systems(Update, init_services_browser_to_slint.after(SlintSystems::Drain))
-            // Insert menu: one-shot push of the data-driven class catalog.
-            // Runs after Drain (like the other one-shot Slint feeds) and
-            // self-gates until the ClassRegistry is populated.
-            .add_systems(Update, init_insert_classes_to_slint.after(SlintSystems::Drain))
+            // Insert menu: rebuilds the catalog and the context rows when the
+            // menu or the Insert Object dialog opens. After the UI sync, which
+            // opens the dialog, and before the frame renders, so the first
+            // frame of either surface already shows the fresh rows.
+            .add_systems(
+                Update,
+                refresh_insert_menu
+                    .after(SlintSystems::Drain)
+                    .after(sync_bevy_to_slint)
+                    .before(render_slint_to_texture),
+            )
             // Theme: one-shot push of the active theme + list sync to Slint.
             .add_systems(Update, init_theme_to_slint.after(SlintSystems::Drain))
             .add_systems(Update, sync_theme_list_to_slint.after(SlintSystems::Drain))
@@ -1650,6 +1869,7 @@ impl Plugin for SlintUiPlugin {
                 .after(SlintSystems::Drain)
                 .before(sync_center_tabs_to_slint))
             .add_systems(Update, sync_center_tabs_to_slint.after(SlintSystems::Drain))
+            .add_systems(Update, sync_unsaved_changes_dialog.after(SlintSystems::Drain))
             .add_systems(Update, drain_pending_build.after(SlintSystems::Drain))
             .init_resource::<super::file_event_handler::PendingFileActions>()
             .init_resource::<super::file_event_handler::PendingUniversePath>()
@@ -1868,6 +2088,14 @@ fn setup_slint_overlay(world: &mut World) {
     let q = queue.clone();
     ui.on_history_clear(move || q.push(SlintAction::HistoryClear));
     let q = queue.clone();
+    ui.on_restore_points_shown(move || q.push(SlintAction::RestorePointsShown));
+    let q = queue.clone();
+    ui.on_restore_point_save(move |label| q.push(SlintAction::RestorePointSave(label.to_string())));
+    let q = queue.clone();
+    ui.on_restore_point_revert(move |id| q.push(SlintAction::RestorePointRevert(id.to_string())));
+    let q = queue.clone();
+    ui.on_restore_point_cancel_pending(move || q.push(SlintAction::RestorePointCancelPending));
+    let q = queue.clone();
     ui.on_copy(move || q.push(SlintAction::Copy));
     let q = queue.clone();
     ui.on_cut(move || q.push(SlintAction::Cut));
@@ -1935,6 +2163,7 @@ fn setup_slint_overlay(world: &mut World) {
     ui.on_insert_into(move |id, node_type| q.push(SlintAction::InsertInto(id, node_type.to_string())));
     let q = queue.clone();
     ui.on_insert_object_request(move || q.push(SlintAction::OpenInsertObject));
+    ui.on_insert_menu_opened(|| INSERT_MENU_REFRESH.store(true, std::sync::atomic::Ordering::Relaxed));
     let q = queue.clone();
     ui.on_apply_keymap_preset(move |id| q.push(SlintAction::ApplyKeymapPreset(id.to_string())));
     let q = queue.clone();
@@ -2029,6 +2258,16 @@ fn setup_slint_overlay(world: &mut World) {
     });
     let q = queue.clone();
     ui.on_attribute_delete(move |name| q.push(SlintAction::AttributeDeleted(name.to_string())));
+    // Add/Edit Parameter modal + delete. Rust opens the modal, since it holds
+    // the Domain and Connector lists and the binding a row does not carry.
+    let q = queue.clone();
+    ui.on_parameter_add_requested(move || q.push(SlintAction::ParameterAddRequested));
+    let q = queue.clone();
+    ui.on_parameter_edit_requested(move |label| q.push(SlintAction::ParameterEditRequested(label.to_string())));
+    let q = queue.clone();
+    ui.on_parameter_confirmed(move || q.push(SlintAction::ParameterConfirmed));
+    let q = queue.clone();
+    ui.on_parameter_delete(move |label| q.push(SlintAction::ParameterDeleted(label.to_string())));
     // Tag system — chip add/remove + click-to-select-all-tagged.
     let q = queue.clone();
     ui.on_tag_add(move |name| q.push(SlintAction::TagAdded(name.to_string())));
@@ -2040,6 +2279,14 @@ fn setup_slint_overlay(world: &mut World) {
     ui.on_tag_rename(move |old, new| q.push(SlintAction::TagRenamed(old.to_string(), new.to_string())));
     let q = queue.clone();
     ui.on_edit_label_confirmed(move |new_text| q.push(SlintAction::EditLabelConfirmed(new_text.to_string())));
+    // Populate the Add/Edit Parameter dialog's type list once.
+    {
+        let opts: Vec<slint::SharedString> = eustress_common::parameters::ParameterValue::EDITABLE_TYPES
+            .iter()
+            .map(|s| (*s).into())
+            .collect();
+        ui.set_parameter_type_options(slint::ModelRc::new(slint::VecModel::from(opts)));
+    }
     // Populate the Add/Edit Attribute dialog's type dropdown once.
     {
         let opts: Vec<slint::SharedString> =
@@ -2106,6 +2353,12 @@ fn setup_slint_overlay(world: &mut World) {
     ui.on_execute_script(move |lang, script| q.push(SlintAction::ExecuteScript(lang.to_string(), script.to_string())));
     let q = queue.clone();
     ui.on_clear_script_output(move || q.push(SlintAction::ClearScriptOutput));
+    let q = queue.clone();
+    ui.on_copy_output_line(move |id| q.push(SlintAction::CopyOutputLine(id)));
+    let q = queue.clone();
+    ui.on_copy_output_visible(move || q.push(SlintAction::CopyOutputVisible));
+    let q = queue.clone();
+    ui.on_toggle_output_stack(move |id| q.push(SlintAction::ToggleOutputStack(id)));
     
     // Bottom panel mode (Output ↔ Timeline tab switch)
     let q = queue.clone();
@@ -2148,7 +2401,7 @@ fn setup_slint_overlay(world: &mut World) {
     {
         let icon_cache: std::cell::RefCell<std::collections::HashMap<String, slint::Image>> =
             std::cell::RefCell::new(std::collections::HashMap::new());
-        let assets = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("assets/icons");
+        let assets = crate::resource_root().join("assets/icons");
         ui.on_tool_icon_image(move |action_id| {
             let key = action_id.to_string();
             if let Some(img) = icon_cache.borrow().get(&key) {
@@ -2195,17 +2448,14 @@ fn setup_slint_overlay(world: &mut World) {
     let q = queue.clone();
     ui.on_set_terrain_brush(move |brush| q.push(SlintAction::SetTerrainBrush(brush.to_string())));
     let q = queue.clone();
+    ui.on_set_terrain_paint_material(move |slot| q.push(SlintAction::SetTerrainPaintMaterial(slot)));
+    let q = queue.clone();
+    ui.on_add_terrain_material(move |name| q.push(SlintAction::AddTerrainMaterial(name.to_string())));
+    let q = queue.clone();
     ui.on_generate_world(move |seed, preset| q.push(SlintAction::GenerateWorld {
         seed: seed.to_string(),
         preset: preset.to_string(),
     }));
-    // TODO: Uncomment after Slint regenerates bindings for brush settings callbacks
-    // let q = queue.clone();
-    // ui.on_brush_size_changed(move |size| q.push(SlintAction::BrushSizeChanged(size)));
-    // let q = queue.clone();
-    // ui.on_brush_strength_changed(move |strength| q.push(SlintAction::BrushStrengthChanged(strength)));
-    // let q = queue.clone();
-    // ui.on_brush_falloff_changed(move |falloff| q.push(SlintAction::BrushFalloffChanged(falloff.to_string())));
     let q = queue.clone();
     ui.on_import_heightmap(move || q.push(SlintAction::ImportHeightmap));
     let q = queue.clone();
@@ -2251,13 +2501,6 @@ fn setup_slint_overlay(world: &mut World) {
     let q = queue.clone();
     ui.on_open_global_variables(move || q.push(SlintAction::OpenGlobalVariables));
     
-    // MindSpace
-    let q = queue.clone();
-    ui.on_toggle_mindspace(move || q.push(SlintAction::ToggleMindspace));
-    let q = queue.clone();
-    ui.on_mindspace_add_label(move || q.push(SlintAction::MindspaceAddLabel));
-    let q = queue.clone();
-    ui.on_mindspace_connect(move || q.push(SlintAction::MindspaceConnect));
 
     // Generic plugin action — routes all ribbon plugin buttons through PluginActionEvent
     let q = queue.clone();
@@ -2361,6 +2604,30 @@ fn setup_slint_overlay(world: &mut World) {
     let q = queue.clone();
     ui.on_script_caret_moved(move |line, col| q.push(SlintAction::ScriptCaretMoved(line, col)));
     let q = queue.clone();
+    ui.on_script_save(move || q.push(SlintAction::ScriptSave));
+    let q = queue.clone();
+    ui.on_unsaved_changes_save(move || q.push(SlintAction::UnsavedChangesSave));
+    let q = queue.clone();
+    ui.on_unsaved_changes_discard(move || q.push(SlintAction::UnsavedChangesDiscard));
+    let q = queue.clone();
+    ui.on_unsaved_changes_cancel(move || q.push(SlintAction::UnsavedChangesCancel));
+    let q = queue.clone();
+    ui.on_script_editor_key(move |key, anchor, cursor| {
+        q.push(SlintAction::ScriptEditorKey(key.to_string(), anchor, cursor))
+    });
+    let q = queue.clone();
+    ui.on_script_find(move |query, match_case| q.push(SlintAction::ScriptFind(query.to_string(), match_case)));
+    let q = queue.clone();
+    ui.on_script_find_step(move |forward| q.push(SlintAction::ScriptFindStep(forward)));
+    let q = queue.clone();
+    ui.on_script_replace(move |with| q.push(SlintAction::ScriptReplace(with.to_string())));
+    let q = queue.clone();
+    ui.on_script_replace_all(move |with| q.push(SlintAction::ScriptReplaceAll(with.to_string())));
+    let q = queue.clone();
+    ui.on_script_find_close(move || q.push(SlintAction::ScriptFindClose));
+    let q = queue.clone();
+    ui.on_script_go_to_line(move |line| q.push(SlintAction::ScriptGoToLine(line)));
+    let q = queue.clone();
     ui.on_script_completion_accept(move |idx| q.push(SlintAction::ScriptCompletionAccept(idx)));
     let q = queue.clone();
     ui.on_script_completion_move(move |delta| q.push(SlintAction::ScriptCompletionMove(delta)));
@@ -2370,6 +2637,98 @@ fn setup_slint_overlay(world: &mut World) {
     ui.on_script_completion_request(move || q.push(SlintAction::ScriptCompletionRequest));
     let q = queue.clone();
     ui.on_reorder_center_tab(move |from, to| q.push(SlintAction::ReorderCenterTab(from, to)));
+    let q = queue.clone();
+    ui.on_close_other_tabs(move |idx| q.push(SlintAction::CloseOtherTabs(idx)));
+    let q = queue.clone();
+    ui.on_close_tabs_to_right(move |idx| q.push(SlintAction::CloseTabsToRight(idx)));
+    let q = queue.clone();
+    ui.on_close_all_tabs(move || q.push(SlintAction::CloseAllTabs));
+    let q = queue.clone();
+    ui.on_reveal_tab_in_explorer(move |idx| q.push(SlintAction::RevealTabInExplorer(idx)));
+    let q = queue.clone();
+    ui.on_sort_center_tabs(move |by| q.push(SlintAction::SortCenterTabs(by.to_string())));
+    let q = queue.clone();
+    ui.on_unbuilt_feature(move |id| q.push(SlintAction::UnbuiltFeature(id.to_string())));
+    let q = queue.clone();
+    ui.on_set_ribbon_collapsed(move |c| q.push(SlintAction::SetRibbonCollapsed(c)));
+    let q = queue.clone();
+    ui.on_soul_test_connection(move || q.push(SlintAction::SoulTestConnection));
+
+    // Data > Sync Domain to Object Type
+    let q = queue.clone();
+    ui.on_open_sync_domain(move || q.push(SlintAction::OpenSyncDomain));
+    let q = queue.clone();
+    ui.on_sync_domain_picked(move |name| q.push(SlintAction::SyncDomainPicked(name.to_string())));
+    let q = queue.clone();
+    ui.on_sync_domain_preview(move |x, y, z| q.push(SlintAction::SyncDomainPreview(x, y, z)));
+    let q = queue.clone();
+    ui.on_sync_domain_run(move |x, y, z| q.push(SlintAction::SyncDomainRun(x, y, z)));
+
+    // Data > Manage Global Sources
+    let q = queue.clone();
+    ui.on_data_source_add(move || q.push(SlintAction::DataSourceAdd));
+    let q = queue.clone();
+    ui.on_data_source_remove(move |row| q.push(SlintAction::DataSourceRemove(row)));
+    let q = queue.clone();
+    ui.on_data_source_edit(move |row| q.push(SlintAction::DataSourceEdit(row)));
+    let q = queue.clone();
+    ui.on_data_source_test(move |row| q.push(SlintAction::DataSourceTest(row)));
+
+    // Find & Replace
+    let q = queue.clone();
+    ui.on_find_search(move || q.push(SlintAction::FindSearch));
+    let q = queue.clone();
+    ui.on_find_step(move |step| q.push(SlintAction::FindStep(step)));
+    let q = queue.clone();
+    ui.on_find_select_result(move |row| q.push(SlintAction::FindSelectResult(row)));
+    let q = queue.clone();
+    ui.on_find_replace_one(move || q.push(SlintAction::FindReplaceOne));
+    let q = queue.clone();
+    ui.on_find_replace_all(move || q.push(SlintAction::FindReplaceAll));
+    let q = queue.clone();
+    ui.on_find_closed(move || q.push(SlintAction::FindClosed));
+
+    // Edit > Group / Ungroup (menus and the Model ribbon buttons)
+    let q = queue.clone();
+    ui.on_group(move || q.push(SlintAction::Group));
+    let q = queue.clone();
+    ui.on_ungroup(move || q.push(SlintAction::Ungroup));
+    // File > Exit takes the window close button's path, so unsaved changes
+    // still raise the exit confirmation.
+    let q = queue.clone();
+    ui.on_exit_app(move || q.push(SlintAction::CloseRequested));
+
+    // Script editor and Problems panel
+    let q = queue.clone();
+    ui.on_summarize_script(move |id| q.push(SlintAction::SummarizeScript(id)));
+    let q = queue.clone();
+    ui.on_problems_jump_to(move |path, line, col| q.push(SlintAction::ProblemsJumpTo(path.to_string(), line, col)));
+    let q = queue.clone();
+    ui.on_problems_fix_with_workshop(move || q.push(SlintAction::ProblemsFixWithWorkshop));
+    let q = queue.clone();
+    ui.on_script_go_to_definition(move |line, col| q.push(SlintAction::ScriptGoToDefinition(line, col)));
+    let q = queue.clone();
+    ui.on_script_find_references(move |line, col| q.push(SlintAction::ScriptFindReferences(line, col)));
+
+    // API Reference and Services browser tabs
+    let q = queue.clone();
+    ui.on_api_search_changed(move |text| q.push(SlintAction::ApiSearchChanged(text.to_string())));
+    let q = queue.clone();
+    ui.on_api_category_selected(move |cat| q.push(SlintAction::ApiCategorySelected(cat.to_string())));
+    let q = queue.clone();
+    ui.on_api_language_filter_changed(move |lang| q.push(SlintAction::ApiLanguageFilterChanged(lang.to_string())));
+    let q = queue.clone();
+    ui.on_api_copy_example(move |ex| q.push(SlintAction::ApiCopyExample(ex.to_string())));
+    let q = queue.clone();
+    ui.on_services_browser_open_url(move |url| q.push(SlintAction::ServicesBrowserOpenUrl(url.to_string())));
+
+    // Stress test dialog
+    let q = queue.clone();
+    ui.on_start_stress_test(move |clients, rate, duration, movement, interactions| {
+        q.push(SlintAction::StartStressTest { clients, rate, duration, movement, interactions });
+    });
+    let q = queue.clone();
+    ui.on_stop_stress_test(move || q.push(SlintAction::StopStressTest));
     let q = queue.clone();
     ui.on_toggle_mode(move |idx| q.push(SlintAction::ToggleTabMode(idx)));
     
@@ -2385,21 +2744,12 @@ fn setup_slint_overlay(world: &mut World) {
     let q = queue.clone();
     ui.on_web_refresh(move || q.push(SlintAction::WebRefresh));
     
-    // Settings
-    let q = queue.clone();
-    ui.on_open_settings(move || q.push(SlintAction::ShowSettings));
-    let q = queue.clone();
-    ui.on_open_find(move || q.push(SlintAction::ShowFind));
-    
-    // Layout
-    let q = queue.clone();
-    ui.on_apply_layout_preset(move |preset| q.push(SlintAction::ApplyLayoutPreset(preset)));
+    // Layout menu: presets apply on the Slint side; Save and Import go
+    // through a layout file.
     let q = queue.clone();
     ui.on_save_layout_to_file(move || q.push(SlintAction::SaveLayoutToFile));
     let q = queue.clone();
     ui.on_load_layout_from_file(move || q.push(SlintAction::LoadLayoutFromFile));
-    let q = queue.clone();
-    ui.on_reset_layout_to_default(move || q.push(SlintAction::ResetLayoutToDefault));
     let q = queue.clone();
     ui.on_toggle_theme_editor(move || q.push(SlintAction::ToggleThemeEditor));
     let q = queue.clone();
@@ -2499,6 +2849,16 @@ fn setup_slint_overlay(world: &mut World) {
     ui.on_workshop_gauntlet_toggled(move |v| q.push(SlintAction::WorkshopGauntletToggled(v)));
     let q = queue.clone();
     ui.on_workshop_auto_toggled(move |v| q.push(SlintAction::WorkshopAutoToggled(v)));
+    let q = queue.clone();
+    ui.on_workshop_stop_agent(move || q.push(SlintAction::WorkshopStopAgent));
+    let q = queue.clone();
+    ui.on_workshop_approve_all(move || q.push(SlintAction::WorkshopApproveAll));
+    let q = queue.clone();
+    ui.on_workshop_skip_all(move || q.push(SlintAction::WorkshopSkipAll));
+    let q = queue.clone();
+    ui.on_workshop_remove_queued(move |index| q.push(SlintAction::WorkshopRemoveQueued(index)));
+    let q = queue.clone();
+    ui.on_workshop_copy_text(move |text| q.push(SlintAction::WorkshopCopyText(text.to_string())));
     let q = queue.clone();
     ui.on_workshop_mention_query_changed(move |text| q.push(SlintAction::WorkshopMentionQueryChanged(text.to_string())));
     let q = queue.clone();
@@ -2802,6 +3162,106 @@ fn sync_universe_browser(
     ui.set_show_universe_browser(!registry.universes.is_empty());
 }
 
+/// Looks up a GUI element's display and its parent entity. The overlay
+/// renderer and the click hit test each hold a different query, so both
+/// resolvers below take this instead.
+type GuiLookup<'a> = dyn Fn(Entity) -> Option<(&'a eustress_common::gui::billboard_renderer::GuiElementDisplay, Option<Entity>)> + 'a;
+
+/// Resolve an element's screen rect as `(x, y, w, h)` in viewport-local
+/// logical pixels. The renderer and the click hit test both use it, so a
+/// click lands on exactly the rect that was drawn.
+///
+/// `Position` / `Size` are `UDim2`: `Scale` is a FRACTION OF THE PARENT's
+/// resolved extent, `Offset` is pixels added on top. The parent of a
+/// top-level ScreenGui child is the viewport itself, so Scale resolves
+/// against the viewport rect (`Position = {0.5,0},{0.5,0}` is the screen
+/// centre, `Size = {1,0},{1,0}` the full screen). Mirrors the billboard
+/// subtree resolver in `billboard_gui.rs`.
+///
+/// `AnchorPoint` shifts by the element's OWN resolved size, so
+/// `{0.5,0.5}` centres the element on its position instead of hanging it
+/// from the top-left.
+fn resolve_gui_rect<'a>(
+    entity: Entity,
+    lookup: &GuiLookup<'a>,
+    viewport: (f32, f32),
+    cache: &mut std::collections::HashMap<Entity, (f32, f32, f32, f32)>,
+) -> (f32, f32, f32, f32) {
+    if let Some(&cached) = cache.get(&entity) {
+        return cached;
+    }
+    let Some((d, parent)) = lookup(entity) else {
+        return (0.0, 0.0, viewport.0, viewport.1);
+    };
+    // A ScreenGui is a zero-size container that spans the whole screen: its
+    // children resolve Scale against the viewport, not against the
+    // container's (unset, would-be-1px) extent.
+    if d.class_type.eq_ignore_ascii_case("screengui") {
+        let r = (0.0, 0.0, viewport.0, viewport.1);
+        cache.insert(entity, r);
+        return r;
+    }
+    let (px, py, pw, ph) = match parent {
+        Some(p) if lookup(p).is_some() => resolve_gui_rect(p, lookup, viewport, cache),
+        _ => (0.0, 0.0, viewport.0, viewport.1),
+    };
+
+    // Fall back to the pre-resolved pixel fields when a UDim2 is entirely
+    // absent (both halves zero): some loader paths populate only the
+    // legacy `x/y/width/height` and leave the UDim2 arrays zeroed.
+    let udim_unset = |s: f32, o: f32| s == 0.0 && o == 0.0;
+
+    let w = if udim_unset(d.size_udim2[0], d.size_udim2[1]) {
+        d.width.max(1.0)
+    } else {
+        (d.size_udim2[0] * pw + d.size_udim2[1]).max(1.0)
+    };
+    let h = if udim_unset(d.size_udim2[2], d.size_udim2[3]) {
+        d.height.max(1.0)
+    } else {
+        (d.size_udim2[2] * ph + d.size_udim2[3]).max(1.0)
+    };
+    let local_x = if udim_unset(d.position_udim2[0], d.position_udim2[1]) {
+        d.x
+    } else {
+        d.position_udim2[0] * pw + d.position_udim2[1]
+    };
+    let local_y = if udim_unset(d.position_udim2[2], d.position_udim2[3]) {
+        d.y
+    } else {
+        d.position_udim2[2] * ph + d.position_udim2[3]
+    };
+
+    let r = (
+        px + local_x - d.anchor_point[0] * w,
+        py + local_y - d.anchor_point[1] * h,
+        w,
+        h,
+    );
+    cache.insert(entity, r);
+    r
+}
+
+/// Whether the element or any GUI ancestor is hidden. `Visible = false` on a
+/// GuiObject hides everything inside it and `Enabled = false` hides a whole
+/// ScreenGui (both land in `GuiElementDisplay::visible`), as in Roblox.
+fn gui_hidden_by_ancestor<'a>(entity: Entity, lookup: &GuiLookup<'a>) -> bool {
+    let mut cur = Some(entity);
+    let mut depth = 0;
+    while let Some(e) = cur {
+        let Some((d, parent)) = lookup(e) else { return false };
+        if !d.visible {
+            return true;
+        }
+        cur = parent;
+        depth += 1;
+        if depth > 256 {
+            return false;
+        }
+    }
+    false
+}
+
 /// Frame counter for one-time debug logging
 static RENDER_FRAME: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
@@ -2829,109 +3289,28 @@ fn sync_gui_elements_to_slint(
     // the fallback when walking up to the service entity itself.
     loaded_q: Query<&crate::space::LoadedFromFile>,
     service_q: Query<&crate::space::service_loader::ServiceComponent>,
-    changed: Query<(), Changed<eustress_common::gui::billboard_renderer::GuiElementDisplay>>,
-    added: Query<(), Added<eustress_common::gui::billboard_renderer::GuiElementDisplay>>,
-    mut last_count: Local<usize>,
+    // Set by `probe_gui_element_changes` off the main thread (see its doc).
+    mut gui_latch: ResMut<GuiElementsChanged>,
+    // In Play the shared HUD draws the ScreenGuis; the overlay previews them
+    // in Edit only.
+    play: Option<Res<crate::play_datamodel::PlayDataModel>>,
+    // The UI Builder's live preview (`ui_builder/mod.rs`): drawn after the
+    // Space's own ScreenGuis, so it sits on top. Empty unless Preview is on.
+    ui_builder_preview: Option<Res<crate::ui_builder::UiBuilderPreview>>,
 ) {
     let Some(slint_context) = slint_context else { return };
 
-    // Skip sync if nothing changed — major FPS optimization
-    let current_count = gui_query.iter().count();
-    let has_changes = !changed.is_empty() || !added.is_empty() || current_count != *last_count;
-    if !has_changes { return; }
-    *last_count = current_count;
+    // Skip sync if nothing changed — major FPS optimization. A change to the
+    // UI Builder's preview counts as a change.
+    let latched = std::mem::take(&mut gui_latch.bypass_change_detection().0);
+    let preview_changed = ui_builder_preview.as_ref().is_some_and(|p| p.is_changed());
+    if !latched && !preview_changed {
+        return;
+    }
 
     let ui = &slint_context.window;
 
-    /// Resolve an element's screen rect as `(x, y, w, h)` in viewport-local
-    /// logical pixels.
-    ///
-    /// `Position` / `Size` are `UDim2`: `Scale` is a FRACTION OF THE PARENT's
-    /// resolved extent, `Offset` is pixels added on top. The parent of a
-    /// top-level ScreenGui child is the viewport itself, so Scale has to
-    /// resolve against the viewport rect — resolving it against nothing is
-    /// what collapsed `Position = {0.5,0},{0.5,0}` (screen centre) to the
-    /// top-left corner and `Size = {1,0},{1,0}` (full screen) to 1×1 px.
-    /// Mirrors the billboard subtree resolver in `billboard_gui.rs`.
-    ///
-    /// `AnchorPoint` shifts by the element's OWN resolved size, so
-    /// `{0.5,0.5}` centres the element on its position instead of hanging it
-    /// from the top-left.
-    fn resolve_rect(
-        entity: Entity,
-        gui_query: &Query<(Entity, &eustress_common::gui::billboard_renderer::GuiElementDisplay, Option<&ChildOf>)>,
-        viewport: (f32, f32),
-        cache: &mut std::collections::HashMap<Entity, (f32, f32, f32, f32)>,
-    ) -> (f32, f32, f32, f32) {
-        if let Some(&cached) = cache.get(&entity) {
-            return cached;
-        }
-        let Ok((_, d, parent)) = gui_query.get(entity) else {
-            return (0.0, 0.0, viewport.0, viewport.1);
-        };
-        // A ScreenGui is a zero-size container that spans the whole screen —
-        // its children resolve Scale against the viewport, not against the
-        // container's (unset, would-be-1px) extent.
-        if d.class_type == "screengui" {
-            let r = (0.0, 0.0, viewport.0, viewport.1);
-            cache.insert(entity, r);
-            return r;
-        }
-        let (px, py, pw, ph) = match parent {
-            Some(c) if gui_query.get(c.parent()).is_ok() => {
-                resolve_rect(c.parent(), gui_query, viewport, cache)
-            }
-            _ => (0.0, 0.0, viewport.0, viewport.1),
-        };
-
-        // Fall back to the pre-resolved pixel fields when a UDim2 is entirely
-        // absent (both halves zero) — some loader paths populate only the
-        // legacy `x/y/width/height` and leave the UDim2 arrays zeroed.
-        let udim_unset = |s: f32, o: f32| s == 0.0 && o == 0.0;
-
-        let w = if udim_unset(d.size_udim2[0], d.size_udim2[1]) {
-            d.width.max(1.0)
-        } else {
-            (d.size_udim2[0] * pw + d.size_udim2[1]).max(1.0)
-        };
-        let h = if udim_unset(d.size_udim2[2], d.size_udim2[3]) {
-            d.height.max(1.0)
-        } else {
-            (d.size_udim2[2] * ph + d.size_udim2[3]).max(1.0)
-        };
-        let local_x = if udim_unset(d.position_udim2[0], d.position_udim2[1]) {
-            d.x
-        } else {
-            d.position_udim2[0] * pw + d.position_udim2[1]
-        };
-        let local_y = if udim_unset(d.position_udim2[2], d.position_udim2[3]) {
-            d.y
-        } else {
-            d.position_udim2[2] * ph + d.position_udim2[3]
-        };
-
-        let r = (
-            px + local_x - d.anchor_point[0] * w,
-            py + local_y - d.anchor_point[1] * h,
-            w,
-            h,
-        );
-        cache.insert(entity, r);
-        r
-    }
-
-    // Check if an entity or any ancestor has visible=false (hidden ScreenGui)
-    fn is_ancestor_hidden(
-        entity: Entity,
-        gui_query: &Query<(Entity, &eustress_common::gui::billboard_renderer::GuiElementDisplay, Option<&ChildOf>)>,
-    ) -> bool {
-        let Ok((_, display, parent)) = gui_query.get(entity) else { return false };
-        if !display.visible && display.class_type == "screengui" { return true; }
-        if let Some(child_of) = parent {
-            return is_ancestor_hidden(child_of.parent(), gui_query);
-        }
-        false
-    }
+    let lookup = |e: Entity| gui_query.get(e).ok().map(|(_, d, p)| (d, p.map(|c| c.parent())));
 
     // Check whether any ancestor of `entity` is a BillboardGuiMarker. Those
     // GuiElementDisplay entities are consumed by the per-billboard Slint
@@ -2969,7 +3348,7 @@ fn sync_gui_elements_to_slint(
         let mut cur = entity;
         loop {
             if let Ok((_, d, _)) = gui_query.get(cur) {
-                if d.class_type == "screengui" { return true; }
+                if d.class_type.eq_ignore_ascii_case("screengui") { return true; }
             }
             match parent_q.get(cur) {
                 Ok(p) => cur = p.parent(),
@@ -3011,7 +3390,8 @@ fn sync_gui_elements_to_slint(
 
     // Collect, filter hidden ScreenGui descendants + billboard children, sort.
     // Diagnostic: log filter funnel ONCE per scene structural change so the
-    // user can grep why ghost entities slip through. Throttled by `last_count`.
+    // user can grep why ghost entities slip through. Throttled by the change
+    // latch: this only runs when an element was added, changed or removed.
     let mut funnel = (0usize, 0usize, 0usize, 0usize, 0usize, 0usize); // raw, after_screengui, after_hidden, after_billboard, after_has_screengui, accepted
     let mut leaked: Vec<(Entity, String, f32, f32)> = Vec::new();
     let mut elements: Vec<(Entity, &eustress_common::gui::billboard_renderer::GuiElementDisplay)> =
@@ -3019,10 +3399,10 @@ fn sync_gui_elements_to_slint(
             .filter(|(e, d, _)| {
                 funnel.0 += 1;
                 // Skip the ScreenGui display element itself (zero-size container)
-                if d.class_type == "screengui" { return false; }
+                if d.class_type.eq_ignore_ascii_case("screengui") { return false; }
                 funnel.1 += 1;
                 // Skip children of hidden ScreenGuis
-                if is_ancestor_hidden(*e, &gui_query) { return false; }
+                if gui_hidden_by_ancestor(*e, &lookup) { return false; }
                 funnel.2 += 1;
                 // Skip billboard descendants — rendered by billboard_gui plugin
                 if is_under_billboard(*e, &billboard_q, &parent_q) { return false; }
@@ -3044,10 +3424,14 @@ fn sync_gui_elements_to_slint(
             })
             .map(|(e, d, _)| (e, d))
             .collect();
-    info!("👻 [gui-overlay] funnel: raw={} -screengui_self={} -hidden_anc={} -under_bb={} -has_sg_anc={} ACCEPTED={}",
+    // Debug level: a HUD a script updates every frame rebuilds this every frame.
+    debug!("👻 [gui-overlay] funnel: raw={} -screengui_self={} -hidden_anc={} -under_bb={} -has_sg_anc={} ACCEPTED={}",
           funnel.0, funnel.1, funnel.2, funnel.3, funnel.4, funnel.5);
     for (e, ct, x, y) in leaked.iter().take(20) {
-        info!("👻 [gui-overlay] accepted: entity={:?} class={} pos=({:.0},{:.0})", e, ct, x, y);
+        debug!("👻 [gui-overlay] accepted: entity={:?} class={} pos=({:.0},{:.0})", e, ct, x, y);
+    }
+    if play.is_some() {
+        elements.clear();
     }
     elements.sort_by_key(|(_, e)| e.z_order);
 
@@ -3061,9 +3445,9 @@ fn sync_gui_elements_to_slint(
     let mut rect_cache: std::collections::HashMap<Entity, (f32, f32, f32, f32)> =
         std::collections::HashMap::new();
 
-    let slint_elements: Vec<GuiElementData> = elements.iter().map(|(entity, e)| {
+    let mut slint_elements: Vec<GuiElementData> = elements.iter().map(|(entity, e)| {
         let (rx, ry, rw, rh) =
-            resolve_rect(*entity, &gui_query, viewport_extent, &mut rect_cache);
+            resolve_gui_rect(*entity, &lookup, viewport_extent, &mut rect_cache);
 
         // Load image for ImageLabel/ImageButton if path is set
         let (has_image, image_source) = if !e.image_path.is_empty() {
@@ -3107,15 +3491,58 @@ fn sync_gui_elements_to_slint(
             text_b: e.text_color[2],
             text_a: e.text_color[3],
             font_size: e.font_size,
-            text_align: e.text_align.as_str().into(),
+            font_weight: e.font_weight,
+            // main.slint compares lowercase names; the display carries the
+            // enum's ("Left", "Top").
+            text_align: e.text_align.to_ascii_lowercase().into(),
+            text_y_align: e.text_y_align.to_ascii_lowercase().into(),
             image_source,
             has_image,
             class_type: e.class_type.as_str().into(),
         }
     }).collect();
 
-    let model = std::rc::Rc::new(slint::VecModel::from(slint_elements));
-    ui.set_gui_elements(slint::ModelRc::from(model));
+    // Update the live model row by row. Replacing it rebuilt and repainted
+    // every overlay element whenever any one of them changed, and a HUD that
+    // a script updates every frame changes one every frame.
+    if let Some(preview) = ui_builder_preview.as_deref() {
+        slint_elements.extend(crate::ui_builder::preview_rows(preview, viewport_extent));
+    }
+
+    let current = ui.get_gui_elements();
+    if let Some(live) = current.as_any().downcast_ref::<slint::VecModel<GuiElementData>>() {
+        let old_len = live.row_count();
+        let new_len = slint_elements.len();
+        for (i, element) in slint_elements.into_iter().enumerate() {
+            if i >= old_len {
+                live.push(element);
+            } else if live.row_data(i).as_ref() != Some(&element) {
+                live.set_row_data(i, element);
+            }
+        }
+        for i in (new_len..old_len).rev() {
+            live.remove(i);
+        }
+    } else {
+        let model = std::rc::Rc::new(slint::VecModel::from(slint_elements));
+        ui.set_gui_elements(slint::ModelRc::from(model));
+    }
+}
+
+/// What `render_slint_to_texture` did over the last 120 frames, logged as one
+/// line: how many frames repainted, how much of the texture they dirtied, and
+/// where the time went. One sampled frame misled: it fell on the frame the
+/// profiler printed its report, which repaints the whole window.
+#[derive(Default)]
+struct SlintPaintStats {
+    frames: u32,
+    painted: u32,
+    full: u32,
+    dirty_share: f64,
+    timers: std::time::Duration,
+    render: std::time::Duration,
+    worst: std::time::Duration,
+    copy: std::time::Duration,
 }
 
 fn render_slint_to_texture(
@@ -3124,14 +3551,40 @@ fn render_slint_to_texture(
     slint_scenes: Query<&SlintScene>,
     slint_context: Option<NonSend<SlintUiState>>,
     mut staging: ResMut<SlintStagingBuffer>,
+    mut stats: Local<SlintPaintStats>,
 ) {
     let Some(slint_context) = slint_context else { return };
-    
+
     let frame = RENDER_FRAME.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    
+
+    // Attribution aid: which share of frames repaint, how much of the
+    // window they dirty, and whether Slint's render or the texture copy
+    // costs the time.
+    stats.frames += 1;
+    if stats.frames >= 120 {
+        if stats.painted > 0 {
+            let n = stats.painted as f64;
+            info!(
+                target: "eustress_engine::slint_paint",
+                "slint paint: {} of {} frames repainted ({} full window), mean dirty {:.1}%, render {:.2} ms mean / {:.2} worst, copy {:.2} ms mean, timers {:.2} ms per frame",
+                stats.painted,
+                stats.frames,
+                stats.full,
+                stats.dirty_share / n,
+                stats.render.as_secs_f64() * 1000.0 / n,
+                stats.worst.as_secs_f64() * 1000.0,
+                stats.copy.as_secs_f64() * 1000.0 / n,
+                stats.timers.as_secs_f64() * 1000.0 / stats.frames as f64,
+            );
+        }
+        *stats = SlintPaintStats::default();
+    }
+
     // Update Slint timers, animations, and process deferred events
+    let t_timers = std::time::Instant::now();
     slint::platform::update_timers_and_animations();
-    
+    stats.timers += t_timers.elapsed();
+
     let adapter = &slint_context.adapter;
 
     // Skip the expensive UI repaint when nothing requested a redraw. Slint's
@@ -3173,10 +3626,12 @@ fn render_slint_to_texture(
     
     // Render Slint UI into the staging buffer (NOT into image.data).
     // ReusedBuffer mode: Slint only repaints dirty regions within the buffer.
+    let t_render = std::time::Instant::now();
     let dirty_region = adapter.software_renderer.render(
         &mut staging.pixels,
         tex_width,
     );
+    let render_time = t_render.elapsed();
     
     // Clear the GPU image to transparent black EVERY frame, then copy the full
     // staging buffer. This is the correct fix for ghosting per WGPU best practices:
@@ -3192,21 +3647,17 @@ fn render_slint_to_texture(
     if dirty_size.width == 0 || dirty_size.height == 0 {
         return;
     }
-    // Attribution aid: which part of the chrome keeps repainting. Every 120th
-    // painted frame, log the dirty bounding box and its share of the window,
-    // so a per-frame property write that dirties a large region (measured:
-    // 33 to 59 ms per frame during a bulk load) can be traced to its widget.
-    if frame % 120 == 0 {
-        let origin = dirty_region.bounding_box_origin();
-        let share = (dirty_size.width as f64 * dirty_size.height as f64)
-            / (tex_width as f64 * tex_height as f64).max(1.0)
-            * 100.0;
-        info!(
-            target: "eustress_engine::slint_paint",
-            "slint repaint: dirty {}x{} at ({}, {}) = {:.1}% of {}x{}",
-            dirty_size.width, dirty_size.height, origin.x, origin.y, share, tex_width, tex_height
-        );
+    let share = (dirty_size.width as f64 * dirty_size.height as f64)
+        / (tex_width as f64 * tex_height as f64).max(1.0)
+        * 100.0;
+    stats.painted += 1;
+    if share >= 99.9 {
+        stats.full += 1;
     }
+    stats.dirty_share += share;
+    stats.render += render_time;
+    stats.worst = stats.worst.max(render_time);
+    let t_copy = std::time::Instant::now();
 
     let Some(mut image) = images.get_mut(&scene.image) else { return };
     if let Some(data) = image.data.as_mut() {
@@ -3222,6 +3673,7 @@ fn render_slint_to_texture(
     // images.get_mut() marks the asset changed but Bevy's render pipeline doesn't
     // re-extract the texture data without this. See: bevy#17350
     materials.get_mut(&scene.material);
+    stats.copy += t_copy.elapsed();
 }
 
 /// Forwards Bevy mouse/keyboard input to Slint (from official bevy-hosts-slint)
@@ -3368,7 +3820,17 @@ pub fn update_slint_ui_focus(
     frames: Res<bevy::diagnostic::FrameCount>,
     // Cursor + button signature of the last GUI hit-test (see below).
     mut hit_sig: Local<Option<(i32, i32, u8)>>,
+    // What held the keyboard last frame, for the change log below.
+    mut keyboard_holders: Local<Vec<&'static str>>,
+    // In Play the shared HUD hit test answers for ScreenGuis, and learns
+    // from here when Studio's own UI has the input.
+    hud: (
+        Option<Res<crate::play_datamodel::PlayDataModel>>,
+        Option<Res<eustress_play_runtime::hud_input::HudPointer>>,
+        Option<ResMut<eustress_play_runtime::hud_input::GuiInputBlocked>>,
+    ),
 ) {
+    let (play, hud_pointer, mut gui_blocked) = hud;
     // Block engine keyboard handling whenever ANY Slint modal is open
     // or a text input has focus. The atomic this feeds is what the
     // camera controller + keybindings module read each frame before
@@ -3376,58 +3838,116 @@ pub fn update_slint_ui_focus(
     // through the modal backdrop to the 3D viewport and the user's
     // typing also moves the camera.
     //
-    // Every `show-*-dialog` property on the root StudioWindow goes
-    // here. Missing one means that modal's dialog backdrop absorbs
-    // mouse clicks but keyboard events still escape — the bug the
-    // Simulation Settings modal reproduced.
-    let any_focus = slint_context.as_ref()
-        .map(|ctx| {
-            let w = &ctx.window;
-            w.get_any_input_has_focus()
-                || w.get_command_bar_has_focus()
-                // Properties-panel filter box. Deliberately NOT folded into
-                // `any-input-has-focus`: that flag also pauses the properties
-                // sync, and the filter needs the sync to run in order to
-                // re-filter. This only stops keystrokes reaching the camera.
-                || w.get_property_search_has_focus()
-                // Explorer inline rename (F2): a TreeItem TextInput has
-                // keyboard focus while the node id is >= 0. Without this
-                // the rename field types into the void and WASD leaks to
-                // the camera ("F2 moves me around" — 2026-05-22).
-                || w.get_explorer_renaming_node_id() >= 0
-                // Dialogs — every one must be listed here.
-                || w.get_show_settings_dialog()
-                || w.get_show_exit_confirmation()
-                || w.get_show_publish_dialog()
-                || w.get_show_login_dialog()
-                || w.get_show_keybindings_dialog()
-                || w.get_show_about_dialog()
-                || w.get_show_soul_settings_dialog()
-                || w.get_show_find_dialog()
-                || w.get_show_forge_connect_dialog()
-                || w.get_show_stress_test_dialog()
-                || w.get_show_sync_domain_dialog()
-                || w.get_show_simulation_settings_dialog()
-                // Add-Attribute modal — without this, scrolling its type list
-                // leaked to the camera and zoomed the 3D viewport.
-                || w.get_show_attribute_dialog()
-                || w.get_show_rename_tag_dialog()
-                || w.get_show_edit_label_dialog()
-                // New Universe / New Space two-step creation modals. Without
-                // these, typing the universe/space name leaked WASD + shortcut
-                // keys to the 3D camera ("it moves me around" — 2026-06-02).
-                || w.get_show_new_universe_dialog()
-                || w.get_show_new_space_dialog()
-        })
-        .unwrap_or(false);
+    // Full-window modals: each draws the modal backdrop over the whole window,
+    // viewport included. The backdrop only stops Slint widgets behind it; the
+    // world reads the pointer from the viewport rectangle, so while a modal is
+    // up it takes neither keys nor pointer input (a click on a dialog button
+    // must not also select the part behind it). Every `show-*` dialog whose
+    // component draws that backdrop goes here; one missing lets its clicks
+    // and keys reach the world.
+    //
+    // Every term is named, so the log below can say which one holds the
+    // keyboard ("WASD stopped moving the camera" was a flag left true by a
+    // field that no longer existed, and nothing said which).
+    let mut holders: Vec<&'static str> = Vec::new();
+    let mut modal_open = false;
+    if let Some(ctx) = slint_context.as_ref() {
+        let w = &ctx.window;
+        let modals: [(&'static str, bool); 23] = [
+            ("the unsaved-changes dialog", w.get_show_unsaved_changes_dialog()),
+            ("Settings", w.get_show_settings_dialog()),
+            ("the exit confirmation", w.get_show_exit_confirmation()),
+            ("Publish", w.get_show_publish_dialog()),
+            ("Login", w.get_show_login_dialog()),
+            ("Keyboard shortcuts", w.get_show_keybindings_dialog()),
+            ("About", w.get_show_about_dialog()),
+            ("Forge connect", w.get_show_forge_connect_dialog()),
+            ("the stress test", w.get_show_stress_test_dialog()),
+            ("Sync domain", w.get_show_sync_domain_dialog()),
+            ("Simulation settings", w.get_show_simulation_settings_dialog()),
+            // Add-Attribute modal: without it, scrolling its type list
+            // leaked to the camera and zoomed the 3D viewport.
+            ("Add Attribute", w.get_show_attribute_dialog()),
+            ("Rename tag", w.get_show_rename_tag_dialog()),
+            ("Edit label", w.get_show_edit_label_dialog()),
+            // Typing a new universe's or space's name leaked WASD and
+            // shortcut keys to the 3D camera ("it moves me around").
+            ("New Universe", w.get_show_new_universe_dialog()),
+            ("New Space", w.get_show_new_space_dialog()),
+            // Insert Object's class search, the feedback and API-key forms,
+            // and the Data menu's three dialogs (typing a source name or
+            // endpoint used to fly the camera and hit Delete).
+            ("Insert Object", w.get_show_insert_object_dialog()),
+            ("Feedback", w.get_show_feedback_dialog()),
+            ("the API key dialog", w.get_show_api_key_dialog()),
+            ("Data sources", w.get_show_global_sources_window()),
+            ("Domains", w.get_show_domains_window()),
+            ("Global variables", w.get_show_global_variables_window()),
+            // History's revert confirm.
+            ("the revert confirm", w.get_show_revert_confirm()),
+        ];
+        for (name, open) in modals {
+            if open {
+                holders.push(name);
+                modal_open = true;
+            }
+        }
+        let script_tab = {
+            let tab = w.get_active_tab_type();
+            tab == "script" || tab == "code"
+        };
+        let inputs: [(&'static str, bool); 7] = [
+            // Properties fields and the Workshop chat report here.
+            ("a Properties or Workshop field (any-input-has-focus)", w.get_any_input_has_focus()),
+            ("the command bar", w.get_command_bar_has_focus()),
+            // Properties-panel filter box. Deliberately NOT folded into
+            // `any-input-has-focus`: that flag also pauses the properties
+            // sync, and the filter needs the sync to run in order to
+            // re-filter. This only stops keystrokes reaching the camera.
+            ("the Properties filter", w.get_property_search_has_focus()),
+            // Script editor. Honoured only while a script or code tab is
+            // showing: the editor is destroyed when the tab changes, and a
+            // flag a destroyed editor left true must never hold the
+            // engine's keyboard shut.
+            ("the script editor", w.get_script_editor_has_focus() && script_tab),
+            // Explorer inline rename (F2): a TreeItem TextInput has keyboard
+            // focus while the node id is >= 0.
+            ("an Explorer rename", w.get_explorer_renaming_node_id() >= 0),
+            // Find & Replace floats beside the viewport without a backdrop:
+            // it takes the keyboard, the world keeps the pointer.
+            ("Find & Replace", w.get_show_find_dialog()),
+            // A script's purchase prompt in Play: Enter buys and Escape
+            // cancels it, so neither may reach the game or stop Play.
+            ("a purchase prompt", w.get_show_purchase_prompt()),
+        ];
+        for (name, on) in inputs {
+            if on {
+                holders.push(name);
+            }
+        }
+    }
     // In-viewport billboard text editing captures the keyboard exactly like
     // a Slint text input: while typing into a double-clicked billboard,
     // WASD/Q/E must not fly the camera and Delete must not delete parts.
-    let any_focus = any_focus
-        || billboard_edit
-            .as_deref()
-            .map(|b| b.editing.is_some())
-            .unwrap_or(false);
+    if billboard_edit.as_deref().is_some_and(|b| b.editing.is_some()) {
+        holders.push("a billboard text edit");
+    }
+    // The frame a purchase prompt closes on: the Escape that cancelled it
+    // must not also stop Play.
+    if super::purchase_prompt::holds_keys(frames.0) {
+        holders.push("the frame a purchase prompt closed");
+    }
+    let any_focus = !holders.is_empty();
+    // Say when the keyboard is taken from the viewport or given back, and by
+    // what, so a held keyboard is never a mystery again.
+    if *keyboard_holders != holders {
+        if holders.is_empty() {
+            info!("⌨️ keyboard back to the viewport");
+        } else {
+            info!("⌨️ keyboard held by: {}", holders.join(", "));
+        }
+        *keyboard_holders = holders;
+    }
     ui_focus.text_input_focused = any_focus;
     OVERLAY_INPUT_FOCUSED.store(any_focus, std::sync::atomic::Ordering::Relaxed);
 
@@ -3516,17 +4036,73 @@ pub fn update_slint_ui_focus(
         })
         .unwrap_or(false);
 
+    // The purchase prompt covers the whole window: a click on Buy is not a
+    // click in the game behind it.
+    let purchase_prompt_open = slint_context
+        .as_ref()
+        .map(|ctx| ctx.window.get_show_purchase_prompt())
+        .unwrap_or(false);
+
     // Check if cursor is inside the 3D viewport bounds (logical pixels)
+    // The UI Builder panel floats over the viewport's left edge (main.slint
+    // places it at `ui_builder::PANEL_X/Y`): the cursor on it is on UI, not
+    // on the world, so a click there never selects the part behind it.
+    let over_ui_builder = slint_context.as_ref().is_some_and(|ctx| {
+        crate::ui_builder::panel_contains(&ctx.window, (cursor_pos.x, cursor_pos.y), (vb_x, vb_y, vb_w, vb_h))
+    });
+    // Likewise the terrain tool bar at the viewport's top left: a click on
+    // it must not sculpt the ground behind it.
+    let over_terrain_bar = slint_context.as_ref().is_some_and(|ctx| {
+        crate::terrain_tools_ui::tool_bar_contains(&ctx.window, (cursor_pos.x, cursor_pos.y), (vb_x, vb_y, vb_w, vb_h))
+    });
     let in_viewport = scene_tab_active
         && !popup_open
+        && !modal_open
+        && !purchase_prompt_open
+        && !over_ui_builder
+        && !over_terrain_bar
         && cursor_pos.x >= vb_x
         && cursor_pos.x <= vb_x + vb_w
         && cursor_pos.y >= vb_y
         && cursor_pos.y <= vb_y + vb_h;
 
     // has_focus = true means "UI has focus" (cursor is over a panel, NOT the viewport)
+    // The HUD takes no input while another tab, a menu, the purchase prompt
+    // or a Studio text field has it.
+    if let Some(blocked) = gui_blocked.as_deref_mut() {
+        let now = !scene_tab_active || popup_open || purchase_prompt_open || over_ui_builder || ui_focus.text_input_focused;
+        if blocked.0 != now {
+            blocked.0 = now;
+        }
+    }
     ui_focus.has_focus = !in_viewport;
     ui_focus.last_ui_position = if !in_viewport { Some(cursor_pos) } else { None };
+
+    // A press in the 3D viewport leaves whatever text field had the
+    // keyboard: Slint's focus moves to the content area's shortcut scope (so
+    // a live field's own focus-out runs), and the flags fields report about
+    // themselves are cleared, since a field destroyed while focused never
+    // clears its own. Without this, one such flag held WASD shut for the
+    // rest of the session while clicks still worked.
+    if in_viewport
+        && (mouse.just_pressed(MouseButton::Left)
+            || mouse.just_pressed(MouseButton::Right)
+            || mouse.just_pressed(MouseButton::Middle))
+    {
+        if let Some(ctx) = slint_context.as_ref() {
+            let w = &ctx.window;
+            w.invoke_release_keyboard_focus();
+            if w.get_any_input_has_focus() {
+                w.set_any_input_has_focus(false);
+            }
+            if w.get_property_search_has_focus() {
+                w.set_property_search_has_focus(false);
+            }
+            if w.get_script_editor_has_focus() {
+                w.set_script_editor_has_focus(false);
+            }
+        }
+    }
 
     // The hit-test below walks every GUI element. On a MindSpace Space that
     // is tens of thousands of billboard labels: 50 ms per frame measured on
@@ -3552,52 +4128,44 @@ pub fn update_slint_ui_focus(
             && !crate::space::file_loader::ui_sync_tick_for_frame(frames.0 as u64)
         {
             ui_focus.gui_clicked_button = None;
+            ui_focus.gui_clicked_entity = None;
             return;
         }
+    }
+
+    // In Play the HUD drew the ScreenGuis and its hit test took this frame's
+    // clicks (it runs in PreUpdate), so its answer stands in for the rect
+    // test below: `gui_element_hit` for the pull, the clicked button for
+    // Rune's `on_button_click`.
+    if play.is_some() {
+        let pointer = hud_pointer.as_deref();
+        ui_focus.gui_element_hit = in_viewport && pointer.is_some_and(|p| p.over_gui);
+        ui_focus.gui_clicked_entity = pointer.and_then(|p| p.activated.first().copied());
+        ui_focus.gui_clicked_button = ui_focus
+            .gui_clicked_entity
+            .and_then(|e| gui_elements.get(e).ok())
+            .and_then(|(_, _, instance, ..)| instance.map(|i| i.name.clone()));
+        return;
     }
 
     // Check if cursor is over any visible ScreenGui element (buttons, labels, frames)
     // These are rendered inside the viewport but should consume clicks.
     ui_focus.gui_element_hit = false;
     ui_focus.gui_clicked_button = None;
+    ui_focus.gui_clicked_entity = None;
     if in_viewport {
         // Convert cursor to viewport-local coordinates (logical pixels —
         // GuiElementDisplay stores logical widths/heights).
         let vp_x = cursor_pos.x - vb_x;
         let vp_y = cursor_pos.y - vb_y;
 
-        // Resolve absolute on-screen positions per element by walking the
-        // ChildOf chain. Mirrors the renderer's accumulation exactly —
-        // if the two ever diverge, clicks stop matching rendered rects.
-        // Cached within this call so a Panel with 10 children only walks
-        // each ancestor once.
-        let mut offset_cache: std::collections::HashMap<Entity, (f32, f32)> =
+        // Resolve each element's rect with the renderer's own resolver
+        // (UDim2 Scale against the viewport, AnchorPoint), so a click lands
+        // on exactly what was drawn. The resolver caches ancestors, so a
+        // Panel with 10 children only resolves each ancestor once.
+        let lookup = |e: Entity| gui_elements.get(e).ok().map(|(_, d, _, p, _, _)| (d, p.map(|c| c.parent())));
+        let mut rect_cache: std::collections::HashMap<Entity, (f32, f32, f32, f32)> =
             std::collections::HashMap::new();
-        fn compute_offset(
-            entity: Entity,
-            q: &Query<(
-                Entity,
-                &eustress_common::gui::billboard_renderer::GuiElementDisplay,
-                Option<&eustress_common::classes::Instance>,
-                Option<&ChildOf>,
-                Option<&eustress_common::gui::billboard_renderer::BillboardGuiMarker>,
-                Option<&eustress_common::gui::billboard_renderer::SurfaceGuiMarker>,
-            )>,
-            cache: &mut std::collections::HashMap<Entity, (f32, f32)>,
-        ) -> (f32, f32) {
-            if let Some(&v) = cache.get(&entity) { return v; }
-            let Ok((_, _display, _, parent, _, _)) = q.get(entity) else { return (0.0, 0.0) };
-            let out = if let Some(co) = parent {
-                let pe = co.parent();
-                let ancestor = compute_offset(pe, q, cache);
-                let parent_pos = q.get(pe).map(|(_, pd, _, _, _, _)| (pd.x, pd.y)).unwrap_or((0.0, 0.0));
-                (ancestor.0 + parent_pos.0, ancestor.1 + parent_pos.1)
-            } else {
-                (0.0, 0.0)
-            };
-            cache.insert(entity, out);
-            out
-        }
 
         // Z-order the hit test so topmost buttons win over Frames that
         // geometrically contain them. Higher z-index renders on top, so
@@ -3655,26 +4223,40 @@ pub fn update_slint_ui_focus(
         for (entity, gui, instance, _parent, _bb, _sf) in ordered {
             if !gui.visible { continue; }
             if gui.mouse_filter == "ignore" { continue; }
+            // A ScreenGui is a container spanning the whole viewport; only its
+            // elements take clicks.
+            if gui.class_type.eq_ignore_ascii_case("screengui") { continue; }
             // 3D surfaces are hit-tested by the world raycast, not by this
             // screen-space rect test.
             if in_3d_surface(entity, &gui_elements, &mut surface_cache) { continue; }
-            let (ox, oy) = compute_offset(entity, &gui_elements, &mut offset_cache);
-            let gx = gui.x + ox;
-            let gy = gui.y + oy;
-            let gw = gui.width;
-            let gh = gui.height;
+            // A hidden ancestor (an invisible Frame, a disabled ScreenGui, the
+            // StarterGui originals Play hides under their PlayerGui copies)
+            // hides this element's clicks as well as its pixels.
+            if gui_hidden_by_ancestor(entity, &lookup) { continue; }
+            let (gx, gy, gw, gh) = resolve_gui_rect(entity, &lookup, (vb_w, vb_h), &mut rect_cache);
             if gw > 0.0 && gh > 0.0
                 && vp_x >= gx && vp_x <= gx + gw
                 && vp_y >= gy && vp_y <= gy + gh
             {
                 if gui.mouse_filter != "pass" {
                     ui_focus.gui_element_hit = true;
+                    // Case-insensitive, as are the ScreenGui checks above: the
+                    // two GUI loaders disagree on casing. The folder-form path
+                    // lowercases the class ("textbutton"), but a flat
+                    // `Name.textbutton.toml` goes through the flat loader, which
+                    // writes `format!("{:?}")` verbatim ("TextButton"). An exact
+                    // `== "textbutton"` therefore never matched those buttons,
+                    // and their clicks never reached a script. ImageButton is
+                    // a button too (MouseButton1Click / Activated in Luau,
+                    // `on_button_click` in Rune).
                     if mouse.just_pressed(bevy::input::mouse::MouseButton::Left)
-                        && gui.class_type == "textbutton"
+                        && (gui.class_type.eq_ignore_ascii_case("textbutton")
+                            || gui.class_type.eq_ignore_ascii_case("imagebutton"))
                     {
                         let btn_name = instance.map(|i| i.name.clone()).unwrap_or_default();
                         info!("🖱️ ScreenGui button clicked: '{}'", btn_name);
                         ui_focus.gui_clicked_button = Some(btn_name);
+                        ui_focus.gui_clicked_entity = Some(entity);
                     }
                     break;
                 }
@@ -3844,6 +4426,8 @@ struct DrainEventWriters<'w> {
     redo_action_events: MessageWriter<'w, crate::undo::RedoEvent>,
     undo_single_events: MessageWriter<'w, crate::undo::UndoSingleEvent>,
     revert_to_events: MessageWriter<'w, crate::undo::RevertToEvent>,
+    /// History panel row click: jump the edit history to that entry.
+    history_jump_events: MessageWriter<'w, crate::undo::HistoryJumpEvent>,
     history_events: MessageWriter<'w, crate::commands::HistoryActionEvent>,
     exit_events: MessageWriter<'w, bevy::app::AppExit>,
     spawn_events: MessageWriter<'w, super::SpawnPartEvent>,
@@ -3900,31 +4484,14 @@ struct DrainEventWriters<'w> {
     paste_events: MessageWriter<'w, crate::clipboard::PasteEvent>,
 }
 
-/// Terrain brush settings state
-#[derive(Resource, Default)]
-pub struct BrushState {
-    pub size: f32,
-    pub strength: f32,
-    pub falloff: String,
-}
-
-impl BrushState {
-    pub fn new() -> Self {
-        Self {
-            size: 10.0,
-            strength: 0.5,
-            falloff: "smooth".to_string(),
-        }
-    }
-}
-
 /// Map a `Generate` preset id to a flat-plate spec, or `None` when the id
 /// names one of the procedural worldgen presets instead.
 ///
 /// Sizes are the covered extent `(2N + 1) * chunk_size` at the loader's
 /// default 64 m chunks. `height_m = 0` puts the surface at world Y = 0 (what
-/// "baseplate" means, and where parts spawn); the R16 format cannot go below
-/// that, so a fresh plate sculpts upward only until it is raised.
+/// "baseplate" means, and where parts spawn). The R16 band runs from
+/// `height_offset = -32` up to `height_offset + height_scale = 96`, so a
+/// fresh plate can be dug 32 m down and raised 96 m up.
 fn flat_preset(id: &str) -> Option<eustress_common::terrain::worldgen::export::FlatSpec> {
     use eustress_common::terrain::worldgen::export::FlatSpec;
     let half_extent = match id {
@@ -3938,7 +4505,8 @@ fn flat_preset(id: &str) -> Option<eustress_common::terrain::worldgen::export::F
         chunk_size: 64.0,
         chunk_resolution: 64,
         height_m: 0.0,
-        height_scale: 100.0,
+        height_offset: -32.0,
+        height_scale: 128.0,
         material_slot: 0, // Grass
         seed: 0,
     })
@@ -3963,15 +4531,44 @@ impl Default for TerrainVisibility {
     }
 }
 
+/// Put Output text on the clipboard; a failure is a line in the Output.
+fn copy_output_text(text: Option<String>, output: Option<&mut OutputConsole>) {
+    let Some(text) = text.filter(|t| !t.is_empty()) else { return };
+    #[cfg(feature = "clipboard")]
+    let copied = arboard::Clipboard::new()
+        .and_then(|mut clipboard| clipboard.set_text(text))
+        .map_err(|e| e.to_string());
+    #[cfg(not(feature = "clipboard"))]
+    let copied: Result<(), String> = {
+        let _ = text;
+        Err("this build has no clipboard support".to_string())
+    };
+    if let Err(e) = copied {
+        if let Some(out) = output {
+            out.warn(format!("Output: could not copy to the clipboard: {e}"));
+        }
+    }
+}
+
 /// Bundled mutable resources for drain_slint_actions
 #[derive(bevy::ecs::system::SystemParam)]
 struct DrainResources<'w> {
     state: Option<ResMut<'w, StudioState>>,
     output: Option<ResMut<'w, OutputConsole>>,
+    /// The 2D working plane, `None` in 3D: Insert drops new parts onto it.
+    active_view_plane: Option<Res<'w, crate::camera_controller::ActiveViewPlane>>,
     /// Undo stack — Properties-panel edits push `Action::ChangeProperty`
     /// here so panel mutations are Ctrl+Z-able like every other edit
     /// surface (they previously bypassed undo entirely — AAA audit fix).
     undo_stack: Option<ResMut<'w, crate::undo::UndoStack>>,
+    /// Find & Replace: the last search's matches and the current one.
+    find_state: Option<ResMut<'w, FindState>>,
+    /// Data > Manage Global Sources: the Connectors the dialog lists.
+    data_sources: Option<ResMut<'w, DataSourcesPanel>>,
+    /// Data > Sync Domain: the Datasets the dialog offers.
+    sync_domain: Option<ResMut<'w, SyncDomainState>>,
+    /// Data > Overlay: which parts are tinted, and by what.
+    data_overlay: Option<ResMut<'w, DataOverlay>>,
     explorer_state: Option<ResMut<'w, UnifiedExplorerState>>,
     space_root: Option<Res<'w, crate::space::SpaceRoot>>,
     /// WorldDb/Fjall handle — needed by `do_reparent_node`. A drag-drop move
@@ -4030,8 +4627,20 @@ struct DrainResources<'w> {
     mesh_cache: Option<ResMut<'w, crate::space::instance_loader::PrimitiveMeshCache>>,
     /// Asset Manager panel state (expand/collapse, search, category filter)
     asset_manager_state: Option<ResMut<'w, AssetManagerState>>,
-    /// Terrain brush settings (size, strength, falloff)
-    brush_state: Option<ResMut<'w, BrushState>>,
+    /// The live terrain brush; the material picker sets its `paint_material`.
+    /// Option, like the other terrain resources here, so a host without the
+    /// terrain plugin cannot fail the drain's param validation.
+    terrain_brush: Option<ResMut<'w, eustress_common::terrain::TerrainBrush>>,
+    /// Whether the terrain tools are on: a material pick turns them back on
+    /// (through SetTerrainBrushEvent) when they were left after painting.
+    terrain_mode: Option<Res<'w, eustress_common::terrain::TerrainMode>>,
+    /// Terrain material slot table: validates a picked slot, and names the
+    /// base a new material starts from.
+    terrain_material_slots: Option<Res<'w, eustress_common::terrain::TerrainMaterialSlots>>,
+    /// Where custom material slots load from (the open Space's
+    /// `Workspace/Terrain`). "Add material" writes its file there and asks
+    /// for a reload.
+    terrain_material_source: Option<ResMut<'w, eustress_common::terrain::TerrainMaterialSource>>,
     /// Standard materials for spawning instances
     materials: ResMut<'w, Assets<StandardMaterial>>,
     /// Soul service settings for API key access
@@ -4039,8 +4648,6 @@ struct DrainResources<'w> {
     global_soul_settings: Option<ResMut<'w, crate::soul::GlobalSoulSettings>>,
     /// Stress test state
     stress_test: Option<ResMut<'w, crate::network_benchmark::StressTestState>>,
-    /// Play server state (for stress test port)
-    play_server: Option<Res<'w, crate::play_server::PlayServerState>>,
     /// Action queue ref for background thread callbacks
     action_queue: Option<Res<'w, SlintActionQueue>>,
     /// Task 12: change queue — emit SceneDeltas on property write-back (streaming feature only).
@@ -4112,7 +4719,7 @@ struct DrainResources<'w> {
 fn do_challenge_auth(public_key_hex: &str, private_key_hex: &str) -> Result<(String, String), String> {
     use ed25519_dalek::{SigningKey, Signer};
 
-    let api_url = "https://api.eustress.dev";
+    let api_url = eustress_common::api_base::api_base();
 
     // Bounded timeouts: this runs on the Bevy main thread, so an unreachable
     // or blackholed witness (captive portal, offline) would otherwise stall
@@ -4416,20 +5023,125 @@ fn build_publish_tree(
     }
 }
 
-/// Sync publish dialog visibility from Slint back to StudioState (for camera blocking).
-/// Called in sync_bevy_to_slint or a nearby per-frame system.
-fn sync_publish_dialog_state(
+/// Mirror dialog visibility from Slint into StudioState, where the camera's
+/// mouse gate reads it (keyboard gating reads the Slint properties directly,
+/// in `update_slint_ui_focus`). A mirror, never a latch: a flag that only Rust
+/// set and nothing cleared is how one Forge Connect click used to stop the
+/// camera for the rest of the session.
+///
+/// Also shows the Forge connection state in the Forge dialog, and closes the
+/// dialog once a connect succeeds.
+fn sync_dialog_state(
     slint_context: Option<NonSend<SlintUiState>>,
     mut state: Option<ResMut<StudioState>>,
+    forge: Option<Res<crate::forge::ForgeState>>,
+    mut last_forge_status: Local<Option<crate::forge::ForgeConnectionStatus>>,
+    mut forge_prefilled: Local<bool>,
 ) {
     let Some(ref context) = slint_context else { return };
-    let Some(ref mut state) = state else { return };
-    state.show_publish_dialog = context.window.get_show_publish_dialog();
+    let ui = &context.window;
+    // Remembered Forge credentials fill the dialog once, at startup.
+    if !*forge_prefilled {
+        *forge_prefilled = true;
+        #[cfg(feature = "data")]
+        {
+            use crate::capture::credentials;
+            if let Some(url) = credentials::get(FORGE_URL_CREDENTIAL) {
+                ui.set_forge_server_url(url.into());
+            }
+            if let Some(key) = credentials::get(FORGE_KEY_CREDENTIAL) {
+                ui.set_forge_api_key(key.into());
+            }
+        }
+    }
+    if let Some(ref mut state) = state {
+        state.show_publish_dialog = ui.get_show_publish_dialog();
+        state.show_forge_connect_window = ui.get_show_forge_connect_dialog();
+        state.show_stress_test_window = ui.get_show_stress_test_dialog();
+        state.show_settings_window = ui.get_show_settings_dialog();
+        state.show_keybindings_window = ui.get_show_keybindings_dialog();
+        state.show_find_dialog = ui.get_show_find_dialog();
+    }
+
+    let Some(forge) = forge else { return };
+    if !forge.is_changed() {
+        return;
+    }
+    use crate::forge::ForgeConnectionStatus as Status;
+    ui.set_forge_connected(forge.status == Status::Connected);
+    ui.set_forge_connecting(forge.status == Status::Connecting);
+    let status = match forge.status {
+        Status::Connecting => format!("Connecting to {}...", forge.url),
+        Status::Connected => format!("Connected to {}", forge.url),
+        Status::Disconnected | Status::Failed => String::new(),
+    };
+    ui.set_forge_status_message(status.into());
+    ui.set_forge_error_message(forge.error.clone().unwrap_or_default().into());
+    // A connect that just succeeded closes the dialog it was started from.
+    if forge.status == Status::Connected && last_forge_status.as_ref() != Some(&Status::Connected) {
+        ui.set_show_forge_connect_dialog(false);
+    }
+    *last_forge_status = Some(forge.status.clone());
+}
+
+/// Names of the remembered Forge connection in the local credential store
+/// (an environment variable of the same name also works).
+#[cfg(feature = "data")]
+const FORGE_URL_CREDENTIAL: &str = "EUSTRESS_FORGE_URL";
+#[cfg(feature = "data")]
+const FORGE_KEY_CREDENTIAL: &str = "EUSTRESS_FORGE_API_KEY";
+
+/// What to tell someone who reaches a control whose backend is not built.
+fn unbuilt_feature_notice(id: &str) -> Option<super::notifications::NotificationEvent> {
+    use super::notifications::{NotificationCategory, NotificationEvent};
+    let (title, message) = match id {
+        "network-panel" => (
+            "The Network panel is not built yet",
+            "Start Server (F9) hosts the Space you are playing; who joins and leaves appears in notifications and the Output. Connect to Forge and Allocate Server work from this menu.",
+        ),
+        "collaboration" => (
+            "Live collaboration is not built yet",
+            "Editing a Space together (Team Create) is not built. Playing together is: Start Server (F9) hosts the Space you are playing.",
+        ),
+        "stress-test" => (
+            "Stress tests are not built for the current server",
+            "The stress test drives the old play-server protocol, which Start Server (F9) no longer uses.",
+        ),
+        _ => return None,
+    };
+    Some(NotificationEvent::info(NotificationCategory::General, title, message))
+}
+
+/// The keyboard route to the same unbuilt controls (F9, Ctrl+Alt+N,
+/// Ctrl+Shift+L) arrives as menu actions nothing else handles.
+fn announce_unbuilt_actions(
+    mut menu: MessageReader<MenuActionEvent>,
+    mut notes: MessageWriter<super::notifications::NotificationEvent>,
+) {
+    use crate::keybindings::Action;
+    for event in menu.read() {
+        // Start/Stop Server are built: `crate::multiplayer` owns them.
+        let id = match event.action {
+            Action::ToggleNetworkPanel => "network-panel",
+            Action::ToggleCollaboration => "collaboration",
+            _ => continue,
+        };
+        if let Some(note) = unbuilt_feature_notice(id) {
+            notes.write(note);
+        }
+    }
 }
 
 /// Custom SystemParam bundle to group entity queries and stay under 16-parameter limit
 #[derive(bevy::ecs::system::SystemParam)]
 struct DrainActionQueries<'w, 's> {
+    /// ParticleSimulation / ParticleSpecies field edits from Properties.
+    particle_sim_edit: super::particle_sim_panel::EditQueries<'w, 's>,
+    /// PointLight / SpotLight / SurfaceLight / DirectionalLight field edits
+    /// from Properties.
+    light_edit: super::light_panel::EditQueries<'w, 's>,
+    /// Sun / Moon / Sky / Atmosphere / Clouds field edits from Properties.
+    celestial_edit: super::celestial_panel::EditQueries<'w, 's>,
     instances: Query<'w, 's, (Entity, &'static mut eustress_common::classes::Instance)>,
     transforms: Query<'w, 's, &'static mut Transform>,
     base_parts: Query<'w, 's, &'static mut eustress_common::classes::BasePart>,
@@ -4441,13 +5153,16 @@ struct DrainActionQueries<'w, 's> {
     loaded_from_file: Query<'w, 's, (Entity, &'static mut crate::space::LoadedFromFile)>,
     service_components: Query<'w, 's, &'static mut crate::space::service_loader::ServiceComponent>,
     terrain_roots: Query<'w, 's, Entity, With<eustress_common::terrain::TerrainRoot>>,
-    /// The live heightfield, read by Terrain > Export Heightmap.
+    /// The live heightfield and its layer bake. Export Heightmap and Add
+    /// material read the base raster; Insert places a terrain layer on the
+    /// baked surface the view shows.
     terrain_field: Query<
         'w,
         's,
         (
             &'static eustress_common::terrain::TerrainConfig,
             &'static eustress_common::terrain::TerrainData,
+            Option<&'static eustress_common::terrain::TerrainBaked>,
         ),
         With<eustress_common::terrain::TerrainRoot>,
     >,
@@ -4490,12 +5205,121 @@ struct DrainActionQueries<'w, 's> {
     /// it to TOML. Tags are set via `commands.insert(Tags(..))` instead — a
     /// `&mut Tags` query here would alias the read-only `entity_tags` above.
     attributes: Query<'w, 's, &'static mut eustress_common::attributes::Attributes>,
+    /// Mutable Parameters access for the Properties panel: the Add/Edit
+    /// Parameter modal, row edits and deletes. `Has<ParametersSynced>` says
+    /// whether the component already matches the stored instance; see
+    /// `ensure_parameters_synced`.
+    parameters: Query<
+        'w,
+        's,
+        (
+            &'static mut eustress_common::parameters::InstanceParameters,
+            Has<crate::space::parameters_runtime::ParametersSynced>,
+        ),
+    >,
     /// Bevy's built-in parent link — read-only. Used to build the
     /// hierarchy snapshot handed to Rune one-shot scripts (see
     /// `rune_ecs_module::seed_instance_snapshot`) so `Instance.Parent` /
     /// `GetChildren()` resolve against the REAL scene tree, not just
     /// entities the script itself created.
     hierarchy_parents: Query<'w, 's, &'static ChildOf>,
+}
+
+/// The instance a Parameters action applies to: the Explorer's selected
+/// entity, or the entity behind a selected service row.
+fn parameter_target(res: &DrainResources, queries: &DrainActionQueries) -> Option<Entity> {
+    res.explorer_state.as_ref().and_then(|es| match &es.selected {
+        SelectedItem::Entity(e) => Some(*e),
+        SelectedItem::Service(svc) => queries
+            .instances
+            .iter()
+            .find_map(|(en, inst)| if inst.name == *svc { Some(en) } else { None }),
+        _ => None,
+    })
+}
+
+/// Bring an instance's Parameters in step with its stored record before an
+/// edit, so saving the edit never drops Parameters the component had not
+/// loaded yet.
+fn ensure_parameters_synced(entity: Entity, queries: &mut DrainActionQueries, commands: &mut Commands) {
+    use crate::space::parameters_runtime::{persisted_signature, sync_from_store, ParametersSynced};
+    let path = queries.instance_files.get(entity).ok().map(|f| f.toml_path.clone());
+    let Ok((mut params, synced)) = queries.parameters.get_mut(entity) else { return };
+    if synced {
+        return;
+    }
+    let marker = match path.filter(|p| !p.to_string_lossy().contains("__bin_")) {
+        Some(path) => sync_from_store(&mut params, &path),
+        // Nothing stored to read: the component is all there is.
+        None => ParametersSynced { persisted: persisted_signature(&params) },
+    };
+    commands.entity(entity).insert(marker);
+}
+
+/// Fill the Parameter modal's lists: the default domain, the Space's Domain
+/// instances and the domains this instance already uses; and the Space's
+/// Connectors.
+fn fill_parameter_lists(ui: &StudioWindow, entity: Entity, res: &DrainResources, queries: &DrainActionQueries) {
+    use eustress_common::parameters::DEFAULT_PARAMETER_DOMAIN;
+    let mut domains: Vec<String> = queries
+        .instances
+        .iter()
+        .filter(|(_, inst)| inst.class_name == eustress_common::classes::ClassName::Domain)
+        .map(|(_, inst)| inst.name.clone())
+        .collect();
+    if let Ok((params, _)) = queries.parameters.get(entity) {
+        domains.extend(params.domains.keys().cloned());
+    }
+    domains.retain(|d| d != DEFAULT_PARAMETER_DOMAIN);
+    domains.sort_by_key(|d| d.to_lowercase());
+    domains.dedup();
+    domains.insert(0, DEFAULT_PARAMETER_DOMAIN.to_string());
+    let space = crate::space::open_space_root(res.space_root.as_deref());
+    let connectors = eustress_common::parameters::connector_names(&space);
+    let model = |v: Vec<String>| {
+        let items: Vec<slint::SharedString> = v.into_iter().map(Into::into).collect();
+        slint::ModelRc::new(slint::VecModel::from(items))
+    };
+    ui.set_parameter_domain_options(model(domains));
+    ui.set_parameter_connector_options(model(connectors));
+}
+
+/// The instance a Parameter dialog is for, as its subtitle shows it:
+/// "Pump7 (Part)".
+fn parameter_target_label(entity: Entity, queries: &DrainActionQueries) -> String {
+    queries
+        .instances
+        .get(entity)
+        .map(|(_, inst)| format!("{} ({})", inst.name, inst.class_name.as_str()))
+        .unwrap_or_default()
+}
+
+/// Rebuild the Properties panel next frame and make sure it is showing.
+/// Parameters have no change-queue producer (Tags and Attributes do), so a
+/// Parameters action marks the panel dirty itself.
+fn refresh_parameter_rows(res: &mut DrainResources) {
+    if let Some(ref mut d) = res.panel_dirty {
+        d.properties = true;
+    }
+    if let Some(ref mut s) = res.state {
+        s.show_properties = true;
+    }
+}
+
+/// The Parameter modal's fields, as the runtime's draft.
+fn read_parameter_draft(ui: &StudioWindow) -> crate::space::parameters_runtime::ParameterDraft {
+    crate::space::parameters_runtime::ParameterDraft {
+        is_edit: ui.get_parameter_dialog_is_edit(),
+        original: ui.get_parameter_dialog_original().to_string(),
+        domain: ui.get_parameter_dialog_domain().to_string(),
+        name: ui.get_parameter_dialog_name().to_string(),
+        type_name: ui.get_parameter_dialog_type().to_string(),
+        value: ui.get_parameter_dialog_value().to_string(),
+        bound: ui.get_parameter_dialog_bound(),
+        connector: ui.get_parameter_dialog_connector().to_string(),
+        field: ui.get_parameter_dialog_field().to_string(),
+        refresh: ui.get_parameter_dialog_refresh().to_string(),
+    }
 }
 
 /// Snapshot the CURRENT value of a canonical undo property for an entity,
@@ -5138,13 +5962,14 @@ fn do_reparent_node(
 
                 // Mirror the move into the WorldDb tree.
                 //
-                // The disk rename alone does not stick: for a migrated Space
-                // the loader spawns from the Fjall `tree` and the disk
-                // reconcile is ADD-ONLY, so the pre-move keys still describe
-                // the old parent and the object returns to where it started on
-                // the next load. The tree is path-keyed, so a reparent IS a
-                // key-prefix rewrite — the same shape as the folder rename
-                // just performed on disk.
+                // The disk rename alone does not stick. The loader spawns from
+                // the Fjall `tree`, and `reconcile_disk_toml_into_tree` runs only
+                // for NON-migrated Spaces -- a migrated Space keeps the pre-move
+                // keys and the object returns to where it started. Even where the
+                // reconcile runs it only adds and overwrites keys, never deletes
+                // them, so the old keys would survive beside the new ones as a
+                // duplicate. The tree is path-keyed, so a reparent IS a key-prefix
+                // rewrite -- the same shape as the folder rename just done on disk.
                 if let (Some(db_handle), Some(root)) = (res.world_db.as_ref(), res.space_root.as_ref()) {
                     if let Some(db) = db_handle.0.as_ref() {
                         let src_rel = crate::space::space_source::rel_from_root(&root.0, &src_entry);
@@ -5321,6 +6146,209 @@ fn resolve_pending_insert_selection(
 ///
 /// `folder` is the instance's own directory — the thing undo trashes. Pass
 /// `None` for an entity with no folder of its own.
+/// Find & Replace state: the last search's matches, in the order the dialog
+/// lists them, and which one is current (-1 = none).
+#[derive(Resource)]
+pub struct FindState {
+    hits: Vec<Entity>,
+    current: i32,
+}
+
+impl Default for FindState {
+    fn default() -> Self {
+        Self { hits: Vec::new(), current: -1 }
+    }
+}
+
+/// The Find dialog's pattern: the typed text, escaped unless ".*" is on,
+/// bounded by word edges when "Word" is on, case-folded unless "Aa" is on.
+/// None for an empty search.
+fn find_pattern(ui: &StudioWindow) -> Result<Option<regex::Regex>, String> {
+    let text = ui.get_find_search_text().to_string();
+    if text.is_empty() {
+        return Ok(None);
+    }
+    let mut pattern = if ui.get_find_use_regex() { text } else { regex::escape(&text) };
+    if ui.get_find_whole_word() {
+        pattern = format!(r"\b(?:{pattern})\b");
+    }
+    regex::RegexBuilder::new(&pattern)
+        .case_insensitive(!ui.get_find_case_sensitive())
+        .build()
+        .map(Some)
+        .map_err(|e| e.to_string())
+}
+
+/// Search every loaded object's name and show the matches, ordered by their
+/// place in the tree. The list is capped so a very large Space stays quick;
+/// the count still says how many matched.
+fn run_find(ui: &StudioWindow, queries: &DrainActionQueries, find: &mut FindState) {
+    const MAX_ROWS: usize = 1000;
+    let mut hits: Vec<(String, Entity, String, String)> = Vec::new(); // (path, entity, name, class)
+    match find_pattern(ui) {
+        Ok(Some(re)) => {
+            for (entity, inst) in queries.instances.iter() {
+                if !re.is_match(&inst.name) {
+                    continue;
+                }
+                let mut ancestors = Vec::new();
+                let mut cursor = entity;
+                while let Ok(parent) = queries.hierarchy_parents.get(cursor) {
+                    cursor = parent.parent();
+                    if let Ok((_, p)) = queries.instances.get(cursor) {
+                        ancestors.push(p.name.clone());
+                    }
+                    if ancestors.len() > 64 {
+                        break;
+                    }
+                }
+                ancestors.reverse();
+                hits.push((ancestors.join("/"), entity, inst.name.clone(), inst.class_name.as_str().to_string()));
+            }
+        }
+        Ok(None) => {}
+        Err(e) => warn!("Find: {e}"),
+    }
+    hits.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.2.cmp(&b.2)));
+    let total = hits.len();
+    hits.truncate(MAX_ROWS);
+    find.hits = hits.iter().map(|h| h.1).collect();
+    find.current = if find.hits.is_empty() { -1 } else { find.current.clamp(0, find.hits.len() as i32 - 1) };
+    let rows: Vec<SearchResultData> = hits
+        .iter()
+        .enumerate()
+        .map(|(row, (path, _, name, class))| SearchResultData {
+            entity_id: row as i32,
+            name: name.as_str().into(),
+            class_name: class.as_str().into(),
+            path: path.as_str().into(),
+        })
+        .collect();
+    ui.set_find_results(slint::ModelRc::new(slint::VecModel::from(rows)));
+    ui.set_find_total_results(total as i32);
+    ui.set_find_current_result(find.current);
+}
+
+/// Select one object and scroll the Explorer to it, as a viewport click does.
+fn select_and_reveal(entity: Entity, res: &mut DrainResources) {
+    if let Some(ref sm) = res.selection_manager {
+        sm.0.write().select(crate::entity_utils::entity_to_id_string(entity));
+    }
+    if let Some(ref mut es) = res.explorer_state {
+        es.pending_scroll_target_entity = Some(entity);
+        es.dirty = true;
+        es.needs_immediate_sync = true;
+    }
+}
+
+/// Rename an object everywhere it lives: `Instance.name`, `Name`, and its
+/// folder (or legacy flat file) on disk, with `InstanceFile`,
+/// `LoadedFromFile` and the file registry moved along so later saves land in
+/// the right place. The Properties panel's Name row and Find & Replace both
+/// rename through here. Err carries a message for the Output panel.
+fn rename_instance(
+    entity: Entity,
+    new_name: &str,
+    res: &mut DrainResources,
+    queries: &mut DrainActionQueries,
+    commands: &mut Commands,
+) -> Result<(), String> {
+    if let Ok((_, mut inst)) = queries.instances.get_mut(entity) {
+        inst.name = new_name.to_string();
+    }
+    commands.entity(entity).insert(Name::new(new_name.to_string()));
+
+    // Rename on disk. Modern instances live in `Folder/_instance.toml`, so
+    // the FOLDER is renamed, not the inner file; legacy flat files
+    // (`Name.glb.toml`, `Name.part.toml`) get a filename rename.
+    let Ok(mut inst_file) = queries.instance_files.get_mut(entity) else {
+        return Ok(());
+    };
+    let old_path = inst_file.toml_path.clone();
+    let is_folder_instance = old_path
+        .file_name()
+        .map(|n| n.to_string_lossy() == "_instance.toml")
+        .unwrap_or(false);
+
+    let (old_fs_path, new_fs_path, new_toml_path) = if is_folder_instance {
+        let old_folder = old_path.parent().map(|p| p.to_path_buf());
+        let new_folder = old_folder.as_ref().and_then(|f| f.parent()).map(|gp| gp.join(new_name));
+        match (old_folder, new_folder) {
+            (Some(of), Some(nf)) => {
+                let new_toml = nf.join("_instance.toml");
+                (of, nf, new_toml)
+            }
+            _ => {
+                // No parent folder to rename within: the name changes in
+                // memory only.
+                inst_file.name = new_name.to_string();
+                return Ok(());
+            }
+        }
+    } else {
+        // Legacy flat file: rename the file itself, keeping its extension chain.
+        let old_name = old_path.file_name().unwrap_or_default().to_string_lossy().to_string();
+        let ext = old_name.splitn(2, '.').nth(1).unwrap_or("glb.toml").to_string();
+        let new_path = old_path
+            .parent()
+            .unwrap_or(old_path.as_path())
+            .join(format!("{}.{}", new_name, ext));
+        (old_path.clone(), new_path.clone(), new_path)
+    };
+
+    if old_fs_path == new_fs_path {
+        inst_file.name = new_name.to_string();
+        return Ok(());
+    }
+    if new_fs_path.exists() {
+        return Err(format!(
+            "Cannot rename: '{}' already exists",
+            new_fs_path.file_name().unwrap_or_default().to_string_lossy()
+        ));
+    }
+
+    // 1. The file watcher ignores the rename's delete and create events on
+    //    both paths, so it neither respawns a duplicate nor despawns the
+    //    live entity.
+    if let Some(ref mut registry) = res.file_registry {
+        registry.rename_in_progress.insert(old_path.clone());
+        registry.rename_in_progress.insert(old_fs_path.clone());
+        registry.rename_in_progress.insert(new_fs_path.clone());
+    }
+
+    // 2. Rename the folder (or file) on disk.
+    match std::fs::rename(&old_fs_path, &new_fs_path) {
+        Ok(()) => {
+            // 3. InstanceFile points at the `_instance.toml` inside the
+            //    renamed folder (or the renamed flat file).
+            inst_file.toml_path = new_toml_path.clone();
+            inst_file.name = new_name.to_string();
+            // 4. LoadedFromFile tracks the folder (or flat file) itself.
+            if let Ok((_, mut lff)) = queries.loaded_from_file.get_mut(entity) {
+                lff.path = new_fs_path.clone();
+            }
+            // 5. The file registry's mapping follows.
+            if let Some(ref mut registry) = res.file_registry {
+                let _ = registry.rename_file(&old_path, new_toml_path.clone());
+            }
+            info!("📝 Renamed {:?} → {:?}", old_fs_path, new_fs_path);
+            Ok(())
+        }
+        Err(e) => {
+            if let Some(ref mut registry) = res.file_registry {
+                registry.rename_in_progress.remove(&old_path);
+                registry.rename_in_progress.remove(&old_fs_path);
+                registry.rename_in_progress.remove(&new_fs_path);
+            }
+            warn!("Failed to rename {:?} → {:?}: {}", old_fs_path, new_fs_path, e);
+            Err(format!(
+                "Could not rename '{}': {e}",
+                old_fs_path.file_name().unwrap_or_default().to_string_lossy()
+            ))
+        }
+    }
+}
+
 fn finish_insert(
     entity: Entity,
     folder: Option<&std::path::Path>,
@@ -5390,6 +6418,72 @@ fn finish_template_insert(
     } else {
         warn!("➕ {}: no UndoStack resource — insert is NOT undoable", label);
     }
+}
+
+/// Insert a light class (PointLight, SpotLight, SurfaceLight or
+/// DirectionalLight) where `light_panel::plan_insert` puts it, then select
+/// it and record the undo step like every template insert. The one path for
+/// the ribbon, the Insert dialog and the Toolbox, which used to disagree:
+/// the Toolbox wrote a bare stub into `Lighting/` with no `[light]` section,
+/// and all three left the light at the world origin.
+///
+/// Returns false when `class_name` is not a light class.
+fn insert_light_instance(
+    class_name: &str,
+    res: &mut DrainResources,
+    queries: &DrainActionQueries,
+    pending: &mut PendingInsertSelection,
+) -> bool {
+    use eustress_common::classes::ClassName;
+    let Ok(class) = ClassName::from_str(class_name) else { return false };
+    if !super::light_panel::is_light_class(class) {
+        return false;
+    }
+    let space_root = crate::space::open_space_root(res.space_root.as_deref());
+    let selected: Option<Entity> = res.explorer_state.as_ref().and_then(|es| match &es.selected {
+        SelectedItem::Entity(e) => Some(*e),
+        _ => None,
+    });
+    let selected_folder = selected
+        .and_then(|e| queries.loaded_from_file.get(e).ok())
+        .and_then(|(_, lff)| lff.path.is_dir().then(|| lff.path.clone()));
+    let selected_class = selected
+        .and_then(|e| queries.instances.get(e).ok())
+        .map(|(_, inst)| inst.class_name);
+    let ctx = super::light_panel::InsertContext {
+        space_root,
+        selected_folder,
+        selected_is_part: selected.is_some_and(|e| queries.base_parts.get(e).is_ok()),
+        selected_is_container: matches!(selected_class, Some(ClassName::Folder | ClassName::Model)),
+        selected_position: selected
+            .and_then(|e| queries.transforms.get(e).ok())
+            .map(|t| t.translation),
+        camera: queries
+            .camera_query
+            .iter()
+            .find(|(c, _)| c.order == 0)
+            .map(|(_, gt)| *gt),
+    };
+    let plan = super::light_panel::plan_insert(class, &ctx);
+    match crate::space::instance_create::create_instance(&plan.dir, class_name, None, plan.overrides) {
+        Ok(created) => {
+            if let Some(ref mut out) = res.output {
+                out.info(format!(
+                    "Inserted {} '{}' in {}",
+                    class_name,
+                    created.folder_name,
+                    plan.dir.display(),
+                ));
+            }
+            finish_template_insert(&created.folder_path, &format!("Insert {}", class_name), res, pending);
+        }
+        Err(e) => {
+            if let Some(ref mut out) = res.output {
+                out.error(format!("Insert {} failed: {}", class_name, e));
+            }
+        }
+    }
+    true
 }
 
 /// Create + spawn one primitive Part instance, then finish it properly.
@@ -5799,15 +6893,22 @@ fn drain_slint_actions(
             SlintAction::Publish(request) => { events.file_events.write(FileEvent::Publish(request)); }
             
             // Edit operations → MenuActionEvent
+            // One history: the edit history the History panel shows. See
+            // `keybindings::Action::Undo` for why the selection history no
+            // longer steps along with it.
             SlintAction::Undo => {
-                events.undo_events.write(crate::commands::UndoCommandEvent);
                 events.undo_action_events.write(crate::undo::UndoEvent);
             }
             SlintAction::Redo => {
-                events.redo_events.write(crate::commands::RedoCommandEvent);
                 events.redo_action_events.write(crate::undo::RedoEvent);
             }
-            SlintAction::HistoryJumpTo(id) => { events.history_events.write(crate::commands::HistoryActionEvent::JumpTo(id)); }
+            // The History panel lists UndoStack entries, so a row click jumps
+            // THAT history. It used to jump the selection history with an
+            // UndoStack index, which scrambled the selection and reverted
+            // nothing.
+            SlintAction::HistoryJumpTo(id) => {
+                events.history_jump_events.write(crate::undo::HistoryJumpEvent { target: id.max(0) as usize });
+            }
 
             // ---- Procurement ----------------------------------------------
             // Every arm persists straight after mutating. An order that is
@@ -5818,12 +6919,28 @@ fn drain_slint_actions(
                     if let Some(ref mut out) = res.output {
                         out.info(format!("Raised {reference} against {manufacturer_id}"));
                     }
+                    // The new RFQ sorts last; select it so it is the one shown.
+                    if let Some(ref mut focus) = res.procurement_focus {
+                        focus.selected_rfq = Some(reference);
+                    }
                 }
             }
-            SlintAction::ProcurementSelectRfq(_) | SlintAction::ProcurementSelectOrder(_) => {
-                // Selection lives in Slint; the sync pass reads it back. Kept as
-                // explicit arms so a future selection-dependent load has a home
-                // and so the match stays exhaustive.
+            // Remember WHICH record was picked. The drain runs before the
+            // sync rebuilds the rows, so the model still holds the list the
+            // user clicked on.
+            SlintAction::ProcurementSelectRfq(idx) => {
+                if let (Some(ui), Some(focus)) = (ui, res.procurement_focus.as_mut()) {
+                    focus.selected_rfq = usize::try_from(idx).ok()
+                        .and_then(|i| ui.get_procurement_rfqs().row_data(i))
+                        .map(|row| row.reference.to_string());
+                }
+            }
+            SlintAction::ProcurementSelectOrder(idx) => {
+                if let (Some(ui), Some(focus)) = (ui, res.procurement_focus.as_mut()) {
+                    focus.selected_order = usize::try_from(idx).ok()
+                        .and_then(|i| ui.get_procurement_orders().row_data(i))
+                        .map(|row| row.reference.to_string());
+                }
             }
             SlintAction::ProcurementAddLine(reference) => {
                 if let Some(ref mut reg) = res.purchase_orders {
@@ -5907,14 +7024,36 @@ fn drain_slint_actions(
                 }
             }
             SlintAction::ProcurementFilterChanged(_) => {
-                // The filter lives in Slint and is read back by the sync pass.
+                // The chip is two-way bound to `procurement-state-filter`; the
+                // sync re-filters and finds the selected order again by
+                // reference (or shows none when the filter hides it).
             }
             SlintAction::ProcurementOpenRfqBuilder => {
                 if let Some(ref mut mgr) = res.tab_manager {
                     mgr.open_rfq_builder();
                 }
             }
-            SlintAction::HistoryClear => { events.history_events.write(crate::commands::HistoryActionEvent::Clear); }
+            SlintAction::HistoryClear => {
+                // The panel shows the edit history; Clear empties that one.
+                if let Some(ref mut stack) = res.undo_stack {
+                    stack.clear();
+                }
+                events.history_events.write(crate::commands::HistoryActionEvent::Clear);
+            }
+            // Restore points. Each runs with `&mut World` as a queued
+            // command, so the drain gains no parameter for them.
+            SlintAction::RestorePointsShown => {
+                commands.queue(|world: &mut World| super::restore_points::request_refresh(world));
+            }
+            SlintAction::RestorePointSave(label) => {
+                commands.queue(move |world: &mut World| super::restore_points::save(world, label));
+            }
+            SlintAction::RestorePointRevert(id) => {
+                commands.queue(move |world: &mut World| super::restore_points::revert(world, id));
+            }
+            SlintAction::RestorePointCancelPending => {
+                commands.queue(|world: &mut World| super::restore_points::cancel_pending(world));
+            }
             SlintAction::Copy => { events.menu_events.write(MenuActionEvent::new(crate::keybindings::Action::Copy)); }
             SlintAction::Cut => {
                 events.menu_events.write(MenuActionEvent::new(crate::keybindings::Action::Copy));
@@ -5924,6 +7063,8 @@ fn drain_slint_actions(
             SlintAction::Delete => { events.menu_events.write(MenuActionEvent::new(crate::keybindings::Action::Delete)); }
             SlintAction::Duplicate => { events.menu_events.write(MenuActionEvent::new(crate::keybindings::Action::Duplicate)); }
             SlintAction::SelectAll => { events.menu_events.write(MenuActionEvent::new(crate::keybindings::Action::SelectAll)); }
+            SlintAction::Group => { events.menu_events.write(MenuActionEvent::new(crate::keybindings::Action::Group)); }
+            SlintAction::Ungroup => { events.menu_events.write(MenuActionEvent::new(crate::keybindings::Action::Ungroup)); }
             
             // Tool selection → StudioState
             SlintAction::SelectTool(tool) => {
@@ -6041,7 +7182,9 @@ fn drain_slint_actions(
             }
 
             SlintAction::SetDisplayUnit(sym) => {
-                match eustress_common::units::Unit::from_symbol(&sym) {
+                // Lenient, so every spelling (and a setting saved as
+                // "studs") picks the current stud, never the legacy one.
+                match eustress_common::units::Unit::from_any(&sym) {
                     Some(u) => {
                         if let Some(ref mut du) = res.display_unit {
                             if du.0 != u {
@@ -6180,8 +7323,19 @@ fn drain_slint_actions(
             SlintAction::FocusSelected => {
                 events.menu_events.write(MenuActionEvent::new(crate::keybindings::Action::FocusSelection));
             }
-            SlintAction::SetViewMode(_mode) => {
-                // View mode changes handled by camera controller
+            SlintAction::SetViewMode(mode) => {
+                // The ViewSelector, the View menu and the Perspective rows
+                // all send one command string; the camera controller applies
+                // it. Through the controller's inbox rather than a writer so
+                // this system's parameter list does not grow.
+                // Viewpoint picks (`viewpoint-save`, `viewpoint:<name>`)
+                // travel the same channel; everything else is a camera command.
+                if !crate::saved_viewpoints::route_ui_command(&mode) {
+                    match crate::camera_controller::ViewCommand::parse(&mode) {
+                        Some(command) => crate::camera_controller::queue_view_command(command),
+                        None => warn!("set-view-mode: unknown command {mode:?}"),
+                    }
+                }
             }
             SlintAction::ToggleWireframe => {
                 if let Some(ref mut vs) = res.view_state {
@@ -6231,19 +7385,12 @@ fn drain_slint_actions(
             }
             SlintAction::InsertInto(id, node_type) => {
                 // The row becomes the selection first (the insert handler
-                // writes under the selected entity's folder), then the
-                // dialog opens on the next UI sync.
-                let target = res
-                    .explorer_state
-                    .as_ref()
-                    .and_then(|es| es.entity_id_cache.get(&id).copied())
-                    .and_then(|e| queries.instances.get(e).ok().map(|(_, inst)| inst.name.clone()))
-                    .unwrap_or_else(|| "Workspace".to_string());
+                // writes under it), then the dialog opens. Both go through
+                // the queue, which runs them next frame in this order, so the
+                // dialog's target and suggestions come from the row, service
+                // rows included.
                 queue.push(SlintAction::SelectNode(id, node_type, false, false));
-                if let Some(ref mut s) = res.state {
-                    s.insert_target_name = target;
-                    s.show_insert_object_dialog = true;
-                }
+                queue.push(SlintAction::OpenInsertObject);
             }
             SlintAction::OpenInsertObject => {
                 let target = res
@@ -6293,34 +7440,438 @@ fn drain_slint_actions(
                 }
             }
             
-            // Panel toggles → StudioState
-            SlintAction::ToggleCommandBar => {
-                if let Some(ref mut s) = res.state {
-                    // Toggled directly in Slint via show-command-bar binding
-                }
-            }
-            SlintAction::ShowKeybindings => {
-                if let Some(ref mut s) = res.state {
-                    s.show_keybindings_window = true;
-                }
-            }
-            SlintAction::ShowSoulSettings => {
-                if let Some(ref mut s) = res.state {
-                    s.show_soul_settings_window = true;
-                }
-            }
-            SlintAction::ShowSettings => {
-                if let Some(ref mut s) = res.state {
-                    s.show_settings_window = true;
-                }
-            }
-            SlintAction::ShowFind => {
-                if let Some(ref mut s) = res.state {
-                    s.show_find_dialog = true;
-                }
-            }
-            
             // Network → StudioState
+            // ── Data > Sync Domain to Object Type ──
+            // A domain is a Dataset: each row becomes one object, and each
+            // column is a field that can name, color or label it.
+            SlintAction::OpenSyncDomain => {
+                let Some(ui) = ui else { continue };
+                let mut domains: Vec<(String, std::path::PathBuf)> = Vec::new();
+                for (entity, inst) in queries.instances.iter() {
+                    if inst.class_name != eustress_common::classes::ClassName::Dataset {
+                        continue;
+                    }
+                    let Ok((_, lff)) = queries.loaded_from_file.get(entity) else { continue };
+                    let dir = if lff.path.is_dir() {
+                        lff.path.clone()
+                    } else {
+                        lff.path.parent().map(|p| p.to_path_buf()).unwrap_or_else(|| lff.path.clone())
+                    };
+                    // Two Datasets may share a name; keep each label unique.
+                    let mut label = inst.name.clone();
+                    let mut n = 2;
+                    while domains.iter().any(|(l, _)| *l == label) {
+                        label = format!("{} ({n})", inst.name);
+                        n += 1;
+                    }
+                    domains.push((label, dir));
+                }
+                domains.sort_by(|a, b| a.0.to_lowercase().cmp(&b.0.to_lowercase()));
+                let names: Vec<slint::SharedString> = domains.iter().map(|(l, _)| l.as_str().into()).collect();
+                ui.set_sync_domain_domains(slint::ModelRc::new(slint::VecModel::from(names)));
+                ui.set_sync_domain_fields(slint::ModelRc::new(slint::VecModel::from(Vec::<slint::SharedString>::new())));
+                ui.set_sync_domain_selected(slint::SharedString::default());
+                ui.set_sync_domain_status(slint::SharedString::default());
+                ui.set_sync_domain_busy(false);
+                if let Some(ref mut sync) = res.sync_domain {
+                    sync.domains = domains;
+                }
+            }
+            SlintAction::SyncDomainPicked(label) => {
+                let Some(ui) = ui else { continue };
+                let dir = res.sync_domain.as_ref()
+                    .and_then(|s| s.domains.iter().find(|(l, _)| *l == label).map(|(_, d)| d.clone()));
+                let Some(dir) = dir else { continue };
+                #[cfg(feature = "data")]
+                {
+                    let (fields, status): (Vec<slint::SharedString>, String) = match load_dataset_frame(&dir) {
+                        Some(frame) => (
+                            frame.specs().map(|s| s.name.as_str().into()).collect(),
+                            format!("{} rows, {} columns", frame.n_rows(), frame.n_cols()),
+                        ),
+                        None => (Vec::new(), "This Dataset has no readable data file.".to_string()),
+                    };
+                    ui.set_sync_domain_fields(slint::ModelRc::new(slint::VecModel::from(fields)));
+                    ui.set_sync_domain_status(status.into());
+                }
+                #[cfg(not(feature = "data"))]
+                {
+                    let _ = dir;
+                    ui.set_sync_domain_status("This build has no Data Platform support.".into());
+                }
+            }
+            SlintAction::SyncDomainPreview(sx, sy, sz) => {
+                let Some(ui) = ui else { continue };
+                #[cfg(feature = "data")]
+                {
+                    let status = match sync_domain_plan(ui, &res, &queries, Vec3::new(sx, sy, sz)) {
+                        Ok(plan) => plan.summary(),
+                        Err(e) => e,
+                    };
+                    ui.set_sync_domain_status(status.into());
+                }
+                #[cfg(not(feature = "data"))]
+                {
+                    let _ = (sx, sy, sz);
+                    ui.set_sync_domain_status("This build has no Data Platform support.".into());
+                }
+            }
+            SlintAction::SyncDomainRun(sx, sy, sz) => {
+                let Some(ui) = ui else { continue };
+                if ui.get_sync_domain_busy() {
+                    continue;
+                }
+                #[cfg(feature = "data")]
+                {
+                    match sync_domain_plan(ui, &res, &queries, Vec3::new(sx, sy, sz)) {
+                        Ok(plan) => {
+                            ui.set_sync_domain_busy(true);
+                            ui.set_sync_domain_status(format!("Creating {}", plan.summary()).into());
+                            let queue = res.action_queue.as_deref().cloned();
+                            // Thousands of folders are written off the main
+                            // thread; the file watcher spawns them as they land.
+                            std::thread::spawn(move || {
+                                let done = plan.write();
+                                if let Some(queue) = queue {
+                                    queue.push(done);
+                                }
+                            });
+                        }
+                        Err(e) => ui.set_sync_domain_status(e.into()),
+                    }
+                }
+                #[cfg(not(feature = "data"))]
+                {
+                    let _ = (sx, sy, sz);
+                    ui.set_sync_domain_status("This build has no Data Platform support.".into());
+                }
+            }
+            SlintAction::SyncDomainDone { container, created, skipped, error } => {
+                if let Some(ui) = ui {
+                    ui.set_sync_domain_busy(false);
+                }
+                let space_root = crate::space::open_space_root(res.space_root.as_deref());
+                if created > 0 {
+                    if let Some(ref mut stack) = res.undo_stack {
+                        stack.push_labeled(
+                            format!("Sync {created} objects from a domain"),
+                            crate::undo::Action::spawn_folders(&space_root, &[container.clone()]),
+                        );
+                    }
+                    if let Some(ui) = ui {
+                        ui.set_show_sync_domain_dialog(false);
+                    }
+                }
+                let folder = container.file_name().unwrap_or_default().to_string_lossy().to_string();
+                let summary = match &error {
+                    Some(e) => format!("Sync stopped after {created} objects: {e}"),
+                    None if skipped > 0 => format!("Synced {created} objects into '{folder}' ({skipped} rows skipped)."),
+                    None => format!("Synced {created} objects into '{folder}'."),
+                };
+                let note = match error {
+                    None => super::notifications::NotificationEvent::success(
+                        super::notifications::NotificationCategory::General, "Sync Domain", summary.clone()),
+                    Some(_) => super::notifications::NotificationEvent::error(
+                        super::notifications::NotificationCategory::General, "Sync Domain", summary.clone()),
+                };
+                events.notification.write(note);
+                if let Some(ref mut out) = res.output {
+                    out.info(format!("Data · {summary}"));
+                }
+            }
+            // ── Data > Manage Global Sources ──
+            SlintAction::DataSourceAdd => {
+                let Some(ui) = ui else { continue };
+                let name = ui.get_data_source_new_name().trim().to_string();
+                let kind = ui.get_data_source_new_type().to_string();
+                let endpoint = ui.get_data_source_new_url().trim().to_string();
+                if name.is_empty() || endpoint.is_empty() {
+                    continue;
+                }
+                let space_root = crate::space::open_space_root(res.space_root.as_deref());
+                match write_connector_named(&space_root, &kind, &name, &endpoint) {
+                    Ok((folder_name, folder)) => {
+                        if let Some(ref mut stack) = res.undo_stack {
+                            stack.push_labeled(
+                                format!("Add data source {folder_name}"),
+                                crate::undo::Action::spawn_folders(&space_root, &[folder]),
+                            );
+                        }
+                        ui.set_data_source_new_name(slint::SharedString::default());
+                        ui.set_data_source_new_url(slint::SharedString::default());
+                        ui.set_data_source_adding(false);
+                        if let Some(ref mut out) = res.output {
+                            out.info(format!("Data · added {kind} source '{folder_name}' in DataService."));
+                        }
+                    }
+                    Err(e) => {
+                        if let Some(ref mut out) = res.output {
+                            out.error(format!("Data · could not add the source: {e}"));
+                        }
+                    }
+                }
+                if let Some(ref mut panel) = res.data_sources {
+                    panel.rows = scan_data_sources(&space_root, &panel.rows);
+                    push_data_sources(ui, &panel.rows);
+                }
+            }
+            SlintAction::DataSourceRemove(row) => {
+                // The ordinary Delete removes it: trash, database and undo.
+                let Some(entity) = connector_entity(row, &mut res) else { continue };
+                select_and_reveal(entity, &mut res);
+                events.menu_events.write(MenuActionEvent::new(crate::keybindings::Action::Delete));
+                if let Some(ref mut panel) = res.data_sources {
+                    // Rescan shortly, once the Delete has moved the folder.
+                    panel.since_scan = 45;
+                }
+            }
+            SlintAction::DataSourceEdit(row) => {
+                // A source's settings (endpoint, secret name, provider
+                // options, enabled) are its Connector's attributes: select it
+                // and show Properties.
+                let Some(entity) = connector_entity(row, &mut res) else { continue };
+                select_and_reveal(entity, &mut res);
+                if let Some(ref mut s) = res.state {
+                    s.show_properties = true;
+                }
+                if let Some(ui) = ui {
+                    ui.set_right_tab_index(0);
+                    ui.set_show_global_sources_window(false);
+                }
+            }
+            SlintAction::DataSourceTest(row) => {
+                let Some(ui) = ui else { continue };
+                let space_root = crate::space::open_space_root(res.space_root.as_deref());
+                let Some(ref mut panel) = res.data_sources else { continue };
+                let Some(entry) = usize::try_from(row).ok().and_then(|i| panel.rows.get_mut(i)) else { continue };
+                if entry.test_state == "testing" {
+                    continue;
+                }
+                entry.test_state = "testing".to_string();
+                entry.test_detail.clear();
+                let dir = entry.dir.clone();
+                push_data_sources(ui, &panel.rows);
+                let queue = res.action_queue.as_deref().cloned();
+                std::thread::spawn(move || {
+                    let (ok, detail) = probe_data_source(&dir, &space_root);
+                    if let Some(queue) = queue {
+                        queue.push(SlintAction::DataSourceTestDone { dir, ok, detail });
+                    }
+                });
+            }
+            SlintAction::DataSourceTestDone { dir, ok, detail } => {
+                let Some(ref mut panel) = res.data_sources else { continue };
+                if let Some(entry) = panel.rows.iter_mut().find(|r| r.dir == dir) {
+                    entry.test_state = if ok { "ok" } else { "failed" }.to_string();
+                    entry.test_detail = detail;
+                    entry.tested_at = chrono::Local::now().format("%H:%M").to_string();
+                }
+                if let Some(ui) = ui {
+                    push_data_sources(ui, &panel.rows);
+                }
+            }
+            // ── Find & Replace ──
+            SlintAction::FindSearch => {
+                let Some(ui) = ui else { continue };
+                let Some(ref mut find) = res.find_state else { continue };
+                if ui.get_find_search_text().is_empty() {
+                    // Opened with nothing typed: start from the selection's name.
+                    let seed = queries.selected_entities.iter().next()
+                        .and_then(|e| queries.instances.get(e).ok().map(|(_, i)| i.name.clone()));
+                    if let Some(seed) = seed {
+                        ui.set_find_search_text(seed.as_str().into());
+                    }
+                }
+                run_find(ui, &queries, find);
+            }
+            SlintAction::FindStep(step) => {
+                let Some(ui) = ui else { continue };
+                let target = res.find_state.as_mut().and_then(|find| {
+                    let n = find.hits.len() as i32;
+                    if n == 0 {
+                        return None;
+                    }
+                    find.current = (find.current + step).rem_euclid(n);
+                    Some((find.current, find.hits[find.current as usize]))
+                });
+                if let Some((current, entity)) = target {
+                    ui.set_find_current_result(current);
+                    select_and_reveal(entity, &mut res);
+                }
+            }
+            SlintAction::FindSelectResult(row) => {
+                let Some(ui) = ui else { continue };
+                let target = res.find_state.as_mut().and_then(|find| {
+                    let entity = *find.hits.get(usize::try_from(row).ok()?)?;
+                    find.current = row;
+                    Some(entity)
+                });
+                if let Some(entity) = target {
+                    ui.set_find_current_result(row);
+                    select_and_reveal(entity, &mut res);
+                }
+            }
+            replace @ (SlintAction::FindReplaceOne | SlintAction::FindReplaceAll) => {
+                let Some(ui) = ui else { continue };
+                let all = matches!(replace, SlintAction::FindReplaceAll);
+                let re = match find_pattern(ui) {
+                    Ok(Some(re)) => re,
+                    Ok(None) => continue,
+                    Err(e) => {
+                        if let Some(ref mut out) = res.output {
+                            out.warning(format!("Find: {e}"));
+                        }
+                        continue;
+                    }
+                };
+                let targets: Vec<Entity> = match res.find_state.as_ref() {
+                    Some(find) if all => find.hits.clone(),
+                    Some(find) => find.hits.get(find.current.max(0) as usize).copied().into_iter().collect(),
+                    None => continue,
+                };
+                let replacement = ui.get_find_replace_text().to_string();
+                let literal = !ui.get_find_use_regex();
+                let (mut renamed, mut skipped) = (0usize, 0usize);
+                let mut undo_steps: Vec<crate::undo::Action> = Vec::new();
+                for entity in targets {
+                    // Services keep their names; so do objects the pattern
+                    // no longer changes.
+                    if queries.service_components.get(entity).is_ok() {
+                        skipped += 1;
+                        continue;
+                    }
+                    let Some((id, old)) = queries.instances.get(entity).ok().map(|(_, i)| (i.id, i.name.clone())) else {
+                        continue;
+                    };
+                    let new = if literal {
+                        re.replace_all(&old, regex::NoExpand(replacement.as_str())).into_owned()
+                    } else {
+                        re.replace_all(&old, replacement.as_str()).into_owned()
+                    };
+                    if new == old || new.trim().is_empty() {
+                        skipped += 1;
+                        continue;
+                    }
+                    match rename_instance(entity, &new, &mut res, &mut queries, &mut commands) {
+                        Ok(()) => {
+                            renamed += 1;
+                            if id != 0 {
+                                use crate::undo::PropertyValueSnapshot as S;
+                                undo_steps.push(crate::undo::Action::ChangeProperty {
+                                    id,
+                                    property: "Name".to_string(),
+                                    old_value: S::String(old),
+                                    new_value: S::String(new),
+                                });
+                            }
+                        }
+                        Err(problem) => {
+                            skipped += 1;
+                            if let Some(ref mut out) = res.output {
+                                out.warning(problem);
+                            }
+                        }
+                    }
+                }
+                if let Some(ref mut stack) = res.undo_stack {
+                    match undo_steps.len() {
+                        0 => {}
+                        1 => stack.push(undo_steps.remove(0)),
+                        n => stack.push_labeled(
+                            format!("Replace in {n} names"),
+                            crate::undo::Action::Batch { actions: undo_steps },
+                        ),
+                    }
+                }
+                if let Some(ref mut out) = res.output {
+                    out.info(format!("Find & Replace: renamed {renamed}, skipped {skipped}"));
+                }
+                if let Some(ref mut find) = res.find_state {
+                    run_find(ui, &queries, find);
+                }
+            }
+            SlintAction::FindClosed => {
+                if let Some(ref mut find) = res.find_state {
+                    **find = FindState::default();
+                }
+            }
+            SlintAction::SoulTestConnection => {
+                // Tests what is typed in the dialog, saved or not, so a key
+                // can be checked before Save. Each provider is checked on its
+                // own thread; the results come back as one action.
+                let Some(ui) = ui else { continue };
+                if ui.get_soul_test_running() {
+                    continue;
+                }
+                let keys = [
+                    ("Anthropic", ui.get_soul_api_key().to_string()),
+                    ("xAI", ui.get_soul_xai_api_key().to_string()),
+                    ("OpenAI", ui.get_soul_openai_api_key().to_string()),
+                ];
+                ui.set_soul_test_running(true);
+                ui.set_soul_test_status("Testing...".into());
+                ui.set_soul_error_message(slint::SharedString::default());
+                let queue = res.action_queue.as_deref().cloned();
+                std::thread::spawn(move || {
+                    let results: Vec<crate::soul::KeyProbe> = std::thread::scope(|scope| {
+                        let checks: Vec<_> = keys
+                            .iter()
+                            .map(|(provider, key)| {
+                                let (provider, key) = (*provider, key.as_str());
+                                scope.spawn(move || crate::soul::probe_api_key(provider, key))
+                            })
+                            .collect();
+                        checks.into_iter().filter_map(|check| check.join().ok()).collect()
+                    });
+                    if let Some(queue) = queue {
+                        queue.push(SlintAction::SoulTestConnectionDone(results));
+                    }
+                });
+            }
+            SlintAction::SoulTestConnectionDone(results) => {
+                let summary = results.iter().map(|r| r.summary()).collect::<Vec<_>>().join(" · ");
+                let first_failure = results.iter().find(|r| r.failed()).map(|r| r.summary());
+                let anthropic_accepted = results.iter().find(|r| r.provider == "Anthropic").map(|r| r.accepted());
+                if let Some(ui) = ui {
+                    ui.set_soul_test_running(false);
+                    ui.set_soul_test_status(summary.as_str().into());
+                    ui.set_soul_error_message(first_failure.clone().unwrap_or_default().into());
+                    // Record the verdict against the stored key when that is
+                    // the key that was tested.
+                    let typed = ui.get_soul_api_key().trim().to_string();
+                    if let Some(ref mut gs) = res.global_soul_settings {
+                        if !typed.is_empty() && typed == gs.global_api_key.trim() {
+                            gs.api_key_valid = anthropic_accepted;
+                        }
+                    }
+                    ui.set_soul_api_key_valid(anthropic_accepted == Some(true));
+                }
+                let note = match first_failure {
+                    None => super::notifications::NotificationEvent::success(
+                        super::notifications::NotificationCategory::Network, "Soul connection test", summary.clone()),
+                    Some(_) => super::notifications::NotificationEvent::error(
+                        super::notifications::NotificationCategory::Network, "Soul connection test", summary.clone()),
+                };
+                events.notification.write(note);
+                if let Some(ref mut out) = res.output {
+                    out.info(format!("Soul connection test: {summary}"));
+                }
+            }
+            SlintAction::SetRibbonCollapsed(collapsed) => {
+                // Saved at once, like the other layout choices, and pushed
+                // back to Slint by the EditorSettings sync.
+                if let Some(ref mut s) = res.editor_settings {
+                    if s.ribbon_collapsed != collapsed {
+                        s.ribbon_collapsed = collapsed;
+                        let _ = s.save();
+                    }
+                }
+            }
+            SlintAction::UnbuiltFeature(id) => {
+                if let Some(note) = unbuilt_feature_notice(&id) {
+                    events.notification.write(note);
+                }
+            }
             SlintAction::StartServer => {
                 events.menu_events.write(MenuActionEvent::new(crate::keybindings::Action::StartServer));
             }
@@ -6328,28 +7879,36 @@ fn drain_slint_actions(
                 events.menu_events.write(MenuActionEvent::new(crate::keybindings::Action::StopServer));
             }
             SlintAction::ConnectForge => {
-                let already_open = res.state.as_ref().map_or(false, |s| s.show_forge_connect_window);
-                if already_open {
-                    // Dialog is open — user clicked Connect button. Perform actual connection.
-                    if let (Some(ui), Some(ref mut forge)) = (ui.as_ref(), res.forge_state.as_mut()) {
-                        let url = ui.get_forge_server_url().to_string();
-                        let api_key = ui.get_forge_api_key().to_string();
-                        crate::forge::connect_to_forge(forge, &url, &api_key);
-                        if let Some(ref mut out) = res.output {
-                            out.info(format!("Connecting to Forge at {}...", url));
+                // Sent by the Forge dialog's Connect button; the ribbon opens
+                // the dialog on the Slint side. The outcome comes back through
+                // `ForgeState` and `sync_dialog_state` shows it in the dialog.
+                if let (Some(ui), Some(ref mut forge)) = (ui.as_ref(), res.forge_state.as_mut()) {
+                    let url = ui.get_forge_server_url().to_string();
+                    let api_key = ui.get_forge_api_key().to_string();
+                    // "Remember credentials": kept in the local credential
+                    // store (outside every Space), or forgotten when unticked.
+                    #[cfg(feature = "data")]
+                    {
+                        use crate::capture::credentials;
+                        if ui.get_forge_remember_credentials() {
+                            let _ = credentials::set(FORGE_URL_CREDENTIAL, &url);
+                            if !api_key.trim().is_empty() {
+                                let _ = credentials::set(FORGE_KEY_CREDENTIAL, &api_key);
+                            }
+                        } else {
+                            let _ = credentials::remove(FORGE_URL_CREDENTIAL);
+                            let _ = credentials::remove(FORGE_KEY_CREDENTIAL);
                         }
                     }
-                } else {
-                    // Show the dialog
-                    if let Some(ref mut s) = res.state {
-                        s.show_forge_connect_window = true;
+                    crate::forge::connect_to_forge(forge, &url, &api_key);
+                    if let Some(ref mut out) = res.output {
+                        out.info(format!("Connecting to Forge at {}...", url.trim()));
                     }
                 }
             }
             SlintAction::DisconnectForge => {
                 if let Some(ref mut forge) = res.forge_state {
-                    forge.status = crate::forge::ForgeConnectionStatus::Disconnected;
-                    forge.deployment = None;
+                    forge.disconnect();
                 }
                 if let Some(ref mut out) = res.output {
                     out.info("Disconnected from Forge.".to_string());
@@ -6402,21 +7961,11 @@ fn drain_slint_actions(
             }
 
             // Stress test
-            SlintAction::ShowStressTest => {
-                if let Some(ref mut s) = res.state {
-                    s.show_stress_test_window = true;
-                }
-            }
-            SlintAction::StartStressTest { clients, rate, duration, movement, interactions } => {
-                if let Some(ref mut stress) = res.stress_test {
-                    stress.target_clients = clients;
-                    stress.message_rate = rate;
-                    stress.duration_secs = duration as u64;
-                    stress.simulate_movement = movement;
-                    stress.simulate_interactions = interactions;
-                    let port = res.play_server.as_ref().map(|r| r.port).unwrap_or(42069);
-                    crate::network_benchmark::start_stress_test(&mut *stress, port);
-                    info!("🔥 Stress test started: {} clients, {} msg/s, {}s", clients, rate, duration);
+            // The benchmark's clients speak the old play-server protocol,
+            // which no host serves, so the dialog answers with the notice.
+            SlintAction::StartStressTest { .. } => {
+                if let Some(note) = unbuilt_feature_notice("stress-test") {
+                    events.notification.write(note);
                 }
             }
             SlintAction::StopStressTest => {
@@ -6428,8 +7977,12 @@ fn drain_slint_actions(
 
             // Data → StudioState
             SlintAction::OpenGlobalSources => {
-                if let Some(ref mut s) = res.state {
-                    s.show_global_sources_window = true;
+                // The dialog lists the open Space's Connectors; the sync keeps
+                // the list current while it stays open.
+                if let (Some(ui), Some(panel)) = (ui, res.data_sources.as_mut()) {
+                    let space_root = crate::space::open_space_root(res.space_root.as_deref());
+                    panel.rows = scan_data_sources(&space_root, &panel.rows);
+                    push_data_sources(ui, &panel.rows);
                 }
             }
             SlintAction::OpenDomains => {
@@ -6443,20 +7996,6 @@ fn drain_slint_actions(
                 }
             }
             
-            // MindSpace
-            SlintAction::ToggleMindspace => {
-                if let Some(ref mut s) = res.state {
-                    s.mindspace_panel_visible = !s.mindspace_panel_visible;
-                }
-            }
-            SlintAction::MindspaceAddLabel => {
-                events.plugin_action.write(crate::studio_plugins::PluginActionEvent {
-                    action_id: "mindspace:add_label".to_string(),
-                });
-            }
-            SlintAction::MindspaceConnect => {
-                // TODO: Connect selected MindSpace nodes
-            }
             SlintAction::PluginAction(action_id) => {
                 // Route the action string through to the plugin system.
                 // Normalize Slint kebab-case to Rust snake_case (dashes → underscores).
@@ -6846,9 +8385,12 @@ fn drain_slint_actions(
             SlintAction::CloseCenterTab(idx) => {
                 // Slint sends 0-based index into the non-scene tabs list.
                 // CenterTabManager uses Scene at index 0, so mgr_idx = idx + 1.
+                // A tab with unsaved edits waits on the unsaved-changes prompt.
                 if let Some(ref mut mgr) = res.tab_manager {
                     let mgr_idx = (idx as usize) + 1;
-                    mgr.close_tab(mgr_idx);
+                    if let Some(id) = mgr.tabs.get(mgr_idx).map(|t| t.id) {
+                        mgr.request_close(super::center_tabs::TabCloseRequest::One(id));
+                    }
                 } else if let Some(ref mut s) = res.state {
                     s.pending_close_tab = Some(idx);
                 }
@@ -7123,6 +8665,9 @@ fn drain_slint_actions(
                         ss.claude_api_key = key.clone();
                     }
                     if let Some(ref mut gs) = res.global_soul_settings {
+                        if gs.global_api_key.trim() != key {
+                            gs.api_key_valid = None;
+                        }
                         gs.global_api_key = key.clone();
                         gs.global_xai_api_key = xai_key.clone();
                         gs.global_openai_api_key = openai_key.clone();
@@ -7162,6 +8707,7 @@ fn drain_slint_actions(
                 // Update the correct field based on current mode (Summary / Markdown / Code)
                 if let Some(ref mut mgr) = res.tab_manager {
                     let idx = mgr.active_tab;
+                    let mut code_edit = false;
                     if let Some(active) = mgr.tabs.get_mut(idx) {
                         let is_summary = matches!(&active.tab_type,
                             super::center_tabs::CenterTabType::SoulScript { mode: super::center_tabs::SoulScriptMode::Summary }
@@ -7199,23 +8745,302 @@ fn drain_slint_actions(
                             }
                         } else {
                             active.content = text.clone();
+                            code_edit = true;
+                        }
+                    }
+                    // Code and plain code views save on request, so an edit
+                    // there leaves the tab dirty until Save writes it.
+                    if code_edit && mgr.mark_dirty(idx) {
+                        if let (Some(ui), Some(s)) = (ui, res.state.as_mut()) {
+                            patch_center_tab_dirty(ui, s, idx, true);
                         }
                     }
                 }
                 // Store updated script content and mark dirty so
                 // sync_center_tabs_to_slint pushes fresh line numbers this frame.
+                let tab_id = res.tab_manager.as_ref().and_then(|m| m.tabs.get(m.active_tab)).map(|t| t.id);
                 if let Some(ref mut s) = res.state {
+                    // A typed edit joins the tab's undo history. An edit the
+                    // engine made is recorded where it was made, and arrives
+                    // here with the text already equal.
+                    if let Some(id) = tab_id.filter(|_| s.script_source_path.is_some()) {
+                        if s.script_editor_content != text {
+                            let before = s.script_editor_content.clone();
+                            let cursor = crate::script_editor::editing::first_difference(&before, &text);
+                            // More than a keystroke's worth of change (a paste,
+                            // a cut, a selection deleted) is its own step.
+                            let whole_step = before.len().abs_diff(text.len()) > 4;
+                            let history = s.script_history.entry(id).or_default();
+                            if whole_step {
+                                history.break_group();
+                            }
+                            history.record(&before, cursor, std::time::Instant::now());
+                            if whole_step {
+                                history.break_group();
+                            }
+                        }
+                    }
                     s.script_editor_content = text;
                     s.script_content_dirty = true;
                 }
             }
-            SlintAction::ReorderCenterTab(from, to) => {
-                // Slint sends 0-based indices into the non-scene tabs list.
-                // CenterTabManager: Scene at 0, so mgr indices = from+1, to+1.
+            SlintAction::ScriptSave => {
+                let Some(ref mut mgr) = res.tab_manager else { continue; };
+                let idx = mgr.active_tab;
+                let Some(tab) = mgr.tabs.get(idx) else { continue; };
+                let entity_source = tab.entity
+                    .and_then(|e| queries.loaded_from_file.get(e).ok())
+                    .map(|(_, loaded)| loaded.path.clone());
+                match super::center_tabs::save_code_tab(tab, entity_source.as_deref()) {
+                    Ok(Some(path)) => {
+                        if mgr.mark_clean(idx) {
+                            if let (Some(ui), Some(s)) = (ui, res.state.as_mut()) {
+                                patch_center_tab_dirty(ui, s, idx, false);
+                            }
+                        }
+                        if let Some(ref mut out) = res.output {
+                            out.info(format!("Saved {}", path.display()));
+                        }
+                    }
+                    Ok(None) => {}
+                    Err(e) => {
+                        if let Some(ref mut out) = res.output {
+                            out.error(format!("Save failed: {e}"));
+                        }
+                    }
+                }
+            }
+            SlintAction::UnsavedChangesSave => {
+                let Some(ref mut mgr) = res.tab_manager else { continue; };
+                let Some(req) = mgr.pending_close.take() else { continue; };
+                let covered: Vec<bool> = (0..mgr.tabs.len()).map(|i| mgr.close_covers(req, i)).collect();
+                let saved = save_dirty_tabs_before_close(
+                    mgr,
+                    |e| queries.loaded_from_file.get(e).ok().map(|(_, l)| l.path.clone()),
+                    |i, _| covered[i],
+                );
+                // A failed save cancels the close, so no unsaved edit is lost.
+                if report_close_saves(&saved, res.output.as_deref_mut()) {
+                    finish_tab_close(mgr, req, res.state.as_deref_mut(), &mut events.exit_events);
+                }
+            }
+            SlintAction::UnsavedChangesDiscard => {
+                let Some(ref mut mgr) = res.tab_manager else { continue; };
+                let Some(req) = mgr.pending_close.take() else { continue; };
+                finish_tab_close(mgr, req, res.state.as_deref_mut(), &mut events.exit_events);
+            }
+            SlintAction::UnsavedChangesCancel => {
                 if let Some(ref mut mgr) = res.tab_manager {
-                    mgr.reorder_tab((from as usize) + 1, (to as usize) + 1);
+                    mgr.pending_close = None;
+                }
+            }
+            SlintAction::ScriptEditorKey(key, anchor, cursor) => {
+                use crate::script_editor::editing::{self, Selection};
+                let Some(ref mut state) = res.state else { continue; };
+                let Some(tab_id) = res.tab_manager.as_ref().and_then(|m| m.tabs.get(m.active_tab)).map(|t| t.id)
+                else { continue; };
+                let text = state.script_editor_content.clone();
+                let sel = Selection { anchor: anchor.max(0) as usize, cursor: cursor.max(0) as usize }.clamp(&text);
+                let service = active_code_service(state, res.script_analysis.as_deref());
+                // Hover: what the file's service knows about the identifier at
+                // the caret, from the latest analysis. No edit.
+                if key == "hover" || key == "hover-close" {
+                    let hover = match (&service, res.script_analysis.as_ref().and_then(|a| a.analysis.as_ref())) {
+                        (Some(s), Some(result)) if key == "hover" => s
+                            .hover(&text, sel.cursor, result)
+                            .map(|h| editing::markdown_to_plain(&h.markdown))
+                            .unwrap_or_default(),
+                        _ => String::new(),
+                    };
+                    if let Some(ui) = ui {
+                        let (line0, col0) = line_col0(&text, sel.cursor);
+                        ui.set_script_hover_line(line0 + 1);
+                        ui.set_script_hover_col(col0 + 1);
+                        ui.set_script_hover_text(hover.into());
+                    }
+                    continue;
+                }
+                let history = state.script_history.entry(tab_id).or_default();
+                let edit = match key.as_str() {
+                    "undo" | "redo" => {
+                        let step = if key == "undo" {
+                            history.undo(&text, sel.cursor)
+                        } else {
+                            history.redo(&text, sel.cursor)
+                        };
+                        let Some(step) = step else { continue; };
+                        let selection = Selection::caret(step.cursor).clamp(&step.text);
+                        editing::Edit { text: step.text, selection }
+                    }
+                    command => {
+                        let is_command = matches!(command, "indent" | "outdent" | "newline" | "comment");
+                        let edit = match command {
+                            "indent" => editing::indent(&text, sel),
+                            "outdent" => editing::outdent(&text, sel),
+                            "newline" => editing::newline(&text, sel, |line| match &service {
+                                Some(s) => s.indent_after(line),
+                                None => line.trim_end().ends_with(['{', '(', '[']),
+                            }),
+                            "comment" => {
+                                let marker = service.as_ref().and_then(|s| s.line_comment()).unwrap_or("//");
+                                editing::toggle_comment(&text, sel, marker)
+                            }
+                            typed => {
+                                let Some(ch) = typed.chars().next() else { continue; };
+                                let pairs = service.as_ref().map_or(DEFAULT_EDITOR_PAIRS, |s| s.auto_close_pairs());
+                                editing::type_char(&text, sel, ch, pairs)
+                            }
+                        };
+                        // A command is its own undo step; typing joins the
+                        // burst around it.
+                        if is_command {
+                            history.break_group();
+                        }
+                        if edit.text != text {
+                            history.record(&text, sel.cursor, std::time::Instant::now());
+                        }
+                        if is_command {
+                            history.break_group();
+                        }
+                        edit
+                    }
+                };
+                apply_script_edit(state, edit, &queue);
+            }
+            SlintAction::ScriptFind(query, match_case) => {
+                let Some(ref mut state) = res.state else { continue; };
+                state.find_query = query;
+                state.find_match_case = match_case;
+                let caret = caret_byte_offset(&state.script_editor_content, state.completion_line, state.completion_col);
+                let matches = crate::script_editor::editing::find_all(
+                    &state.script_editor_content, &state.find_query, state.find_match_case,
+                );
+                state.find_index = matches.iter().position(|&(a, _)| a >= caret).unwrap_or(0);
+                select_find_match(state, &matches, ui);
+            }
+            SlintAction::ScriptFindStep(forward) => {
+                let Some(ref mut state) = res.state else { continue; };
+                let matches = crate::script_editor::editing::find_all(
+                    &state.script_editor_content, &state.find_query, state.find_match_case,
+                );
+                let n = matches.len();
+                if n > 0 {
+                    state.find_index = if forward {
+                        (state.find_index + 1) % n
+                    } else {
+                        (state.find_index + n - 1) % n
+                    };
+                }
+                select_find_match(state, &matches, ui);
+            }
+            SlintAction::ScriptReplace(with) => {
+                use crate::script_editor::editing::{self, Selection};
+                let Some(ref mut state) = res.state else { continue; };
+                let text = state.script_editor_content.clone();
+                let matches = editing::find_all(&text, &state.find_query, state.find_match_case);
+                if matches.is_empty() {
+                    select_find_match(state, &matches, ui);
+                    continue;
+                }
+                let range = matches[state.find_index.min(matches.len() - 1)];
+                let edit = editing::replace_ranges(&text, &[range], &with, Selection::caret(range.0));
+                record_script_step(state, res.tab_manager.as_deref(), &text, range.0);
+                apply_script_edit(state, edit, &queue);
+                // On to the next match, in the new text.
+                let next = editing::find_all(&state.script_editor_content, &state.find_query, state.find_match_case);
+                let after = range.0 + with.len();
+                state.find_index = next.iter().position(|&(a, _)| a >= after).unwrap_or(0);
+                select_find_match(state, &next, ui);
+            }
+            SlintAction::ScriptReplaceAll(with) => {
+                use crate::script_editor::editing::{self, Selection};
+                let Some(ref mut state) = res.state else { continue; };
+                let text = state.script_editor_content.clone();
+                let matches = editing::find_all(&text, &state.find_query, state.find_match_case);
+                if matches.is_empty() {
+                    select_find_match(state, &matches, ui);
+                    continue;
+                }
+                let caret = caret_byte_offset(&text, state.completion_line, state.completion_col);
+                let edit = editing::replace_ranges(&text, &matches, &with, Selection::caret(caret));
+                record_script_step(state, res.tab_manager.as_deref(), &text, caret);
+                apply_script_edit(state, edit, &queue);
+                state.find_index = 0;
+                if let Some(ui) = ui {
+                    ui.set_script_find_status(format!("Replaced {}", matches.len()).into());
+                }
+            }
+            SlintAction::ScriptFindClose => {
+                let Some(ref mut state) = res.state else { continue; };
+                state.find_query.clear();
+                state.find_index = 0;
+                if let Some(ui) = ui {
+                    ui.set_script_find_status("".into());
+                }
+            }
+            SlintAction::ScriptGoToLine(line) => {
+                let Some(ref mut state) = res.state else { continue; };
+                let line = line.max(1);
+                let at = crate::script_editor::editing::line_start_offset(&state.script_editor_content, line as usize);
+                state.pending_external_edit = Some((at as u32, at as u32));
+                if let Some(ui) = ui {
+                    ui.set_script_scroll_to_line(line);
+                }
+            }
+            SlintAction::ReorderCenterTab(from, slot) => {
+                // Slint sends a 0-based tab index and a drop slot, both into
+                // the non-scene tabs list. CenterTabManager has Scene at 0,
+                // so both shift by one. The fallback applies the same slot
+                // semantics to StudioState directly.
+                if from < 0 || slot < 0 {
+                    // Nothing to move: no tab, or no gap under the pointer.
+                } else if let Some(ref mut mgr) = res.tab_manager {
+                    mgr.move_tab_to_slot((from as usize) + 1, (slot as usize) + 1);
                 } else if let Some(ref mut s) = res.state {
-                    s.pending_reorder = Some((from, to));
+                    s.pending_reorder = Some((from, slot));
+                }
+            }
+            SlintAction::CloseOtherTabs(idx) => {
+                if let Some(ref mut mgr) = res.tab_manager {
+                    let keep = (idx + 1).max(0) as usize;
+                    if let Some(id) = mgr.tabs.get(keep).map(|t| t.id) {
+                        mgr.request_close(super::center_tabs::TabCloseRequest::Others(id));
+                    }
+                }
+            }
+            SlintAction::CloseTabsToRight(idx) => {
+                if let Some(ref mut mgr) = res.tab_manager {
+                    let from = (idx + 1).max(0) as usize;
+                    if let Some(id) = mgr.tabs.get(from).map(|t| t.id) {
+                        mgr.request_close(super::center_tabs::TabCloseRequest::ToRight(id));
+                    }
+                }
+            }
+            SlintAction::CloseAllTabs => {
+                if let Some(ref mut mgr) = res.tab_manager {
+                    mgr.request_close(super::center_tabs::TabCloseRequest::All);
+                }
+            }
+            SlintAction::RevealTabInExplorer(idx) => {
+                // Same path as the Soul panel's "Reveal": select the tab's
+                // instance, which the Explorer scrolls to and highlights.
+                let entity = res.tab_manager.as_ref()
+                    .and_then(|mgr| mgr.tabs.get((idx + 1).max(0) as usize))
+                    .and_then(|tab| tab.entity);
+                if let Some(entity) = entity {
+                    events.plugin_action.write(crate::studio_plugins::PluginActionEvent::new(
+                        format!("soul:reveal_in_explorer:{}", entity.index().index()),
+                    ));
+                }
+            }
+            SlintAction::SortCenterTabs(by) => {
+                let key = match by.as_str() {
+                    "type" => Some(super::center_tabs::TabSortKey::Type),
+                    "name" => Some(super::center_tabs::TabSortKey::Name),
+                    _ => None,
+                };
+                if let (Some(key), Some(mgr)) = (key, res.tab_manager.as_mut()) {
+                    mgr.sort_tabs(key);
                 }
             }
             SlintAction::ToggleTabMode(studio_idx) => {
@@ -7398,40 +9223,151 @@ fn drain_slint_actions(
                 events.terrain_toggle.write(super::spawn_events::ToggleTerrainEditEvent);
             }
             SlintAction::SetTerrainBrush(brush) => {
-                use eustress_common::terrain::BrushMode;
-                let mode = match brush.to_lowercase().as_str() {
-                    "raise" => Some(BrushMode::Raise),
-                    "lower" => Some(BrushMode::Lower),
-                    "smooth" => Some(BrushMode::Smooth),
-                    "flatten" => Some(BrushMode::Flatten),
-                    "paint" | "painttexture" => Some(BrushMode::PaintTexture),
-                    "voxeladd" => Some(BrushMode::VoxelAdd),
-                    "voxelremove" => Some(BrushMode::VoxelRemove),
-                    "voxelsmooth" => Some(BrushMode::VoxelSmooth),
-                    "region" => Some(BrushMode::Region),
-                    "fill" => Some(BrushMode::Fill),
-                    _ => None,
+                use eustress_common::terrain::TerrainTool;
+                let id = brush.to_lowercase();
+                // "leave" comes from the lit tool's own ribbon button: the
+                // terrain tools are on, so the toggle leaves them.
+                if id == "leave" {
+                    events.terrain_toggle.write(super::spawn_events::ToggleTerrainEditEvent);
+                    continue;
+                }
+                // The brush ids from before the seven tools, as a tool and
+                // its mode, so older callers (menus, scripts) still land.
+                let (tool, mode) = match id.as_str() {
+                    "raise" => (Some(TerrainTool::Sculpt), Some(0)),
+                    "lower" => (Some(TerrainTool::Sculpt), Some(1)),
+                    "voxeladd" => (Some(TerrainTool::Draw), Some(0)),
+                    "voxelremove" => (Some(TerrainTool::Draw), Some(1)),
+                    "voxelsmooth" => (Some(TerrainTool::Smooth), None),
+                    "painttexture" => (Some(TerrainTool::Paint), Some(0)),
+                    "fill" => (Some(TerrainTool::Region), Some(2)),
+                    other => (TerrainTool::from_id(other), None),
                 };
-                if let Some(m) = mode {
-                    events.terrain_brush.write(super::spawn_events::SetTerrainBrushEvent { mode: m });
+                match tool {
+                    Some(tool) => {
+                        events.terrain_brush.write(super::spawn_events::SetTerrainBrushEvent { tool, mode });
+                    }
+                    None => warn!("Terrain tools: unknown tool id {id:?}"),
                 }
             }
-            SlintAction::BrushSizeChanged(size) => {
-                // Update brush size in terrain state
-                if let Some(ref mut brush_state) = res.brush_state {
-                    brush_state.size = size;
+            SlintAction::SetTerrainPaintMaterial(slot) => {
+                use eustress_common::terrain::{TerrainMaterial, TerrainMode, TerrainTool, MATERIAL_SLOT_NONE};
+                let Some(slot) = u8::try_from(slot).ok().filter(|slot| *slot != MATERIAL_SLOT_NONE) else {
+                    warn!("Terrain paint material: {slot} is not a material slot");
+                    continue;
+                };
+                // Built-in slots always exist; a custom one must be in the
+                // table, or the brush would lay down cells nothing draws.
+                let defined = match res.terrain_material_slots.as_deref() {
+                    Some(slots) => slots.get(slot).is_some(),
+                    None => TerrainMaterial::from_u8(slot).is_some(),
+                };
+                if !defined {
+                    warn!("Terrain paint material: slot {slot} is not defined in this Space");
+                    continue;
+                }
+                let tools_off = res.terrain_mode.as_deref().is_some_and(|mode| *mode != TerrainMode::Editor);
+                let Some(ref mut brush) = res.terrain_brush else { continue };
+                brush.paint_material = slot;
+                // Picking a material makes the next stroke lay it: a tool
+                // that uses one (Draw, Paint) keeps it; any other tool gives
+                // way to Paint. Either way the terrain tools come on, through
+                // the same event as the ribbon's buttons, when they were off.
+                let uses_material = matches!(brush.tool, TerrainTool::Draw | TerrainTool::Paint);
+                if !uses_material || tools_off {
+                    let tool = if uses_material { brush.tool } else { TerrainTool::Paint };
+                    events.terrain_brush.write(super::spawn_events::SetTerrainBrushEvent { tool, mode: None });
                 }
             }
-            SlintAction::BrushStrengthChanged(strength) => {
-                // Update brush strength in terrain state
-                if let Some(ref mut brush_state) = res.brush_state {
-                    brush_state.strength = strength;
-                }
-            }
-            SlintAction::BrushFalloffChanged(falloff) => {
-                // Update brush falloff in terrain state
-                if let Some(ref mut brush_state) = res.brush_state {
-                    brush_state.falloff = falloff;
+            SlintAction::AddTerrainMaterial(name) => {
+                use eustress_common::terrain::{
+                    write_custom_material_toml, MaterialCell, TerrainMaterial, TerrainMode, TerrainTool,
+                };
+                let Some(terrain_dir) = res
+                    .terrain_material_source
+                    .as_deref()
+                    .and_then(|source| source.terrain_dir())
+                    .map(|dir| dir.to_path_buf())
+                else {
+                    if let Some(ref mut out) = res.output {
+                        out.error("Add material: open a Space first");
+                    }
+                    continue;
+                };
+                let Some(slots) = res.terrain_material_slots.as_deref() else {
+                    continue;
+                };
+                // Only a heightfield terrain can be painted, and only one
+                // can be saved: a procedural root (empty raster) never writes
+                // _terrain.toml, and without it the Space loader no longer
+                // treats Workspace/Terrain as terrain storage, so a materials/
+                // folder written here would come back as stray Folder
+                // entities on the next open.
+                let cells: &[MaterialCell] = match queries.terrain_field.single() {
+                    Ok((_, data, _)) if !data.height_cache.is_empty() => &data.material_cache,
+                    _ => {
+                        if let Some(ref mut out) = res.output {
+                            out.error("Add material: generate or import a heightfield terrain first");
+                        }
+                        continue;
+                    }
+                };
+                // A slot some cells still name (its file was deleted) is not
+                // free: the new material would silently take those cells over.
+                let Some(slot) = slots.next_unused_custom_slot(cells) else {
+                    if let Some(ref mut out) = res.output {
+                        out.error("Add material: every custom material slot is in use");
+                    }
+                    continue;
+                };
+                // The new material starts from the one picked for painting,
+                // so "pick Rock, type Red Rock, Add" gives a Rock variant.
+                let picked = res
+                    .terrain_brush
+                    .as_deref()
+                    .map_or(TerrainMaterial::Grass.to_u8(), |brush| brush.paint_material);
+                let base = slots.get(picked).map_or(TerrainMaterial::Grass, |def| def.base);
+                let name = match name.trim() {
+                    "" => format!("Material {slot}"),
+                    typed => typed.to_string(),
+                };
+                match write_custom_material_toml(&terrain_dir, slot, &name, base) {
+                    Ok(path) => {
+                        // Read back at once rather than waiting on the file
+                        // watcher, so the new slot is drawable and pickable
+                        // from the next frame.
+                        if let Some(ref mut source) = res.terrain_material_source {
+                            source.request_reload();
+                        }
+                        // As with a pick: the new material is the one the
+                        // next stroke lays, with Paint armed unless Draw is.
+                        let tools_off =
+                            res.terrain_mode.as_deref().is_some_and(|mode| *mode != TerrainMode::Editor);
+                        if let Some(ref mut brush) = res.terrain_brush {
+                            brush.paint_material = slot;
+                            let uses_material = matches!(brush.tool, TerrainTool::Draw | TerrainTool::Paint);
+                            if !uses_material || tools_off {
+                                let tool = if uses_material { brush.tool } else { TerrainTool::Paint };
+                                events
+                                    .terrain_brush
+                                    .write(super::spawn_events::SetTerrainBrushEvent { tool, mode: None });
+                            }
+                        }
+                        if let Some(ref mut out) = res.output {
+                            out.info(format!("Added terrain material \"{name}\" in slot {slot}: {}", path.display()));
+                        }
+                        events.notification.write(super::notifications::NotificationEvent::success(
+                            super::notifications::NotificationCategory::Editor,
+                            "Terrain material added",
+                            format!("{name}, based on {}", base.name()),
+                        ));
+                    }
+                    Err(error) => {
+                        if let Some(ref mut out) = res.output {
+                            out.error(format!("Add material: {error}"));
+                        }
+                        warn!("Add terrain material failed: {error}");
+                    }
                 }
             }
             SlintAction::ImportHeightmap => {
@@ -7455,7 +9391,7 @@ fn drain_slint_actions(
             SlintAction::ExportHeightmap => {
                 // Refuse BEFORE opening the dialog — asking for a filename and
                 // then writing nothing is what this button used to do.
-                let Ok((config, data)) = queries.terrain_field.single() else {
+                let Ok((config, data, _)) = queries.terrain_field.single() else {
                     if let Some(ref mut out) = res.output {
                         out.error("Export Heightmap: no terrain in the scene");
                     }
@@ -7478,8 +9414,10 @@ fn drain_slint_actions(
                 };
 
                 // 16-bit greyscale, the same normalization the .r16 chunks use
-                // (`value * 65535`, world Y = value * height_scale) so the file
-                // round-trips through Import Heightmap.
+                // (`value * 65535`, world Y = height_offset + value *
+                // height_scale) so the file round-trips through Import
+                // Heightmap. A PNG has nowhere to store the band, so the
+                // message below reports it.
                 let (w, h) = (data.cache_width, data.cache_height);
                 let pixels: Vec<u16> = data
                     .height_cache
@@ -7491,9 +9429,10 @@ fn drain_slint_actions(
                         Ok(()) => {
                             if let Some(ref mut out) = res.output {
                                 out.info(format!(
-                                    "Exported {}x{} heightmap (height_scale {:.1} m) to {}",
+                                    "Exported {}x{} heightmap (height_offset {:.1} m, height_scale {:.1} m) to {}",
                                     w,
                                     h,
+                                    config.height_offset,
                                     config.height_scale,
                                     path.display()
                                 ));
@@ -7518,60 +9457,52 @@ fn drain_slint_actions(
             }
             
             // Layout
-            SlintAction::ApplyLayoutPreset(preset) => {
-                // Apply preset layout configurations
-                if let Some(ref mut s) = res.state {
-                    match preset {
-                        0 => { // Default
-                            s.show_explorer = true;
-                            s.show_properties = true;
-                            s.show_output = true;
-                        }
-                        1 => { // Minimal — hide side panels
-                            s.show_explorer = false;
-                            s.show_properties = false;
-                            s.show_output = false;
-                        }
-                        2 => { // Code — explorer + output, no properties
-                            s.show_explorer = true;
-                            s.show_properties = false;
-                            s.show_output = true;
-                        }
-                        3 => { // Build — all panels visible
-                            s.show_explorer = true;
-                            s.show_properties = true;
-                            s.show_output = true;
-                        }
-                        _ => {}
-                    }
-                }
-            }
             SlintAction::SaveLayoutToFile => {
-                if let Some(ref es) = res.editor_settings {
-                    if let Err(e) = es.save() {
-                        if let Some(ref mut out) = res.output {
-                            out.info(format!("Failed to save layout: {}", e));
-                        }
-                    } else if let Some(ref mut out) = res.output {
-                        out.info("Layout saved".to_string());
+                let Some(ui) = ui else { continue };
+                let Some(path) = rfd::FileDialog::new()
+                    .add_filter("Studio layout", &["json"])
+                    .set_file_name("layout.json")
+                    .set_title("Save Layout")
+                    .save_file()
+                else {
+                    continue;
+                };
+                let result = serde_json::to_string_pretty(&PanelLayout::read(ui))
+                    .map_err(|e| e.to_string())
+                    .and_then(|json| std::fs::write(&path, json).map_err(|e| e.to_string()));
+                if let Some(ref mut out) = res.output {
+                    match result {
+                        Ok(()) => out.info(format!("Layout saved to {}", path.display())),
+                        Err(e) => out.error(format!("Could not save the layout: {e}")),
                     }
                 }
             }
             SlintAction::LoadLayoutFromFile => {
-                // Reload editor settings from disk
-                let loaded = crate::editor_settings::EditorSettings::load();
-                if let Some(ref mut es) = res.editor_settings {
-                    **es = loaded;
-                    if let Some(ref mut out) = res.output {
-                        out.info("Layout loaded".to_string());
+                let Some(ui) = ui else { continue };
+                let Some(path) = rfd::FileDialog::new()
+                    .add_filter("Studio layout", &["json"])
+                    .set_title("Import Layout")
+                    .pick_file()
+                else {
+                    continue;
+                };
+                let layout = std::fs::read_to_string(&path)
+                    .map_err(|e| e.to_string())
+                    .and_then(|text| serde_json::from_str::<PanelLayout>(&text).map_err(|e| e.to_string()));
+                match layout {
+                    // Panel visibility flows back into StudioState through
+                    // `sync_bevy_to_slint`'s reconciliation.
+                    Ok(layout) => {
+                        layout.apply(ui);
+                        if let Some(ref mut out) = res.output {
+                            out.info(format!("Layout imported from {}", path.display()));
+                        }
                     }
-                }
-            }
-            SlintAction::ResetLayoutToDefault => {
-                if let Some(ref mut s) = res.state {
-                    s.show_explorer = true;
-                    s.show_properties = true;
-                    s.show_output = true;
+                    Err(e) => {
+                        if let Some(ref mut out) = res.output {
+                            out.error(format!("Could not import the layout: {e}"));
+                        }
+                    }
                 }
             }
             SlintAction::ToggleThemeEditor => {
@@ -7691,6 +9622,53 @@ fn drain_slint_actions(
                 }
                 if let Some(ref mut out) = res.output {
                     out.info(format!("Mode: {}", id));
+                }
+            }
+            SlintAction::SyntheticPointer { x, y, button, action } => {
+                // Agent-driven pointer input. Goes through the SAME
+                // `dispatch_event` calls the real mouse path uses, so Slint
+                // cannot tell the difference and hover/press/release state
+                // stays consistent. Coordinates are logical (already divided
+                // by the scale factor), matching what the real path computes.
+                let Some(ctx) = slint_context.as_ref() else {
+                    if let Some(ref mut out) = res.output {
+                        out.warn("Synthetic pointer ignored: the Slint UI is not running.");
+                    }
+                    continue;
+                };
+                let position = LogicalPosition::new(x, y);
+                let btn = match button.as_str() {
+                    "right" => PointerEventButton::Right,
+                    "middle" => PointerEventButton::Middle,
+                    _ => PointerEventButton::Left,
+                };
+                let win = &ctx.adapter.slint_window;
+                // Always move first: Slint resolves which element is under
+                // the pointer from the move, so a press without one lands on
+                // whatever was last hovered rather than the target.
+                win.dispatch_event(WindowEvent::PointerMoved { position });
+                match action.as_str() {
+                    "move" => {}
+                    "press" => {
+                        win.dispatch_event(WindowEvent::PointerPressed { position, button: btn });
+                    }
+                    "release" => {
+                        win.dispatch_event(WindowEvent::PointerReleased { position, button: btn });
+                    }
+                    "double" => {
+                        for _ in 0..2 {
+                            win.dispatch_event(WindowEvent::PointerPressed { position, button: btn });
+                            win.dispatch_event(WindowEvent::PointerReleased { position, button: btn });
+                        }
+                    }
+                    // "click" and anything else already validated upstream.
+                    _ => {
+                        win.dispatch_event(WindowEvent::PointerPressed { position, button: btn });
+                        win.dispatch_event(WindowEvent::PointerReleased { position, button: btn });
+                    }
+                }
+                if let Some(ref mut out) = res.output {
+                    out.info(format!("Agent pointer: {action} {button} at ({x:.0}, {y:.0})"));
                 }
             }
             SlintAction::SelectSubmode(mode_id, submode_id) => {
@@ -8218,32 +10196,7 @@ fn drain_slint_actions(
                         .and_then(|es| es.file_path_cache.get(&id).cloned());
                     if let Some(path) = file_path {
                         if path.is_file() {
-                            let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
-                            if super::file_icons::opens_externally(ext) {
-                                // Documents / presentations / spreadsheets /
-                                // media / archives / binaries (and unknown
-                                // types) — hand off to the OS default app
-                                // (PowerPoint, Word, a PDF viewer, …) rather
-                                // than the in-engine text editor.
-                                match open::that(&path) {
-                                    Ok(_) => {
-                                        if let Some(ref mut out) = res.output {
-                                            out.info(format!("Opened in default app: {}", path.display()));
-                                        }
-                                    }
-                                    Err(e) => {
-                                        if let Some(ref mut out) = res.output {
-                                            out.error(format!("Could not open {}: {}", path.display(), e));
-                                        }
-                                    }
-                                }
-                            } else if let Some(ref mut mgr) = res.tab_manager {
-                                // Editable text / code / config → in-engine tab editor.
-                                let idx = mgr.open_file(&path);
-                                if let Some(ref mut out) = res.output {
-                                    out.info(format!("Opened: {} (tab {})", path.display(), idx));
-                                }
-                            }
+                            open_explorer_file(&path, res.tab_manager.as_deref_mut(), res.output.as_deref_mut());
                         } else if path.is_dir() {
                             // Double-click directory — toggle expand
                             if let Some(ref mut es) = res.explorer_state {
@@ -8715,6 +10668,119 @@ fn drain_slint_actions(
                 }
             }
 
+            // Parameters "+" → fill the lists, reset the modal, open it.
+            SlintAction::ParameterAddRequested => {
+                let Some(entity) = parameter_target(&res, &queries) else {
+                    if let Some(ref mut out) = res.output {
+                        out.error("Select an instance before adding a Parameter".to_string());
+                    }
+                    continue;
+                };
+                if !queries.parameters.contains(entity) {
+                    if let Some(ref mut out) = res.output {
+                        out.error("This instance cannot hold Parameters".to_string());
+                    }
+                    continue;
+                }
+                ensure_parameters_synced(entity, &mut queries, &mut commands);
+                if let Some(ui) = ui {
+                    fill_parameter_lists(ui, entity, &res, &queries);
+                    ui.set_parameter_dialog_target(parameter_target_label(entity, &queries).into());
+                    ui.set_parameter_dialog_is_edit(false);
+                    ui.set_parameter_dialog_original("".into());
+                    ui.set_parameter_dialog_domain(eustress_common::parameters::DEFAULT_PARAMETER_DOMAIN.into());
+                    ui.set_parameter_dialog_name("".into());
+                    ui.set_parameter_dialog_type("String".into());
+                    ui.set_parameter_dialog_value("".into());
+                    ui.set_parameter_dialog_bound(false);
+                    ui.set_parameter_dialog_connector("".into());
+                    ui.set_parameter_dialog_field("".into());
+                    ui.set_parameter_dialog_refresh("".into());
+                    ui.set_parameter_dialog_error("".into());
+                    ui.set_show_parameter_dialog(true);
+                }
+            }
+
+            // Gear on a Parameter row → open the modal prefilled, binding
+            // included (the row carries only the value and its type).
+            SlintAction::ParameterEditRequested(label) => {
+                let Some(entity) = parameter_target(&res, &queries) else { continue };
+                ensure_parameters_synced(entity, &mut queries, &mut commands);
+                let (domain, key) = crate::space::parameters_runtime::label_parts(&label);
+                let found = queries.parameters.get(entity).ok().and_then(|(params, _)| {
+                    let value = params.get(&domain, &key)?.clone();
+                    Some((value, params.binding(&domain, &key).cloned().unwrap_or_default()))
+                });
+                let Some((value, binding)) = found else {
+                    if let Some(ref mut out) = res.output {
+                        out.error(format!("This instance has no Parameter '{label}'"));
+                    }
+                    continue;
+                };
+                if let Some(ui) = ui {
+                    fill_parameter_lists(ui, entity, &res, &queries);
+                    ui.set_parameter_dialog_target(parameter_target_label(entity, &queries).into());
+                    ui.set_parameter_dialog_is_edit(true);
+                    ui.set_parameter_dialog_original(label.as_str().into());
+                    ui.set_parameter_dialog_domain(domain.as_str().into());
+                    ui.set_parameter_dialog_name(key.as_str().into());
+                    ui.set_parameter_dialog_type(value.type_name().into());
+                    ui.set_parameter_dialog_value(value.edit_string().into());
+                    ui.set_parameter_dialog_bound(binding.is_sourced());
+                    ui.set_parameter_dialog_connector(binding.connector.clone().unwrap_or_default().into());
+                    ui.set_parameter_dialog_field(binding.field.clone().unwrap_or_default().into());
+                    ui.set_parameter_dialog_refresh(
+                        binding.refresh_seconds.map(|s| s.to_string()).unwrap_or_default().into(),
+                    );
+                    ui.set_parameter_dialog_error("".into());
+                    ui.set_show_parameter_dialog(true);
+                }
+            }
+
+            // Add/Edit Parameter modal confirmed → apply, or say why not in
+            // the modal, which stays open so the mistake is fixed in place.
+            // Changed<InstanceParameters> → parameters_runtime saves it and,
+            // when it is bound, reads its Connector.
+            SlintAction::ParameterConfirmed => {
+                let Some(ui) = ui else { continue };
+                let Some(entity) = parameter_target(&res, &queries) else {
+                    ui.set_parameter_dialog_error("Select an instance first.".into());
+                    continue;
+                };
+                ensure_parameters_synced(entity, &mut queries, &mut commands);
+                let draft = read_parameter_draft(ui);
+                let Ok((mut params, _)) = queries.parameters.get_mut(entity) else {
+                    ui.set_parameter_dialog_error("This instance cannot hold Parameters.".into());
+                    continue;
+                };
+                match crate::space::parameters_runtime::apply_parameter_draft(&mut params, &draft) {
+                    Ok(label) => {
+                        ui.set_show_parameter_dialog(false);
+                        ui.set_parameter_dialog_error("".into());
+                        if let Some(ref mut out) = res.output {
+                            out.info(format!("Parameter '{label}' set ({})", draft.type_name));
+                        }
+                        refresh_parameter_rows(&mut res);
+                    }
+                    Err(why) => ui.set_parameter_dialog_error(why.into()),
+                }
+            }
+
+            // Trash on a Parameter row → remove it and any binding.
+            SlintAction::ParameterDeleted(label) => {
+                let Some(entity) = parameter_target(&res, &queries) else { continue };
+                ensure_parameters_synced(entity, &mut queries, &mut commands);
+                let (domain, key) = crate::space::parameters_runtime::label_parts(&label);
+                if let Ok((mut params, _)) = queries.parameters.get_mut(entity) {
+                    if params.remove(&domain, &key).is_some() {
+                        if let Some(ref mut out) = res.output {
+                            out.info(format!("Parameter '{label}' deleted"));
+                        }
+                    }
+                }
+                refresh_parameter_rows(&mut res);
+            }
+
             // Tag chip / registry "+" → add a tag to the selected entity. Tags
             // are re-inserted via `commands` (a `&mut Tags` query would alias the
             // read-only `entity_tags`); Changed<Tags> → save + panel refresh.
@@ -8908,6 +10974,22 @@ fn drain_slint_actions(
 
             // Properties write-back — apply edits from Slint properties panel to ECS
             SlintAction::PropertyChanged(key, raw_val) => {
+                // A Parameter row edits as `Parameter:<label>` (see
+                // properties.slint), so it never collides with an Attribute or
+                // a built-in property of the same name.
+                if let Some(label) = key.strip_prefix("Parameter:") {
+                    if let Some(entity) = parameter_target(&res, &queries) {
+                        ensure_parameters_synced(entity, &mut queries, &mut commands);
+                        let edited = queries.parameters.get_mut(entity).ok().and_then(|(mut params, _)| {
+                            crate::space::parameters_runtime::edit_parameter_value(&mut params, label, &raw_val)
+                        });
+                        if let (Some(Err(why)), Some(out)) = (edited, res.output.as_mut()) {
+                            out.warn(why);
+                        }
+                    }
+                    refresh_parameter_rows(&mut res);
+                    continue;
+                }
                 // BrickColor is a presentation-only alias for Color: the wheel
                 // picker writes a "wheel|name|r, g, b" payload. Only the RGB is
                 // applied, through the exact same path the Color field uses.
@@ -9038,6 +11120,118 @@ fn drain_slint_actions(
                     }
                     continue;
                 }
+                // Particle simulations: fields come from the classes' field
+                // tables (parse, apply, undo, save). Keys that are not fields
+                // of the selected class, like Name, fall through.
+                if let Some(entity) = res.explorer_state.as_ref().and_then(|es| match &es.selected {
+                    SelectedItem::Entity(e) => Some(*e),
+                    _ => None,
+                }) {
+                    let toml_path = queries.instance_files.get(entity).ok().map(|f| f.toml_path.clone());
+                    if let Some(outcome) = super::particle_sim_panel::handle_edit(
+                        entity,
+                        &key,
+                        &raw_val,
+                        toml_path.as_deref(),
+                        &mut queries.particle_sim_edit,
+                    ) {
+                        match outcome {
+                            Ok(done) => {
+                                if let (Some(action), Some(stack)) = (done.undo, res.undo_stack.as_mut()) {
+                                    stack.push(action);
+                                }
+                                if !done.message.is_empty() {
+                                    if let Some(ref mut out) = res.output {
+                                        out.info(done.message);
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                if let Some(ref mut out) = res.output {
+                                    out.error(e);
+                                }
+                            }
+                        }
+                        if let Some(ref mut s) = res.state {
+                            s.last_properties_hash = 0;
+                            s.frames_since_selection_change = 0;
+                        }
+                        continue;
+                    }
+                    // Light classes: their Light rows write the class
+                    // component (which relights live), the file's `[light]`
+                    // section and the undo stack. Keys that are not light
+                    // fields (Name, Position, Rotation) fall through.
+                    if let Some(outcome) = super::light_panel::handle_edit(
+                        entity,
+                        &key,
+                        &raw_val,
+                        res.display_unit
+                            .as_deref()
+                            .map_or(eustress_common::units::ENGINE_NATIVE_UNIT, |u| u.0),
+                        toml_path.as_deref(),
+                        &mut queries.light_edit,
+                    ) {
+                        match outcome {
+                            Ok(done) => {
+                                if let (Some(action), Some(stack)) = (done.undo, res.undo_stack.as_mut()) {
+                                    stack.push(action);
+                                }
+                                if !done.message.is_empty() {
+                                    if let Some(ref mut out) = res.output {
+                                        out.info(done.message);
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                if let Some(ref mut out) = res.output {
+                                    out.error(e);
+                                }
+                            }
+                        }
+                        if let Some(ref mut s) = res.state {
+                            s.last_properties_hash = 0;
+                            s.frames_since_selection_change = 0;
+                        }
+                        continue;
+                    }
+                    // Sun, Moon, Sky, Atmosphere and Clouds: their rows
+                    // write the class component (the renderer follows it
+                    // the same frame), the file's own section and the undo
+                    // stack. A
+                    // Sun's Color is its light's, not a Part colour, so this
+                    // runs before the generic Color/Enabled handling.
+                    if let Some(outcome) = super::celestial_panel::handle_edit(
+                        entity,
+                        &key,
+                        &raw_val,
+                        toml_path.as_deref(),
+                        &mut queries.celestial_edit,
+                    ) {
+                        match outcome {
+                            Ok(done) => {
+                                if let (Some(action), Some(stack)) = (done.undo, res.undo_stack.as_mut()) {
+                                    stack.push(action);
+                                }
+                                if !done.message.is_empty() {
+                                    if let Some(ref mut out) = res.output {
+                                        out.info(done.message);
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                if let Some(ref mut out) = res.output {
+                                    out.error(e);
+                                }
+                            }
+                        }
+                        if let Some(ref mut s) = res.state {
+                            s.last_properties_hash = 0;
+                            s.frames_since_selection_change = 0;
+                        }
+                        continue;
+                    }
+                }
                 // Decode rotation step protocol: "step:axis:+1:x,y,z" or "step:axis:-1:x,y,z"
                 // Emitted by RotationVec3Row +/- buttons to avoid Slint float-to-string conversion.
                 let val: String = if raw_val.starts_with("step:") {
@@ -9118,114 +11312,31 @@ fn drain_slint_actions(
                     let undo_prop = canonical_undo_property(&key);
                     let undo_old =
                         undo_prop.and_then(|p| snapshot_panel_property(p, entity, &queries));
+                    // Position and Rotation typed with several parts selected
+                    // move the whole group (see those arms), so the undo step
+                    // must cover every part they touch, not only the one the
+                    // panel shows; recording just the primary left the rest
+                    // moved after Ctrl+Z.
+                    let group_transform_before: Vec<(Entity, Vec3, Quat)> =
+                        if matches!(undo_prop, Some("Position") | Some("Orientation")) {
+                            let mut targets: Vec<Entity> = queries.selected_entities.iter().collect();
+                            if !targets.contains(&entity) {
+                                targets.push(entity);
+                            }
+                            targets
+                                .into_iter()
+                                .filter_map(|e| queries.transforms.get(e).ok().map(|t| (e, t.translation, t.rotation)))
+                                .collect()
+                        } else {
+                            Vec::new()
+                        };
 
                     match key.as_str() {
                         // Instance fields
                         "Name" => {
-                            if let Ok((_, mut inst)) = queries.instances.get_mut(entity) {
-                                inst.name = val.clone();
-                            }
-                            commands.entity(entity).insert(Name::new(val.clone()));
-
-                            // Rename on disk. Modern instances live in
-                            // `Folder/_instance.toml` — rename the FOLDER,
-                            // not the inner file. Legacy flat files
-                            // (`Name.glb.toml`, `Name.part.toml`) still
-                            // get filename rename. The old code treated
-                            // every `_instance.toml` as a flat file and
-                            // renamed the inner file to `NewName.toml`,
-                            // leaving the parent folder at its hex-
-                            // suffixed insert-time name.
-                            if let Ok(mut inst_file) = queries.instance_files.get_mut(entity) {
-                                let old_path = inst_file.toml_path.clone();
-                                let is_folder_instance = old_path
-                                    .file_name()
-                                    .map(|n| n.to_string_lossy() == "_instance.toml")
-                                    .unwrap_or(false);
-
-                                let (old_fs_path, new_fs_path, new_toml_path) = if is_folder_instance {
-                                    // Folder-based: rename the folder + keep _instance.toml inside it.
-                                    let old_folder = old_path.parent().map(|p| p.to_path_buf());
-                                    let new_folder = old_folder
-                                        .as_ref()
-                                        .and_then(|f| f.parent())
-                                        .map(|gp| gp.join(&val));
-                                    match (old_folder, new_folder) {
-                                        (Some(of), Some(nf)) => {
-                                            let new_toml = nf.join("_instance.toml");
-                                            (of, nf, new_toml)
-                                        }
-                                        _ => {
-                                            // Can't resolve parent — fall back to no-op.
-                                            inst_file.name = val.clone();
-                                            continue;
-                                        }
-                                    }
-                                } else {
-                                    // Legacy flat file: rename the file itself, preserving extension chain.
-                                    let old_name = old_path.file_name().unwrap_or_default().to_string_lossy().to_string();
-                                    let ext = old_name.splitn(2, '.').nth(1).unwrap_or("glb.toml").to_string();
-                                    let new_filename = format!("{}.{}", val, ext);
-                                    let new_path = old_path.parent()
-                                        .unwrap_or(old_path.as_path())
-                                        .join(&new_filename);
-                                    (old_path.clone(), new_path.clone(), new_path)
-                                };
-
-                                if old_fs_path == new_fs_path {
-                                    // Name unchanged, just update display
-                                    inst_file.name = val.clone();
-                                } else if new_fs_path.exists() {
-                                    // Destination already exists — don't overwrite
-                                    if let Some(ref mut out) = res.output {
-                                        out.warning(format!(
-                                            "Cannot rename: '{}' already exists",
-                                            new_fs_path.file_name().unwrap_or_default().to_string_lossy()
-                                        ));
-                                    }
-                                } else {
-                                    // 1. Tell file watcher to ignore the rename's delete+create
-                                    //    events on both the old and new paths so it doesn't
-                                    //    respawn duplicates or despawn the live entity.
-                                    if let Some(ref mut registry) = res.file_registry {
-                                        registry.rename_in_progress.insert(old_path.clone());
-                                        registry.rename_in_progress.insert(old_fs_path.clone());
-                                        registry.rename_in_progress.insert(new_fs_path.clone());
-                                    }
-
-                                    // 2. Rename the folder (or file) on disk
-                                    match std::fs::rename(&old_fs_path, &new_fs_path) {
-                                        Ok(()) => {
-                                            // 3. Update InstanceFile component to point at the
-                                            //    new `_instance.toml` inside the renamed folder
-                                            //    (or the renamed flat file).
-                                            inst_file.toml_path = new_toml_path.clone();
-                                            inst_file.name = val.clone();
-
-                                            // 4. Update LoadedFromFile component if present —
-                                            //    this one tracks the containing folder (or
-                                            //    flat file path), not the TOML.
-                                            if let Ok((_, mut lff)) = queries.loaded_from_file.get_mut(entity) {
-                                                lff.path = new_fs_path.clone();
-                                            }
-
-                                            // 5. Update the file registry mapping
-                                            if let Some(ref mut registry) = res.file_registry {
-                                                let _ = registry.rename_file(&old_path, new_toml_path.clone());
-                                            }
-
-                                            info!("📝 Renamed {:?} → {:?}", old_fs_path, new_fs_path);
-                                        }
-                                        Err(e) => {
-                                            // Rename failed — clear the suppress flags
-                                            if let Some(ref mut registry) = res.file_registry {
-                                                registry.rename_in_progress.remove(&old_path);
-                                                registry.rename_in_progress.remove(&old_fs_path);
-                                                registry.rename_in_progress.remove(&new_fs_path);
-                                            }
-                                            warn!("Failed to rename {:?} → {:?}: {}", old_fs_path, new_fs_path, e);
-                                        }
-                                    }
+                            if let Err(problem) = rename_instance(entity, &val, &mut res, &mut queries, &mut commands) {
+                                if let Some(ref mut out) = res.output {
+                                    out.warning(problem);
                                 }
                             }
                         }
@@ -9639,6 +11750,36 @@ fn drain_slint_actions(
                                 }
                             }
                         }
+                        // The editor camera's Perspective rows (only it shows
+                        // them, see `camera_property_rows`). They are view
+                        // state, not document edits: no undo step, no TOML,
+                        // just the same command the ViewSelector sends.
+                        "ViewMode" => {
+                            let dimension = match val.trim().to_ascii_lowercase().as_str() {
+                                "2d" => Some(crate::camera_controller::ViewDimension::TwoD),
+                                "3d" => Some(crate::camera_controller::ViewDimension::ThreeD),
+                                _ => None,
+                            };
+                            if let Some(d) = dimension {
+                                crate::camera_controller::queue_view_command(
+                                    crate::camera_controller::ViewCommand::SetDimension(d),
+                                );
+                            }
+                        }
+                        "Projection" => {
+                            if let Some(command) = crate::camera_controller::ViewCommand::parse(&val) {
+                                if matches!(command, crate::camera_controller::ViewCommand::SetProjection(_)) {
+                                    crate::camera_controller::queue_view_command(command);
+                                }
+                            }
+                        }
+                        "OrthographicSize" => {
+                            if let Some(v) = parse_finite(val.trim()) {
+                                crate::camera_controller::queue_view_command(
+                                    crate::camera_controller::ViewCommand::SetOrthographicSize(v),
+                                );
+                            }
+                        }
                         // Camera FOV / clip planes — write straight to the
                         // live `Projection` component (same one the renderer
                         // reads every frame) so the change is visible in the
@@ -9861,6 +12002,36 @@ fn drain_slint_actions(
                                 } else {
                                     all_selected
                                 };
+                                // Record the resize here, as ONE step for every
+                                // part. The resize itself lands next frame (the
+                                // scale tool applies the event), so the generic
+                                // before/after snapshot below sees no change and
+                                // a typed Size was never undoable. CAD parts
+                                // resize through their feature tree and are
+                                // left to it.
+                                let mut old_states = Vec::new();
+                                let mut new_states = Vec::new();
+                                for target in &targets {
+                                    if queries.cad_parts.get(*target).is_ok() {
+                                        continue;
+                                    }
+                                    let (Ok(bp), Ok(t)) = (queries.base_parts.get(*target), queries.transforms.get(*target)) else {
+                                        continue;
+                                    };
+                                    if (bp.size - new_size).length() > 1e-6 {
+                                        old_states.push((target.to_bits(), t.translation.to_array(), bp.size.to_array()));
+                                        new_states.push((target.to_bits(), t.translation.to_array(), new_size.to_array()));
+                                    }
+                                }
+                                if !old_states.is_empty() {
+                                    if let Some(ref mut stack) = res.undo_stack {
+                                        let n = old_states.len();
+                                        stack.push_labeled(
+                                            format!("Resize {} object{}", n, if n == 1 { "" } else { "s" }),
+                                            crate::undo::Action::ScaleEntities { old_states, new_states },
+                                        );
+                                    }
+                                }
                                 for target in targets {
                                     events.resize_part_events.write(
                                         crate::scale_tool::ResizePartEvent {
@@ -10274,7 +12445,27 @@ fn drain_slint_actions(
                     // semantics). Other entities persist via the
                     // Changed<BasePart> save pipeline; undo is ONE
                     // ChangePropertyMulti covering the whole selection.
-                    if let (Some(prop), Some(old)) = (undo_prop, undo_old) {
+                    if !group_transform_before.is_empty() {
+                        let mut old_transforms = Vec::new();
+                        let mut new_transforms = Vec::new();
+                        for (e, pos, rot) in &group_transform_before {
+                            let Ok(t) = queries.transforms.get(*e) else { continue };
+                            if (t.translation - *pos).length() > 1e-6 || t.rotation.angle_between(*rot) > 1e-6 {
+                                old_transforms.push((e.to_bits(), pos.to_array(), rot.to_array()));
+                                new_transforms.push((e.to_bits(), t.translation.to_array(), t.rotation.to_array()));
+                            }
+                        }
+                        let n = old_transforms.len();
+                        if n > 0 {
+                            if let Some(ref mut stack) = res.undo_stack {
+                                let what = if undo_prop == Some("Orientation") { "Rotation" } else { "Position" };
+                                stack.push_labeled(
+                                    format!("Set {} ({} object{})", what, n, if n == 1 { "" } else { "s" }),
+                                    crate::undo::Action::TransformEntities { old_transforms, new_transforms },
+                                );
+                            }
+                        }
+                    } else if let (Some(prop), Some(old)) = (undo_prop, undo_old) {
                         if let Some(new) = snapshot_panel_property(prop, entity, &queries) {
                             if new != old {
                                 use crate::undo::PropertyValueSnapshot as S;
@@ -10565,10 +12756,11 @@ fn drain_slint_actions(
                                                 crate::space::service_loader::PropertyValue::Vec3([x as f64, y as f64, z as f64])
                                             })
                                         }
+                                        // A service's four-number values are colours,
+                                        // shown 0-255; stored 0-1.
                                         crate::space::service_loader::PropertyValue::Vec4(_) => {
-                                            parse_color4_value(&val).map(|(r, g, b, a)| {
-                                                crate::space::service_loader::PropertyValue::Vec4([r as f64, g as f64, b as f64, a as f64])
-                                            })
+                                            service_color_from_panel(&val)
+                                                .map(crate::space::service_loader::PropertyValue::Vec4)
                                         }
                                     };
                                     
@@ -10805,7 +12997,15 @@ fn drain_slint_actions(
                             entity,
                             name: inst.name.clone(),
                             class_name: inst.class_name.as_str().to_string(),
-                            parent: queries.hierarchy_parents.get(entity).ok().map(|c| c.0),
+                            // A pose anchor is not an instance: its part is
+                            // the parent.
+                            parent: queries.hierarchy_parents.get(entity).ok().map(|c| c.0).map(|p| {
+                                if queries.instances.get(p).is_err() {
+                                    queries.hierarchy_parents.get(p).map(|c| c.0).unwrap_or(p)
+                                } else {
+                                    p
+                                }
+                            }),
                         }
                     }).collect();
 
@@ -11162,12 +13362,26 @@ fn drain_slint_actions(
                         };
 
                         let now = chrono::Utc::now().to_rfc3339();
+                        // A light class is a light, not a block with a
+                        // light's name: no mesh, no size, and a `[light]`
+                        // section (the class defaults; this drain carries
+                        // part fields only) that `spawn_instance` turns into
+                        // its class component.
+                        let light_class = eustress_common::classes::ClassName::from_str(&inst.class_name)
+                            .ok()
+                            .filter(|c| eustress_common::plugins::light_classes::is_light_class(*c));
+                        let mut extra = std::collections::HashMap::new();
+                        if let Some(class) = light_class {
+                            if let Some(light) = eustress_common::plugins::light_classes::LightComponent::from_section(
+                                class,
+                                &eustress_common::plugins::light_classes::LightSection::default(),
+                            ) {
+                                extra.insert("light".to_string(), toml::Value::Table(light.to_section()));
+                            }
+                        }
                         let instance_def = crate::space::instance_loader::InstanceDefinition {
-                            // Parallel nuclear session added this field; generic
-                            // builders carry no reactor state.
-                            nuclear: None,
                             plasma: None,
-                            asset: Some(crate::space::instance_loader::AssetReference {
+                            asset: light_class.is_none().then(|| crate::space::instance_loader::AssetReference {
                                 mesh: mesh_path.to_string(),
                                 scene: "Scene0".to_string(),
                             }),
@@ -11180,7 +13394,7 @@ fn drain_slint_actions(
                                 // scene came out axis-aligned regardless of
                                 // script intent.
                                 rotation: inst.rotation,
-                                scale: inst.size,
+                                scale: if light_class.is_some() { [1.0, 1.0, 1.0] } else { inst.size },
                             },
                             properties: crate::space::instance_loader::InstanceProperties {
                                 color: inst.color,
@@ -11214,7 +13428,7 @@ fn drain_slint_actions(
                             // entities.
                             tags: if inst.tags.is_empty() { None } else { Some(inst.tags.clone()) },
                             parameters: None,
-                            extra: std::collections::HashMap::new(),
+                            extra,
                         };
 
                         let folder_name = crate::space::instance_loader::unique_entity_name(&workspace_dir, &inst.name);
@@ -11541,6 +13755,38 @@ fn drain_slint_actions(
                     out.clear();
                 }
             }
+            SlintAction::ToggleOutputStack(id) => {
+                super::output_rows::toggle_expanded(id as u32 as u64);
+            }
+            SlintAction::CopyOutputLine(id) => {
+                let text = res.output.as_deref().and_then(|out| {
+                    out.entries.iter()
+                        .find(|e| e.id as u32 == id as u32)
+                        .map(super::output_rows::copy_text)
+                });
+                copy_output_text(text, res.output.as_deref_mut());
+            }
+            SlintAction::CopyOutputVisible => {
+                let text = match (ui, res.output.as_deref()) {
+                    (Some(ui), Some(out)) => {
+                        let source: String = ui.get_output_source_filter().into();
+                        let search: String = ui.get_output_filter_text().into();
+                        let filters = super::output_rows::Filters {
+                            source: &source,
+                            search: &search,
+                            levels: [
+                                ui.get_output_show_info(),
+                                ui.get_output_show_warnings(),
+                                ui.get_output_show_errors(),
+                                ui.get_output_show_debug(),
+                            ],
+                        };
+                        Some(super::output_rows::visible_text(&out.entries, &filters))
+                    }
+                    _ => None,
+                };
+                copy_output_text(text, res.output.as_deref_mut());
+            }
 
             SlintAction::SetBottomPanel(mode) => {
                 use crate::timeline_panel::BottomPanelMode;
@@ -11557,11 +13803,11 @@ fn drain_slint_actions(
                 // Connector instance under DataService (same path the ribbon's
                 // Data → Connect uses). The live poll/stream runtime that
                 // consumes enabled Connectors is the next increment.
-                let space_root = crate::space::default_space_root();
+                let space_root = crate::space::open_space_root(res.space_root.as_deref());
                 match write_connector(&space_root, &source_type) {
                     Ok(name) => if let Some(ref mut out) = res.output {
                         out.info(format!(
-                            "Data · created {source_type} Connector '{name}' in DataService — set the endpoint + enable it in Properties.",
+                            "Data · created {source_type} Connector '{name}' in DataService. Set the endpoint and enable it in Properties.",
                         ));
                     },
                     Err(e) => if let Some(ref mut out) = res.output {
@@ -11663,8 +13909,55 @@ fn drain_slint_actions(
                 }
             }
             SlintAction::WorkshopStartPipeline => {
-                // Start pipeline is implicit — happens when user sends first message
-                info!("Workshop: Start pipeline requested");
+                // "Build the brief from this conversation now": propose the
+                // step-0 normalize card when there is none and approve it, the
+                // click being the approval. `dispatch_normalize_request` runs it.
+                use crate::workshop::{IdeationState, McpCommandStatus, MessageRole};
+                const NORMALIZE: &str = "/mcp/ideation/normalize";
+                let has_key = match (res.global_soul_settings.as_deref(), res.soul_settings.as_deref()) {
+                    (Some(global), Some(space)) => !space.effective_api_key(global).is_empty(),
+                    _ => false,
+                };
+                let Some(ref mut pipeline) = res.workshop_pipeline else { continue };
+                match pipeline.state {
+                    IdeationState::Idle => {
+                        pipeline.add_error_message(
+                            "Describe the product first: the pipeline builds its brief from the conversation.".to_string(),
+                        );
+                    }
+                    IdeationState::Conversing if !has_key => {
+                        pipeline.add_error_message("No API key configured. Add one in Settings > Soul.".to_string());
+                    }
+                    IdeationState::Conversing => {
+                        let is_normalize = |m: &crate::workshop::ChatMessage| {
+                            m.role == MessageRole::Mcp && m.mcp_endpoint.as_deref() == Some(NORMALIZE)
+                        };
+                        let in_flight = pipeline.messages.iter().any(|m| {
+                            is_normalize(m)
+                                && matches!(m.mcp_status, Some(McpCommandStatus::Approved | McpCommandStatus::Running))
+                        });
+                        if !in_flight {
+                            let pending = pipeline.messages.iter()
+                                .find(|m| is_normalize(m) && m.mcp_status == Some(McpCommandStatus::Pending))
+                                .map(|m| m.id);
+                            let id = match pending {
+                                Some(id) => id,
+                                None => pipeline.add_mcp_command(
+                                    "Generate ideation_brief.toml from your conversation.\nEstimated cost: ~$0.03 (Sonnet)".to_string(),
+                                    NORMALIZE.to_string(),
+                                    "POST".to_string(),
+                                    0.03,
+                                ),
+                            };
+                            pipeline.update_mcp_status(id, McpCommandStatus::Approved);
+                        }
+                    }
+                    _ => {
+                        if let Some(ref mut out) = res.output {
+                            out.info(format!("Workshop: the pipeline is already {}", pipeline.state_string()));
+                        }
+                    }
+                }
             }
             SlintAction::WorkshopPausePipeline => {
                 if let Some(ref mut pipeline) = res.workshop_pipeline {
@@ -11921,6 +14214,62 @@ fn drain_slint_actions(
                 }
             }
 
+            SlintAction::WorkshopStopAgent => {
+                // Handled by `claude_bridge::apply_workshop_stop` next frame,
+                // which owns the in-flight calls this match cannot reach.
+                crate::workshop::claude_bridge::request_stop();
+            }
+
+            SlintAction::WorkshopApproveAll | SlintAction::WorkshopSkipAll => {
+                // Through the same events as the per-card buttons, so a bulk
+                // decision runs exactly the per-card code, one card at a time.
+                use crate::workshop::McpCommandStatus;
+                let waiting: Vec<u32> = res
+                    .workshop_pipeline
+                    .as_ref()
+                    .map(|p| {
+                        p.messages
+                            .iter()
+                            .filter(|m| {
+                                m.mcp_method.as_deref() == Some("tool_use")
+                                    && m.mcp_status == Some(McpCommandStatus::Pending)
+                            })
+                            .map(|m| m.id)
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                let approve = matches!(action, SlintAction::WorkshopApproveAll);
+                for message_id in waiting {
+                    if approve {
+                        events.workshop_approve.write(crate::workshop::WorkshopApproveMcpEvent { message_id });
+                    } else {
+                        events.workshop_skip.write(crate::workshop::WorkshopSkipMcpEvent { message_id });
+                    }
+                }
+            }
+
+            SlintAction::WorkshopRemoveQueued(index) => {
+                if let Ok(index) = usize::try_from(index) {
+                    crate::workshop::remove_queued_message(index);
+                }
+            }
+
+            SlintAction::WorkshopCopyText(text) => {
+                #[cfg(feature = "clipboard")]
+                let copied = arboard::Clipboard::new()
+                    .and_then(|mut clipboard| clipboard.set_text(text.clone()))
+                    .map_err(|e| e.to_string());
+                #[cfg(not(feature = "clipboard"))]
+                let copied: Result<(), String> = Err("this build has no clipboard support".to_string());
+                // Success is shown on the button itself ("Copied"); only a
+                // failure is worth a line in the Output panel.
+                if let Err(e) = copied {
+                    if let Some(ref mut out) = res.output {
+                        out.warn(format!("Workshop: could not copy to the clipboard: {e}"));
+                    }
+                }
+            }
+
             SlintAction::WorkshopModeChanged(mode_name) => {
                 if let Some(ui) = ui {
                     ui.set_workshop_active_mode_name(mode_name.as_str().into());
@@ -11933,17 +14282,39 @@ fn drain_slint_actions(
             // The panel tracks `file_path` for each diagnostic; clicking a row
             // fires here with the full path plus 1-based (line, col). We open
             // that file as a tab (if not already), then scroll/select the line.
-            SlintAction::ProblemsJumpTo(path, line, column) => {
-                // Open the file (reuses the same event path as "Open Recent";
-                // its handler treats any existing path as an open request).
-                events.file_events.write(FileEvent::OpenRecent(
-                    std::path::PathBuf::from(path)
-                ));
-                if let Some(ui) = ui {
-                    // Editor jumps to the start on next tick; a proper
-                    // scroll-to-line property is a Phase 3 polish item.
-                    ui.set_script_scroll_to_top(true);
-                    let _ = (line, column);
+            SlintAction::ProblemsJumpTo(path, line, _column) => {
+                // A row carries its script's source file, or "" for the
+                // script in the active editor (an entity-backed Soul Script
+                // tab has no file path of its own). Bring that file's tab
+                // forward, then scroll once its content is in the editor:
+                // `sync_center_tabs_to_slint` applies
+                // `pending_script_jump_line` after any tab switch settles.
+                if !path.is_empty() {
+                    let target = std::path::PathBuf::from(&path);
+                    if let Some(ref mut mgr) = res.tab_manager {
+                        // A Soul Script tab whose instance folder holds the
+                        // file already shows it; reuse it rather than opening
+                        // the same source in a second tab.
+                        let owner = mgr.tabs.iter().position(|tab| {
+                            tab.entity
+                                .and_then(|e| queries.instance_files.get(e).ok())
+                                .filter(|inst| {
+                                    inst.toml_path.file_name().and_then(|n| n.to_str()) == Some("_instance.toml")
+                                })
+                                .and_then(|inst| inst.toml_path.parent().map(|p| p.to_path_buf()))
+                                .is_some_and(|folder| target.starts_with(&folder))
+                        });
+                        match owner {
+                            Some(idx) if idx == mgr.active_tab => {}
+                            Some(idx) => mgr.select_tab(idx),
+                            None => {
+                                mgr.open_file(&target);
+                            }
+                        }
+                    }
+                }
+                if let Some(ref mut s) = res.state {
+                    s.pending_script_jump_line = Some(line.max(1));
                 }
             }
             // Go to Definition — look up identifier at cursor in the symbol
@@ -11963,50 +14334,62 @@ fn drain_slint_actions(
                 state.completion_line = line;
                 state.completion_col = column;
                 let source = state.script_editor_content.clone();
+                let offset = caret_byte_offset(&source, line, column);
+                let service = active_code_service(state, res.script_analysis.as_deref());
 
                 // Signature help first: whether the caret sits inside a call's
                 // argument list is independent of whether an identifier prefix
                 // is being typed, so it must not sit behind the completion
                 // early-returns below.
-                let (sig_label, sig_active) =
-                    match crate::script_editor::analyzer::signature_help_at(
-                        &source, line as u32, column as u32,
-                    ) {
-                        Some((entry, param_idx)) => {
-                            let params = entry
-                                .params
-                                .iter()
-                                .map(|p| format!("{}: {}", p.name, p.typ))
-                                .collect::<Vec<_>>()
-                                .join(", ");
-                            let label = if entry.return_type.is_empty() || entry.return_type == "()" {
-                                format!("{}({})", entry.name, params)
-                            } else {
-                                format!("{}({}) -> {}", entry.name, params, entry.return_type)
-                            };
-                            let active = entry
-                                .params
-                                .get(param_idx as usize)
-                                .map(|p| format!("{}: {}", p.name, p.typ))
-                                .unwrap_or_default();
-                            (label, active)
-                        }
-                        None => (String::new(), String::new()),
-                    };
+                let (sig_label, sig_active) = service
+                    .as_ref()
+                    .and_then(|s| s.signature_help(&source, offset))
+                    .map(|help| {
+                        let active = help
+                            .parameters
+                            .get(help.active_parameter as usize)
+                            .and_then(|&(a, b)| help.label.get(a as usize..b as usize))
+                            .unwrap_or_default()
+                            .to_string();
+                        (help.label, active)
+                    })
+                    .unwrap_or_default();
                 if sig_label != state.signature_label || sig_active != state.signature_active_param {
                     state.signature_label = sig_label;
                     state.signature_active_param = sig_active;
                     state.signature_dirty = true;
                 }
 
-                let (prefix, start) = crate::script_editor::analyzer::prefix_at(
-                    &source, line as u32, column as u32,
-                );
+                // The bracket pair around the caret; a caret move also closes
+                // the hover.
+                if let Some(ui) = ui {
+                    if !ui.get_script_hover_text().is_empty() {
+                        ui.set_script_hover_text("".into());
+                    }
+                    let ((al, ac), (bl, bc)) = crate::script_editor::editing::matching_bracket(&source, offset)
+                        .map(|(a, b)| (line_col0(&source, a), line_col0(&source, b)))
+                        .unwrap_or(((-1, 0), (-1, 0)));
+                    ui.set_script_bracket_a_line(al);
+                    ui.set_script_bracket_a_col(ac);
+                    ui.set_script_bracket_b_line(bl);
+                    ui.set_script_bracket_b_col(bc);
+                }
+
+                let script_class = state
+                    .script_source_path
+                    .as_deref()
+                    .and_then(crate::script_editor::language::script_class_for_path);
+                let cx = completion_context(&source, offset, script_class);
+                let prefix = cx.prefix.to_string();
+                let start = (offset - cx.prefix.len()) as u32;
+                // A member access or a string argument opens the list with
+                // nothing typed yet; otherwise it needs an identifier prefix.
+                let triggered = !prefix.is_empty() || cx.access.is_some() || cx.in_string.is_some();
                 // Escape keeps the popup shut until the caret lands on a
                 // different identifier — otherwise every subsequent keystroke
                 // would pop it straight back open.
                 if state.completion_dismissed {
-                    if prefix.is_empty() || start != state.completion_prefix_start {
+                    if !triggered || start != state.completion_prefix_start {
                         state.completion_dismissed = false;
                     } else {
                         continue;
@@ -12015,7 +14398,7 @@ fn drain_slint_actions(
                 // Nothing being typed: close. Ctrl+Space is the way to get an
                 // unfiltered list, so an empty prefix never auto-opens a
                 // several-hundred-entry catalog.
-                if prefix.is_empty() {
+                if !triggered {
                     if !state.completion_items.is_empty() {
                         state.completion_items.clear();
                         state.completion_dirty = true;
@@ -12024,12 +14407,8 @@ fn drain_slint_actions(
                     state.completion_prefix_start = start;
                     continue;
                 }
-                let symbols = res
-                    .script_analysis
-                    .as_ref()
-                    .map(|a| a.result.symbols.clone())
-                    .unwrap_or_default();
-                let items = crate::script_editor::analyzer::complete(&prefix, &symbols, 60);
+                let mut items = service.map(|s| s.complete(&cx)).unwrap_or_default();
+                items.truncate(60);
                 state.completion_items = items;
                 state.completion_selected = 0;
                 state.completion_prefix = prefix;
@@ -12040,16 +14419,18 @@ fn drain_slint_actions(
             SlintAction::ScriptCompletionRequest => {
                 let Some(ref mut state) = res.state else { continue; };
                 let source = state.script_editor_content.clone();
-                let (prefix, start) = crate::script_editor::analyzer::prefix_at(
-                    &source, state.completion_line as u32, state.completion_col as u32,
-                );
-                let symbols = res
-                    .script_analysis
-                    .as_ref()
-                    .map(|a| a.result.symbols.clone())
-                    .unwrap_or_default();
-                state.completion_items =
-                    crate::script_editor::analyzer::complete(&prefix, &symbols, 200);
+                let offset = caret_byte_offset(&source, state.completion_line, state.completion_col);
+                let service = active_code_service(state, res.script_analysis.as_deref());
+                let script_class = state
+                    .script_source_path
+                    .as_deref()
+                    .and_then(crate::script_editor::language::script_class_for_path);
+                let cx = completion_context(&source, offset, script_class);
+                let prefix = cx.prefix.to_string();
+                let start = (offset - cx.prefix.len()) as u32;
+                let mut items = service.map(|s| s.complete(&cx)).unwrap_or_default();
+                items.truncate(200);
+                state.completion_items = items;
                 state.completion_selected = 0;
                 state.completion_prefix = prefix;
                 state.completion_prefix_start = start;
@@ -12089,10 +14470,7 @@ fn drain_slint_actions(
                 else { continue; };
 
                 let source = state.script_editor_content.clone();
-                let caret = crate::script_editor::analyzer::line_col_to_offset(
-                    &source, state.completion_line as u32, state.completion_col as u32,
-                )
-                .unwrap_or(state.completion_prefix_start);
+                let caret = caret_byte_offset(&source, state.completion_line, state.completion_col) as u32;
                 let start = floor_char_boundary(
                     &source,
                     state.completion_prefix_start.min(caret) as usize,
@@ -12107,15 +14485,16 @@ fn drain_slint_actions(
                 let takes_args = item.detail.contains('(') && !item.detail.contains("()");
                 let is_callable = matches!(
                     item.kind,
-                    crate::script_editor::CompletionKind::Function
+                    crate::script_editor::language::CompletionKind::Function
+                        | crate::script_editor::language::CompletionKind::Method
                 );
                 let insert = if is_callable {
-                    format!("{}()", item.label)
+                    format!("{}()", item.insert_text)
                 } else {
-                    item.label.clone()
+                    item.insert_text.clone()
                 };
                 let caret_after = if is_callable && takes_args {
-                    start + item.label.len() + 1
+                    start + item.insert_text.len() + 1
                 } else {
                     start + insert.len()
                 };
@@ -12125,12 +14504,13 @@ fn drain_slint_actions(
                 next.push_str(&insert);
                 next.push_str(&source[end..]);
 
+                record_script_step(state, res.tab_manager.as_deref(), &source, caret as usize);
                 state.script_editor_content = next.clone();
                 state.script_content_dirty = true;
                 state.completion_items.clear();
                 state.completion_prefix.clear();
                 state.completion_dirty = true;
-                state.pending_caret_offset = Some(caret_after as u32);
+                state.pending_external_edit = Some((caret_after as u32, caret_after as u32));
 
                 // Persist through the same path a typed edit takes, so the
                 // insert is saved and re-analyzed like any other change.
@@ -12140,32 +14520,51 @@ fn drain_slint_actions(
             SlintAction::ScriptGoToDefinition(line, column) => {
                 let Some(ref analysis) = res.script_analysis else { continue; };
                 let source = analysis.source.clone();
-                let Some((ident, _bytes)) = crate::script_editor::analyzer::identifier_at(
-                    &source, line as u32, column as u32,
-                ) else {
+                let offset = caret_byte_offset(&source, line, column);
+                let Some(ident) = identifier_around(&source, offset) else {
                     if let Some(ref mut out) = res.output {
                         out.info("Go to Definition: no identifier under cursor".to_string());
                     }
                     continue;
                 };
-                let defs = analysis.result.symbols.resolve(&ident);
-                if defs.is_empty() {
+                // The file's language service first (it knows scopes and, for
+                // Luau, locals); the name index of this file after that.
+                let from_service = match (&analysis.service, &analysis.analysis) {
+                    (Some(service), Some(result)) => service.definition(&source, offset, result),
+                    _ => None,
+                };
+                let target = from_service.or_else(|| {
+                    analysis.result.symbols.resolve(ident).first().map(|s| {
+                        crate::script_editor::language::Location {
+                            path: None,
+                            range: s.range,
+                            byte_range: s.byte_range,
+                        }
+                    })
+                });
+                let Some(target) = target else {
                     if let Some(ref mut out) = res.output {
-                        out.info(format!("Go to Definition: '{}' — no definition in this file", ident));
+                        out.info(format!("Go to Definition: no definition of '{}' in this file", ident));
+                    }
+                    continue;
+                };
+                if let Some(path) = &target.path {
+                    // Another file: say where. Opening it at the line is the
+                    // cross-file step that follows.
+                    if let Some(ref mut out) = res.output {
+                        out.info(format!(
+                            "Go to Definition: '{}' is defined in {} at line {}",
+                            ident, path.display(), target.range.start_line,
+                        ));
                     }
                     continue;
                 }
-                let target = &defs[0];
                 if let Some(ui) = ui {
-                    // `script-scroll-to-line` was set here from the start, but
-                    // nothing in the editor read it — Go-to-Definition resolved
-                    // the symbol, reported it, and left the view where it was.
-                    // `ScriptEditor` now consumes this and scrolls.
                     ui.set_script_scroll_to_line(target.range.start_line as i32);
                 }
                 if let Some(ref mut out) = res.output {
                     out.info(format!(
-                        "Go to Definition: '{}' → line {}:{}",
+                        "Go to Definition: '{}' at line {}:{}",
                         ident, target.range.start_line, target.range.start_column,
                     ));
                 }
@@ -12176,15 +14575,14 @@ fn drain_slint_actions(
             SlintAction::ScriptFindReferences(line, column) => {
                 let Some(ref analysis) = res.script_analysis else { continue; };
                 let source = analysis.source.clone();
-                let Some((ident, _bytes)) = crate::script_editor::analyzer::identifier_at(
-                    &source, line as u32, column as u32,
-                ) else {
+                let offset = caret_byte_offset(&source, line, column);
+                let Some(ident) = identifier_around(&source, offset) else {
                     if let Some(ref mut out) = res.output {
                         out.info("Find References: no identifier under cursor".to_string());
                     }
                     continue;
                 };
-                let refs = analysis.result.symbols.resolve(&ident);
+                let refs = analysis.result.symbols.resolve(ident);
                 if let Some(ref mut out) = res.output {
                     if refs.is_empty() {
                         out.info(format!("Find References: no matches for '{}'", ident));
@@ -12277,10 +14675,18 @@ fn drain_slint_actions(
                 }
             }
             SlintAction::ApiCopyExample(example) => {
+                #[cfg(feature = "clipboard")]
+                let copied = arboard::Clipboard::new()
+                    .and_then(|mut clipboard| clipboard.set_text(example.clone()))
+                    .map_err(|e| e.to_string());
+                #[cfg(not(feature = "clipboard"))]
+                let copied: Result<(), String> = Err("this build has no clipboard support".to_string());
                 if let Some(ref mut out) = res.output {
-                    out.info(format!("Copied: {}", example));
+                    match copied {
+                        Ok(()) => out.info("API Reference: example copied to the clipboard".to_string()),
+                        Err(e) => out.warn(format!("API Reference: could not copy the example: {e}")),
+                    }
                 }
-                info!("API Reference: Example copied — {}", example);
             }
 
             // Services Browser — open documentation URL in system browser
@@ -12290,17 +14696,9 @@ fn drain_slint_actions(
                 } else {
                     format!("https://eustress.dev{}", url)
                 };
-                #[cfg(target_os = "windows")]
-                let result = std::process::Command::new("cmd")
-                    .args(["/c", "start", "", &full_url])
-                    .spawn();
-                #[cfg(target_os = "macos")]
-                let result = std::process::Command::new("open").arg(&full_url).spawn();
-                #[cfg(target_os = "linux")]
-                let result = std::process::Command::new("xdg-open").arg(&full_url).spawn();
-                #[cfg(not(any(target_os = "windows", target_os = "macos", target_os = "linux")))]
-                let result: Result<_, std::io::Error> = Err(std::io::Error::new(std::io::ErrorKind::Other, "unsupported"));
-                if let Err(e) = result {
+                // `open::that` hands the URL to the OS as one argument;
+                // `cmd /c start` would split it at every `&` in a query.
+                if let Err(e) = open::that(&full_url) {
                     if let Some(ref mut out) = res.output {
                         out.error(format!("Failed to open browser: {}", e));
                     }
@@ -12311,7 +14709,7 @@ fn drain_slint_actions(
             SlintAction::InsertPart(part_type_str) => {
                 // ── Model / Folder: create directory with _instance.toml ──
                 if part_type_str == "Model" || part_type_str == "Folder" {
-                    let space_root = crate::space::default_space_root();
+                    let space_root = crate::space::open_space_root(res.space_root.as_deref());
                     let workspace_dir = space_root.join("Workspace");
                     let _ = std::fs::create_dir_all(&workspace_dir);
 
@@ -12417,9 +14815,14 @@ fn drain_slint_actions(
                 // and anything else stays in the user's currently-
                 // selected folder (or `Workspace/` as fallback).
                 if mesh_id.is_none() {
-                    let space_root = crate::space::default_space_root();
+                    // Lights take the same path as the ribbon's: their class
+                    // template, inside the selected part or in front of the
+                    // camera, selected and undoable.
+                    if insert_light_instance(&part_type_str, &mut res, &queries, &mut pending_insert) {
+                        continue;
+                    }
+                    let space_root = crate::space::open_space_root(res.space_root.as_deref());
                     let canonical_service = match part_type_str.as_str() {
-                        "PointLight" | "SpotLight" | "SurfaceLight" | "DirectionalLight" => "Lighting",
                         "Sound"                       => "SoundService",
                         "BillboardGui"                => "StarterGui",
                         "SoulScript"                  => "SoulService",
@@ -12495,8 +14898,14 @@ fn drain_slint_actions(
 
                 let mesh_id = mesh_id.expect("checked above");
 
-                // Compute spawn position: 10 units in front of the camera, min Y = 0.5
-                let spawn_pos: [f32; 3] = if let Some((_, cam_transform)) = queries.camera_query.iter().find(|(c, _)| c.order == 0) {
+                // Compute spawn position: 10 units in front of the camera, min Y = 0.5.
+                // In 2D: the centre of the view, on the working plane. The 2D
+                // camera sits off the plane, so "in front of it" would float
+                // the part in front of every layer.
+                let plane_2d = res.active_view_plane.as_ref().and_then(|p| p.0);
+                let spawn_pos: [f32; 3] = if let Some(plane) = plane_2d {
+                    plane.center.to_array()
+                } else if let Some((_, cam_transform)) = queries.camera_query.iter().find(|(c, _)| c.order == 0) {
                     let forward = cam_transform.forward();
                     let cam_pos = cam_transform.translation();
                     let pos = cam_pos + forward * 10.0;
@@ -12593,8 +15002,8 @@ fn drain_slint_actions(
                     })
                 });
 
-                // Space root path (uses dynamic default)
-                let space_root = crate::space::default_space_root();
+                // The open Space (the live SpaceRoot)
+                let space_root = crate::space::open_space_root(res.space_root.as_deref());
 
                 // Step 1: Create .glb.toml instance file on disk in the correct directory.
                 // If parented to a folder entity, write the file inside that folder's directory.
@@ -12692,16 +15101,40 @@ fn drain_slint_actions(
                 match action.as_str() {
                     // File-specific actions
                     "open" => {
-                        // Open file in appropriate editor (handled by OpenNode action)
-                        if let Some(ref es) = res.explorer_state {
-                            if let SelectedItem::File(ref path) = es.selected {
-                                info!("Opening file: {}", path.display());
-                                // File opening is handled by the OpenNode action
-                            }
+                        // Same as double-clicking the file.
+                        if let Some(path) = selected_explorer_file(&res.explorer_state).filter(|p| p.is_file()) {
+                            open_explorer_file(&path, res.tab_manager.as_deref_mut(), res.output.as_deref_mut());
                         }
                     }
                     "open-with" => {
-                        info!("Open With... dialog not yet implemented");
+                        let Some(path) = selected_explorer_file(&res.explorer_state).filter(|p| p.is_file()) else {
+                            continue;
+                        };
+                        #[cfg(target_os = "windows")]
+                        let result = {
+                            use std::os::windows::process::CommandExt;
+                            // The shell's own "Open with" chooser, out of
+                            // process. OpenAs_RunDLL reads the rest of the
+                            // command line verbatim as the path, so it goes
+                            // in unquoted; `.arg()` would quote any path
+                            // with a space and break it.
+                            std::process::Command::new("rundll32.exe")
+                                .raw_arg(format!("shell32.dll,OpenAs_RunDLL {}", path.display()))
+                                .spawn()
+                                .map(|_| ())
+                        };
+                        // macOS and Linux have no system chooser to call:
+                        // pick the application, then hand it the file.
+                        #[cfg(not(target_os = "windows"))]
+                        let result = match rfd::FileDialog::new().set_title("Open With").pick_file() {
+                            Some(app) => open::with(&path, app.to_string_lossy().to_string()),
+                            None => continue,
+                        };
+                        if let Err(e) = result {
+                            if let Some(ref mut out) = res.output {
+                                out.error(format!("Open With failed for {}: {e}", path.display()));
+                            }
+                        }
                     }
                     "show-in-explorer" => {
                         if let Some(ref es) = res.explorer_state {
@@ -12957,7 +15390,8 @@ fn drain_slint_actions(
                     "copy-relative-path" => {
                         if let Some(ref es) = res.explorer_state {
                             if let SelectedItem::File(ref path) = es.selected {
-                                let relative = path.strip_prefix(&es.project_root)
+                                let open_space = crate::space::open_space_root(res.space_root.as_deref());
+                                let relative = path.strip_prefix(&open_space)
                                     .unwrap_or(path);
                                 #[cfg(feature = "clipboard")]
                                 {
@@ -12973,10 +15407,17 @@ fn drain_slint_actions(
                         }
                     }
                     "properties" => {
-                        if let Some(ref es) = res.explorer_state {
-                            if let SelectedItem::File(ref path) = es.selected {
-                                info!("File properties for: {}", path.display());
-                                // TODO: Show file properties dialog with size, modified date, etc.
+                        // The Properties panel already describes a selected
+                        // file (name, type, size, read-only, modified,
+                        // created); bring it forward and re-read the
+                        // metadata, which may have changed on disk.
+                        if selected_explorer_file(&res.explorer_state).is_some() {
+                            if let Some(ref mut s) = res.state {
+                                s.show_properties = true;
+                                s.last_selection_hash = 0;
+                            }
+                            if let Some(ui) = ui {
+                                ui.set_right_tab_index(0);
                             }
                         }
                     }
@@ -13057,9 +15498,6 @@ fn drain_slint_actions(
                             }
                         }
                     }
-                    "insert" => {
-                        // TODO: Open insert submenu or switch to toolbox tab
-                    }
 
                     // ── Viewport build menu (CTX-03) ──────────────────────
                     //
@@ -13095,7 +15533,7 @@ fn drain_slint_actions(
                                 SelectedItem::Entity(e) => Some(*e),
                                 _ => None,
                             });
-                        let space_root = crate::space::default_space_root();
+                        let space_root = crate::space::open_space_root(res.space_root.as_deref());
                         let workspace_dir = space_root.join("Workspace");
                         let write_dir = parent_entity
                             .and_then(|pe| queries.loaded_from_file.get(pe).ok())
@@ -13250,6 +15688,18 @@ fn drain_slint_actions(
             SlintAction::MenuAction(action) => {
                 let action = action.as_str();
 
+                // Every insert arrives here as `insert:<id>`, whichever
+                // surface it came from (menu bar, ribbon tabs, Insert Object
+                // dialog, Explorer plus button). Remember it for the Insert
+                // menu's Recent section; ids the menu cannot show are left out.
+                if let Some(id) = action.strip_prefix("insert:") {
+                    if let Some(ref mut settings) = res.editor_settings {
+                        if let Some(recent) = super::insert_classes::recent_after_insert(&settings.recent_inserts, id) {
+                            settings.recent_inserts = recent;
+                        }
+                    }
+                }
+
                 // ── Discipline-tool interest capture ────────────────────
                 // Every custom-tab (mode manifest) button funnels through
                 // here, so one hook covers all ~1,400 without touching them
@@ -13291,12 +15741,12 @@ fn drain_slint_actions(
                             super::notifications::NotificationEvent::info(
                                 super::notifications::NotificationCategory::General,
                                 format!("{} is on the roadmap", meta.label),
-                                "Not built yet — your click was counted as a vote for it.",
+                                "Not built yet. Your click was counted as a vote for it.",
                             ),
                         );
                         if let Some(ref mut out) = res.output {
                             out.info(format!(
-                                "{} ({}) — planned, not yet implemented. Interest recorded.",
+                                "{} ({}): planned, not built yet. Your click counted as a vote.",
                                 meta.label, action
                             ));
                         }
@@ -13524,6 +15974,27 @@ fn drain_slint_actions(
                         }
                         continue;
                     }
+                    "cad:open_sketch" => {
+                        // The ribbon's Sketch > Edit: the same panel a
+                        // double-click on a CadPart opens, and the way back
+                        // after closing it.
+                        let selected = res
+                            .explorer_state
+                            .as_ref()
+                            .is_some_and(|es| matches!(es.selected, SelectedItem::Entity(_)));
+                        if selected {
+                            events.cad_sketch_canvas_visible.write(
+                                crate::cad_plugin::CadSketchCanvasSetVisibleEvent { visible: true },
+                            );
+                        } else {
+                            events.notification.write(super::notifications::NotificationEvent::warning(
+                                super::notifications::NotificationCategory::General,
+                                "Edit sketch",
+                                "Select a CadPart first",
+                            ));
+                        }
+                        continue;
+                    }
                     "cad:solve_sketch" => {
                         let entity = res.explorer_state.as_ref().and_then(|es| {
                             match &es.selected {
@@ -13715,7 +16186,7 @@ fn drain_slint_actions(
                                 match frame {
                                     Some(frame) => {
                                         // Target dir: the selected folder, else Workspace.
-                                        let space_root = crate::space::default_space_root();
+                                        let space_root = crate::space::open_space_root(res.space_root.as_deref());
                                         let base = sel
                                             .and_then(|e| queries.loaded_from_file.get(e).ok())
                                             .map(|(_, lff)| if lff.path.is_dir() {
@@ -13747,7 +16218,7 @@ fn drain_slint_actions(
                                         );
                                         let _ = std::fs::write(ds_dir.join("_instance.toml"), toml);
                                         if let Some(ref mut out) = res.output {
-                                            out.info(format!("Imported Dataset '{}' — {} rows × {} cols ({})", stem, frame.n_rows(), frame.n_cols(), cols_summary));
+                                            out.info(format!("Imported Dataset '{}': {} rows × {} cols ({})", stem, frame.n_rows(), frame.n_cols(), cols_summary));
                                         }
                                     }
                                     None => {
@@ -13791,7 +16262,7 @@ fn drain_slint_actions(
                     // top-bar Data menu's source items use (AddDataSource), so
                     // both are one front door to the Data Platform.
                     if act == "connect" {
-                        let space_root = crate::space::default_space_root();
+                        let space_root = crate::space::open_space_root(res.space_root.as_deref());
                         match write_connector(&space_root, "REST") {
                             Ok(name) => if let Some(ref mut out) = res.output {
                                 out.info(format!(
@@ -13828,6 +16299,11 @@ fn drain_slint_actions(
                         });
                         match act {
                             "stats" | "fit" | "fft" | "cluster" | "anomaly" => {
+                                // Results go to the Output panel (and the log
+                                // file); `info!` alone reached only the log.
+                                let mut report: Vec<(bool, String)> = Vec::new();
+                                macro_rules! say { ($($t:tt)*) => { report.push((false, format!($($t)*))) } }
+                                macro_rules! warn_say { ($($t:tt)*) => { report.push((true, format!($($t)*))) } }
                                 match csv.as_ref()
                                     .and_then(|p| std::fs::File::open(p).ok())
                                     .and_then(|f| eustress_data::import::frame_from_csv(f).ok())
@@ -13842,11 +16318,11 @@ fn drain_slint_actions(
                                         let nnames: Vec<&str> = nidx.iter().map(|&i| cols[i].0.name.as_str()).collect();
                                         match act {
                                             "stats" => {
-                                                info!("Data · stats ({} rows):", frame.n_rows());
+                                                say!("Data · stats ({} rows):", frame.n_rows());
                                                 for (spec, data) in cols {
                                                     if let Ok(s) = eustress_data::numerics::stats(data) {
                                                         let u = spec.unit.clone().map(|u| format!(" {u}")).unwrap_or_default();
-                                                        info!("  {} — n={} mean={:.4}{u} min={:.3} max={:.3} sd={:.4}",
+                                                        say!("  {} — n={} mean={:.4}{u} min={:.3} max={:.3} sd={:.4}",
                                                             spec.name, s.count, s.mean, s.min, s.max, s.std_dev);
                                                     }
                                                 }
@@ -13855,13 +16331,13 @@ fn drain_slint_actions(
                                                 if nidx.len() >= 2 {
                                                     let (xi, yi) = (nidx[0], *nidx.last().unwrap());
                                                     match eustress_data::numerics::fit_linear(&cols[xi].1, &cols[yi].1) {
-                                                        Ok(fit) => info!(
+                                                        Ok(fit) => say!(
                                                             "Data · linear fit {} vs {}: slope={:.5} intercept={:.4} R2={:.4}",
                                                             cols[yi].0.name, cols[xi].0.name, fit.slope, fit.intercept, fit.r_squared),
-                                                        Err(e) => warn!("Data · fit failed: {e}"),
+                                                        Err(e) => warn_say!("Data · fit failed: {e}"),
                                                     }
                                                 } else {
-                                                    warn!("Data · fit needs at least two numeric columns.");
+                                                    warn_say!("Data · fit needs at least two numeric columns.");
                                                 }
                                             }
                                             "fft" => {
@@ -13875,16 +16351,16 @@ fn drain_slint_actions(
                                                                 if sp.magnitudes[k] > bm { bm = sp.magnitudes[k]; bk = k; }
                                                             }
                                                             if bk > 0 && sp.freqs[bk] > 0.0 {
-                                                                info!("Data · FFT of {}: dominant period ≈ {:.1} samples (freq {:.4}/sample, amp {:.3})",
+                                                                say!("Data · FFT of {}: dominant period ≈ {:.1} samples (freq {:.4}/sample, amp {:.3})",
                                                                     cols[yi].0.name, 1.0 / sp.freqs[bk], sp.freqs[bk], bm);
                                                             } else {
-                                                                info!("Data · FFT of {}: no dominant cycle (monotone / flat signal)", cols[yi].0.name);
+                                                                say!("Data · FFT of {}: no dominant cycle (monotone / flat signal)", cols[yi].0.name);
                                                             }
                                                         }
-                                                        Err(e) => warn!("Data · FFT failed: {e} (needs a gap-free, uniformly sampled column)"),
+                                                        Err(e) => warn_say!("Data · FFT failed: {e} (needs a gap-free, uniformly sampled column)"),
                                                     }
                                                 } else {
-                                                    warn!("Data · FFT needs a numeric column.");
+                                                    warn_say!("Data · FFT needs a numeric column.");
                                                 }
                                             }
                                             "cluster" => {
@@ -13897,13 +16373,13 @@ fn drain_slint_actions(
                                                                 let c = *id as usize;
                                                                 if c < k { counts[c] += 1; }
                                                             }
-                                                            info!("Data · k-means ({} cols, k={}): cluster sizes {:?}", nnames.len(), k, counts);
+                                                            say!("Data · k-means ({} cols, k={}): cluster sizes {:?}", nnames.len(), k, counts);
                                                         }
                                                         Ok(_) => {}
-                                                        Err(e) => warn!("Data · cluster failed: {e}"),
+                                                        Err(e) => warn_say!("Data · cluster failed: {e}"),
                                                     }
                                                 } else {
-                                                    warn!("Data · cluster needs numeric columns.");
+                                                    warn_say!("Data · cluster needs numeric columns.");
                                                 }
                                             }
                                             "anomaly" => {
@@ -13916,27 +16392,216 @@ fn drain_slint_actions(
                                                                 let sb = scores[b].unwrap_or(f64::NEG_INFINITY);
                                                                 sb.partial_cmp(&sa).unwrap_or(std::cmp::Ordering::Equal)
                                                             });
-                                                            info!("Data · anomaly (kNN, {} cols): most isolated rows:", nnames.len());
+                                                            say!("Data · anomaly (kNN, {} cols): most isolated rows:", nnames.len());
                                                             for &i in order.iter().take(5) {
                                                                 if let Some(Some(s)) = scores.get(i) {
-                                                                    info!("  row {} — score {:.3}", i, s);
+                                                                    say!("  row {}: score {:.3}", i, s);
                                                                 }
                                                             }
                                                         }
                                                         Ok(_) => {}
-                                                        Err(e) => warn!("Data · anomaly failed: {e}"),
+                                                        Err(e) => warn_say!("Data · anomaly failed: {e}"),
                                                     }
                                                 } else {
-                                                    warn!("Data · anomaly needs numeric columns.");
+                                                    warn_say!("Data · anomaly needs numeric columns.");
                                                 }
                                             }
                                             _ => {}
                                         }
                                     }
-                                    None => warn!("Data · select a Dataset with a .csv beside its _instance.toml first."),
+                                    None => warn_say!("Data · select a Dataset with a .csv beside its _instance.toml first."),
+                                }
+                                for (is_warning, line) in report {
+                                    if is_warning { warn!("{line}"); } else { info!("{line}"); }
+                                    if let Some(ref mut out) = res.output {
+                                        if is_warning { out.warn(line); } else { out.info(line); }
+                                    }
                                 }
                             }
-                            other => info!("Data · '{}' — surface ready; pipeline coming soon.", other),
+                            // Compare two Datasets, column by column: mean,
+                            // min, max and standard deviation side by side,
+                            // with the change in the mean. The first Dataset
+                            // picked (Ctrl+Click order) is the baseline. The
+                            // table lands in the Data Grid, where it stays
+                            // until another Dataset is selected.
+                            "compare" => {
+                                let order = res.selection_manager.as_ref()
+                                    .map(|m| m.0.read().get_selected())
+                                    .unwrap_or_default();
+                                let mut picks: Vec<(usize, Entity)> = queries.selected_entities.iter()
+                                    .filter(|&e| queries.instances.get(e)
+                                        .map(|(_, i)| i.class_name == eustress_common::classes::ClassName::Dataset)
+                                        .unwrap_or(false))
+                                    .map(|e| {
+                                        let id = crate::entity_utils::entity_to_id_string(e);
+                                        (order.iter().position(|s| *s == id).unwrap_or(usize::MAX), e)
+                                    })
+                                    .collect();
+                                picks.sort_by_key(|p| p.0);
+                                let (a, b) = match picks.as_slice() {
+                                    [(_, a), (_, b)] => (*a, *b),
+                                    _ => {
+                                        if let Some(ref mut out) = res.output {
+                                            out.warn("Data · Compare: select exactly two Datasets (Ctrl+Click); the first one picked is the baseline.".to_string());
+                                        }
+                                        continue;
+                                    }
+                                };
+                                let dir_of = |e: Entity| {
+                                    queries.loaded_from_file.get(e).ok().map(|(_, lff)| {
+                                        if lff.path.is_dir() {
+                                            lff.path.clone()
+                                        } else {
+                                            lff.path.parent().map(|p| p.to_path_buf()).unwrap_or_else(|| lff.path.clone())
+                                        }
+                                    })
+                                };
+                                let name_of = |e: Entity| queries.instances.get(e).map(|(_, i)| i.name.clone()).unwrap_or_default();
+                                let (Some(fa), Some(fb)) = (
+                                    dir_of(a).and_then(|d| load_dataset_frame(&d)),
+                                    dir_of(b).and_then(|d| load_dataset_frame(&d)),
+                                ) else {
+                                    if let Some(ref mut out) = res.output {
+                                        out.warn("Data · Compare: both Datasets need a readable data file.".to_string());
+                                    }
+                                    continue;
+                                };
+                                let f = |x: f64| format!("{x:.4}");
+                                let mut table: Vec<Vec<String>> = Vec::new();
+                                for (spec, da) in fa.columns() {
+                                    let Some(db) = fb.column(&spec.name) else { continue };
+                                    let (Ok(sa), Ok(sb)) = (eustress_data::numerics::stats(da), eustress_data::numerics::stats(db)) else {
+                                        continue;
+                                    };
+                                    table.push(vec![
+                                        spec.name.clone(),
+                                        f(sa.mean), f(sb.mean), f(sb.mean - sa.mean),
+                                        f(sa.min), f(sb.min), f(sa.max), f(sb.max),
+                                        f(sa.std_dev), f(sb.std_dev),
+                                    ]);
+                                }
+                                if table.is_empty() {
+                                    if let Some(ref mut out) = res.output {
+                                        out.warn(format!(
+                                            "Data · Compare: '{}' and '{}' share no numeric columns.",
+                                            name_of(a), name_of(b)
+                                        ));
+                                    }
+                                    continue;
+                                }
+                                let shared = table.len();
+                                if let Some(w) = ui {
+                                    let strings = |cells: Vec<String>| {
+                                        slint::ModelRc::new(slint::VecModel::from(
+                                            cells.into_iter().map(slint::SharedString::from).collect::<Vec<_>>(),
+                                        ))
+                                    };
+                                    let header = ["column", "A mean", "B mean", "B - A mean", "A min", "B min", "A max", "B max", "A sd", "B sd"];
+                                    w.set_datagrid_columns(strings(header.iter().map(|s| s.to_string()).collect()));
+                                    w.set_datagrid_rows(slint::ModelRc::new(slint::VecModel::from(
+                                        table.into_iter().map(|cells| DataGridRow { cells: strings(cells) }).collect::<Vec<_>>(),
+                                    )));
+                                    w.set_datagrid_name(format!("Compare: {} (A) vs {} (B)", name_of(a), name_of(b)).into());
+                                }
+                                commands.insert_resource(crate::timeline_panel::BottomPanelMode::DataGrid);
+                                if let Some(ref mut s) = res.state {
+                                    s.show_output = true;
+                                }
+                                if let Some(ref mut out) = res.output {
+                                    out.info(format!(
+                                        "Data · Compare: {shared} shared numeric columns of '{}' (A) and '{}' (B) are in the Data Grid.",
+                                        name_of(a), name_of(b)
+                                    ));
+                                }
+                            }
+                            // Overlay: tint the parts a Dataset describes by
+                            // one of its numbers. A row's key (the first text
+                            // column) is matched against part names and tags;
+                            // its value (the last numeric column) picks the
+                            // color. Press again to clear.
+                            "overlay" => {
+                                if res.data_overlay.as_ref().is_some_and(|o| o.active) {
+                                    if let Some(ref mut overlay) = res.data_overlay {
+                                        overlay.active = false;
+                                        overlay.rev += 1;
+                                    }
+                                    if let Some(ref mut out) = res.output {
+                                        out.info("Data · Overlay cleared.".to_string());
+                                    }
+                                    continue;
+                                }
+                                let Some(frame) = dir.as_ref().and_then(|d| load_dataset_frame(d)) else {
+                                    if let Some(ref mut out) = res.output {
+                                        out.warn("Data · Overlay: select a Dataset with a readable data file first.".to_string());
+                                    }
+                                    continue;
+                                };
+                                let cols = frame.columns();
+                                let key = cols.iter().find(|(s, _)| matches!(s.dtype, ColumnDtype::Str));
+                                let metric = cols.iter().rev().find(|(s, _)| matches!(s.dtype, ColumnDtype::F64 | ColumnDtype::I64));
+                                let (Some((key_spec, key_data)), Some((metric_spec, metric_data))) = (key, metric) else {
+                                    if let Some(ref mut out) = res.output {
+                                        out.warn("Data · Overlay needs a text column (part names or tags) and a numeric column.".to_string());
+                                    }
+                                    continue;
+                                };
+                                let mut values: std::collections::HashMap<String, f64> = std::collections::HashMap::new();
+                                for r in 0..frame.n_rows() {
+                                    let k = data_cell_string(key_data, r);
+                                    if let (false, Some(v)) = (k.is_empty(), chart_cell_f64(metric_data, r)) {
+                                        values.insert(k, v);
+                                    }
+                                }
+                                if values.is_empty() {
+                                    if let Some(ref mut out) = res.output {
+                                        out.warn("Data · Overlay: no rows have both a key and a number.".to_string());
+                                    }
+                                    continue;
+                                }
+                                let lo = values.values().cloned().fold(f64::INFINITY, f64::min);
+                                let hi = values.values().cloned().fold(f64::NEG_INFINITY, f64::max);
+                                // How many keys name something in the scene.
+                                let mut names: std::collections::HashSet<&str> = queries.instances.iter().map(|(_, i)| i.name.as_str()).collect();
+                                for (_, tags) in queries.entity_tags.iter() {
+                                    names.extend(tags.0.iter().map(|t| t.as_str()));
+                                }
+                                let matched = values.keys().filter(|k| names.contains(k.as_str())).count();
+                                let total = values.len();
+                                if let Some(ref mut overlay) = res.data_overlay {
+                                    overlay.values = values;
+                                    overlay.range = (lo, hi);
+                                    overlay.active = true;
+                                    overlay.rev += 1;
+                                }
+                                if let Some(ref mut out) = res.output {
+                                    out.info(format!(
+                                        "Data · Overlay: coloring by '{}' (keys from '{}'): {matched} of {total} keys matched a part name or tag; range {lo:.3} to {hi:.3}, violet to yellow. Press Overlay again to clear.",
+                                        metric_spec.name, key_spec.name,
+                                    ));
+                                }
+                            }
+                            // Not built yet: the same roadmap notice and vote
+                            // as any other unwired ribbon button (RIB-02).
+                            other => {
+                                let action_id = format!("data:{other}");
+                                let (mode_id, submode_id) = res
+                                    .mode_registry
+                                    .as_ref()
+                                    .map(|r| (r.active_id.clone(), r.active_submode_id.clone()))
+                                    .unwrap_or_default();
+                                if let Some(ref mut t) = res.usage_telemetry {
+                                    t.record(&action_id, &mode_id, &submode_id, false);
+                                }
+                                let label = humanize_menu_action(&action_id);
+                                events.notification.write(super::notifications::NotificationEvent::info(
+                                    super::notifications::NotificationCategory::General,
+                                    format!("{label} is on the roadmap"),
+                                    "Not built yet. Your click was counted as a vote for it.",
+                                ));
+                                if let Some(ref mut out) = res.output {
+                                    out.info(format!("{label} ({action_id}): planned, not built yet. Your click counted as a vote."));
+                                }
+                            }
                         }
                     }
                     #[cfg(not(feature = "data"))]
@@ -13974,15 +16639,15 @@ fn drain_slint_actions(
                     };
                     let is_soul = class_name == "SoulScript";
 
-                    // Determine parent directory from selected Explorer item
-                    let selected_entity: Option<Entity> = if let Some(ref es) = res.explorer_state {
-                        match &es.selected {
-                            SelectedItem::Entity(e) => Some(*e),
-                            _ => None,
-                        }
-                    } else { None };
+                    // Parent: the selected instance or service row.
+                    let selected_entity: Option<Entity> = insert_parent_entity(
+                        res.explorer_state.as_deref().map(|es| &es.selected),
+                        &queries.loaded_from_file,
+                        &queries.hierarchy_parents,
+                    );
+                    let script_service = insert_service_for(selected_entity, &queries.loaded_from_file, "SoulService");
 
-                    let space_root = crate::space::default_space_root();
+                    let space_root = crate::space::open_space_root(res.space_root.as_deref());
                     let write_dir = selected_entity
                         .and_then(|pe| queries.loaded_from_file.get(pe).ok())
                         .map(|(_, lff)| {
@@ -14055,7 +16720,7 @@ fn drain_slint_actions(
                         crate::space::file_loader::LoadedFromFile {
                             path: script_dir.clone(),
                             file_type: crate::space::FileType::Directory,
-                            service: "SoulService".to_string(),
+                            service: script_service.clone(),
                         },
                         Name::new(script_name.clone()),
                     ));
@@ -14078,7 +16743,7 @@ fn drain_slint_actions(
                         registry.register(script_dir.join("_instance.toml"), entity, crate::space::FileMetadata {
                             path: script_dir.clone(),
                             file_type: crate::space::FileType::Directory,
-                            service: "SoulService".to_string(),
+                            service: script_service.clone(),
                             name: script_name.clone(),
                             size: 0,
                             modified: std::time::SystemTime::now(),
@@ -14096,15 +16761,16 @@ fn drain_slint_actions(
                 if action == "insert:model" || action == "insert:folder" {
                     let part_type_str = if action == "insert:model" { "Model" } else { "Folder" };
 
-                    // Resolve parent: selected entity's directory, or Workspace root
-                    let selected_entity: Option<Entity> = if let Some(ref es) = res.explorer_state {
-                        match &es.selected {
-                            SelectedItem::Entity(e) => Some(*e),
-                            _ => None,
-                        }
-                    } else { None };
+                    // Resolve parent: the selected instance or service row, or
+                    // the Workspace root.
+                    let selected_entity: Option<Entity> = insert_parent_entity(
+                        res.explorer_state.as_deref().map(|es| &es.selected),
+                        &queries.loaded_from_file,
+                        &queries.hierarchy_parents,
+                    );
+                    let container_service = insert_service_for(selected_entity, &queries.loaded_from_file, "Workspace");
 
-                    let space_root = crate::space::default_space_root();
+                    let space_root = crate::space::open_space_root(res.space_root.as_deref());
                     let write_dir = selected_entity
                         .and_then(|pe| queries.loaded_from_file.get(pe).ok())
                         .map(|(_, lff)| {
@@ -14153,7 +16819,7 @@ fn drain_slint_actions(
                                 crate::space::file_loader::LoadedFromFile {
                                     path: dir_path.clone(),
                                     file_type: crate::space::FileType::Directory,
-                                    service: "Workspace".to_string(),
+                                    service: container_service.clone(),
                                 },
                                 Name::new(dir_name.clone()),
                                 Transform::default(),
@@ -14170,7 +16836,7 @@ fn drain_slint_actions(
                                 registry.register(dir_path.join("_instance.toml"), entity, crate::space::FileMetadata {
                                     path: dir_path.clone(),
                                     file_type: crate::space::FileType::Directory,
-                                    service: "Workspace".to_string(),
+                                    service: container_service.clone(),
                                     name: dir_name.clone(),
                                     size: 0,
                                     modified: std::time::SystemTime::now(),
@@ -14180,7 +16846,7 @@ fn drain_slint_actions(
                                 registry.register(dir_path.clone(), entity, crate::space::FileMetadata {
                                     path: dir_path.clone(),
                                     file_type: crate::space::FileType::Directory,
-                                    service: "Workspace".to_string(),
+                                    service: container_service.clone(),
                                     name: dir_name.clone(),
                                     size: 0,
                                     modified: std::time::SystemTime::now(),
@@ -14227,13 +16893,13 @@ fn drain_slint_actions(
                         [0.0, 0.5, 0.0]
                     };
 
-                    // Parent entity: any selected entity (unrestricted hierarchy)
-                    let parent_entity: Option<Entity> = if let Some(ref es) = res.explorer_state {
-                        match &es.selected {
-                            SelectedItem::Entity(e) => Some(*e),
-                            _ => None,
-                        }
-                    } else { None };
+                    // Parent entity: the selected instance or service row
+                    // (unrestricted hierarchy), else the Workspace below.
+                    let parent_entity: Option<Entity> = insert_parent_entity(
+                        res.explorer_state.as_deref().map(|es| &es.selected),
+                        &queries.loaded_from_file,
+                        &queries.hierarchy_parents,
+                    );
 
                     let parent_entity = parent_entity.or_else(|| {
                         queries.loaded_from_file.iter().find_map(|(lff_entity, lff)| {
@@ -14249,7 +16915,7 @@ fn drain_slint_actions(
                         })
                     });
 
-                    let space_root = crate::space::default_space_root();
+                    let space_root = crate::space::open_space_root(res.space_root.as_deref());
                     let write_dir = parent_entity
                         .and_then(|pe| queries.loaded_from_file.get(pe).ok())
                         .map(|(_, lff)| {
@@ -14327,7 +16993,7 @@ fn drain_slint_actions(
                         // Prefer selected GUI container, fall back to service root
                         let parent_entity = selected_gui_entity.or(service_entity);
 
-                        let space_root = crate::space::default_space_root();
+                        let space_root = crate::space::open_space_root(res.space_root.as_deref());
                         let write_dir = parent_entity
                             .and_then(|pe| queries.loaded_from_file.get(pe).ok())
                             .map(|(_, lff)| {
@@ -14475,7 +17141,8 @@ fn drain_slint_actions(
                                 if let Some(ref mut out) = res.output {
                                     if on && no_terrain {
                                         out.warning(
-                                            "Water on, but there is no terrain yet — the plane is                                              sized to the terrain footprint and appears with it",
+                                            "Water on, but there is no terrain yet: the plane is \
+                                             sized to the terrain footprint and appears with it",
                                         );
                                     }
                                     out.info(format!(
@@ -14493,49 +17160,101 @@ fn drain_slint_actions(
                                 warn!("terrain:water with no WaterConfig resource");
                             }
                         }
-                    } else if action == "terrain:clear" {
-                        // Clear terrain: delete Workspace/Terrain directory and despawn all terrain entities
-                        let space_root = crate::space::default_space_root();
-                        let terrain_dir = space_root.join("Workspace").join("Terrain");
-                        
-                        // Delete terrain directory and all its contents
-                        if terrain_dir.exists() {
-                            match std::fs::remove_dir_all(&terrain_dir) {
-                                Ok(()) => {
-                                    if let Some(ref mut out) = res.output {
-                                        out.info("Deleted Workspace/Terrain directory");
-                                    }
-                                    info!("🗑️ Deleted terrain directory: {:?}", terrain_dir);
-                                }
-                                Err(e) => {
-                                    error!("Failed to delete terrain directory: {}", e);
-                                    if let Some(ref mut out) = res.output {
-                                        out.error(format!("Failed to delete terrain files: {}", e));
-                                    }
-                                }
+                    } else if action == "terrain:regenerate-layers" {
+                        // The seed's trees, grass and lakes, read off the
+                        // ground as it stands now.
+                        commands.queue(|world: &mut World| {
+                            let result = crate::engine_bridge::terrain::regenerate_layers_world(world);
+                            if let Some(mut explorer) = world.get_resource_mut::<UnifiedExplorerState>() {
+                                explorer.dirty = true;
                             }
-                        }
-                        
-                        // Despawn all terrain entities (TerrainRoot and Chunks)
-                        let terrain_count = queries.terrain_roots.iter().count();
-                        let chunk_count = queries.terrain_chunks.iter().count();
-                        
-                        for entity in queries.terrain_roots.iter() {
-                            commands.entity(entity).despawn();
-                        }
-                        
-                        for entity in queries.terrain_chunks.iter() {
-                            commands.entity(entity).despawn();
-                        }
-                        
-                        if let Some(ref mut out) = res.output {
-                            out.info(format!("Cleared {} terrain entities", terrain_count + chunk_count));
-                        }
-                        info!("🗑️ Despawned {} terrain roots and {} chunks", terrain_count, chunk_count);
-                        
-                        // Mark explorer as dirty to refresh the tree
-                        if let Some(ref mut es) = res.explorer_state {
-                            es.dirty = true;
+                            let Some(mut out) = world.get_resource_mut::<OutputConsole>() else { return };
+                            match result {
+                                Ok(done) => out.info(format!(
+                                    "Regenerated {} terrain layers from the seed ({} earlier generated layers replaced); layers you made are untouched",
+                                    done.written, done.removed
+                                )),
+                                Err(e) => out.warning(format!("Regenerate layers: {e}")),
+                            }
+                        });
+                    } else if action == "terrain:convert-water-paint" {
+                        // Ground painted Water (older Spaces) becomes seabed
+                        // under real water, one undo entry.
+                        commands.queue(|world: &mut World| {
+                            let result = crate::engine_bridge::terrain::convert_water_paint_world(world);
+                            let Some(mut out) = world.get_resource_mut::<OutputConsole>() else { return };
+                            match result {
+                                Ok(done) if done.cells == 0 && done.left_painted == 0 => {
+                                    out.info("Convert water paint: no ground here is painted Water");
+                                }
+                                Ok(done) => {
+                                    let mut message = format!(
+                                        "Converted {} cells of water paint into {} bodies of real water over seabed (Ctrl+Z undoes it)",
+                                        done.cells, done.bodies
+                                    );
+                                    if done.left_painted > 0 {
+                                        message.push_str(&format!(
+                                            "; {} painted cells stand above their water's level and keep their paint",
+                                            done.left_painted
+                                        ));
+                                    }
+                                    out.info(message);
+                                }
+                                Err(e) => out.warning(format!("Convert water paint: {e}")),
+                            }
+                        });
+                    } else if action == "terrain:clear" {
+                        // Clear clears everything: the terrain's files and
+                        // entities, the ocean, and the layers (roads, stamps,
+                        // pads, fills, scatter, lakes), which go to the trash
+                        // with an undo entry so they are recoverable
+                        // (`clear_terrain_world`, shared with the bridge's
+                        // `terrain.clear`). The raster delete cannot be undone,
+                        // so it only ever targets the live SpaceRoot:
+                        // `default_space_root()` re-reads the last-opened path
+                        // from settings, which can name another Space after an
+                        // in-session switch. It runs with the world, after this
+                        // frame's commands, and refuses while a generation is
+                        // running or queued, whose terrain would land after it.
+                        let live_root = res.space_root.as_ref().map(|sr| sr.0.clone());
+                        if let Some(space_root) = live_root {
+                            commands.queue(move |world: &mut World| {
+                                use crate::engine_bridge::terrain::{clear_terrain_world, generation_busy, TerrainClear};
+                                if generation_busy(world) {
+                                    if let Some(mut out) = world.get_resource_mut::<OutputConsole>() {
+                                        out.warning("Clear Terrain: a generation is still running; clear again once it finishes");
+                                    }
+                                    return;
+                                }
+                                let TerrainClear { files, instance, roots, chunks, layers_trashed, .. } =
+                                    clear_terrain_world(world, &space_root, true);
+                                let mut failed = files.failed;
+                                failed.extend(instance.error);
+                                info!(
+                                    "🗑️ Clear Terrain: {} entries removed, {} roots and {} chunks despawned, layers trashed: {}",
+                                    files.removed.len(),
+                                    roots,
+                                    chunks,
+                                    layers_trashed
+                                );
+                                if let Some(mut out) = world.get_resource_mut::<OutputConsole>() {
+                                    if failed.is_empty() {
+                                        out.info(if layers_trashed {
+                                            "Cleared the terrain; its layers went to the trash (Ctrl+Z brings them back)"
+                                        } else {
+                                            "Cleared the terrain"
+                                        });
+                                    } else {
+                                        error!("Failed to delete terrain files: {}", failed.join("; "));
+                                        out.error(format!("Failed to delete terrain files: {}", failed.join("; ")));
+                                    }
+                                }
+                            });
+                        } else {
+                            if let Some(ref mut out) = res.output {
+                                out.error("Clear Terrain: no open Space, nothing was deleted");
+                            }
+                            warn!("terrain:clear with no SpaceRoot; refused");
                         }
                     } else if action == "help:api-browser" {
                         // Open API Reference as a center tab via CenterTabManager
@@ -14555,10 +17274,11 @@ fn drain_slint_actions(
                         info!("Help: Opened Services Browser center tab");
                     } else if action == "help:constitution" {
                         // Open the Eustress Constitution PDF in the OS default viewer.
-                        // The document lives in the repo at docs/documents/ so every
-                        // build ships with it and every user can access it without
-                        // a network connection.
+                        // The document lives in the repo at docs/documents/ and the
+                        // installer puts a copy in `docs/` beside the executable, so
+                        // every user can open it without a network connection.
                         let candidates = [
+                            crate::resource_root().join("docs/eustress_constitution.pdf"),
                             std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
                                 .join("../../..")
                                 .join("docs/documents/eustress_constitution.pdf"),
@@ -14636,26 +17356,33 @@ fn drain_slint_actions(
                             | "insert:particleemitter" => Some(("ParticleEmitter",     "Workspace")),
                             "insert:decal"             => Some(("Decal",               "Workspace")),
                             "insert:sound"             => Some(("Sound",               "SoundService")),
-                            // Lighting
-                            "insert:pointlight"        => Some(("PointLight",          "Workspace")),
-                            "insert:spotlight"         => Some(("SpotLight",           "Workspace")),
-                            "insert:surfacelight"      => Some(("SurfaceLight",        "Workspace")),
+                            // Lights take `insert_light_instance` below.
                             _ => None,
                         };
 
-                        if let Some((class_name, service_name)) = class_and_service {
-                            let space_root = crate::space::default_space_root();
+                        if let Some(light_class) = super::light_panel::insert_action_class(action) {
+                            // PointLight / SpotLight / SurfaceLight /
+                            // DirectionalLight, from the ribbon or the
+                            // Insert dialog: inside the selected part, else
+                            // in front of the camera (never the origin).
+                            insert_light_instance(light_class, &mut res, &queries, &mut pending_insert);
+                        } else if let Some((class_name, service_name)) = class_and_service {
+                            // The OPEN Space. `default_space_root()` re-reads
+                            // the last-opened path from settings, which names
+                            // another Space when this one was opened with
+                            // --space, a launch file, or an in-session switch.
+                            let space_root = res.space_root.as_ref().map(|sr| sr.0.clone())
+                                .unwrap_or_else(crate::space::default_space_root);
                             // Prefer the selected entity's folder as the
                             // dest so e.g. inserting an Attachment with a
                             // Part selected plants it as a child of that
                             // part. Falls back to the class's canonical
                             // service when nothing is selected.
-                            let selected_entity: Option<Entity> = res.explorer_state
-                                .as_ref()
-                                .and_then(|es| match &es.selected {
-                                    SelectedItem::Entity(e) => Some(*e),
-                                    _ => None,
-                                });
+                            let selected_entity: Option<Entity> = insert_parent_entity(
+                                res.explorer_state.as_deref().map(|es| &es.selected),
+                                &queries.loaded_from_file,
+                                &queries.hierarchy_parents,
+                            );
                             let fallback_dir = space_root.join(service_name);
                             let write_dir = selected_entity
                                 .and_then(|pe| queries.loaded_from_file.get(pe).ok())
@@ -14698,8 +17425,8 @@ fn drain_slint_actions(
                             }
                         } else if let Some(class_name) = action.strip_prefix("insert:") {
                             // Generic data-driven Insert path. The
-                            // dynamic dropdown (fed from the ClassRegistry,
-                            // see `init_insert_classes_to_slint`) emits the
+                            // dynamic dropdown (rebuilt from the class
+                            // templates on disk, see `refresh_insert_menu`) emits the
                             // canonical PascalCase `insert:<ClassName>` for
                             // every creatable class that isn't handled by a
                             // bespoke arm above. We route it straight
@@ -14721,13 +17448,14 @@ fn drain_slint_actions(
                                 .unwrap_or("Other");
                             let service_name = super::insert_classes::default_service_for(category);
 
-                            let space_root = crate::space::default_space_root();
-                            let selected_entity: Option<Entity> = res.explorer_state
-                                .as_ref()
-                                .and_then(|es| match &es.selected {
-                                    SelectedItem::Entity(e) => Some(*e),
-                                    _ => None,
-                                });
+                            // The OPEN Space, as in the template branch above.
+                            let space_root = res.space_root.as_ref().map(|sr| sr.0.clone())
+                                .unwrap_or_else(crate::space::default_space_root);
+                            let selected_entity: Option<Entity> = insert_parent_entity(
+                                res.explorer_state.as_deref().map(|es| &es.selected),
+                                &queries.loaded_from_file,
+                                &queries.hierarchy_parents,
+                            );
                             let fallback_dir = space_root.join(service_name);
                             let write_dir = selected_entity
                                 .and_then(|pe| queries.loaded_from_file.get(pe).ok())
@@ -14737,11 +17465,37 @@ fn drain_slint_actions(
                                 })
                                 .unwrap_or_else(|| fallback_dir.clone());
 
+                            // Terrain layers go in Workspace/Terrain/Layers on
+                            // the ground under the view, whatever is selected,
+                            // and a spline point into the selected spline
+                            // (see `terrain_layers::plan_insert`).
+                            let layer_plan = crate::terrain_layers::plan_insert(
+                                class_name,
+                                &space_root,
+                                selected_entity
+                                    .and_then(|pe| queries.instances.get(pe).ok())
+                                    .map(|(_, inst)| (inst.class_name, write_dir.as_path())),
+                                queries.camera_query.iter(),
+                                queries.terrain_field.iter().next().map(|(config, data, baked)| {
+                                    (config, eustress_common::terrain::surface_data(data, baked))
+                                }),
+                            );
+                            let (write_dir, overrides) = match &layer_plan {
+                                Some(Ok(plan)) => (plan.dir.clone(), plan.overrides.clone()),
+                                Some(Err(reason)) => {
+                                    if let Some(ref mut out) = res.output {
+                                        out.error(format!("Insert {}: {}", class_name, reason));
+                                    }
+                                    continue;
+                                }
+                                None => (write_dir, crate::space::instance_create::InstanceOverrides::default()),
+                            };
+
                             match crate::space::instance_create::create_instance(
                                 &write_dir,
                                 class_name,
                                 None,
-                                crate::space::instance_create::InstanceOverrides::default(),
+                                overrides,
                             ) {
                                 Ok(created) => {
                                     if let Some(ref mut out) = res.output {
@@ -14756,6 +17510,22 @@ fn drain_slint_actions(
                                         &mut res,
                                         &mut pending_insert,
                                     );
+                                    if let Some(Ok(plan)) = &layer_plan {
+                                        crate::terrain_layers::finish_insert(plan, &created.folder_path);
+                                    }
+                                    // A new simulation arrives with one species
+                                    // (a block of water) so Play has something
+                                    // to run; the species folder sits inside it.
+                                    if class_name == "ParticleSimulation" {
+                                        if let Err(e) = crate::space::instance_create::create_instance(
+                                            &created.folder_path,
+                                            "ParticleSpecies",
+                                            Some("Water"),
+                                            Default::default(),
+                                        ) {
+                                            warn!("Insert ParticleSimulation: default species failed: {}", e);
+                                        }
+                                    }
                                 }
                                 Err(e) => {
                                     error!("Insert {} failed: {}", class_name, e);
@@ -14794,12 +17564,12 @@ fn drain_slint_actions(
                                 super::notifications::NotificationEvent::info(
                                     super::notifications::NotificationCategory::General,
                                     format!("{} is on the roadmap", label),
-                                    "Not built yet — your click was counted as a vote for it.",
+                                    "Not built yet. Your click was counted as a vote for it.",
                                 ),
                             );
                             if let Some(ref mut out) = res.output {
                                 out.info(format!(
-                                    "{} ({}) — planned, not yet implemented. Interest recorded.",
+                                    "{} ({}): planned, not built yet. Your click counted as a vote.",
                                     label, action,
                                 ));
                             }
@@ -14946,6 +17716,14 @@ fn drain_slint_actions(
 
             // Close
             SlintAction::CloseRequested => {
+                // Unsaved script edits ask first; the answer continues the exit.
+                if let Some(ref mut mgr) = res.tab_manager {
+                    let exit = super::center_tabs::TabCloseRequest::AppExit;
+                    if !mgr.dirty_tabs_closed_by(exit).is_empty() {
+                        mgr.pending_close = Some(exit);
+                        continue;
+                    }
+                }
                 if let Some(ref mut s) = res.state {
                     if s.has_unsaved_changes {
                         s.show_exit_confirmation = true;
@@ -15197,10 +17975,11 @@ fn sync_selection_summary_to_slint(
     }
 }
 
-/// Reflect `CadSketchUiState` onto the docked SketchCanvasPanel.
+/// Reflect `CadSketchUiState` onto the Sketch panel.
 fn sync_sketch_canvas_to_slint(
     slint_context: Option<NonSend<SlintUiState>>,
     state: Option<Res<crate::cad_plugin::CadSketchUiState>>,
+    mut pushed_rev: Local<Option<u64>>,
 ) {
     let Some(slint_context) = slint_context else { return };
     let Some(state) = state else { return };
@@ -15222,32 +18001,48 @@ fn sync_sketch_canvas_to_slint(
     if cur_sk != state.sketch_name {
         ui.set_sketch_canvas_sketch_name(state.sketch_name.as_str().into());
     }
-    let cur_status: String = ui.get_sketch_canvas_solve_status().into();
-    if cur_status != state.solve_status {
-        ui.set_sketch_canvas_solve_status(state.solve_status.as_str().into());
+    let cur_solve: String = ui.get_sketch_canvas_solve_state().into();
+    if cur_solve != state.solve_state {
+        ui.set_sketch_canvas_solve_state(state.solve_state.as_str().into());
+    }
+    if ui.get_sketch_canvas_free_dof() != state.free_dof {
+        ui.set_sketch_canvas_free_dof(state.free_dof);
+    }
+    let cur_detail: String = ui.get_sketch_canvas_status_detail().into();
+    if cur_detail != state.status_detail {
+        ui.set_sketch_canvas_status_detail(state.status_detail.as_str().into());
     }
 
-    let entities: Vec<SketchEntityRow> = state
-        .entities
-        .iter()
-        .map(|(i, kind, summary)| SketchEntityRow {
-            index: *i as i32,
-            kind: kind.as_str().into(),
-            summary: summary.as_str().into(),
-        })
-        .collect();
-    ui.set_sketch_canvas_entities(slint::ModelRc::new(slint::VecModel::from(entities)));
+    // The row models only when their content changed. Replacing a model
+    // rebuilds every row, which resets its hover and swallows a click that
+    // lands mid-rebuild; doing it every frame made the rows unusable.
+    if *pushed_rev != Some(state.rev) {
+        *pushed_rev = Some(state.rev);
+        let entities: Vec<SketchEntityRow> = state
+            .entities
+            .iter()
+            .map(|e| SketchEntityRow {
+                index: e.index as i32,
+                kind: e.kind.into(),
+                label: e.label.into(),
+                summary: e.summary.as_str().into(),
+                state: e.state.into(),
+            })
+            .collect();
+        ui.set_sketch_canvas_entities(slint::ModelRc::new(slint::VecModel::from(entities)));
 
-    let constraints: Vec<SketchConstraintRow> = state
-        .constraints
-        .iter()
-        .map(|(i, kind, detail)| SketchConstraintRow {
-            index: *i as i32,
-            kind: kind.as_str().into(),
-            detail: detail.as_str().into(),
-        })
-        .collect();
-    ui.set_sketch_canvas_constraints(slint::ModelRc::new(slint::VecModel::from(constraints)));
+        let constraints: Vec<SketchConstraintRow> = state
+            .constraints
+            .iter()
+            .map(|c| SketchConstraintRow {
+                index: c.index as i32,
+                kind: c.kind.into(),
+                label: c.label.as_str().into(),
+                detail: c.detail.as_str().into(),
+            })
+            .collect();
+        ui.set_sketch_canvas_constraints(slint::ModelRc::new(slint::VecModel::from(constraints)));
+    }
 
     let a = state.selected_a.map(|i| i as i32).unwrap_or(-1);
     if ui.get_sketch_canvas_selected_a() != a {
@@ -15289,7 +18084,7 @@ fn sync_numeric_input_to_slint(
         ui.set_numeric_input_axis_label(axis_label.as_str().into());
     }
 
-    let unit = numeric.owner.map(|o| o.unit()).unwrap_or("");
+    let unit = numeric.unit_label();
     let current_unit: String = ui.get_numeric_input_unit().into();
     if current_unit != unit {
         ui.set_numeric_input_unit(unit.into());
@@ -15429,6 +18224,10 @@ struct TerrainSyncParams<'w, 's> {
 struct UiSyncMemo {
     explorer_pulse: u32,
     properties_pulse: u32,
+    command_bar_pulse: u32,
+    find_pulse: u32,
+    /// Explorer / Properties / Output visibility as last reconciled.
+    panels: Option<[bool; 3]>,
     settings_pushed: bool,
 }
 
@@ -15448,26 +18247,101 @@ fn recent_space_label(path: &str) -> String {
     }
 }
 
-/// The Insert Object dialog's rows: the ribbon catalog filtered by `query`
-/// (case-insensitive, on class name, label and category), headers dropped.
+/// The Insert Object dialog's rows. With `query` empty: the context rows the
+/// ribbon menu shows (suggested for the selection, recent), the shapes, then
+/// the catalog by category, each group under its heading. Otherwise every
+/// shape and class that matches, best first (`insert_classes::match_rank`:
+/// exact, prefix, word start, anywhere, category), without headings.
 fn insert_results_model(ui: &StudioWindow, query: &str) -> slint::ModelRc<InsertClassData> {
     use slint::Model;
     let q = query.trim().to_lowercase();
-    let rows: Vec<InsertClassData> = ui
-        .get_insert_classes()
-        .iter()
-        .filter(|row| {
-            q.is_empty()
-                || row.class_name.to_lowercase().contains(&q)
-                || row.display.to_lowercase().contains(&q)
-                || row.category.to_lowercase().contains(&q)
-        })
-        .map(|mut row| {
-            row.show_header = false;
-            row
-        })
-        .collect();
+    let shapes = super::insert_classes::shape_rows().iter().map(insert_row).collect::<Vec<_>>();
+    let rows: Vec<InsertClassData> = if q.is_empty() {
+        ui.get_insert_context()
+            .iter()
+            .chain(shapes)
+            .chain(ui.get_insert_classes().iter())
+            .collect()
+    } else {
+        let mut ranked: Vec<(u8, usize, InsertClassData)> = shapes
+            .into_iter()
+            .chain(ui.get_insert_classes().iter())
+            .enumerate()
+            .filter_map(|(order, row)| {
+                super::insert_classes::match_rank(&q, &row.class_name, &row.display, &row.category)
+                    .map(|rank| (rank, order, row))
+            })
+            .collect();
+        ranked.sort_by_key(|(rank, order, _)| (*rank, *order));
+        ranked
+            .into_iter()
+            .map(|(_, _, mut row)| {
+                row.show_header = false;
+                row.section = slint::SharedString::default();
+                row
+            })
+            .collect()
+    };
     slint::ModelRc::from(std::rc::Rc::new(slint::VecModel::from(rows)))
+}
+
+/// The entity a new instance goes under, from the Explorer selection: a
+/// folder-backed instance itself; a single-file instance's parent, since the
+/// insert is written into the folder that file sits in; a service row's
+/// service entity, whose `_service.toml` sits in the service folder. `None`
+/// with nothing selected, which leaves each insert handler to its class's
+/// usual service. `insert_menu_target` resolves the same way for the Insert
+/// menu's "Inserts into" line.
+fn insert_parent_entity(
+    selected: Option<&SelectedItem>,
+    loaded_from_file: &Query<(Entity, &mut crate::space::LoadedFromFile)>,
+    parents: &Query<&ChildOf>,
+) -> Option<Entity> {
+    match selected? {
+        SelectedItem::Entity(e) => {
+            let single_file = loaded_from_file.get(*e).ok().is_some_and(|(_, file)| {
+                !file.path.is_dir()
+                    && file.path.file_name().map_or(true, |n| n.to_string_lossy() != "_service.toml")
+            });
+            if single_file {
+                if let Ok(parent) = parents.get(*e) {
+                    return Some(parent.parent());
+                }
+            }
+            Some(*e)
+        }
+        SelectedItem::Service(name) => loaded_from_file.iter().find_map(|(entity, file)| {
+            let marker = file.path.file_name().is_some_and(|n| n.to_string_lossy() == "_service.toml");
+            (marker && file.service == *name).then_some(entity)
+        }),
+        _ => None,
+    }
+}
+
+/// The service an instance inserted under `parent` belongs to: the parent's
+/// own, or `fallback` for a top-level insert. What the loader stamps on the
+/// same folder at the next load; storage services hide their content by it.
+fn insert_service_for(
+    parent: Option<Entity>,
+    loaded_from_file: &Query<(Entity, &mut crate::space::LoadedFromFile)>,
+    fallback: &str,
+) -> String {
+    parent
+        .and_then(|p| loaded_from_file.get(p).ok())
+        .map(|(_, file)| file.service.clone())
+        .filter(|service| !service.is_empty())
+        .unwrap_or_else(|| fallback.to_string())
+}
+
+/// One Insert row as the Slint struct.
+fn insert_row(row: &super::insert_classes::InsertClassDescriptor) -> InsertClassData {
+    InsertClassData {
+        class_name: row.class_name.as_str().into(),
+        category: row.category.as_str().into(),
+        display: row.display.as_str().into(),
+        show_header: row.show_header,
+        section: row.section.as_str().into(),
+    }
 }
 
 fn sync_bevy_to_slint(
@@ -15479,8 +18353,7 @@ fn sync_bevy_to_slint(
     auth_state: Option<Res<crate::auth::AuthState>>,
     bliss_state: Option<Res<crate::auth::BlissNodeState>>,
     mut viewport_bounds: Option<ResMut<super::ViewportBounds>>,
-    snapshot: Option<Res<UIWorldSnapshot>>,
-    // Direct entity count query as fallback when snapshot is empty
+    // Status-bar entity count.
     instance_query: Query<Entity, With<eustress_common::classes::Instance>>,
     play_mode_state: Option<Res<State<crate::play_mode::PlayModeState>>>,
     // Terrain state sync — bundled into one SystemParam (see
@@ -15608,12 +18481,7 @@ fn sync_bevy_to_slint(
     }
 
     // Entity count
-    let entity_count = if let Some(ref snapshot) = snapshot {
-        let count = snapshot.entities.len();
-        if count > 0 { count } else { instance_query.iter().count() }
-    } else {
-        instance_query.iter().count()
-    };
+    let entity_count = instance_query.iter().count();
     
     // Get mutable reference to state
     let Some(mut state) = state else { return };
@@ -15630,13 +18498,17 @@ fn sync_bevy_to_slint(
         ui.set_snapshot_status(state.snapshot_status.as_str().into());
     }
 
-    // ── Insert Object dialog: one-shot open with the full class list ──
+    // ── Insert Object dialog: open with an empty search ──
+    // `refresh_insert_menu` runs next, this frame: it rebuilds the catalog
+    // from disk and pushes the target, the suggested and recent rows and the
+    // dialog's results.
     if state.show_insert_object_dialog {
         state.show_insert_object_dialog = false;
         ui.set_insert_target_name(state.insert_target_name.as_str().into());
         ui.set_insert_search_query(slint::SharedString::default());
         ui.set_insert_results(insert_results_model(ui, ""));
         ui.set_show_insert_object_dialog(true);
+        INSERT_MENU_REFRESH.store(true, std::sync::atomic::Ordering::Relaxed);
     }
 
     // ── Focus requests (Ctrl+Shift+X / Ctrl+Shift+E) ──
@@ -15647,6 +18519,42 @@ fn sync_bevy_to_slint(
     if state.focus_properties_filter_pulse != ui_memo.properties_pulse {
         ui_memo.properties_pulse = state.focus_properties_filter_pulse;
         ui.invoke_focus_properties_filter();
+    }
+
+    // ── Explorer / Properties / Output visibility ──
+    // Two writers: Rust (Ctrl+1/2/3, layout presets, handlers that reveal
+    // Properties) and the Slint View menu. Whichever side changed since the
+    // last frame wins, and the other is brought in line.
+    let slint_panels = [ui.get_show_explorer(), ui.get_show_properties(), ui.get_show_output()];
+    let state_panels = [state.show_explorer, state.show_properties, state.show_output];
+    match ui_memo.panels {
+        Some(last) if state_panels != last => {
+            ui.set_show_explorer(state_panels[0]);
+            ui.set_show_properties(state_panels[1]);
+            ui.set_show_output(state_panels[2]);
+            ui_memo.panels = Some(state_panels);
+        }
+        Some(last) if slint_panels == last => {}
+        // Slint changed (or first frame: the Slint layout is the start).
+        _ => {
+            state.show_explorer = slint_panels[0];
+            state.show_properties = slint_panels[1];
+            state.show_output = slint_panels[2];
+            ui_memo.panels = Some(slint_panels);
+        }
+    }
+
+    // ── Command bar (Ctrl+K) ──
+    if state.toggle_command_bar_pulse != ui_memo.command_bar_pulse {
+        ui_memo.command_bar_pulse = state.toggle_command_bar_pulse;
+        ui.set_show_command_bar(!ui.get_show_command_bar());
+    }
+
+    // ── Find & Replace (Ctrl+F) ──
+    if state.open_find_pulse != ui_memo.find_pulse {
+        ui_memo.find_pulse = state.open_find_pulse;
+        ui.set_show_find_dialog(true);
+        ui.invoke_find_search();
     }
 
     // ── Snap, collisions and the recent-spaces list follow the settings ──
@@ -15693,23 +18601,13 @@ fn sync_bevy_to_slint(
             ui.set_terrain_edit_mode(terrain_edit);
         }
     }
-    // Terrain brush
+    // The active terrain tool, for the ribbon's lit button and the Terrain
+    // panel's label. Its settings go to the `TerrainToolsUi` global
+    // (`terrain_tools_ui`), every frame they change.
     if let Some(ref tb) = terrain.brush {
-        let brush_str = match tb.mode {
-            eustress_common::terrain::BrushMode::Raise => "raise",
-            eustress_common::terrain::BrushMode::Lower => "lower",
-            eustress_common::terrain::BrushMode::Smooth => "smooth",
-            eustress_common::terrain::BrushMode::Flatten => "flatten",
-            eustress_common::terrain::BrushMode::PaintTexture => "paint",
-            eustress_common::terrain::BrushMode::VoxelAdd => "voxeladd",
-            eustress_common::terrain::BrushMode::VoxelRemove => "voxelremove",
-            eustress_common::terrain::BrushMode::VoxelSmooth => "voxelsmooth",
-            eustress_common::terrain::BrushMode::Region => "region",
-            eustress_common::terrain::BrushMode::Fill => "fill",
-        };
-        let current_brush: String = ui.get_terrain_brush().into();
-        if current_brush != brush_str {
-            ui.set_terrain_brush(brush_str.into());
+        let tool = tb.tool.id();
+        if ui.get_terrain_brush().as_str() != tool {
+            ui.set_terrain_brush(tool.into());
         }
     }
     // Terrain config - only sync when values change
@@ -15723,7 +18621,8 @@ fn sync_bevy_to_slint(
             ui.set_terrain_resolution(format!("{}", config.chunk_resolution).into());
             ui.set_terrain_height_scale(format!("{:.1}", config.height_scale).into());
             ui.set_terrain_lod_levels(format!("{}", config.lod_levels).into());
-            ui.set_terrain_material("Default".into());
+            // `terrain-material` (the Materials row) is the slot summary
+            // `sync_terrain_materials_to_slint` keeps.
         }
     }
     let chunk_count_str = format!("{}", terrain.chunks.iter().count());
@@ -15762,6 +18661,9 @@ fn sync_bevy_to_slint(
         // about what the engine is actually doing.
         if ui.get_usage_telemetry_enabled() != es.usage_telemetry_enabled {
             ui.set_usage_telemetry_enabled(es.usage_telemetry_enabled);
+        }
+        if ui.get_ribbon_collapsed() != es.ribbon_collapsed {
+            ui.set_ribbon_collapsed(es.ribbon_collapsed);
         }
     }
 
@@ -15880,87 +18782,108 @@ fn sync_bevy_to_slint(
         ui.set_current_entity_count(entity_count as i32);
     }
     
-    // Sync output console logs → Slint (last 200 entries)
-    // Rebuild when log count OR filter state changes
+    // Output rows (ui/output_rows.rs). Rebuilt at once when a filter, the
+    // search or a shown stack changes, and on the status tick when the log
+    // moved, so a flood of prints costs four rebuilds a second, not one a
+    // frame.
     if let Some(ref output) = output {
-        let new_log_count = output.entries.len();
-        let filter_hash = {
-            let sf: String = ui.get_output_source_filter().into();
-            let si = ui.get_output_show_info();
-            let sw = ui.get_output_show_warnings();
-            let se = ui.get_output_show_errors();
-            let sd = ui.get_output_show_debug();
-            format!("{}{}{}{}{}", sf, si, sw, se, sd)
-        };
-        let prev_filter = state.last_output_filter.clone();
-        let needs_rebuild = new_log_count != state.last_log_count || filter_hash != prev_filter;
-        if needs_rebuild {
-            state.last_log_count = new_log_count;
+        let source_filter: String = ui.get_output_source_filter().into();
+        let search: String = ui.get_output_filter_text().into();
+        let levels = [
+            ui.get_output_show_info(),
+            ui.get_output_show_warnings(),
+            ui.get_output_show_errors(),
+            ui.get_output_show_debug(),
+        ];
+        let filter_hash = format!(
+            "{}\u{1f}{}\u{1f}{:?}\u{1f}{}",
+            source_filter, search, levels, super::output_rows::expand_epoch()
+        );
+        let filters_changed = filter_hash != state.last_output_filter;
+        let log_changed = output.revision != state.last_output_revision;
+        if filters_changed || (log_changed && status_tick) {
+            state.last_output_revision = output.revision;
             state.last_output_filter = filter_hash;
-            let log_model: Vec<LogData> = output.entries.iter().enumerate().map(|(i, entry)| {
-                LogData {
-                    id: i as i32,
-                    level: match entry.level {
-                        LogLevel::Info => "info".into(),
-                        LogLevel::Warn => "warning".into(),
-                        LogLevel::Error => "error".into(),
-                        LogLevel::Debug => "debug".into(),
-                    },
-                    timestamp: entry.timestamp.clone().into(),
-                    message: entry.message.clone().into(),
-                    source: entry.source.clone().into(),
-                }
+            let filters = super::output_rows::Filters { source: &source_filter, search: &search, levels };
+            let built = super::output_rows::build(&output.entries, &filters, &super::output_rows::expanded_ids());
+            let rows: Vec<OutputRow> = built.rows.into_iter().map(|r| OutputRow {
+                id: r.id as i32,
+                kind: r.kind.into(),
+                level: r.level,
+                source: r.source.into(),
+                badge: r.badge.into(),
+                time: r.time.into(),
+                text: r.text.into(),
+                count: r.count,
+                script: r.script.into(),
+                script_label: r.script_label.into(),
+                file: r.file.into(),
+                line: r.line,
+                stack: r.stack.into(),
+                expanded: r.expanded,
             }).collect();
-            let model_rc = std::rc::Rc::new(slint::VecModel::from(log_model));
-            ui.set_output_logs(slint::ModelRc::from(model_rc));
-
-            // Build all-text for the selectable output area — respects source + level filters
-            let source_filter = ui.get_output_source_filter().to_string();
-            let show_info = ui.get_output_show_info();
-            let show_warn = ui.get_output_show_warnings();
-            let show_err = ui.get_output_show_errors();
-            let show_dbg = ui.get_output_show_debug();
-            let all_text: String = output.entries.iter().filter(|e| {
-                // Source filter semantics:
-                //   "" or "all" → every source passes (default)
-                //   "rune"       → rune entries only
-                //   "luau"       → luau entries only
-                //   any other    → entries whose source exactly matches
-                //
-                // The prior version hid rune/luau entries whenever the
-                // filter wasn't explicitly "all" or that exact source —
-                // which is why script errors landed in OutputConsole but
-                // never rendered in the Output panel for the default
-                // filter state (empty string). Errors now show up
-                // regardless of whether the user has touched the
-                // Rune/Luau filter toggles.
-                let source_ok = match source_filter.as_str() {
-                    "" | "all" => true,
-                    f          => e.source == f,
-                };
-                // Level filter
-                let level_ok = match e.level {
-                    LogLevel::Info => show_info,
-                    LogLevel::Warn => show_warn,
-                    LogLevel::Error => show_err,
-                    LogLevel::Debug => show_dbg,
-                };
-                source_ok && level_ok
-            }).map(|e| {
-                let level_tag = match e.level {
-                    LogLevel::Info => "ℹ",
-                    LogLevel::Warn => "⚠",
-                    LogLevel::Error => "✗",
-                    LogLevel::Debug => "⚙",
-                };
-                format!("{} {} {}", e.timestamp, level_tag, e.message)
-            }).collect::<Vec<_>>().join("\n");
-            ui.set_output_all_text(slint::SharedString::from(all_text));
+            ui.set_output_rows(slint::ModelRc::new(slint::VecModel::from(rows)));
+            ui.set_output_count_info(built.counts[0]);
+            ui.set_output_count_warnings(built.counts[1]);
+            ui.set_output_count_errors(built.counts[2]);
+            ui.set_output_count_debug(built.counts[3]);
+            ui.set_output_total_lines(i32::try_from(output.entries.len()).unwrap_or(i32::MAX));
+            ui.set_output_rows_revision(ui.get_output_rows_revision().wrapping_add(1));
         }
     }
-    
+
     // Workshop Panel sync is handled by the dedicated sync_workshop_to_slint system
     // (runs on its own schedule to avoid adding workshop as a parameter here)
+}
+
+/// Writes Play's lifecycle to the Output panel: started, paused, resumed and
+/// stopped, so a session's script output reads between its own start and stop
+/// lines.
+fn log_play_state_to_output(
+    state: Option<Res<State<crate::play_mode::PlayModeState>>>,
+    mut last: Local<Option<crate::play_mode::PlayModeState>>,
+    output: Option<ResMut<OutputConsole>>,
+) {
+    use crate::play_mode::PlayModeState;
+    let Some(state) = state else { return };
+    let now = *state.get();
+    let before = last.replace(now);
+    let Some(before) = before else { return };
+    if before == now {
+        return;
+    }
+    let line = match (before, now) {
+        (PlayModeState::Editing, PlayModeState::Playing) => "▶ Play started",
+        (PlayModeState::Paused, PlayModeState::Playing) => "▶ Play resumed",
+        (_, PlayModeState::Paused) => "⏸ Play paused",
+        (_, PlayModeState::Editing) => "■ Play stopped; the Space is back to its state before Play",
+        _ => return,
+    };
+    if let Some(mut out) = output {
+        // A script's last lines, printed in the frame Play ended or paused,
+        // land above the lifecycle line rather than in the next session.
+        crate::soul::rune_api::forward_script_logs(&mut out);
+        out.push_with_source(LogLevel::Info, line.to_string(), "play");
+    }
+}
+
+/// Forget what the Explorer and the selection hold about the entities of a
+/// Space being unloaded. Called by `space_ops::open_space` on every switch or
+/// reopen (the Universe browser, File > Open Recent, a snapshot revert), so a
+/// despawned entity is never selected, expanded, or behind a clickable row.
+/// Expansion is keyed by entity, so a reloaded tree opens collapsed below its
+/// services (whose expansion is kept, by name).
+pub fn reset_explorer_for_space_reload(world: &mut World) {
+    if let Some(sm) = world.get_resource::<BevySelectionManager>() {
+        sm.0.write().clear();
+    }
+    if let Some(mut es) = world.get_resource_mut::<UnifiedExplorerState>() {
+        es.selected = SelectedItem::None;
+        es.entity_id_cache.clear();
+        es.expanded_entities.clear();
+        es.dirty = true;
+        es.needs_immediate_sync = true;
+    }
 }
 
 /// Persist the Output console buffer to `<space>/.eustress/output.log` when
@@ -16042,20 +18965,26 @@ fn push_model_picker_rows(
         let section_start = previous_provider != Some(provider);
         previous_provider = Some(provider);
 
+        // A model its provider lists without a price reads as exactly that.
+        // Nothing invents one: the price used to come from a web search, and
+        // a wrong price there is a wrong cost estimate on every turn.
+        let price = match (model.input_price_per_mtok(), model.output_price_per_mtok()) {
+            (Some(input), Some(output)) => {
+                format!("{} / {} per Mtok", format_price(input), format_price(output))
+            }
+            _ => "price not published".to_string(),
+        };
+
         rows.push(WorkshopModelEntry {
             name: model.display_name().into(),
             provider: provider.label().into(),
             tagline: model.tagline().into(),
-            price: format!(
-                "{} / {} per Mtok",
-                format_price(model.input_price_per_mtok()),
-                format_price(model.output_price_per_mtok())
-            )
-            .into(),
+            price: price.into(),
             section_start,
             key_missing: global_settings
                 .map(|g| g.key_for_provider(provider).is_none())
                 .unwrap_or(true),
+            is_new: model.is_discovered(),
         });
     }
 
@@ -16065,13 +18994,83 @@ fn push_model_picker_rows(
     ui.set_workshop_available_models(slint::ModelRc::from(model));
 }
 
-/// Syncs IdeationPipeline state to the Workshop Panel Slint properties.
+/// What the Workshop's activity strip shows: whether the agent is working, on
+/// what, how many tool calls wait for approval, and what is queued.
+///
+/// Recomputed every frame, because the moments that matter (a model call
+/// starting, a tool finishing) do not all mark the pipeline changed. It is a
+/// scan of the message list plus two flags, and it is only pushed to Slint
+/// when it differs from the last frame's, so a quiet panel costs nothing.
+#[derive(Clone, PartialEq, Default)]
+struct WorkshopAgentStatus {
+    busy: bool,
+    activity: String,
+    pending_approvals: i32,
+    queued: Vec<String>,
+}
+
+impl WorkshopAgentStatus {
+    fn read(
+        pipeline: &crate::workshop::IdeationPipeline,
+        tasks: Option<&crate::workshop::claude_bridge::WorkshopClaudeTasks>,
+        model_name: &str,
+    ) -> Self {
+        use crate::workshop::McpCommandStatus;
+        let tool_calls = || {
+            pipeline
+                .messages
+                .iter()
+                .filter(|m| m.mcp_method.as_deref() == Some("tool_use"))
+        };
+        let running_tool = tool_calls()
+            .filter(|m| {
+                m.tool_result.is_none()
+                    && matches!(
+                        m.mcp_status,
+                        Some(McpCommandStatus::Running) | Some(McpCommandStatus::Approved)
+                    )
+            })
+            .last()
+            .and_then(|m| m.mcp_endpoint.clone());
+        let thinking = tasks.is_some_and(|t| t.is_busy());
+        let pending_approvals = tool_calls()
+            .filter(|m| m.mcp_status == Some(McpCommandStatus::Pending))
+            .count() as i32;
+
+        // The advisor and the Critic run as tool calls, but "Running
+        // consult_advisor" reads like plumbing. Say what is happening.
+        let activity = match running_tool.as_deref() {
+            Some("consult_advisor") => "Asking the advisor".to_string(),
+            Some("gauntlet_critic") => "The Critic is scoring".to_string(),
+            Some(tool) => format!("Running {tool}"),
+            None if thinking => format!("{model_name} is thinking"),
+            None => String::new(),
+        };
+
+        Self {
+            busy: thinking || running_tool.is_some(),
+            activity,
+            pending_approvals,
+            queued: crate::workshop::queued_message_previews(),
+        }
+    }
+
+    fn push(&self, ui: &StudioWindow) {
+        ui.set_workshop_agent_busy(self.busy);
+        ui.set_workshop_agent_activity(self.activity.as_str().into());
+        ui.set_workshop_pending_approvals(self.pending_approvals);
+        let queued: Vec<slint::SharedString> = self.queued.iter().map(|q| q.as_str().into()).collect();
+        ui.set_workshop_queued_messages(slint::ModelRc::from(std::rc::Rc::new(slint::VecModel::from(queued))));
+    }
+}
+
 /// Sync Workshop panel state directly to the Slint UI.
 ///
-/// Runs when the pipeline OR Soul settings change. The soul-settings trigger
-/// is critical: without it, saving an API key in File > Settings wouldn't
-/// clear the Workshop panel's "Configure" banner until the next pipeline
-/// mutation — so the UI would look broken even though the key is valid.
+/// Two speeds. The agent status (above) is checked every frame and pushed on
+/// change. Everything else runs when the pipeline or Soul settings change. The
+/// soul-settings trigger is critical: without it, saving an API key in
+/// File > Settings wouldn't clear the Workshop's key banner until the next
+/// pipeline mutation, so the UI would look broken even though the key is valid.
 ///
 /// Pushes straight to `SlintUiState.window` via NonSend. The `SlintBridge`
 /// pipeline in slint_main.rs is unused in the current in-process Slint path,
@@ -16081,31 +19080,68 @@ fn sync_workshop_to_slint(
     pipeline: Option<Res<crate::workshop::IdeationPipeline>>,
     global_settings: Option<Res<crate::soul::GlobalSoulSettings>>,
     space_settings: Option<Res<crate::soul::SoulServiceSettings>>,
+    claude_tasks: Option<Res<crate::workshop::claude_bridge::WorkshopClaudeTasks>>,
+    catalog_revision: Option<Res<crate::soul::model_catalog::ModelCatalogRevision>>,
     mut models_pushed: Local<bool>,
+    mut last_status: Local<Option<WorkshopAgentStatus>>,
 ) {
     let Some(slint_context) = slint_context else { return };
     let Some(pipeline) = pipeline else { return };
+    let ui = &slint_context.window;
 
+    let model = global_settings
+        .as_ref()
+        .map(|g| g.effective_workshop_model())
+        .unwrap_or_default();
+
+    let status = WorkshopAgentStatus::read(&pipeline, claude_tasks.as_deref(), model.display_name());
+    if last_status.as_ref() != Some(&status) {
+        status.push(ui);
+        *last_status = Some(status);
+    }
+
+    // A key change, or a model list the providers just confirmed, both change
+    // what the picker should show.
     let soul_changed = global_settings.as_ref().map(|g| g.is_changed()).unwrap_or(false)
-        || space_settings.as_ref().map(|s| s.is_changed()).unwrap_or(false);
+        || space_settings.as_ref().map(|s| s.is_changed()).unwrap_or(false)
+        || catalog_revision.as_ref().is_some_and(|r| r.is_changed());
     // The model rows have to reach Slint at least once even if nothing ever
     // changes, because `main.slint` binds the picker straight to them: without
     // this first push the menu would render empty on a session where the user
     // never touched Soul settings.
     if !pipeline.is_changed() && !soul_changed && *models_pushed { return; }
 
+    // The Anthropic key, which the ideation pipeline always spends whatever
+    // model the chat uses.
     let api_key_valid = match (&global_settings, &space_settings) {
         (Some(global), Some(space)) => !space.effective_api_key(global).is_empty(),
         _ => false,
     };
-
-    let ui = &slint_context.window;
-
     ui.set_workshop_api_key_valid(api_key_valid);
-    let model_name = global_settings.as_ref()
-        .map(|g| g.effective_workshop_model().display_name())
-        .unwrap_or_else(|| crate::soul::WorkshopModel::default().display_name());
-    ui.set_workshop_active_model_name(model_name.into());
+
+    // The key the chat itself will spend: the selected model's provider. The
+    // banner keyed off the Anthropic key alone, so picking Grok with only an
+    // xAI key claimed a key was missing when nothing was.
+    let chat_key_valid = match model.provider() {
+        crate::soul::Provider::Anthropic => api_key_valid,
+        provider => global_settings
+            .as_ref()
+            .and_then(|g| g.key_for_provider(provider))
+            .is_some(),
+    };
+    ui.set_workshop_chat_key_valid(chat_key_valid);
+    ui.set_workshop_chat_key_hint(if chat_key_valid {
+        slint::SharedString::default()
+    } else {
+        format!(
+            "{} needs your {} API key.",
+            model.display_name(),
+            model.provider().key_label()
+        )
+        .into()
+    });
+
+    ui.set_workshop_active_model_name(model.display_name().into());
     push_model_picker_rows(ui, global_settings.as_deref());
     *models_pushed = true;
     ui.set_workshop_gauntlet_enabled(
@@ -16119,57 +19155,17 @@ fn sync_workshop_to_slint(
     ui.set_workshop_total_artifacts(pipeline.artifacts.len() as i32);
     ui.set_workshop_estimated_cost(pipeline.format_cost().into());
 
-    let messages: Vec<ChatMessage> = pipeline.messages.iter().enumerate().map(|(i, msg)| {
-        // Entity chip extraction: inspect the tool name + input to
-        // decide if this MCP card should render a clickable entity
-        // chip (class icon + name + "click to reveal in Explorer"),
-        // and if so pick the right class icon.
-        let (entity_class, entity_name, entity_icon) = extract_entity_chip(msg);
-        // Flatten inline markdown markers to plain text for the chat
-        // bubble. The math-Unicode trick works in the Script-Editor
-        // Markdown view (where a custom font / copy-paste path shows
-        // the math glyphs fine + a round-trip unrender writes clean
-        // `.md` back to disk), but on Windows the Workshop panel uses
-        // Segoe UI, which has no U+1D400 Mathematical-Alphanumeric
-        // glyphs — so bolds rendered invisible. `flatten_markdown_for_display`
-        // drops the markers so text is readable; real per-segment
-        // weight rendering is a TODO tracked on that function.
-        let styled_content = flatten_markdown_for_display(&msg.content);
-        ChatMessage {
-            id: i as i32,
-            role: msg.role.to_slint_string().into(),
-            content: styled_content.into(),
-            timestamp: msg.timestamp.clone().into(),
-            mcp_endpoint: msg.mcp_endpoint.clone().unwrap_or_default().into(),
-            mcp_method: msg.mcp_method.as_deref().unwrap_or("").into(),
-            mcp_status: msg.mcp_status.as_ref().map(|s| s.to_slint_string()).unwrap_or("").into(),
-            artifact_path: msg.artifact_path.as_ref().map(|p| p.to_string_lossy().to_string()).unwrap_or_default().into(),
-            artifact_type: msg.artifact_type.as_ref().map(|t| t.to_slint_string()).unwrap_or("").into(),
-            entity_class: entity_class.into(),
-            entity_name: entity_name.into(),
-            entity_icon,
-            // Slint resolves `@image-url` at compile time only, so a runtime
-            // attachment path has to be loaded here, the same way the entity
-            // icon above is. A file that has gone missing degrades to no
-            // thumbnail rather than failing the whole message row.
-            attachment: msg
-                .image_path
-                .as_ref()
-                .and_then(|p| cached_image(p))
-                .unwrap_or_default(),
-            has_attachment: msg
-                .image_path
-                .as_ref()
-                .map(|p| p.exists())
-                .unwrap_or(false),
-            // Split the reply into prose and tables so the bubble can draw a
-            // grid. A message with no table comes back as a single text block,
-            // which renders identically to the old single-TextInput path.
-            blocks: chat_blocks_for(&msg.content),
-        }
-    }).collect();
-    let msg_model = std::rc::Rc::new(slint::VecModel::from(messages));
-    ui.set_workshop_messages(slint::ModelRc::from(msg_model));
+    // Up in an empty input recalls this.
+    let last_prompt = pipeline
+        .messages
+        .iter()
+        .rev()
+        .find(|m| m.role == crate::workshop::MessageRole::User)
+        .map(|m| m.content.as_str())
+        .unwrap_or("");
+    ui.set_workshop_last_prompt(last_prompt.into());
+
+    sync_workshop_rows(ui, &pipeline);
 
     let steps: Vec<PipelineStepData> = pipeline.steps.iter().enumerate().map(|(i, step)| {
         PipelineStepData {
@@ -16181,6 +19177,235 @@ fn sync_workshop_to_slint(
     }).collect();
     let step_model = std::rc::Rc::new(slint::VecModel::from(steps));
     ui.set_workshop_pipeline_steps(slint::ModelRc::from(step_model));
+}
+
+/// The Workshop message model, kept alive across syncs so rows are updated in
+/// place.
+///
+/// The sync used to build a brand-new model on every change, which rebuilt
+/// every row whenever one message arrived: slow on a long conversation, and it
+/// threw away per-row state, so an opened tool call snapped shut the moment
+/// the next message landed. Now a row is rewritten only when its signature
+/// changes. A `thread_local` because a Slint model is `Rc`, and this only ever
+/// runs on the main thread (the system holds `NonSend<SlintUiState>`).
+struct WorkshopRows {
+    session_id: String,
+    model: std::rc::Rc<slint::VecModel<ChatMessage>>,
+    signatures: Vec<u64>,
+}
+
+thread_local! {
+    static WORKSHOP_ROWS: std::cell::RefCell<Option<WorkshopRows>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Bring the Workshop message model in line with the pipeline, touching only
+/// rows that changed.
+fn sync_workshop_rows(ui: &StudioWindow, pipeline: &crate::workshop::IdeationPipeline) {
+    WORKSHOP_ROWS.with(|cell| {
+        let mut slot = cell.borrow_mut();
+
+        // A new session starts a fresh model. So does a window that no longer
+        // holds ours, which would otherwise keep an empty chat forever.
+        let attached = slot.as_ref().is_some_and(|rows| {
+            rows.session_id == pipeline.session_id
+                && ui.get_workshop_messages() == slint::ModelRc::from(rows.model.clone())
+        });
+        if !attached {
+            let model = std::rc::Rc::new(slint::VecModel::<ChatMessage>::default());
+            ui.set_workshop_messages(slint::ModelRc::from(model.clone()));
+            *slot = Some(WorkshopRows {
+                session_id: pipeline.session_id.clone(),
+                model,
+                signatures: Vec::new(),
+            });
+        }
+        let Some(rows) = slot.as_mut() else { return };
+
+        let wanted = pipeline.messages.len();
+        while rows.model.row_count() > wanted {
+            rows.model.remove(rows.model.row_count() - 1);
+        }
+        rows.signatures.truncate(wanted);
+
+        for (i, msg) in pipeline.messages.iter().enumerate() {
+            let signature = workshop_row_signature(msg);
+            if rows.signatures.get(i) == Some(&signature) {
+                continue;
+            }
+            let row = workshop_row(msg);
+            if i < rows.model.row_count() {
+                rows.model.set_row_data(i, row);
+            } else {
+                rows.model.push(row);
+            }
+            if i < rows.signatures.len() {
+                rows.signatures[i] = signature;
+            } else {
+                rows.signatures.push(signature);
+            }
+        }
+    });
+}
+
+/// Everything about a message that changes how its row renders. Content is
+/// fixed once a message exists, but a tool call's status, result and entity
+/// chip change as it runs, and the model and attachment are stamped just after
+/// creation, so those are what gets hashed.
+fn workshop_row_signature(msg: &crate::workshop::ChatMessage) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    msg.id.hash(&mut h);
+    msg.role.to_slint_string().hash(&mut h);
+    msg.content.len().hash(&mut h);
+    msg.mcp_status.as_ref().map(|s| s.to_slint_string()).hash(&mut h);
+    msg.tool_result.as_ref().map(|r| r.len()).hash(&mut h);
+    msg.tool_input.is_some().hash(&mut h);
+    msg.image_path.hash(&mut h);
+    msg.model_used.hash(&mut h);
+    h.finish()
+}
+
+/// Build one Slint row from a pipeline message.
+fn workshop_row(msg: &crate::workshop::ChatMessage) -> ChatMessage {
+    let is_tool = msg.role == crate::workshop::MessageRole::Mcp;
+
+    // Entity chip extraction: inspect the tool name + input to decide if this
+    // tool row should render a clickable entity chip (class icon + name +
+    // "click to reveal in Explorer"), and if so pick the right class icon.
+    let (entity_class, entity_name, entity_icon) = extract_entity_chip(msg);
+
+    // Flatten inline markdown markers to plain text for the chat. The
+    // math-Unicode trick works in the Script-Editor Markdown view (where a
+    // custom font / copy-paste path shows the math glyphs fine + a round-trip
+    // unrender writes clean `.md` back to disk), but on Windows the Workshop
+    // panel uses Segoe UI, which has no U+1D400 Mathematical-Alphanumeric
+    // glyphs, so bolds rendered invisible. `flatten_markdown_for_display`
+    // drops the markers so text is readable; real per-segment weight
+    // rendering is a TODO tracked on that function.
+    let styled_content = flatten_markdown_for_display(&msg.content);
+
+    // What a tool row opens to. Agentic calls carry structured input; the
+    // ideation pipeline's step cards carry only their content, which is still
+    // what their approval card should show.
+    let tool_input = match &msg.tool_input {
+        Some(serde_json::Value::Object(fields)) if fields.is_empty() => String::new(),
+        Some(input) => clip_for_display(&serde_json::to_string_pretty(input).unwrap_or_default(), 4_000),
+        None if is_tool => clip_for_display(&msg.content, 4_000),
+        None => String::new(),
+    };
+
+    ChatMessage {
+        // The real id, not the row index. Run and Skip send it back, and the
+        // handlers look messages up by id.
+        id: msg.id as i32,
+        role: msg.role.to_slint_string().into(),
+        content: styled_content.into(),
+        // "7:59 PM", not the RFC 3339 string in UTC the message stores.
+        timestamp: workshop_display_time(&msg.timestamp).into(),
+        mcp_endpoint: msg.mcp_endpoint.clone().unwrap_or_default().into(),
+        mcp_method: msg.mcp_method.as_deref().unwrap_or("").into(),
+        mcp_status: msg.mcp_status.as_ref().map(|s| s.to_slint_string()).unwrap_or("").into(),
+        artifact_path: msg.artifact_path.as_ref().map(|p| p.to_string_lossy().to_string()).unwrap_or_default().into(),
+        artifact_type: msg.artifact_type.as_ref().map(|t| t.to_slint_string()).unwrap_or("").into(),
+        entity_class: entity_class.into(),
+        entity_name: entity_name.into(),
+        entity_icon,
+        // Slint resolves `@image-url` at compile time only, so a runtime
+        // attachment path has to be loaded here, the same way the entity icon
+        // above is. A file that has gone missing degrades to no thumbnail
+        // rather than failing the whole message row.
+        attachment: msg
+            .image_path
+            .as_ref()
+            .and_then(|p| cached_image(p))
+            .unwrap_or_default(),
+        has_attachment: msg
+            .image_path
+            .as_ref()
+            .map(|p| p.exists())
+            .unwrap_or(false),
+        // Split the reply into prose and tables so the row can draw a grid.
+        // Tool rows never show a body, so they skip the parse.
+        blocks: if is_tool { Default::default() } else { chat_blocks_for(&msg.content) },
+        tool_summary: msg.tool_input.as_ref().map(workshop_tool_summary).unwrap_or_default().into(),
+        tool_input: tool_input.into(),
+        tool_result: msg
+            .tool_result
+            .as_deref()
+            .map(|r| clip_for_display(r, 8_000))
+            .unwrap_or_default()
+            .into(),
+        model_label: msg
+            .model_used
+            .as_deref()
+            .map(|id| {
+                crate::soul::WorkshopModel::from_api_id(id)
+                    .map(|m| m.display_name().to_string())
+                    .unwrap_or_else(|| id.to_string())
+            })
+            .unwrap_or_default()
+            .into(),
+    }
+}
+
+/// "7:59 PM" for today, "Sep 22, 7:59 PM" otherwise, in local time. Messages
+/// store RFC 3339 in UTC, and the panel used to print that string as is.
+fn workshop_display_time(rfc3339: &str) -> String {
+    let Ok(when) = chrono::DateTime::parse_from_rfc3339(rfc3339) else {
+        return String::new();
+    };
+    let local = when.with_timezone(&chrono::Local);
+    if local.date_naive() == chrono::Local::now().date_naive() {
+        local.format("%-I:%M %p").to_string()
+    } else {
+        local.format("%b %-d, %-I:%M %p").to_string()
+    }
+}
+
+/// A tool call's arguments as one line for its collapsed row, like
+/// `name: Neon Part, class: Part, size: [3 items]`. Strings are unquoted,
+/// nested values abbreviated, and the whole line capped.
+fn workshop_tool_summary(input: &serde_json::Value) -> String {
+    use serde_json::Value;
+    let Value::Object(fields) = input else {
+        return clip_line(&input.to_string(), 160);
+    };
+    let parts: Vec<String> = fields
+        .iter()
+        .map(|(key, value)| {
+            let shown = match value {
+                Value::String(s) => s.split_whitespace().collect::<Vec<_>>().join(" "),
+                Value::Array(items) if items.len() == 1 => "[1 item]".to_string(),
+                Value::Array(items) => format!("[{} items]", items.len()),
+                Value::Object(_) => "{…}".to_string(),
+                other => other.to_string(),
+            };
+            format!("{key}: {}", clip_line(&shown, 48))
+        })
+        .collect();
+    clip_line(&parts.join(", "), 160)
+}
+
+/// `s` cut to at most `max` characters, on a character boundary, with an
+/// ellipsis when anything was cut.
+fn clip_line(s: &str, max: usize) -> String {
+    match s.char_indices().nth(max) {
+        Some((cut, _)) => format!("{}…", &s[..cut]),
+        None => s.to_string(),
+    }
+}
+
+/// Long tool text capped for display, saying how much was left out. The full
+/// text stays in the conversation and still reaches the model; this only keeps
+/// one enormous result from stalling the panel's layout.
+fn clip_for_display(s: &str, max: usize) -> String {
+    match s.char_indices().nth(max) {
+        Some((cut, _)) => {
+            let hidden = s[cut..].chars().count();
+            format!("{}\n\n… {hidden} more characters not shown", &s[..cut])
+        }
+        None => s.to_string(),
+    }
 }
 
 /// PNG bytes for the image currently sitting in the Workshop attach strip,
@@ -16233,15 +19458,24 @@ fn take_staged_attachment() -> Option<Vec<u8>> {
 /// one with `viewport-y` at zero. Holding the offset out here, keyed by
 /// session, means each conversation tab returns to where it was rather than
 /// every session sharing a single position.
+///
+/// `None` means "following the bottom" rather than a fixed offset. A fixed
+/// offset for a conversation you were following would bring you back above
+/// whatever arrived while you were away, which is the opposite of following.
 #[derive(Resource, Default)]
 pub struct WorkshopScrollMemory {
-    positions: std::collections::HashMap<String, f32>,
+    positions: std::collections::HashMap<String, Option<f32>>,
 }
 
-/// Records the chat scroll offset while the Workshop panel is open, and
+/// Records the chat scroll position while the Workshop panel is open, and
 /// restores the right one when the panel reappears or the session changes.
 ///
-/// Restoration is re-applied for a few frames rather than written once.
+/// A session you were following, or have never opened, comes back pinned to
+/// its newest message: the panel's own `changed viewport-height` handler does
+/// the scrolling once the rows lay out. A session you had scrolled up in comes
+/// back at that offset.
+///
+/// An offset is re-applied for a few frames rather than written once.
 /// `ScrollView` clamps `viewport-y` against `viewport-height`, and on the
 /// frame a panel is rebuilt that height is still zero, so a single write
 /// would be clamped straight back to zero before layout caught up.
@@ -16274,16 +19508,24 @@ fn persist_workshop_scroll(
     }
 
     if *restore_frames > 0 {
-        let saved = memory.positions.get(&session).copied().unwrap_or(0.0);
-        ui.set_workshop_chat_scroll_y(saved);
+        match memory.positions.get(&session).copied().flatten() {
+            Some(offset) => {
+                ui.set_workshop_chat_stick_bottom(false);
+                ui.set_workshop_chat_scroll_y(offset);
+            }
+            None => ui.set_workshop_chat_stick_bottom(true),
+        }
         *restore_frames -= 1;
         return;
     }
 
     // Steady state: whatever the user scrolled to belongs to this session.
-    memory
-        .positions
-        .insert(session, ui.get_workshop_chat_scroll_y());
+    let position = if ui.get_workshop_chat_stick_bottom() {
+        None
+    } else {
+        Some(ui.get_workshop_chat_scroll_y())
+    };
+    memory.positions.insert(session, position);
 }
 
 /// Rescan `SoulService/Workshop/` every ~500 ms and push the session
@@ -16985,91 +20227,149 @@ fn init_services_browser_to_slint(
 }
 
 // ============================================================================
-// Insert menu — data-driven catalog from the ClassRegistry
+// Insert menu: catalog and context, rebuilt each time the menu opens
 // ============================================================================
 
-/// Whether the Insert-menu class catalog has been pushed to Slint yet.
-/// The registry is fully populated by spawner-plugin build (all
-/// `register_class` calls run before the first frame), and the set of
-/// creatable templates is static for a session, so a one-shot push is
-/// enough — mirrors `ServicesBrowserInitialized`.
+/// Set when the menu bar's Insert dropdown or the Insert Object dialog opens:
+/// `refresh_insert_menu` rebuilds the catalog from disk and recomputes the
+/// target, the suggestions and the recent inserts. An atomic because the
+/// dropdown's open callback runs inside Slint, outside any system.
+static INSERT_MENU_REFRESH: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// The Insert catalog as last pushed to Slint. An unchanged catalog is not
+/// pushed again: replacing the model rebuilds every row of an open menu.
 #[derive(Resource, Default)]
-struct InsertClassesInitialized(bool);
+struct InsertMenuState {
+    catalog: Vec<super::insert_classes::InsertClassDescriptor>,
+    pushed: bool,
+}
 
-/// One-shot system: enumerate every registered `ClassName` that also has a
-/// creatable `class_schema/<Class>/_instance.toml` template, group it by
-/// category, and push the list to Slint as the Insert dropdown's model.
+/// Where the next insert lands, as the Insert menu names it.
+enum InsertMenuTarget {
+    /// Nothing selected: each class goes to its usual service.
+    Default,
+    /// A service row, or the service's own entity.
+    Service(String),
+    /// A folder-backed instance, which takes the insert inside it.
+    Instance {
+        name: String,
+        class: eustress_common::classes::ClassName,
+        service: String,
+    },
+}
+
+/// Resolve the Explorer selection the way the insert handlers do (see
+/// `insert_parent_entity`): a folder-backed instance takes the insert inside
+/// it; a single-file instance puts it next to itself, in its parent; a
+/// service row, or the service's own entity, puts it in the service; an
+/// instance with no file behind it, or no selection, leaves each class to
+/// its usual service.
+fn insert_menu_target(
+    selected: Option<&SelectedItem>,
+    entries: &Query<(
+        &eustress_common::classes::Instance,
+        Option<&crate::space::LoadedFromFile>,
+        Option<&ChildOf>,
+    )>,
+) -> InsertMenuTarget {
+    let mut entity = match selected {
+        Some(SelectedItem::Service(name)) => return InsertMenuTarget::Service(name.clone()),
+        Some(SelectedItem::Entity(e)) => *e,
+        _ => return InsertMenuTarget::Default,
+    };
+    // One hop at most: from a single-file instance to its parent.
+    for _ in 0..2 {
+        let Ok((instance, file, parent)) = entries.get(entity) else { break };
+        let Some(file) = file else { break };
+        if file.path.file_name().is_some_and(|n| n.to_string_lossy() == "_service.toml") {
+            return InsertMenuTarget::Service(file.service.clone());
+        }
+        if file.path.is_dir() {
+            return InsertMenuTarget::Instance {
+                name: instance.name.clone(),
+                class: instance.class_name,
+                service: file.service.clone(),
+            };
+        }
+        match parent {
+            Some(parent) => entity = parent.parent(),
+            None => return InsertMenuTarget::Service(file.service.clone()),
+        }
+    }
+    InsertMenuTarget::Default
+}
+
+/// Keeps the Insert menu and the Insert Object dialog current.
 ///
-/// Filtering to template-having classes is deliberate (CLASS_REGISTRY.md +
-/// task spec): every row, when clicked, routes through `create_instance`
-/// and succeeds. Registered-but-template-less classes (most Wave 7
-/// data/audio/character structs, created as children or via script) are
-/// omitted so the menu never offers a click that errors.
-///
-/// Logs the registry size, the template-having count, and the final
-/// listed count so the enumerate-vs-registry sanity check is visible at
-/// startup.
-fn init_insert_classes_to_slint(
+/// On the first frame, and whenever either surface opens
+/// (`INSERT_MENU_REFRESH`): rebuild the catalog from the class templates on
+/// disk (`insert_classes::live_catalog`), so a template folder added while
+/// Studio runs is insertable the next time the menu opens; then push the
+/// "Inserts into" target, the classes suggested for the selection and the
+/// recent inserts (`insert_classes::context_rows`), and refresh an open
+/// dialog whose search is empty.
+fn refresh_insert_menu(
     slint_context: Option<NonSend<SlintUiState>>,
-    registry: Option<Res<eustress_common::class_registry::ClassRegistry>>,
-    mut initialized: ResMut<InsertClassesInitialized>,
+    explorer_state: Option<Res<UnifiedExplorerState>>,
+    editor_settings: Option<Res<crate::editor_settings::EditorSettings>>,
+    entries: Query<(
+        &eustress_common::classes::Instance,
+        Option<&crate::space::LoadedFromFile>,
+        Option<&ChildOf>,
+    )>,
+    mut menu: ResMut<InsertMenuState>,
 ) {
-    if initialized.0 {
-        return;
-    }
     let Some(ref ctx) = slint_context else { return };
-    let Some(registry) = registry else { return };
-    // Wait until spawner plugins have registered (registry boots empty).
-    if registry.is_empty() {
+    let requested = INSERT_MENU_REFRESH.swap(false, std::sync::atomic::Ordering::Relaxed);
+    if menu.pushed && !requested {
         return;
     }
-    initialized.0 = true;
+    let ui = &ctx.window;
 
-    let registry_count = registry.len();
-    // Data Platform classes (Dataset/Series/Column/Run) have creatable
-    // class_schema templates + ClassName variants but no registered spawner
-    // yet — Insert creates via `create_instance`/template, not the registry
-    // spawn path, so a template is all a successful click needs. Chain them
-    // onto the registered set; `.filter(!contains)` keeps the row de-duped if
-    // one of them later gains a real spawner.
-    let data_platform = [
-        eustress_common::classes::ClassName::Dataset,
-        eustress_common::classes::ClassName::Series,
-        eustress_common::classes::ClassName::Column,
-        eustress_common::classes::ClassName::Run,
-    ]
-    .into_iter()
-    .filter(|c| !registry.contains(*c));
-    let descriptors = super::insert_classes::build_catalog(
-        registry.registered_classes().chain(data_platform),
-        super::insert_classes::template_exists,
-    );
+    let catalog = super::insert_classes::live_catalog(&eustress_common::class_schema_dir());
+    if !menu.pushed || catalog != menu.catalog {
+        let rows: Vec<InsertClassData> = catalog.iter().map(insert_row).collect();
+        ui.set_insert_classes(slint::ModelRc::new(slint::VecModel::from(rows)));
+        info!("Insert menu: {} classes with a creatable template", catalog.len());
+        menu.catalog = catalog;
+        menu.pushed = true;
+    }
+    if !requested {
+        return;
+    }
 
-    let listed_count = descriptors.len();
-    let slint_rows: Vec<InsertClassData> = descriptors
-        .into_iter()
-        .map(|d| InsertClassData {
-            class_name: d.class_name.into(),
-            category: d.category.into(),
-            display: d.display.into(),
-            show_header: d.show_header,
-        })
-        .collect();
-
-    let model = std::rc::Rc::new(slint::VecModel::from(slint_rows));
-    ctx.window.set_insert_classes(slint::ModelRc::from(model));
-
-    info!(
-        "Insert menu: {} classes listed (of {} registered spawners; \
-         filtered to those with a creatable class_schema template)",
-        listed_count, registry_count,
-    );
+    let target = insert_menu_target(explorer_state.as_deref().map(|es| &es.selected), &entries);
+    let (label, title, suggest_for) = match &target {
+        InsertMenuTarget::Default => (
+            "its usual service".to_string(),
+            String::new(),
+            super::insert_classes::InsertTarget::Default,
+        ),
+        InsertMenuTarget::Service(name) => (
+            name.clone(),
+            name.clone(),
+            super::insert_classes::InsertTarget::Service(name.as_str()),
+        ),
+        InsertMenuTarget::Instance { name, class, service } => (
+            name.clone(),
+            class.as_str().to_string(),
+            super::insert_classes::InsertTarget::Instance { class: *class, service: service.as_str() },
+        ),
+    };
+    let recent: &[String] = editor_settings.as_ref().map(|s| s.recent_inserts.as_slice()).unwrap_or(&[]);
+    let context = super::insert_classes::context_rows(suggest_for, &title, &menu.catalog, recent);
+    let rows: Vec<InsertClassData> = context.iter().map(insert_row).collect();
+    ui.set_insert_context(slint::ModelRc::new(slint::VecModel::from(rows)));
+    ui.set_insert_target_name(label.into());
+    if ui.get_show_insert_object_dialog() && ui.get_insert_search_query().trim().is_empty() {
+        ui.set_insert_results(insert_results_model(ui, ""));
+    }
 }
 
 /// Whether the persisted active-theme choice has been pushed into the `Theme`
 /// global yet. One-shot: after the first push, `Theme.data` is the live source
 /// of truth (swapped by `SlintAction::SelectTheme`), so this never needs to run
-/// again — mirrors `InsertClassesInitialized`.
+/// again.
 #[derive(Resource, Default)]
 struct ThemeInitialized(bool);
 
@@ -17421,6 +20721,101 @@ fn ribbon_tab_color(id: &str, td: &ThemeData) -> slint::Color {
 /// `floating_windows::PanelType::from_panel_id`'s id set; falls back to a
 /// title-cased echo of the id for any panel not in that registry (keeps
 /// detach from silently no-op'ing on an unrecognized id).
+/// The Studio window's panel layout, as the Layout menu saves and imports it:
+/// which panels show, how wide the side docks are, the Output height, the
+/// selected dock tabs, and the preset it started from.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct PanelLayout {
+    show_explorer: bool,
+    show_properties: bool,
+    show_output: bool,
+    show_toolbox: bool,
+    show_assets: bool,
+    show_history: bool,
+    show_soul_panel: bool,
+    left_panel_width: f32,
+    right_panel_width: f32,
+    output_height: f32,
+    left_tab_index: i32,
+    right_tab_index: i32,
+    #[serde(default)]
+    preset: i32,
+}
+
+impl PanelLayout {
+    fn read(ui: &StudioWindow) -> Self {
+        Self {
+            show_explorer: ui.get_show_explorer(),
+            show_properties: ui.get_show_properties(),
+            show_output: ui.get_show_output(),
+            show_toolbox: ui.get_show_toolbox(),
+            show_assets: ui.get_show_assets(),
+            show_history: ui.get_show_history(),
+            show_soul_panel: ui.get_show_soul_panel(),
+            left_panel_width: ui.get_left_panel_width(),
+            right_panel_width: ui.get_right_panel_width(),
+            output_height: ui.get_output_height(),
+            left_tab_index: ui.get_left_tab_index(),
+            right_tab_index: ui.get_right_tab_index(),
+            preset: ui.get_current_layout_preset(),
+        }
+    }
+
+    fn apply(&self, ui: &StudioWindow) {
+        ui.set_show_explorer(self.show_explorer);
+        ui.set_show_properties(self.show_properties);
+        ui.set_show_output(self.show_output);
+        ui.set_show_toolbox(self.show_toolbox);
+        ui.set_show_assets(self.show_assets);
+        ui.set_show_history(self.show_history);
+        ui.set_show_soul_panel(self.show_soul_panel);
+        ui.set_left_panel_width(self.left_panel_width.max(120.0));
+        ui.set_right_panel_width(self.right_panel_width.max(120.0));
+        ui.set_output_height(self.output_height.max(60.0));
+        ui.set_left_tab_index(self.left_tab_index.max(0));
+        ui.set_right_tab_index(self.right_tab_index.max(0));
+        ui.set_current_layout_preset(self.preset);
+    }
+}
+
+/// The file selected in the Explorer, if a file (not an entity) is selected.
+fn selected_explorer_file(
+    explorer_state: &Option<ResMut<UnifiedExplorerState>>,
+) -> Option<std::path::PathBuf> {
+    explorer_state.as_ref().and_then(|es| match &es.selected {
+        SelectedItem::File(path) => Some(path.clone()),
+        _ => None,
+    })
+}
+
+/// Open a file the way double-clicking it in the Explorer does: documents,
+/// media, archives and unknown types go to the OS default app; text, code
+/// and config open in an editor tab.
+fn open_explorer_file(
+    path: &std::path::Path,
+    tab_manager: Option<&mut super::center_tabs::CenterTabManager>,
+    output: Option<&mut OutputConsole>,
+) {
+    let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
+    if super::file_icons::opens_externally(ext) {
+        let message = match open::that(path) {
+            Ok(_) => Ok(format!("Opened in default app: {}", path.display())),
+            Err(e) => Err(format!("Could not open {}: {}", path.display(), e)),
+        };
+        if let Some(out) = output {
+            match message {
+                Ok(m) => out.info(m),
+                Err(m) => out.error(m),
+            }
+        }
+    } else if let Some(mgr) = tab_manager {
+        let idx = mgr.open_file(path);
+        if let Some(out) = output {
+            out.info(format!("Opened: {} (tab {})", path.display(), idx));
+        }
+    }
+}
+
 fn detach_panel_title(panel_id: &str) -> String {
     match panel_id {
         "explorer" => "Explorer".to_string(),
@@ -17694,7 +21089,7 @@ fn menu_action_display_label(action_id: &str) -> slint::SharedString {
 /// Last-pushed button count for the Plugins tab, so `sync_plugin_tabs_to_slint`
 /// only touches the Slint model when the content actually changed (cheap
 /// per-frame check; avoids marking Slint dirty every frame for a static
-/// list). Unlike `InsertClassesInitialized` this ISN'T a one-shot latch —
+/// list). It is not a one-shot latch:
 /// `TabRegistry` is genuinely mutable at runtime once a script-authored
 /// plugin host (Phase 2, not yet built) can enable/disable plugins after
 /// startup; a length comparison keeps this system forward-compatible with
@@ -17711,9 +21106,9 @@ struct PluginTabSignature(String);
 /// Push the "plugins" `TabRegistry` entry (populated by `sync_plugin_tabs`
 /// in `studio_plugins/mod.rs` from real `StudioPlugin`s via `PluginApi` —
 /// see `road_tool.rs` for the first one) to the Slint ribbon's
-/// `plugin-sections`/`plugin-buttons` list-properties. Mirrors
-/// `init_insert_classes_to_slint`'s flatten-and-push shape; unlike that
-/// one-shot system this re-checks every frame (see `PluginTabSignature`).
+/// `plugin-sections`/`plugin-buttons` list-properties, in the same
+/// flatten-and-push shape as `refresh_insert_menu`; this one re-checks every
+/// frame (see `PluginTabSignature`).
 fn sync_plugin_tabs_to_slint(
     slint_context: Option<NonSend<SlintUiState>>,
     tab_registry: Option<Res<crate::studio_plugins::tab_api::TabRegistry>>,
@@ -18049,6 +21444,94 @@ fn compute_chart_data(frame: &eustress_data::Frame, ov: [Option<f64>; 4]) -> Opt
     Some(ChartData { x_label, y_label, series_path, fit_path, fit_label, x_ticks, y_ticks, points })
 }
 
+/// The 3D view's payload: the last three numeric columns, each scaled to
+/// -1..1, colored by the first numeric column when there are four or more
+/// (by row order otherwise). At most 2000 points, like the 2D markers.
+#[cfg(feature = "data")]
+struct Chart3D {
+    points: Vec<ChartPoint3>,
+    labels: [String; 3],
+    color_label: String,
+}
+
+#[cfg(feature = "data")]
+fn compute_chart_points3(frame: &eustress_data::Frame) -> Option<Chart3D> {
+    use eustress_data::ColumnDtype;
+    let cols = frame.columns();
+    let numeric: Vec<usize> = cols.iter().enumerate()
+        .filter(|(_, (_, d))| matches!(d.dtype(), ColumnDtype::F64 | ColumnDtype::I64))
+        .map(|(i, _)| i)
+        .collect();
+    if numeric.len() < 3 {
+        return None;
+    }
+    let axes = [numeric[numeric.len() - 3], numeric[numeric.len() - 2], numeric[numeric.len() - 1]];
+    let color_col = (numeric.len() >= 4).then(|| numeric[0]);
+    let n = frame.n_rows();
+    let rows: Vec<(usize, [f64; 3])> = (0..n)
+        .filter_map(|r| {
+            let v = [
+                chart_cell_f64(&cols[axes[0]].1, r)?,
+                chart_cell_f64(&cols[axes[1]].1, r)?,
+                chart_cell_f64(&cols[axes[2]].1, r)?,
+            ];
+            Some((r, v))
+        })
+        .take(2000)
+        .collect();
+    if rows.is_empty() {
+        return None;
+    }
+    let range = |values: &mut dyn Iterator<Item = f64>| {
+        values.fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), v| (lo.min(v), hi.max(v)))
+    };
+    let ranges: Vec<(f64, f64)> = (0..3).map(|k| range(&mut rows.iter().map(|(_, v)| v[k]))).collect();
+    let norm = |v: f64, (lo, hi): (f64, f64)| -> f32 {
+        if hi - lo < 1e-12 { 0.0 } else { (2.0 * (v - lo) / (hi - lo) - 1.0) as f32 }
+    };
+    let color_values: Vec<Option<f64>> = rows.iter()
+        .map(|(r, _)| match color_col {
+            Some(c) => chart_cell_f64(&cols[c].1, *r),
+            None => Some(*r as f64),
+        })
+        .collect();
+    let color_range = range(&mut color_values.iter().flatten().copied());
+    let fmt = |v: f64| -> slint::SharedString {
+        if v.abs() >= 100.0 || v.fract().abs() < 1e-9 { format!("{v:.0}").into() } else { format!("{v:.2}").into() }
+    };
+    // Dark violet through teal to yellow.
+    let ramp = |t: f32| -> slint::Color {
+        let stops = [[0.27, 0.00, 0.33], [0.13, 0.57, 0.55], [0.99, 0.91, 0.14]];
+        let (a, b, u) = if t < 0.5 { (stops[0], stops[1], t * 2.0) } else { (stops[1], stops[2], (t - 0.5) * 2.0) };
+        slint::Color::from_rgb_f32(a[0] + (b[0] - a[0]) * u, a[1] + (b[1] - a[1]) * u, a[2] + (b[2] - a[2]) * u)
+    };
+    let points = rows.iter().zip(color_values.iter())
+        .map(|((_, v), c)| {
+            let t = c.map(|c| {
+                let (lo, hi) = color_range;
+                if hi - lo < 1e-12 { 0.5 } else { ((c - lo) / (hi - lo)) as f32 }
+            }).unwrap_or(0.5);
+            ChartPoint3 {
+                nx: norm(v[0], ranges[0]),
+                ny: norm(v[1], ranges[1]),
+                nz: norm(v[2], ranges[2]),
+                color: ramp(t.clamp(0.0, 1.0)),
+                xv: fmt(v[0]),
+                yv: fmt(v[1]),
+                zv: fmt(v[2]),
+            }
+        })
+        .collect();
+    Some(Chart3D {
+        points,
+        labels: [cols[axes[0]].0.name.clone(), cols[axes[1]].0.name.clone(), cols[axes[2]].0.name.clone()],
+        color_label: match color_col {
+            Some(c) => cols[c].0.name.clone(),
+            None => "row".to_string(),
+        },
+    })
+}
+
 /// Feed the Chart center tab from the selected Dataset's CSV — series polyline,
 /// linear fit, axis ticks, labels. Selection-driven like the Data Grid; stays on
 /// the last Dataset while other entities are clicked.
@@ -18107,6 +21590,20 @@ fn sync_data_chart_to_slint(
 
     let name = instances.get(entity).map(|i| i.name.clone()).unwrap_or_default();
 
+    let chart3 = frame.as_ref().and_then(compute_chart_points3);
+    match &chart3 {
+        Some(c3) => {
+            window.set_chart_points3(slint::ModelRc::from(std::rc::Rc::new(slint::VecModel::from(c3.points.clone()))));
+            window.set_chart_x3_label(c3.labels[0].as_str().into());
+            window.set_chart_y3_label(c3.labels[1].as_str().into());
+            window.set_chart_z3_label(c3.labels[2].as_str().into());
+            window.set_chart_color3_label(c3.color_label.as_str().into());
+        }
+        None => {
+            window.set_chart_points3(slint::ModelRc::from(std::rc::Rc::new(slint::VecModel::from(Vec::<ChartPoint3>::new()))));
+            window.set_chart_color3_label(slint::SharedString::default());
+        }
+    }
     match frame.as_ref().and_then(|f| compute_chart_data(f, ov)) {
         Some(cd) => {
             window.set_chart_title(name.into());
@@ -18145,17 +21642,647 @@ fn sync_data_chart_to_slint() {}
 /// Connectors and ingests into a sibling Dataset is the next increment —
 /// `enabled = false` here keeps a freshly-created Connector inert until then.
 fn write_connector(space_root: &std::path::Path, source_type: &str) -> std::io::Result<String> {
+    write_connector_named(space_root, source_type, &format!("{source_type} Source"), "").map(|(name, _)| name)
+}
+
+/// A Connector folder under the Space's DataService, named `name` (made
+/// unique), pointing at `endpoint`. Returns the folder name and path. String
+/// values go through TOML's own quoting, since the name and endpoint are typed
+/// by the user.
+fn write_connector_named(
+    space_root: &std::path::Path,
+    source_type: &str,
+    name: &str,
+    endpoint: &str,
+) -> std::io::Result<(String, std::path::PathBuf)> {
     let dir = space_root.join("DataService");
     std::fs::create_dir_all(&dir)?;
-    let base = format!("{source_type} Source");
-    let name = crate::space::instance_loader::unique_entity_name(&dir, &base);
-    let cdir = dir.join(&name);
+    let folder_name = crate::space::instance_loader::unique_entity_name(&dir, name);
+    let cdir = dir.join(&folder_name);
     std::fs::create_dir_all(&cdir)?;
+    let quoted = |v: &str| toml::Value::String(v.to_string()).to_string();
+    let display_name = if folder_name != name { format!("name = {}\n", quoted(name)) } else { String::new() };
     let toml = format!(
-        "[metadata]\nclass_name = \"Connector\"\narchivable = true\n\n[attributes]\nsource_type = \"{source_type}\"\nendpoint = \"\"\npoll_seconds = 10\nformat = \"json\"\nenabled = false\n",
+        "[metadata]\nclass_name = \"Connector\"\narchivable = true\n{display_name}\n[attributes]\nsource_type = {}\nendpoint = {}\npoll_seconds = 10\nformat = \"json\"\nenabled = false\n",
+        quoted(source_type),
+        quoted(endpoint),
     );
     std::fs::write(cdir.join("_instance.toml"), toml)?;
-    Ok(name)
+    Ok((folder_name, cdir))
+}
+
+/// Data > Overlay: parts whose name (or one of their tags) is a key in the
+/// selected Dataset are tinted by that key's number. Display only: `BasePart`
+/// is never touched, so nothing is saved, and clearing gives every part its
+/// own material back.
+#[derive(Resource, Default)]
+pub struct DataOverlay {
+    pub active: bool,
+    pub values: std::collections::HashMap<String, f64>,
+    pub range: (f64, f64),
+    /// Bumped on every change, so tints are recomputed once per change.
+    pub rev: u64,
+}
+
+/// The material a tinted part showed before the overlay replaced it.
+#[derive(Component)]
+struct DataOverlayTint {
+    original: Handle<StandardMaterial>,
+}
+
+/// Dark violet through teal to yellow, low to high.
+fn overlay_ramp(t: f32) -> Color {
+    let stops = [[0.27, 0.00, 0.33], [0.13, 0.57, 0.55], [0.99, 0.91, 0.14]];
+    let (a, b, u) = if t < 0.5 { (stops[0], stops[1], t * 2.0) } else { (stops[1], stops[2], (t - 0.5) * 2.0) };
+    Color::srgb(a[0] + (b[0] - a[0]) * u, a[1] + (b[1] - a[1]) * u, a[2] + (b[2] - a[2]) * u)
+}
+
+#[cfg(feature = "data")]
+fn apply_data_overlay(
+    mut commands: Commands,
+    overlay: Res<DataOverlay>,
+    mut seen_rev: Local<u64>,
+    mut palette: Local<Vec<Handle<StandardMaterial>>>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+    parts: Query<(
+        Entity,
+        &eustress_common::classes::Instance,
+        Option<&eustress_common::attributes::Tags>,
+        Ref<eustress_common::classes::BasePart>,
+        &MeshMaterial3d<StandardMaterial>,
+        Option<&DataOverlayTint>,
+    )>,
+) {
+    let rev_changed = *seen_rev != overlay.rev;
+    if !overlay.active && !rev_changed {
+        return;
+    }
+    *seen_rev = overlay.rev;
+    if palette.is_empty() {
+        // 32 shared materials, so tinted parts still batch.
+        *palette = (0..32)
+            .map(|i| materials.add(StandardMaterial { base_color: overlay_ramp(i as f32 / 31.0), ..default() }))
+            .collect();
+    }
+    let (lo, hi) = overlay.range;
+    for (entity, inst, tags, part, material, tint) in &parts {
+        let value = if overlay.active {
+            overlay.values.get(&inst.name)
+                .or_else(|| tags.and_then(|t| t.0.iter().find_map(|k| overlay.values.get(k))))
+        } else {
+            None
+        };
+        // The part's own material is what it shows now, unless that is one
+        // of ours (then the tint remembers it).
+        let showing_ours = palette.contains(&material.0);
+        match (value, tint) {
+            (Some(v), _) if rev_changed || part.is_changed() || tint.is_none() => {
+                let original = match (showing_ours, tint) {
+                    (false, _) => material.0.clone(),
+                    (true, Some(t)) => t.original.clone(),
+                    (true, None) => continue,
+                };
+                let t = ((v - lo) / (hi - lo).max(1e-12)).clamp(0.0, 1.0) as f32;
+                commands.entity(entity).insert((
+                    MeshMaterial3d(palette[(t * 31.0).round() as usize].clone()),
+                    DataOverlayTint { original },
+                ));
+            }
+            (None, Some(t)) => {
+                let restore = if showing_ours { t.original.clone() } else { material.0.clone() };
+                commands.entity(entity).insert(MeshMaterial3d(restore)).remove::<DataOverlayTint>();
+            }
+            _ => {}
+        }
+    }
+}
+
+/// No-op stand-in when the `data` feature is off (keeps registration unconditional).
+#[cfg(not(feature = "data"))]
+fn apply_data_overlay() {}
+
+/// The Datasets the Sync Domain dialog offers, by the label it shows.
+#[derive(Resource, Default)]
+pub struct SyncDomainState {
+    domains: Vec<(String, std::path::PathBuf)>,
+}
+
+/// A Dataset's frame: the file its `source` attribute names (CSV, JSON
+/// Lines or Parquet, as Import copies it in), else the first `.csv` beside
+/// its `_instance.toml`.
+#[cfg(feature = "data")]
+fn load_dataset_frame(dir: &std::path::Path) -> Option<eustress_data::Frame> {
+    let source = std::fs::read_to_string(dir.join("_instance.toml"))
+        .ok()
+        .and_then(|text| text.parse::<toml::Table>().ok())
+        .and_then(|doc| {
+            doc.get("attributes")?.as_table()?.get("source")?.as_str().map(|s| dir.join(s))
+        })
+        .filter(|p| p.is_file());
+    let Some(path) = source else {
+        return read_dataset_frame(dir);
+    };
+    let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("").to_ascii_lowercase();
+    match ext.as_str() {
+        "csv" => std::fs::File::open(&path).ok().and_then(|f| eustress_data::import::frame_from_csv(f).ok()),
+        "json" | "jsonl" => std::fs::File::open(&path).ok().and_then(|f| eustress_data::import::frame_from_jsonl(f).ok()),
+        "parquet" => eustress_data::read_parquet(&path).ok(),
+        _ => read_dataset_frame(dir),
+    }
+}
+
+/// One object the Sync Domain run will create.
+#[cfg(feature = "data")]
+struct SyncRow {
+    name: String,
+    position: Vec3,
+    color: Option<[f32; 4]>,
+    /// `[parameters]` entries: `"<dataset>.<column>"` = cell.
+    params: Vec<(String, toml::Value)>,
+    label: Option<String>,
+}
+
+/// Everything a Sync Domain run writes, worked out on the main thread so the
+/// writer thread needs nothing from the world.
+#[cfg(feature = "data")]
+struct SyncPlan {
+    dataset: String,
+    workspace: std::path::PathBuf,
+    /// Dialog class: Part, SpherePart, CylinderPart or Model.
+    class: String,
+    rows: Vec<SyncRow>,
+    total_rows: usize,
+    layout: String,
+    extent: Vec3,
+    name_field: String,
+    color_field: String,
+}
+
+#[cfg(feature = "data")]
+impl SyncPlan {
+    const MAX_ROWS: usize = 2000;
+
+    fn summary(&self) -> String {
+        let noun = match self.class.as_str() {
+            "Model" => "Models",
+            "SpherePart" => "spheres",
+            "CylinderPart" => "cylinders",
+            _ => "Parts",
+        };
+        let mut s = format!(
+            "{} {noun} in a {} layout, about {:.0} x {:.0} m",
+            self.rows.len(),
+            self.layout.to_lowercase(),
+            self.extent.x.max(1.0),
+            self.extent.z.max(1.0),
+        );
+        if self.total_rows > self.rows.len() {
+            s += &format!(" (first {} of {} rows)", self.rows.len(), self.total_rows);
+        }
+        if !self.name_field.is_empty() {
+            s += &format!(", named by '{}'", self.name_field);
+        }
+        if !self.color_field.is_empty() {
+            s += &format!(", colored by '{}'", self.color_field);
+        }
+        s
+    }
+
+    /// Write the objects: one Folder holding a Part (or a Model with a Part)
+    /// per row, each carrying its row as `[parameters]`, optionally with a
+    /// floating label. Runs on a worker thread.
+    fn write(self) -> SlintAction {
+        use crate::space::instance_create::{create_instance, InstanceOverrides};
+        let folder_name = crate::space::instance_loader::unique_entity_name(&self.workspace, &format!("{} Sync", self.dataset));
+        let container = match create_instance(&self.workspace, "Folder", Some(&folder_name), Default::default()) {
+            Ok(folder) => folder.folder_path,
+            Err(e) => {
+                return SlintAction::SyncDomainDone {
+                    container: self.workspace.join(&folder_name),
+                    created: 0,
+                    skipped: self.rows.len(),
+                    error: Some(e.to_string()),
+                };
+            }
+        };
+        let mesh = match self.class.as_str() {
+            "SpherePart" => Some("parts/ball.glb".to_string()),
+            "CylinderPart" => Some("parts/cylinder.glb".to_string()),
+            _ => None,
+        };
+        let (mut created, mut skipped) = (0usize, 0usize);
+        for row in &self.rows {
+            let (parent, part_name) = if self.class == "Model" {
+                match create_instance(&container, "Model", Some(&row.name), Default::default()) {
+                    Ok(model) => (model.folder_path, "Block".to_string()),
+                    Err(_) => {
+                        skipped += 1;
+                        continue;
+                    }
+                }
+            } else {
+                (container.clone(), row.name.clone())
+            };
+            let overrides = InstanceOverrides {
+                position: Some(row.position),
+                color_rgba: row.color,
+                asset_mesh: mesh.clone(),
+                anchored: Some(true),
+                ..Default::default()
+            };
+            match create_instance(&parent, "Part", Some(&part_name), overrides) {
+                Ok(part) => {
+                    let _ = write_row_parameters(&part.toml_path, &row.params);
+                    if let Some(text) = &row.label {
+                        let _ = write_row_label(&part.folder_path, text);
+                    }
+                    created += 1;
+                }
+                Err(_) => skipped += 1,
+            }
+        }
+        SlintAction::SyncDomainDone { container, created, skipped, error: None }
+    }
+}
+
+/// Merge a row into an instance's `[parameters]`. Keys are
+/// `"<dataset>.<column>"`, which TOML writes quoted, as the loader expects.
+#[cfg(feature = "data")]
+fn write_row_parameters(toml_path: &std::path::Path, params: &[(String, toml::Value)]) -> Result<(), String> {
+    if params.is_empty() {
+        return Ok(());
+    }
+    let text = std::fs::read_to_string(toml_path).map_err(|e| e.to_string())?;
+    let mut doc: toml::Table = text.parse().map_err(|e: toml::de::Error| e.to_string())?;
+    let table = doc
+        .entry("parameters")
+        .or_insert_with(|| toml::Value::Table(Default::default()))
+        .as_table_mut()
+        .ok_or("[parameters] is not a table")?;
+    for (key, value) in params {
+        table.insert(key.clone(), value.clone());
+    }
+    std::fs::write(toml_path, toml::to_string(&doc).map_err(|e| e.to_string())?).map_err(|e| e.to_string())
+}
+
+/// A small floating label over the object: a BillboardGui holding a
+/// TextLabel, in the shape the MindSpace labels use, sized well inside the
+/// billboard atlas slot.
+#[cfg(feature = "data")]
+fn write_row_label(part_folder: &std::path::Path, text: &str) -> std::io::Result<()> {
+    let bb_dir = part_folder.join("Label");
+    std::fs::create_dir_all(bb_dir.join("TextLabel"))?;
+    std::fs::write(
+        bb_dir.join("_instance.toml"),
+        "[metadata]\nclass_name = \"BillboardGui\"\narchivable = true\n\n[gui]\nposition = [0.0, 0.0, 0.0, 0.0]\nsize = [3.0, 0.0, 0.75, 0.0]\nunits_offset = [0.0, 1.5, 0.0]\nvisible = true\nalways_on_top = false\nz_index = 1\nmax_distance = 1000.0\ndistance_upper_limit = 1000.0\n",
+    )?;
+    let quoted = toml::Value::String(text.to_string()).to_string();
+    std::fs::write(
+        bb_dir.join("TextLabel").join("_instance.toml"),
+        format!(
+            "[metadata]\nclass_name = \"TextLabel\"\narchivable = true\n\n[gui]\nposition = [0.0, 0.0, 0.0, 0.0]\nsize = [1.0, 0.0, 1.0, 0.0]\nbackground_color = [0.0, 0.0, 0.0, 0.0]\nborder_size = 0.0\nborder_color = [0.0, 0.0, 0.0, 0.0]\nvisible = true\nz_index = 0\n\n[text]\ntext = {quoted}\ntext_color = [1.0, 1.0, 1.0, 1.0]\nfont = \"GothamBold\"\nfont_size = 14.0\ntext_scaled = false\ntext_x_alignment = \"center\"\ntext_y_alignment = \"center\"\n",
+        ),
+    )
+}
+
+/// Work out a Sync Domain run from the dialog: which Dataset, how each row is
+/// named, colored, labelled and placed. Err is a line for the dialog.
+#[cfg(feature = "data")]
+fn sync_domain_plan(
+    ui: &StudioWindow,
+    res: &DrainResources,
+    queries: &DrainActionQueries,
+    spacing: Vec3,
+) -> Result<SyncPlan, String> {
+    use eustress_data::{ColumnData, ColumnDtype};
+    let label = ui.get_sync_domain_selected().to_string();
+    let dir = res.sync_domain.as_ref()
+        .and_then(|s| s.domains.iter().find(|(l, _)| *l == label).map(|(_, d)| d.clone()))
+        .ok_or_else(|| "Pick a domain first.".to_string())?;
+    let frame = load_dataset_frame(&dir).ok_or_else(|| "This Dataset has no readable data file.".to_string())?;
+    let total_rows = frame.n_rows();
+    if total_rows == 0 {
+        return Err("This Dataset has no rows.".to_string());
+    }
+    let n = total_rows.min(SyncPlan::MAX_ROWS);
+    let dataset = dir.file_name().unwrap_or_default().to_string_lossy().to_string();
+    let name_field = ui.get_sync_domain_name_field().to_string();
+    let color_field = ui.get_sync_domain_color_field().to_string();
+    let label_field = if ui.get_sync_domain_show_billboard() {
+        Some(ui.get_sync_domain_billboard_field().to_string())
+    } else {
+        None
+    };
+    let layout = ui.get_sync_domain_layout().to_string();
+    let class = ui.get_sync_domain_class().to_string();
+    let columns = frame.columns();
+    let column = |name: &str| columns.iter().find(|(s, _)| s.name == name).map(|(_, d)| d);
+
+    // Placement: a grid, line, circle or scatter centred in front of the camera.
+    let base = queries.camera_query.iter().find(|(c, _)| c.order == 0)
+        .map(|(_, t)| {
+            let p = t.translation() + t.forward() * 20.0;
+            Vec3::new(p.x, 0.5, p.z)
+        })
+        .unwrap_or(Vec3::new(0.0, 0.5, 0.0));
+    let (sx, sy, sz) = (spacing.x.max(0.0), spacing.y, spacing.z.max(0.0));
+    let cols = (n as f32).sqrt().ceil().max(1.0) as usize;
+    let grid_rows = n.div_ceil(cols);
+    let offsets: Vec<Vec3> = (0..n)
+        .map(|i| match layout.as_str() {
+            "Line" => Vec3::new(i as f32 * sx - (n - 1) as f32 * sx * 0.5, i as f32 * sy, 0.0),
+            "Circle" => {
+                let radius = (n as f32 * sx.max(0.5) / std::f32::consts::TAU).max(sx);
+                let angle = std::f32::consts::TAU * i as f32 / n as f32;
+                Vec3::new(radius * angle.cos(), i as f32 * sy, radius * angle.sin())
+            }
+            "Random" => {
+                // A fixed per-row hash, so a re-run lands the same way.
+                let hash = |salt: u64| {
+                    let mut h = (i as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ salt;
+                    h ^= h >> 33;
+                    h = h.wrapping_mul(0xFF51_AFD7_ED55_8CCD);
+                    h ^= h >> 33;
+                    (h % 10_000) as f32 / 10_000.0 - 0.5
+                };
+                let side = (n as f32).sqrt() * sx.max(sz).max(0.5);
+                Vec3::new(hash(1) * side, 0.0, hash(2) * side)
+            }
+            _ => {
+                let (c, r) = (i % cols, i / cols);
+                Vec3::new(
+                    c as f32 * sx - (cols - 1) as f32 * sx * 0.5,
+                    r as f32 * sy,
+                    r as f32 * sz - (grid_rows - 1) as f32 * sz * 0.5,
+                )
+            }
+        })
+        .collect();
+    let (lo, hi) = offsets.iter().fold((Vec3::splat(f32::MAX), Vec3::splat(f32::MIN)), |(lo, hi), p| (lo.min(*p), hi.max(*p)));
+
+    // Color: numbers along a blue-to-yellow ramp, true/false green/red,
+    // "#RRGGBB" as written, other text by a stable palette.
+    let color_col = column(&color_field);
+    let range = color_col.and_then(|data| {
+        let values: Vec<f64> = (0..n).filter_map(|r| chart_cell_f64(data, r)).collect();
+        let lo = values.iter().cloned().fold(f64::INFINITY, f64::min);
+        let hi = values.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+        (lo.is_finite() && hi.is_finite()).then_some((lo, hi))
+    });
+    let color_of = |r: usize| -> Option<[f32; 4]> {
+        let data = color_col?;
+        match data {
+            ColumnData::Bool(v) => v.get(r).copied().flatten().map(|b| if b { [0.25, 0.75, 0.35, 1.0] } else { [0.85, 0.25, 0.25, 1.0] }),
+            ColumnData::Str(v) => {
+                let s = v.get(r)?.as_deref()?.trim();
+                if let Some(hex) = s.strip_prefix('#').filter(|h| h.len() == 6) {
+                    let byte = |i: usize| u8::from_str_radix(&hex[i..i + 2], 16).ok().map(|b| b as f32 / 255.0);
+                    return Some([byte(0)?, byte(2)?, byte(4)?, 1.0]);
+                }
+                const PALETTE: [[f32; 3]; 8] = [
+                    [0.26, 0.52, 0.96], [0.96, 0.62, 0.20], [0.30, 0.75, 0.40], [0.86, 0.30, 0.35],
+                    [0.60, 0.40, 0.85], [0.20, 0.75, 0.80], [0.95, 0.80, 0.25], [0.55, 0.55, 0.55],
+                ];
+                let h = s.bytes().fold(2166136261u32, |h, b| (h ^ b as u32).wrapping_mul(16777619));
+                let c = PALETTE[h as usize % PALETTE.len()];
+                Some([c[0], c[1], c[2], 1.0])
+            }
+            _ => {
+                let (lo, hi) = range?;
+                let t = ((chart_cell_f64(data, r)? - lo) / (hi - lo).max(1e-12)).clamp(0.0, 1.0) as f32;
+                let (a, b) = ([0.15, 0.30, 0.85], [0.98, 0.85, 0.20]);
+                Some([a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, a[2] + (b[2] - a[2]) * t, 1.0])
+            }
+        }
+    };
+
+    // Names: folder-safe, never empty.
+    let name_col = column(&name_field);
+    let label_col = label_field.as_deref().and_then(|f| if f.is_empty() { None } else { column(f) });
+    let rows = (0..n)
+        .map(|r| {
+            let raw = name_col.map(|d| data_cell_string(d, r)).unwrap_or_default();
+            let clean: String = raw
+                .chars()
+                .map(|c| if matches!(c, '\\' | '/' | ':' | '*' | '?' | '"' | '<' | '>' | '|') { '_' } else { c })
+                .take(60)
+                .collect();
+            let clean = clean.trim().to_string();
+            let name = if clean.is_empty() { format!("{dataset} {}", r + 1) } else { clean };
+            let params = columns
+                .iter()
+                .map(|(spec, data)| {
+                    let value = match spec.dtype {
+                        ColumnDtype::F64 | ColumnDtype::I64 => chart_cell_f64(data, r)
+                            .map(toml::Value::Float)
+                            .unwrap_or_else(|| toml::Value::String(String::new())),
+                        _ => toml::Value::String(data_cell_string(data, r)),
+                    };
+                    (format!("{dataset}.{}", spec.name), value)
+                })
+                .collect();
+            let label = label_field.as_ref().map(|_| match label_col {
+                Some(d) => data_cell_string(d, r),
+                None => name.clone(),
+            });
+            SyncRow { name, position: base + offsets[r], color: color_of(r), params, label }
+        })
+        .collect();
+
+    Ok(SyncPlan {
+        dataset,
+        workspace: crate::space::open_space_root(res.space_root.as_deref()).join("Workspace"),
+        class,
+        rows,
+        total_rows,
+        layout,
+        extent: hi - lo,
+        name_field,
+        color_field,
+    })
+}
+
+/// The Data > Manage Global Sources dialog's rows: the open Space's
+/// Connectors, plus the outcome of the last Test on each.
+#[derive(Resource, Default)]
+pub struct DataSourcesPanel {
+    rows: Vec<DataSourceRow>,
+    /// Frames since the last rescan while the dialog is open.
+    since_scan: u32,
+}
+
+#[derive(Clone)]
+struct DataSourceRow {
+    dir: std::path::PathBuf,
+    name: String,
+    kind: String,
+    endpoint: String,
+    /// Why the config cannot work as written, when it cannot.
+    problem: Option<String>,
+    test_state: String,
+    test_detail: String,
+    tested_at: String,
+}
+
+/// A Connector's `[attributes]`, as the strings the data crate reads.
+fn connector_attributes(toml_path: &std::path::Path) -> Option<(Option<String>, std::collections::BTreeMap<String, String>)> {
+    let text = std::fs::read_to_string(toml_path).ok()?;
+    let doc: toml::Table = text.parse().ok()?;
+    let meta = doc.get("metadata").and_then(|m| m.as_table());
+    if meta.and_then(|m| m.get("class_name")).and_then(|c| c.as_str()) != Some("Connector") {
+        return None;
+    }
+    let display = meta.and_then(|m| m.get("name")).and_then(|n| n.as_str()).map(str::to_string);
+    let attrs = doc
+        .get("attributes")
+        .and_then(|a| a.as_table())
+        .map(|t| {
+            t.iter()
+                .map(|(k, v)| (k.clone(), v.as_str().map(str::to_string).unwrap_or_else(|| v.to_string())))
+                .collect()
+        })
+        .unwrap_or_default();
+    Some((display, attrs))
+}
+
+/// Every Connector in `<space>/DataService`, keeping each row's last Test
+/// result across rescans.
+fn scan_data_sources(space_root: &std::path::Path, previous: &[DataSourceRow]) -> Vec<DataSourceRow> {
+    let mut rows = Vec::new();
+    let Ok(entries) = std::fs::read_dir(space_root.join("DataService")) else { return rows };
+    for entry in entries.flatten() {
+        let dir = entry.path();
+        let Some((display, attrs)) = connector_attributes(&dir.join("_instance.toml")) else { continue };
+        let name = display.unwrap_or_else(|| dir.file_name().unwrap_or_default().to_string_lossy().to_string());
+        let kind = attrs.get("source_type").cloned().unwrap_or_default();
+        let endpoint = attrs.get("endpoint").cloned().unwrap_or_default();
+        #[cfg(feature = "data")]
+        let problem = eustress_data::source::materialize::config_from_attributes(&attrs)
+            .and_then(|config| eustress_data::source::validate_config(&config))
+            .err()
+            .map(|e| e.to_string());
+        #[cfg(not(feature = "data"))]
+        let problem: Option<String> = None;
+        let last = previous.iter().find(|r| r.dir == dir);
+        rows.push(DataSourceRow {
+            dir,
+            name,
+            kind,
+            endpoint,
+            problem,
+            test_state: last.map(|r| r.test_state.clone()).unwrap_or_else(|| "idle".to_string()),
+            test_detail: last.map(|r| r.test_detail.clone()).unwrap_or_default(),
+            tested_at: last.map(|r| r.tested_at.clone()).unwrap_or_default(),
+        });
+    }
+    rows.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+    rows
+}
+
+fn push_data_sources(ui: &StudioWindow, rows: &[DataSourceRow]) {
+    let entries: Vec<DataSourceEntry> = rows
+        .iter()
+        .enumerate()
+        .map(|(i, r)| DataSourceEntry {
+            id: i as i32,
+            name: r.name.as_str().into(),
+            source_type: r.kind.as_str().into(),
+            url: if r.endpoint.is_empty() {
+                "(set the endpoint in Properties)".into()
+            } else {
+                r.endpoint.as_str().into()
+            },
+            // Nothing keeps a Connector connected yet, so a sound config is
+            // "disconnected" and a broken one "error"; Test says more.
+            status: if r.problem.is_some() { "error" } else { "disconnected" }.into(),
+            test_state: r.test_state.as_str().into(),
+            test_detail: r.test_detail.as_str().into(),
+            tested_at: r.tested_at.as_str().into(),
+        })
+        .collect();
+    ui.set_data_sources(slint::ModelRc::new(slint::VecModel::from(entries)));
+}
+
+/// The live instance of the Connector on a dialog row, when it is loaded.
+fn connector_entity(row: i32, res: &mut DrainResources) -> Option<Entity> {
+    let dir = res.data_sources.as_ref()?.rows.get(usize::try_from(row).ok()?)?.dir.clone();
+    let entity = res.file_registry.as_ref().and_then(|registry| {
+        registry.get_entity(&dir.join("_instance.toml")).or_else(|| registry.get_entity(&dir))
+    });
+    if entity.is_none() {
+        if let Some(ref mut out) = res.output {
+            out.warning(format!(
+                "Data · '{}' is not loaded in the Explorer yet; try again in a moment.",
+                dir.file_name().unwrap_or_default().to_string_lossy()
+            ));
+        }
+    }
+    entity
+}
+
+/// Test one Connector the way the data crate would reach it. Blocking; runs
+/// on its own thread. Relative file endpoints resolve against the Space.
+fn probe_data_source(dir: &std::path::Path, space_root: &std::path::Path) -> (bool, String) {
+    #[cfg(feature = "data")]
+    {
+        let Some((_, mut attrs)) = connector_attributes(&dir.join("_instance.toml")) else {
+            return (false, "the Connector's _instance.toml could not be read".to_string());
+        };
+        if let Some(endpoint) = attrs.get_mut("endpoint") {
+            let path = std::path::Path::new(endpoint.as_str());
+            if !endpoint.contains("://") && path.is_relative() && !endpoint.is_empty() {
+                *endpoint = space_root.join(path).to_string_lossy().to_string();
+            }
+        }
+        let started = std::time::Instant::now();
+        let result = eustress_data::source::materialize::config_from_attributes(&attrs)
+            .and_then(|config| {
+                eustress_data::source::validate_config(&config)?;
+                eustress_data::source::open(config)
+            })
+            .and_then(|source| source.test_connection());
+        let ms = started.elapsed().as_millis();
+        match result {
+            Ok(status) if status.reachable => (true, format!("{} · {ms} ms", status.detail)),
+            Ok(status) => (false, status.detail),
+            Err(e) => (false, e.to_string()),
+        }
+    }
+    #[cfg(not(feature = "data"))]
+    {
+        let _ = (dir, space_root);
+        (false, "this build has no Data Platform support".to_string())
+    }
+}
+
+/// Keep the open dialog in step with the Space: edits made in Properties, a
+/// Remove whose Delete has since finished, Connectors added from elsewhere.
+/// Rescans about once a second while the dialog is open.
+fn sync_data_sources_dialog(
+    slint_context: Option<NonSend<SlintUiState>>,
+    panel: Option<ResMut<DataSourcesPanel>>,
+    space_root: Option<Res<crate::space::SpaceRoot>>,
+) {
+    let (Some(context), Some(mut panel)) = (slint_context, panel) else { return };
+    let ui = &context.window;
+    if !ui.get_show_global_sources_window() {
+        return;
+    }
+    panel.since_scan += 1;
+    if panel.since_scan < 60 {
+        return;
+    }
+    panel.since_scan = 0;
+    let root = crate::space::open_space_root(space_root.as_deref());
+    let rows = scan_data_sources(&root, &panel.rows);
+    let changed = rows.len() != panel.rows.len()
+        || rows.iter().zip(panel.rows.iter()).any(|(a, b)| {
+            a.dir != b.dir || a.name != b.name || a.kind != b.kind || a.endpoint != b.endpoint || a.problem != b.problem
+        });
+    if changed {
+        panel.rows = rows;
+        push_data_sources(ui, &panel.rows);
+    }
 }
 
 /// Tracks last known window size to detect resize (Changed<Window> is unreliable)
@@ -18276,6 +22403,86 @@ fn sync_worldgen_progress_to_slint(
     let current: String = ui.get_worldgen_progress().into();
     if current != progress {
         ui.set_worldgen_progress(progress.into());
+    }
+}
+
+/// Pushes the terrain material picker (Terrain panel, Paint brush settings)
+/// to Slint: every defined slot with its name and swatch whenever the slot
+/// table changes, and the slot the Paint brush lays down, with its name and
+/// built-in base, which the picker shows as selected.
+fn sync_terrain_materials_to_slint(
+    slint_context: Option<NonSend<SlintUiState>>,
+    slots: Option<Res<eustress_common::terrain::TerrainMaterialSlots>>,
+    brush: Option<Res<eustress_common::terrain::TerrainBrush>>,
+    mut listed: Local<bool>,
+) {
+    let Some(ctx) = slint_context else { return };
+    let ui = &ctx.window;
+    let Some(slots) = slots else { return };
+
+    // The list is a whole-model replace, so it goes out once Slint exists and
+    // then only when the table changes (Space switch, a `.mat.toml` edit,
+    // "Add material").
+    if !*listed || slots.is_changed() {
+        let byte = |channel: f32| (channel.clamp(0.0, 1.0) * 255.0).round() as u8;
+        // Water is real water, not a ground material: its own row under the
+        // list rather than one of them.
+        let water_slot = eustress_common::terrain::TerrainMaterial::Water.to_u8();
+        match slots.get(water_slot) {
+            Some(def) => {
+                let [r, g, b] = def.swatch_srgb();
+                ui.set_terrain_water_slot(i32::from(water_slot));
+                ui.set_terrain_water_swatch(slint::Color::from_rgb_u8(byte(r), byte(g), byte(b)));
+            }
+            None => ui.set_terrain_water_slot(-1),
+        }
+        let rows: Vec<TerrainMaterialSlotData> = slots
+            .iter()
+            .filter(|(slot, _)| *slot != water_slot)
+            .map(|(slot, def)| {
+                let [r, g, b] = def.swatch_srgb();
+                TerrainMaterialSlotData {
+                    slot_id: i32::from(slot),
+                    name: def.name.clone().into(),
+                    swatch: slint::Color::from_rgb_u8(byte(r), byte(g), byte(b)),
+                    custom: slot >= eustress_common::terrain::FIRST_CUSTOM_MATERIAL_SLOT,
+                }
+            })
+            .collect();
+        let custom = rows.iter().filter(|row| row.custom).count();
+        let summary = match custom {
+            0 => format!("{} built-in", rows.len()),
+            _ => format!("{} built-in, {custom} custom", rows.len() - custom),
+        };
+        ui.set_terrain_materials(slint::ModelRc::from(std::rc::Rc::new(slint::VecModel::from(rows))));
+        ui.set_terrain_material(summary.into());
+        *listed = true;
+    }
+
+    let Some(brush) = brush else { return };
+    let slot = i32::from(brush.paint_material);
+    if ui.get_terrain_paint_material() != slot {
+        ui.set_terrain_paint_material(slot);
+    }
+    // A slot "Add material" just wrote is named before the table reloads.
+    let name = slots
+        .get(brush.paint_material)
+        .map_or_else(|| format!("Material {}", brush.paint_material), |def| def.name.clone());
+    let current: String = ui.get_terrain_paint_material_name().into();
+    if current != name {
+        ui.set_terrain_paint_material_name(name.into());
+    }
+    // "Add material" copies only the picked slot's built-in base (see the
+    // AddTerrainMaterial drain), so the hint names that base and not a
+    // custom slot's display name. Same Grass fallback as the drain.
+    let base = slots
+        .get(brush.paint_material)
+        .map_or(eustress_common::terrain::TerrainMaterial::Grass, |def| def.base)
+        .name()
+        .to_string();
+    let current_base: String = ui.get_terrain_paint_material_base().into();
+    if current_base != base {
+        ui.set_terrain_paint_material_base(base.into());
     }
 }
 
@@ -18682,10 +22889,21 @@ fn sync_procurement_to_slint(
             .as_ref()
             .and_then(|v| options.iter().position(|o| o.id == v.as_str()));
 
+        let rfq_refs: Vec<String> = rfqs.iter().map(|row| row.reference.to_string()).collect();
+        let names: Vec<slint::SharedString> = options.iter().map(|o| o.name.clone()).collect();
         ui.set_procurement_rfqs(slint::ModelRc::new(slint::VecModel::from(rfqs)));
         ui.set_procurement_manufacturers(slint::ModelRc::new(slint::VecModel::from(options)));
-        if let Some(i) = rfq_pick {
-            ui.set_procurement_rfq_selected(i as i32);
+        ui.set_procurement_manufacturer_names(slint::ModelRc::new(slint::VecModel::from(names)));
+        // A reveal wins; otherwise keep the record the user selected, found
+        // again by reference in the rebuilt list.
+        let keep = rfq_pick.or_else(|| {
+            focus.as_ref()
+                .and_then(|f| f.selected_rfq.as_deref())
+                .and_then(|r| rfq_refs.iter().position(|x| x == r))
+        });
+        ui.set_procurement_rfq_selected(keep.map_or(-1, |i| i as i32));
+        if let (Some(i), Some(f)) = (rfq_pick, focus.as_mut()) {
+            f.selected_rfq = Some(rfq_refs[i].clone());
         }
         if let Some(i) = vendor_idx {
             ui.set_procurement_vendor_index(i as i32);
@@ -18736,10 +22954,17 @@ fn sync_procurement_to_slint(
         .and_then(|f| f.order.as_ref())
         .and_then(|r| rows.iter().position(|row| row.reference == r.as_str()));
 
+    let order_refs: Vec<String> = rows.iter().map(|row| row.reference.to_string()).collect();
     ui.set_procurement_orders(slint::ModelRc::new(slint::VecModel::from(rows)));
+    let keep = order_pick.or_else(|| {
+        focus.as_ref()
+            .and_then(|f| f.selected_order.as_deref())
+            .and_then(|r| order_refs.iter().position(|x| x == r))
+    });
+    ui.set_procurement_order_selected(keep.map_or(-1, |i| i as i32));
     if let Some(i) = order_pick {
-        ui.set_procurement_order_selected(i as i32);
         if let Some(ref mut f) = focus {
+            f.selected_order = Some(order_refs[i].clone());
             f.order = None;
             f.vendor = None;
         }
@@ -18772,10 +22997,16 @@ fn sync_history_to_slint(
     let actions = undo_stack.history();
 
     let slint_entries: Vec<HistoryEntry> = actions.iter().enumerate().map(|(i, action)| {
+        // The row shows the label a tool pushed ("Drag 3 objects", "Resize
+        // with wheel", "Unlock All (12 parts)") when there is one: it says
+        // which gesture made the change, which is how a slip gets spotted
+        // in the list. Unlabelled steps show their structural description.
+        let structural = action.description();
+        let shown = undo_stack.label_at(i).map(str::to_string).unwrap_or_else(|| structural.clone());
         HistoryEntry {
             id: i as i32,
-            action: action.description().into(),
-            description: action.description().into(),
+            action: structural.into(),
+            description: shown.into(),
             timestamp: slint::SharedString::default(),
             is_current: i == current_index.saturating_sub(1),
             can_undo: i < current_index,
@@ -19010,7 +23241,13 @@ fn sync_unified_explorer_to_slint(
     children_query: Query<&Children>,
     child_of_query: Query<&ChildOf>,
     service_components: Query<&crate::space::service_loader::ServiceComponent>,
-    loaded_from_file: Query<&crate::space::LoadedFromFile>,
+    // Space files: which file each entity loaded from, and the open Space the
+    // Terrain folder and dynamic services are read from. Bundled to stay
+    // under the 16-param ceiling.
+    space_files: (
+        Query<&crate::space::LoadedFromFile>,
+        Option<Res<crate::space::SpaceRoot>>,
+    ),
     // Terrain entities for Explorer tree (TerrainRoot + Chunks), bundled into
     // one tuple param. Bevy caps a system at 16 params and this system is AT
     // the cap; pairing these two (5 call sites between them) is what freed the
@@ -19030,46 +23267,48 @@ fn sync_unified_explorer_to_slint(
         Query<&eustress_common::classes::TextLabel>,
         Query<&eustress_common::attributes::Tags>,
         Query<&eustress_common::classes::BasePart>,
+        // Pose anchors (`space::pose_anchor`): not instances; their children
+        // are listed as their part's.
+        Query<(), With<crate::space::pose_anchor::PoseAnchor>>,
     ),
     // EustressStream change-detection dirty flag
     mut panel_dirty: Option<ResMut<eustress_common::change_queue::PanelDirtyFlags>>,
     // Selection manager for multi-select highlighting in tree
     selection_sync: Option<Res<crate::selection_sync::SelectionSyncManager>>,
-    // Structure probe (AAA perf audit): the tree only reflects the Instance
+    // The tree's index, read straight from the ECS so a rebuild builds no
+    // entity set or child map: instances with no parent, instances with one,
+    // and the service entities. One tuple param, because this system is at
+    // Bevy's 16-param ceiling.
+    index_queries: (
+        Query<(Entity, &eustress_common::classes::Instance), Without<ChildOf>>,
+        Query<(Entity, &eustress_common::classes::Instance, &ChildOf)>,
+        Query<Entity, (With<crate::space::service_loader::ServiceComponent>, With<eustress_common::classes::Instance>)>,
+    ),
+    // Structure latch (AAA perf audit): the tree only reflects the Instance
     // SET, names/classes, and parenting. `PanelDirtyFlags.explorer` is far
     // coarser — streaming/residency ticks set it nearly every frame in big
     // worlds, which had this system doing a full-131K-entity rebuild
     // (HashSet + HashMap + Vec<TreeNode> allocations) at the 4 Hz coalesce
-    // cap FOREVER on a completely static scene. The probe latches the
-    // rebuild only when tree-visible structure actually changed.
-    structure_probe: Query<
-        Entity,
-        (
-            With<eustress_common::classes::Instance>,
-            Or<(
-                Added<eustress_common::classes::Instance>,
-                Changed<eustress_common::classes::Instance>,
-                Changed<ChildOf>,
-            )>,
-        ),
-    >,
-    mut removed_instances: RemovedComponents<eustress_common::classes::Instance>,
+    // cap FOREVER on a completely static scene. The rebuild is latched only
+    // when tree-visible structure actually changed, which
+    // `probe_explorer_structure` detects off the main thread.
+    mut structure_latch: ResMut<ExplorerStructureChanged>,
     // Coalescing state (system-local, no struct change). rebuild_requested: a
     // streaming/change signal asked for a rebuild but it can wait for the
     // coalesce window. last_rebuild_frame: app-frame of the last actual rebuild.
     // NOTE: these two Local params MUST remain LAST in declaration order — Bevy
     // resolves Local by type position, so a future param addition must go above.
     mut rebuild_requested: Local<bool>,
-    // `(last_rebuild_frame, last_selection_generation)`. Packed into ONE Local
-    // because this system is AT Bevy's 16-param ceiling — a 17th is a hard
-    // compile error, and the selection generation has to be remembered
-    // somewhere for the rebuild gate below to notice it changing.
-    mut last_rebuild_frame: Local<(u64, u64)>,
+    // Rebuild clock + selection generation, packed into ONE Local because
+    // this system is AT Bevy's 16-param ceiling — a 17th is a hard compile
+    // error. See `ExplorerRebuildClock`.
+    mut last_rebuild_frame: Local<ExplorerRebuildClock>,
 ) {
     // Field-wise borrow of the bundled tuple so the call sites below read as
     // they did when these were separate params.
     let (terrain_roots, terrain_chunks) = (&terrain.0, &terrain.1);
     let (text_labels, tags_q, base_parts_q) = (&search_facts.0, &search_facts.1, &search_facts.2);
+    let (loaded_from_file, space_root_res) = (&space_files.0, &space_files.1);
     let Some(mut explorer_state) = explorer_state else { return };
 
     // EustressStream change-detection. In the Vehicle-Simulator steady state the
@@ -19103,10 +23342,17 @@ fn sync_unified_explorer_to_slint(
             explorer_state.expanded_entities.insert(parent);
             cur = parent;
         }
+        // Terrain layers and spline points are listed under the Terrain
+        // node, which their ChildOf chain never reaches: open it too.
+        if instances.get(target).is_ok_and(|(_, i)| i.class_name.is_terrain_layer()) {
+            for (terrain_entity, _) in terrain_roots.iter() {
+                explorer_state.expanded_entities.insert(terrain_entity);
+            }
+        }
     }
 
-    let structure_changed = !structure_probe.is_empty() || !removed_instances.is_empty();
-    removed_instances.clear();
+    let structure_changed =
+        std::mem::take(&mut structure_latch.bypass_change_detection().0);
     if let Some(ref mut d) = panel_dirty {
         if d.explorer {
             d.explorer = false;
@@ -19118,7 +23364,7 @@ fn sync_unified_explorer_to_slint(
         *rebuild_requested = true;
     }
 
-    // A SELECTION change is a rebuild reason on its own. `structure_probe` only
+    // A SELECTION change is a rebuild reason on its own. The structure latch only
     // latches when the Instance set / names / parenting change, and selecting
     // something changes none of those — so the hierarchy commands (Select
     // Children / Descendants / Parent / Siblings / Invert), lasso paint, CSG,
@@ -19134,8 +23380,8 @@ fn sync_unified_explorer_to_slint(
         .as_ref()
         .map(|s| s.0.read().generation())
         .unwrap_or(0);
-    if selection_generation != last_rebuild_frame.1 {
-        last_rebuild_frame.1 = selection_generation;
+    if selection_generation != last_rebuild_frame.selection_generation {
+        last_rebuild_frame.selection_generation = selection_generation;
         explorer_state.selection_dirty = true;
     }
 
@@ -19169,20 +23415,58 @@ fn sync_unified_explorer_to_slint(
     // 5 frames -> rebuild (deferred ChildOf from initial load); 3) pending churn
     // latch AND coalesce window elapsed -> rebuild; 4) periodic 30-frame safety
     // tick -> rebuild. Otherwise return without touching the tree.
+    //
+    // A full rebuild walks every live instance (twice) plus the expanded
+    // rows, so on a 100K-instance Space it costs hundreds of milliseconds.
+    // The churn and periodic paths therefore also wait until the time since
+    // the last rebuild is at least `REBUILD_COST_GAP` times what that rebuild
+    // cost: the Explorer then never takes more than ~1/(1 + gap) of the main
+    // thread, at any frame rate or Space size, while a small Space (a
+    // rebuild of a few ms) keeps rebuilding as eagerly as before. The
+    // periodic tick also waits `PERIODIC_MIN_GAP`, since frame-counted it
+    // fired twice a second at 60 FPS. User actions are never delayed.
+    //
+    // The periodic tick is only a safety net: every change the tree shows
+    // has its own signal above, so on a settled Space it rebuilds a tree
+    // identical to the one on screen. It therefore waits
+    // `PERIODIC_COST_GAP` times the last rebuild's cost, keeping it near 1%
+    // of the main thread. A small Space still refreshes every 3 s; a
+    // 100K-instance Space, where one rebuild is a 300 ms hitch, every 30 s.
+    const REBUILD_COST_GAP: u32 = 4;
+    const PERIODIC_COST_GAP: u32 = 100;
+    const PERIODIC_MIN_GAP: std::time::Duration = std::time::Duration::from_secs(3);
+    let since_last = last_rebuild_frame
+        .last_rebuild_at
+        .map(|t| t.elapsed())
+        .unwrap_or(std::time::Duration::MAX);
+    let cost_gap = last_rebuild_frame.last_rebuild_cost * REBUILD_COST_GAP;
+    let reason: u8;
     if explorer_state.needs_immediate_sync {
         info!("🌲 [diag] tree rebuild: needs_immediate_sync path (expand/collapse/select just fired)");
         explorer_state.needs_immediate_sync = false;
         *rebuild_requested = false;
+        reason = 0;
     } else if frame <= 5 {
         // initial-load grace window: always rebuild
-    } else if *rebuild_requested && frame.saturating_sub(last_rebuild_frame.0) >= COALESCE_FRAMES {
+        reason = 1;
+    } else if *rebuild_requested
+        && frame.saturating_sub(last_rebuild_frame.frame) >= COALESCE_FRAMES
+        && since_last >= cost_gap
+    {
         *rebuild_requested = false;
-    } else if perf.as_ref().map(|p| !p.should_throttle(30)).unwrap_or(false) {
+        reason = 2;
+    } else if perf.as_ref().map(|p| !p.should_throttle(30)).unwrap_or(false)
+        && since_last
+            >= (last_rebuild_frame.last_rebuild_cost * PERIODIC_COST_GAP).max(PERIODIC_MIN_GAP)
+    {
         // periodic safety tick: keeps the tree fresh if a signal was missed
+        reason = 3;
     } else {
         return;
     }
-    last_rebuild_frame.0 = frame;
+    last_rebuild_frame.frame = frame;
+    last_rebuild_frame.count_rebuild(reason);
+    let rebuild_t0 = std::time::Instant::now();
     let Some(slint_context) = slint_context else {
         warn!("🌲 [diag] tree rebuild: bailed — no slint_context this frame, rebuild dropped entirely");
         return;
@@ -19209,59 +23493,71 @@ fn sync_unified_explorer_to_slint(
     explorer_state.entity_id_cache.clear();
     explorer_state.next_entity_node_id = 1;
     
-    // SINGLE-PASS preamble. Previously this iterated the full ~110K instance
-    // set three times (instance_entities, children_of_parent, roots) plus a 4th
-    // pass below for service-children. Fold into two tight passes and pre-collect
-    // service_entities so that loop no longer needs its own instances.iter().
-    let mut instance_entities: std::collections::HashSet<Entity> =
-        std::collections::HashSet::new();
-    let mut children_of_parent: std::collections::HashMap<Entity, Vec<Entity>> =
-        std::collections::HashMap::new();
-    let mut roots: Vec<Entity> = Vec::new();
-    let mut service_entities: Vec<Entity> = Vec::new();
-
-    // Pass 1a: membership + child map. Membership must be complete before roots
-    // are decided (a ChildOf may point to an entity not yet visited).
-    for (entity, _) in instances.iter() {
-        instance_entities.insert(entity);
-        if let Ok(child_of) = child_of_query.get(entity) {
-            children_of_parent.entry(child_of.0).or_default().push(entity);
-        }
-    }
-    // Pass 1b: roots + service entities (membership set now complete).
-    for (entity, instance) in instances.iter() {
-        if service_components.get(entity).is_ok() {
-            service_entities.push(entity);
-        }
-        // Skip adornment classes (meta entities hidden from Explorer)
-        if instance.class_name.is_adornment() {
-            continue;
-        }
-        match child_of_query.get(entity) {
-            Ok(child_of) => {
-                if !instance_entities.contains(&child_of.0) {
-                    roots.push(entity);
+    // Roots: instances with no parent, plus instances whose parent is not an
+    // instance. Adornment classes (meta entities) are hidden from the tree.
+    // Children come from Bevy's `Children`, which the `ChildOf` relationship
+    // hooks keep in step at insertion, so the tree needs no child map of its
+    // own.
+    let (unparented_instances, parented_instances, service_entity_query) = &index_queries;
+    let service_entities: Vec<Entity> = service_entity_query.iter().collect();
+    let mut roots: Vec<Entity> = unparented_instances
+        .iter()
+        .filter(|(_, instance)| !instance.class_name.is_adornment())
+        .map(|(entity, _)| entity)
+        .collect();
+    roots.extend(
+        parented_instances
+            .iter()
+            .filter(|(_, instance, child_of)| {
+                !instance.class_name.is_adornment() && !instances.contains(child_of.parent())
+            })
+            .map(|(entity, _, _)| entity),
+    );
+    // Whether a `Children` entry is shown in the tree: an instance, and not an
+    // adornment. `Children` also lists helper entities that are not instances.
+    let is_tree_child = |child: Entity| {
+        instances
+            .get(child)
+            .map(|(_, i)| !i.class_name.is_adornment())
+            .unwrap_or(false)
+    };
+    // An entity's rows in the tree: its instance children, with a pose
+    // anchor's children (the placed children a sized part hangs from its
+    // unscaled anchor) in the anchor's place.
+    let pose_anchors = &search_facts.3;
+    let tree_children = |entity: Entity| -> Vec<Entity> {
+        let mut out = Vec::new();
+        if let Ok(children) = children_query.get(entity) {
+            for child in children.iter() {
+                if pose_anchors.contains(child) {
+                    if let Ok(grand) = children_query.get(child) {
+                        out.extend(grand.iter().filter(|g| is_tree_child(*g)));
+                    }
+                } else if is_tree_child(child) {
+                    out.push(child);
                 }
             }
-            Err(_) => {
-                roots.push(entity);
-            }
         }
-    }
+        out
+    };
     
-    roots.sort_by(|a, b| {
-        let a_name = instances.get(*a).map(|(_, i)| i.name.as_str()).unwrap_or("");
-        let b_name = instances.get(*b).map(|(_, i)| i.name.as_str()).unwrap_or("");
+    // The one order for every child list in the tree: Camera first, then by
+    // name, then by entity index. The lists here come out of ECS storage and
+    // `Children`, and neither order is stable: selecting an entity adds a
+    // component that moves it to the end of storage, and re-parenting appends
+    // to `Children`, so an unsorted list reshuffles. As a key it is a total order, which a sort
+    // requires (the old comparators called two Cameras each less than the
+    // other).
+    let explorer_key = |e: &Entity| {
+        let (class, name) = instances.get(*e)
+            .map(|(_, i)| (i.class_name, i.name.as_str()))
+            .unwrap_or((eustress_common::classes::ClassName::Part, ""));
+        (class != eustress_common::classes::ClassName::Camera, name, e.index())
+    };
+    roots.sort_by(|a, b| explorer_key(a).cmp(&explorer_key(b)));
+    
+    last_rebuild_frame.mark(0, rebuild_t0);
 
-        // Pin Camera at the top, tiebreak by entity index for stable ordering
-        match (a_name, b_name) {
-            ("Camera", _) => std::cmp::Ordering::Less,
-            (_, "Camera") => std::cmp::Ordering::Greater,
-            _ => a_name.cmp(b_name)
-                .then_with(|| a.index().cmp(&b.index())),
-        }
-    });
-    
     // Classify root entities into service buckets
     // Primary: use LoadedFromFile.service field (filesystem-based classification)
     // Fallback: use ClassName for entities without LoadedFromFile
@@ -19300,33 +23596,34 @@ fn sync_unified_explorer_to_slint(
         "StarterCharacterScripts", "StarterPlayerScripts",
     ].into_iter().collect();
     
-    // Find service entities and populate their children buckets directly
-    // This is more reliable than using roots, since children of services have ChildOf
-    // pointing to the service entity, so they're not in roots.
-    // Reuses service_entities collected in the single-pass preamble above
-    // instead of re-iterating all ~110K instances.
+    // Each service's children go straight into its bucket: they have a
+    // `ChildOf` pointing at the service, so they are not roots.
     for entity in service_entities.iter().copied() {
+        // A service folder nested in another (StarterPlayer/StarterPlayerScripts)
+        // is drawn with its children by the tree walk under its parent; listing
+        // its children here as well would show every one of them twice.
+        if child_of_query.get(entity).is_ok() {
+            continue;
+        }
         if let Ok(service) = service_components.get(entity) {
-            // Get children of this service entity from the children_of_parent map
-            if let Some(children) = children_of_parent.get(&entity) {
-                for child in children {
-                    // Skip adornments
-                    if let Ok((_, inst)) = instances.get(*child) {
-                        if inst.class_name.is_adornment() {
-                            continue;
-                        }
+            if let Ok(children) = children_query.get(entity) {
+                for child in children.iter() {
+                    if !is_tree_child(child) {
+                        continue;
                     }
                     match service.class_name.as_str() {
-                        "Workspace" => workspace_roots.push(*child),
-                        "Lighting" => lighting_roots.push(*child),
-                        "StarterGui" => starter_gui_roots.push(*child),
-                        "SoulService" => soul_service_roots.push(*child),
-                        "MaterialService" => material_service_roots.push(*child),
-                        "AdornmentService" => adornment_service_roots.push(*child),
-                        other if !hardcoded_services.contains(other) => {
-                            dynamic_service_roots.entry(other.to_string()).or_default().push(*child);
+                        "Workspace" => workspace_roots.push(child),
+                        "Lighting" => lighting_roots.push(child),
+                        "StarterGui" => starter_gui_roots.push(child),
+                        "SoulService" => soul_service_roots.push(child),
+                        "MaterialService" => material_service_roots.push(child),
+                        "AdornmentService" => adornment_service_roots.push(child),
+                        // Every other service lists its children too: scripts,
+                        // modules, remotes and templates in ServerScriptService,
+                        // ReplicatedStorage, StarterPlayer and the rest.
+                        other => {
+                            dynamic_service_roots.entry(explorer_service_row(other).to_string()).or_default().push(child);
                         }
-                        _ => {}
                     }
                 }
             }
@@ -19362,21 +23659,21 @@ fn sync_unified_explorer_to_slint(
                     "SoulService" => soul_service_roots.push(*entity),
                     "MaterialService" => material_service_roots.push(*entity),
                     "AdornmentService" => adornment_service_roots.push(*entity),
-                    other if !hardcoded_services.contains(other) => {
-                        dynamic_service_roots.entry(other.to_string()).or_default().push(*entity);
+                    // A live root with no service string defaults into Workspace
+                    // instead of being dropped: coverage is "every live Instance
+                    // by hierarchy", not "only services with a bucket".
+                    "" => workspace_roots.push(*entity),
+                    other => {
+                        dynamic_service_roots.entry(explorer_service_row(other).to_string()).or_default().push(*entity);
                     }
-                    // Any remaining live root (e.g. an imported entity whose
-                    // service is a hardcoded-but-unsurfaced bucket, or an empty
-                    // service string) defaults into Workspace instead of being
-                    // dropped — coverage is "every live Instance by hierarchy,"
-                    // not "only services with a dedicated bucket."
-                    _ => workspace_roots.push(*entity),
                 }
             } else {
                 // Fallback: classify by ClassName, defaulting unrecognized
                 // classes into Workspace so any imported root still surfaces.
                 if is_lighting_child(&instance.class_name) {
                     lighting_roots.push(*entity);
+                } else if instance.class_name == eustress_common::classes::ClassName::Material {
+                    material_service_roots.push(*entity);
                 } else if is_ui_child(&instance.class_name) {
                     starter_gui_roots.push(*entity);
                 } else if is_script(&instance.class_name) {
@@ -19388,6 +23685,19 @@ fn sync_unified_explorer_to_slint(
         }
     }
     
+    // Service children in the same order as everything else. SoulService keeps
+    // its own sort below (Workshop pinned first); Workspace is sorted where it
+    // is paged.
+    lighting_roots.sort_by(|a, b| explorer_key(a).cmp(&explorer_key(b)));
+    starter_gui_roots.sort_by(|a, b| explorer_key(a).cmp(&explorer_key(b)));
+    material_service_roots.sort_by(|a, b| explorer_key(a).cmp(&explorer_key(b)));
+    adornment_service_roots.sort_by(|a, b| explorer_key(a).cmp(&explorer_key(b)));
+    for list in dynamic_service_roots.values_mut() {
+        list.sort_by(|a, b| explorer_key(a).cmp(&explorer_key(b)));
+    }
+
+    last_rebuild_frame.mark(1, rebuild_t0);
+
     // Snapshot borrow-free copies of what the DFS closure needs from explorer_state
     let expanded_entities = explorer_state.expanded_entities.clone();
     let selected_item = explorer_state.selected.clone();
@@ -19489,14 +23799,7 @@ fn sync_unified_explorer_to_slint(
                 continue;
             }
 
-            // Use children_of_parent map (built from ChildOf components) instead of Children query
-            // This is more reliable since Children may not be populated yet after ChildOf insertion
-            let has_children = children_of_parent.get(&entity)
-                .map(|children| children.iter().any(|c| {
-                    instance_entities.contains(c) && 
-                    instances.get(*c).map(|(_, i)| !i.class_name.is_adornment()).unwrap_or(false)
-                }))
-                .unwrap_or(false);
+            let has_children = !tree_children(entity).is_empty();
 
             // Stable entity ID: derive from entity bits so IDs survive tree rebuilds.
             // This prevents double-click race conditions where the first click triggers
@@ -19555,28 +23858,10 @@ fn sync_unified_explorer_to_slint(
             });
 
             if is_expanded && has_children {
-                if let Some(children) = children_of_parent.get(&entity) {
-                    let mut child_instances: Vec<Entity> = children.iter()
-                        .filter(|c| {
-                            instance_entities.contains(c) &&
-                            instances.get(**c).map(|(_, i)| !i.class_name.is_adornment()).unwrap_or(false)
-                        })
-                        .copied()
-                        .collect();
-                    child_instances.sort_by(|a, b| {
-                        let a_name = instances.get(*a).map(|(_, i)| i.name.as_str()).unwrap_or("");
-                        let b_name = instances.get(*b).map(|(_, i)| i.name.as_str()).unwrap_or("");
-                        match (a_name, b_name) {
-                            ("Camera", _) => std::cmp::Ordering::Less,
-                            (_, "Camera") => std::cmp::Ordering::Greater,
-                            _ => a_name.cmp(b_name)
-                                // Tiebreaker: entity index for deterministic order with same names
-                                .then_with(|| a.index().cmp(&b.index())),
-                        }
-                    });
-                    for child in child_instances.into_iter().rev() {
-                        stack.push((child, depth + 1));
-                    }
+                let mut child_instances: Vec<Entity> = tree_children(entity);
+                child_instances.sort_by(|a, b| explorer_key(a).cmp(&explorer_key(b)));
+                for child in child_instances.into_iter().rev() {
+                    stack.push((child, depth + 1));
                 }
             }
         }
@@ -19594,30 +23879,38 @@ fn sync_unified_explorer_to_slint(
 
     // Service: Workspace (depth 0) + children (depth 1+)
     let has_terrain = !terrain_roots.is_empty();
+    // Terrain layer instances among the Workspace's own children are listed
+    // under the Terrain node below instead (see `terrain_layers`). Without a
+    // terrain they stay here, so they are always reachable.
+    let mut terrain_layer_roots: Vec<Entity> = Vec::new();
+    if has_terrain {
+        workspace_roots.retain(|e| {
+            let is_layer = instances.get(*e).is_ok_and(|(_, i)| i.class_name.is_terrain_layer());
+            if is_layer {
+                terrain_layer_roots.push(*e);
+            }
+            !is_layer
+        });
+        terrain_layer_roots.sort_by(|a, b| {
+            let a_name = instances.get(*a).map(|(_, i)| i.name.as_str()).unwrap_or("");
+            let b_name = instances.get(*b).map(|(_, i)| i.name.as_str()).unwrap_or("");
+            a_name.cmp(b_name).then_with(|| a.index().cmp(&b.index()))
+        });
+    }
     let ws_has = !workspace_roots.is_empty() || has_terrain;
-    // Bound the Workspace bucket BEFORE sorting/building: a flat list of ~110K
-    // parts (Vehicle Simulator) would otherwise spend seconds sorting + building
-    // TreeNodes every rebuild. Truncate to Workspace's current paging window;
-    // the pager row below loads the next page on click. (Truncation happens
-    // pre-sort so the sort itself is also bounded.)
+    // Bound the Workspace bucket BEFORE building: a flat list of ~110K parts
+    // (Vehicle Simulator) would otherwise spend seconds building TreeNodes
+    // every rebuild. The window is the first N in sorted order, found with a
+    // linear-time selection, so only the window itself is fully sorted and a
+    // click never swaps which parts are on the page. The pager row below
+    // loads the next page on click.
     let workspace_total = workspace_roots.len();
     let ws_window = page_windows.get("Workspace").copied().unwrap_or(page_size);
     if workspace_total > ws_window {
+        workspace_roots.select_nth_unstable_by(ws_window, |a, b| explorer_key(a).cmp(&explorer_key(b)));
         workspace_roots.truncate(ws_window);
     }
-    // Sort workspace children: Camera first, then alphabetical
-    workspace_roots.sort_by(|a, b| {
-        let a_class = instances.get(*a).map(|(_, i)| i.class_name).unwrap_or(eustress_common::classes::ClassName::Part);
-        let b_class = instances.get(*b).map(|(_, i)| i.class_name).unwrap_or(eustress_common::classes::ClassName::Part);
-        let a_name = instances.get(*a).map(|(_, i)| i.name.as_str()).unwrap_or("");
-        let b_name = instances.get(*b).map(|(_, i)| i.name.as_str()).unwrap_or("");
-        match (a_class, b_class) {
-            (eustress_common::classes::ClassName::Camera, _) => std::cmp::Ordering::Less,
-            (_, eustress_common::classes::ClassName::Camera) => std::cmp::Ordering::Greater,
-            _ => a_name.cmp(b_name)
-                .then_with(|| a.index().cmp(&b.index())),
-        }
-    });
+    workspace_roots.sort_by(|a, b| explorer_key(a).cmp(&explorer_key(b)));
 
     tree_nodes.push(make_service_node("Workspace", "workspace", 0, ws_has, svc_expanded("Workspace"), &explorer_state, &selected_entity_ids));
     if svc_expanded("Workspace") {
@@ -19659,17 +23952,19 @@ fn sync_unified_explorer_to_slint(
                 };
             
             let has_chunks = !terrain_chunk_entities.is_empty();
+            // The first terrain takes the layer instances (a Space has one).
+            let layer_roots = std::mem::take(&mut terrain_layer_roots);
             let is_terrain_expanded = expanded_entities.contains(&terrain_entity);
             let is_terrain_selected = matches!(&selected_item, SelectedItem::Entity(e) if *e == terrain_entity);
-            
+
             let (total_w, _) = terrain_config.total_size();
-            
+
             tree_nodes.push(TreeNode {
                 id: terrain_node_id,
                 name: format!("Terrain ({:.0}m)", total_w).into(),
                 icon: load_service_icon("terrain"),
                 depth: 1,
-                expandable: has_chunks,
+                expandable: has_chunks || !layer_roots.is_empty(),
                 expanded: is_terrain_expanded,
                 selected: is_terrain_selected,
                 visible: true,
@@ -19682,8 +23977,10 @@ fn sync_unified_explorer_to_slint(
                 modified: false,
             });
             
-            // Add chunk children if terrain is expanded
+            // Add layer and chunk children if terrain is expanded. Layers
+            // first: they are the part of a terrain that gets edited.
             if is_terrain_expanded {
+                tree_nodes.extend(build_entity_nodes(&layer_roots, 2, "Terrain", &mut entity_id_cache, &mut next_id, &mut load_more_ids, &mut next_load_more_id));
                 let mut sorted_chunks = terrain_chunk_entities;
                 sorted_chunks.sort_by(|(_, a), (_, b)| {
                     a.position.x.cmp(&b.position.x)
@@ -19712,22 +24009,26 @@ fn sync_unified_explorer_to_slint(
                         is_directory: false,
                         extension: slint::SharedString::default(),
                         size: format!("LOD {}", chunk.lod).into(),
-                        modified: chunk.dirty,
+                        // A render chunk holds no unsaved state of its own:
+                        // terrain edits live in TerrainData and its files.
+                        modified: false,
                     });
                 }
             }
         }
     }
 
+    last_rebuild_frame.mark(2, rebuild_t0);
+
     // ================================================================
     // Terrain Folder (file-system-first) — appears under Workspace
     // Shows Workspace/Terrain/ directory with _terrain.toml and chunks/
     // ================================================================
     {
-        let space_root = &crate::space::default_space_root();
+        let space_root = &crate::space::open_space_root(space_root_res.as_deref());
         let terrain_dir = space_root.join("Workspace").join("Terrain");
 
-        // The Workspace/Terrain DATA directory (R16 chunks, splatmaps,
+        // The Workspace/Terrain DATA directory (R16 chunks, material maps,
         // _terrain.toml) is engine-managed export data, not a user instance —
         // the live terrain is already the "Terrain (Nm)" ENTITY node above.
         // Suppress the duplicate filesystem folder node so the Explorer shows
@@ -19820,7 +24121,7 @@ fn sync_unified_explorer_to_slint(
                     };
                     
                     let entry_icon = {
-                        let icon_path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(load_file_icon(if *is_dir { "folder" } else { extension }));
+                        let icon_path = crate::resource_root().join(load_file_icon(if *is_dir { "folder" } else { extension }));
                         cached_image(&icon_path).unwrap_or_default()
                     };
                     tree_nodes.push(TreeNode {
@@ -19872,7 +24173,7 @@ fn sync_unified_explorer_to_slint(
                                 }).unwrap_or_default();
                                 
                                 let sub_icon = {
-                                    let icon_path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(load_file_icon(sub_ext));
+                                    let icon_path = crate::resource_root().join(load_file_icon(sub_ext));
                                     cached_image(&icon_path).unwrap_or_default()
                                 };
                                 tree_nodes.push(TreeNode {
@@ -19932,8 +24233,20 @@ fn sync_unified_explorer_to_slint(
         tree_nodes.extend(build_entity_nodes(&lighting_roots, 1, "Lighting", &mut entity_id_cache, &mut next_id, &mut load_more_ids, &mut next_load_more_id));
     }
 
-    // Service: Players (depth 0) - runtime only, no children in editor
-    tree_nodes.push(make_service_node("Players", "players", 0, false, false, &explorer_state, &selected_entity_ids));
+    // A built-in service row and, when expanded, the children collected for it
+    // in `dynamic_service_roots`.
+    macro_rules! service_row {
+        ($name:literal, $icon:literal) => {{
+            let children = dynamic_service_roots.get($name).cloned().unwrap_or_default();
+            let has = !children.is_empty();
+            tree_nodes.push(make_service_node($name, $icon, 0, has, svc_expanded($name), &explorer_state, &selected_entity_ids));
+            if svc_expanded($name) && has {
+                tree_nodes.extend(build_entity_nodes(&children, 1, $name, &mut entity_id_cache, &mut next_id, &mut load_more_ids, &mut next_load_more_id));
+            }
+        }};
+    }
+
+    service_row!("Players", "players");
 
     // Service: StarterGui (depth 0) + UI children (depth 1+)
     let sg_has = !starter_gui_roots.is_empty();
@@ -19942,20 +24255,11 @@ fn sync_unified_explorer_to_slint(
         tree_nodes.extend(build_entity_nodes(&starter_gui_roots, 1, "StarterGui", &mut entity_id_cache, &mut next_id, &mut load_more_ids, &mut next_load_more_id));
     }
 
-    // Service: StarterPack (depth 0) - no editor children
-    tree_nodes.push(make_service_node("StarterPack", "starterpack", 0, false, false, &explorer_state, &selected_entity_ids));
-
-    // Service: StarterPlayer (depth 0) - no editor children
-    tree_nodes.push(make_service_node("StarterPlayer", "starterplayer", 0, false, false, &explorer_state, &selected_entity_ids));
-
-    // Service: ReplicatedStorage (depth 0) - no editor children
-    tree_nodes.push(make_service_node("ReplicatedStorage", "replicatedstorage", 0, false, false, &explorer_state, &selected_entity_ids));
-
-    // Service: ServerStorage (depth 0) - no editor children
-    tree_nodes.push(make_service_node("ServerStorage", "serverstorage", 0, false, false, &explorer_state, &selected_entity_ids));
-
-    // Service: ServerScriptService (depth 0) - no editor children
-    tree_nodes.push(make_service_node("ServerScriptService", "serverscriptservice", 0, false, false, &explorer_state, &selected_entity_ids));
+    service_row!("StarterPack", "starterpack");
+    service_row!("StarterPlayer", "starterplayer");
+    service_row!("ReplicatedStorage", "replicatedstorage");
+    service_row!("ServerStorage", "serverstorage");
+    service_row!("ServerScriptService", "serverscriptservice");
 
     // Service: SoulService (depth 0) + script children (depth 1+).
     // Sort the immediate children so the Workshop folder (chat
@@ -20017,21 +24321,16 @@ fn sync_unified_explorer_to_slint(
         tree_nodes.extend(build_entity_nodes(&adornment_service_roots, 1, "AdornmentService", &mut entity_id_cache, &mut next_id, &mut load_more_ids, &mut next_load_more_id));
     }
 
-    // Service: SoundService (depth 0) - no editor children
-    tree_nodes.push(make_service_node("SoundService", "soundservice", 0, false, false, &explorer_state, &selected_entity_ids));
-
-    // Service: Teams (depth 0) - no editor children
-    tree_nodes.push(make_service_node("Teams", "teams", 0, false, false, &explorer_state, &selected_entity_ids));
-
-    // Service: Chat (depth 0) - no editor children
-    tree_nodes.push(make_service_node("Chat", "chat", 0, false, false, &explorer_state, &selected_entity_ids));
+    service_row!("SoundService", "soundservice");
+    service_row!("Teams", "teams");
+    service_row!("Chat", "chat");
 
     // ================================================================
     // Dynamic services: discovered from _service.toml files on disk.
     // Any service folder not in the hardcoded list above gets rendered here.
     // ================================================================
     {
-        let space_root = &crate::space::default_space_root();
+        let space_root = &crate::space::open_space_root(space_root_res.as_deref());
 
         // Use cached dynamic services — only rescan filesystem when file watcher signals change
         if explorer_state.explorer_fs_stale || explorer_state.cached_dynamic_services.is_empty() {
@@ -20073,6 +24372,8 @@ fn sync_unified_explorer_to_slint(
     // Pager-row id → container-key map (rebuilt every sync, like
     // db_class_id_cache) — SelectNode resolves "load_more" clicks through it.
     explorer_state.load_more_id_cache = load_more_ids;
+
+    last_rebuild_frame.mark(3, rebuild_t0);
 
     // ================================================================
     // Part 1.5: Virtual "Database (streamed)" section (Phase 4).
@@ -20217,6 +24518,8 @@ fn sync_unified_explorer_to_slint(
         }
     }
 
+    last_rebuild_frame.mark(4, rebuild_t0);
+
     // ================================================================
     // Part 2: Filesystem nodes DISABLED — Explorer shows entity items only.
     // File browsing will be handled by a separate Asset Manager panel.
@@ -20301,6 +24604,8 @@ fn sync_unified_explorer_to_slint(
         }
     }
 
+    last_rebuild_frame.mark(5, rebuild_t0);
+
     // Capture visible node order for Shift+Click range selection
     explorer_state.visible_node_order = tree_nodes.iter()
         .filter(|n| n.visible)
@@ -20354,6 +24659,141 @@ fn sync_unified_explorer_to_slint(
                 explorer_state.scroll_pulse = explorer_state.scroll_pulse.wrapping_add(1);
                 ui.set_explorer_scroll_pulse(explorer_state.scroll_pulse as i32);
             }
+        }
+    }
+
+    last_rebuild_frame.finish_rebuild(rebuild_t0.elapsed());
+}
+
+// ── Change probes for the main-thread UI syncs ──────────────────────────
+//
+// `sync_unified_explorer_to_slint`, `sync_tags_to_slint` and
+// `sync_gui_elements_to_slint` hold the NonSend Slint state, so Bevy runs
+// them on the main thread, one after another. Each used to open with a
+// change-filtered walk over thousands to a hundred thousand entities, which
+// put those walks in series on the main thread every frame. Each walk now
+// lives in its own system that runs on a worker, in parallel with the rest
+// of the frame, and latches a flag its consumer reads and clears. A probe
+// fires on the same tick as its consumer and runs before it, so every
+// consumer sees exactly the changes it saw when it walked for itself.
+
+/// Whether anything the Explorer tree shows has changed since the Explorer
+/// last read it: an Instance added, changed or removed, or a re-parent.
+#[derive(Resource, Default)]
+pub struct ExplorerStructureChanged(bool);
+
+fn probe_explorer_structure(
+    // `Changed<Instance>` also matches the frame an Instance is added.
+    probe: Query<
+        (),
+        (
+            With<eustress_common::classes::Instance>,
+            Or<(Changed<eustress_common::classes::Instance>, Changed<ChildOf>)>,
+        ),
+    >,
+    mut removed: RemovedComponents<eustress_common::classes::Instance>,
+    mut latch: ResMut<ExplorerStructureChanged>,
+) {
+    let any_removed = !removed.is_empty();
+    removed.clear();
+    if any_removed || eustress_common::utils::probe_any(&probe) {
+        latch.0 = true;
+    }
+}
+
+/// Whether any non-streamed entity's Tags changed since the tag panel last
+/// read it.
+#[derive(Resource, Default)]
+pub struct TagsChanged(bool);
+
+fn probe_tag_changes(
+    // Cold streamed parts cannot have their tags edited without first being
+    // selected, which promotes them (removes `ColdStreamed`).
+    changed: Query<
+        (),
+        (
+            Changed<eustress_common::attributes::Tags>,
+            Without<eustress_common::classes::ColdStreamed>,
+        ),
+    >,
+    mut latch: ResMut<TagsChanged>,
+) {
+    if eustress_common::utils::probe_any(&changed) {
+        latch.0 = true;
+    }
+}
+
+/// Whether a GUI element was added, changed or removed since the overlay
+/// last read it. The element count catches removals.
+#[derive(Resource, Default)]
+pub struct GuiElementsChanged(bool);
+
+fn probe_gui_element_changes(
+    elements: Query<(), With<eustress_common::gui::billboard_renderer::GuiElementDisplay>>,
+    changed: Query<(), Changed<eustress_common::gui::billboard_renderer::GuiElementDisplay>>,
+    mut last_count: Local<Option<usize>>,
+    mut latch: ResMut<GuiElementsChanged>,
+) {
+    // Summed over tables; `iter().count()` visited every element.
+    let count = eustress_common::utils::count_matching(&elements);
+    if *last_count != Some(count) || !changed.is_empty() {
+        *last_count = Some(count);
+        latch.0 = true;
+    }
+}
+
+/// The Explorer's rebuild bookkeeping (one `Local`, see its declaration).
+#[derive(Default)]
+struct ExplorerRebuildClock {
+    /// App frame of the last rebuild (the coalesce window counts from it).
+    frame: u64,
+    /// Selection-manager generation last seen (a change is a rebuild reason).
+    selection_generation: u64,
+    /// When the last rebuild finished and what it cost; the churn and
+    /// periodic paths wait a multiple of that cost.
+    last_rebuild_at: Option<std::time::Instant>,
+    last_rebuild_cost: std::time::Duration,
+    /// Rebuilds by reason (immediate, initial, churn, periodic) and their
+    /// total time, reported every `STATS_EVERY`.
+    counts: [u32; 4],
+    spent: std::time::Duration,
+    stats_since: Option<std::time::Instant>,
+    /// Time into the last rebuild at each phase boundary: instance index,
+    /// service buckets, Workspace rows, other services, streamed section,
+    /// search filter. The rest is hashing and the push to Slint.
+    marks: [std::time::Duration; 6],
+}
+
+impl ExplorerRebuildClock {
+    const STATS_EVERY: std::time::Duration = std::time::Duration::from_secs(10);
+
+    fn count_rebuild(&mut self, reason: u8) {
+        self.counts[reason.min(3) as usize] += 1;
+    }
+
+    fn mark(&mut self, phase: usize, rebuild_t0: std::time::Instant) {
+        self.marks[phase] = rebuild_t0.elapsed();
+    }
+
+    fn finish_rebuild(&mut self, cost: std::time::Duration) {
+        self.last_rebuild_cost = cost;
+        self.last_rebuild_at = Some(std::time::Instant::now());
+        self.spent += cost;
+        let since = *self.stats_since.get_or_insert_with(std::time::Instant::now);
+        if since.elapsed() >= Self::STATS_EVERY {
+            let ms = |d: std::time::Duration| d.as_secs_f64() * 1000.0;
+            info!(
+                "🌲 Explorer rebuilds in the last {:.0}s: {} immediate, {} initial, {} churn, {} periodic; {:.0} ms total, last {:.1} ms (cumulative: index {:.1}, buckets {:.1}, workspace {:.1}, services {:.1}, streamed {:.1}, filter {:.1})",
+                since.elapsed().as_secs_f32(),
+                self.counts[0], self.counts[1], self.counts[2], self.counts[3],
+                ms(self.spent),
+                ms(cost),
+                ms(self.marks[0]), ms(self.marks[1]), ms(self.marks[2]),
+                ms(self.marks[3]), ms(self.marks[4]), ms(self.marks[5]),
+            );
+            self.counts = [0; 4];
+            self.spent = std::time::Duration::ZERO;
+            self.stats_since = Some(std::time::Instant::now());
         }
     }
 }
@@ -20463,6 +24903,16 @@ fn resolve_service_name_by_id(id: i32, dynamic: &[(String, String)]) -> Option<S
         .find(|name| service_name_to_id(name) == id)
 }
 
+/// The Explorer row a service's children appear under. StarterPlayerScripts
+/// and StarterCharacterScripts are folders inside StarterPlayer, not rows of
+/// their own.
+fn explorer_service_row(service: &str) -> &str {
+    match service {
+        "StarterPlayerScripts" | "StarterCharacterScripts" => "StarterPlayer",
+        other => other,
+    }
+}
+
 fn make_service_node(
     name: &str,
     icon_name: &str,
@@ -20497,7 +24947,7 @@ fn make_service_node(
 fn load_service_icon(name: &str) -> slint::Image {
     // Per service node, per Explorer push — cached for the same reason as
     // `load_class_icon` (an SVG rasterise per row per push was the freeze).
-    let icon_path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+    let icon_path = crate::resource_root()
         .join("assets")
         .join("icons")
         .join(format!("{}.svg", name));
@@ -20644,10 +25094,10 @@ fn build_file_tree_nodes(
             }
         };
         let icon_path = if is_workshop_folder {
-            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            crate::resource_root()
                 .join("assets").join("icons").join("wrench.svg")
         } else {
-            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            crate::resource_root()
                 .join("assets").join("icons").join("folders")
                 .join(format!("{}.svg", folder_icon_name))
         };
@@ -20720,7 +25170,7 @@ fn build_file_tree_nodes(
             "hgt" | "geotiff" => "image",
             _ => "file",
         };
-        let icon_path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        let icon_path = crate::resource_root()
             .join("assets")
             .join("icons")
             .join("filetypes")
@@ -20920,16 +25370,12 @@ fn sync_tags_to_slint(
     explorer_state: Option<Res<UnifiedExplorerState>>,
     studio_state: Option<Res<StudioState>>,
     all_tags: Query<(Entity, &eustress_common::attributes::Tags)>,
-    // P2 two-tier: the `changed_tags` DRIVER is the hot per-frame cost here —
-    // Bevy O(N)-visits every `Tags`-bearing archetype to read change-ticks,
-    // which on a 120K cold-part Space dominated this system. Cold streamed
-    // parts cannot have their tags edited without first being SELECTED (which
-    // promotes them by removing `ColdStreamed`), so `Without<ColdStreamed>`
-    // never hides a real tag edit. `all_tags` (the project-wide tag registry
-    // count) stays UNFILTERED so streamed parts' tags still count toward the
-    // registry totals — but it only iterates on the slow path (a selection
+    // A tag edit on any non-streamed entity, latched by `probe_tag_changes`
+    // off the main thread. `all_tags` (the project-wide tag registry count)
+    // stays UNFILTERED so streamed parts' tags still count toward the
+    // registry totals, but it only iterates on the slow path (a selection
     // change or a real, non-cold tag mutation).
-    changed_tags: Query<(), (Changed<eustress_common::attributes::Tags>, Without<eustress_common::classes::ColdStreamed>)>,
+    mut tags_latch: ResMut<TagsChanged>,
     mut last_sel: Local<u64>,
 ) {
     let Some(slint_context) = slint_context else { return };
@@ -20951,7 +25397,8 @@ fn sync_tags_to_slint(
     let sel_hash = sel_entity.map(|e| e.to_bits()).unwrap_or(0);
     let selection_changed = sel_hash != *last_sel;
     // Rebuild the chip/registry models on selection change OR any tag mutation.
-    if !selection_changed && changed_tags.is_empty() {
+    let tags_changed = std::mem::take(&mut tags_latch.bypass_change_detection().0);
+    if !selection_changed && !tags_changed {
         return;
     }
     *last_sel = sel_hash;
@@ -21091,10 +25538,154 @@ struct PropertyExtraQueries<'w, 's> {
     /// renderer itself consumes) rather than a parallel data component,
     /// so the panel always shows what's actually being rendered.
     projection: Query<'w, 's, &'static Projection>,
+    /// The editor camera's controller. Its Perspective (2D/3D, projection,
+    /// orthographic size) lives there, not on `Projection`, which only shows
+    /// the settled result; see `camera_property_rows`.
+    editor_camera: Query<'w, 's, &'static crate::camera_controller::EustressCamera>,
     /// Which wheel swatch each part was last given. The BrickColor row shows
     /// that name while the part still wears the picked colour; only when it
     /// does not is a name derived from the bytes.
     color_picks: Option<Res<'w, eustress_common::color_wheels::BrickColorPicks>>,
+    /// ParticleSimulation / ParticleSpecies components and live runtimes.
+    particle_sim: super::particle_sim_panel::PanelQueries<'w, 's>,
+    /// The post effects the renderer honours, so their rows show the live
+    /// component rather than a Part's Appearance/Physics.
+    lighting_fx: Query<'w, 's, (
+        Option<&'static eustress_common::classes::BloomEffect>,
+        Option<&'static eustress_common::classes::SunRaysEffect>,
+    )>,
+    /// The light classes' live components, for their Light rows.
+    lights: super::light_panel::PanelQueries<'w, 's>,
+    /// The Sun's, Moon's, Sky's, Atmosphere's and Clouds' live components.
+    celestial: super::celestial_panel::PanelQueries<'w, 's>,
+}
+
+/// Property rows for a Bloom or SunRays object, from its live component
+/// (defaults while it has none). `None` for any other class. A Clouds
+/// object's rows are `celestial_panel`'s.
+///
+/// Every row writes back through `route_lighting_fx_property` into the
+/// object's own TOML section, and `lighting_plugin::reload_lighting_fx`
+/// re-reads the file, so an edit takes effect a moment after it is made.
+fn lighting_fx_rows(
+    class: eustress_common::classes::ClassName,
+    entity: Entity,
+    extra_q: &PropertyExtraQueries,
+) -> Option<Vec<(&'static str, &'static str, String, &'static str)>> {
+    use eustress_common::classes::ClassName;
+    let (bloom, rays) = extra_q.lighting_fx.get(entity).ok()?;
+    match class {
+        ClassName::BloomEffect => {
+            let b = bloom.cloned().unwrap_or_default();
+            Some(vec![
+                ("Bloom", "Enabled", b.enabled.to_string(), "bool"),
+                ("Bloom", "Intensity", format!("{:.3}", b.intensity), "float"),
+                ("Bloom", "Size", format!("{:.1}", b.size), "float"),
+                ("Bloom", "Threshold", format!("{:.3}", b.threshold), "float"),
+            ])
+        }
+        ClassName::SunRaysEffect => {
+            let r = rays.cloned().unwrap_or_default();
+            Some(vec![
+                ("SunRays", "Enabled", r.enabled.to_string(), "bool"),
+                ("SunRays", "Intensity", format!("{:.3}", r.intensity), "float"),
+                ("SunRays", "Spread", format!("{:.3}", r.spread), "float"),
+            ])
+        }
+        _ => None,
+    }
+}
+
+/// Where a Clouds, Bloom or SunRays write lands in the object's TOML: its own
+/// section (`[clouds]`, `[bloom]`, `[sun_rays]`), ahead of the class-blind
+/// `route_property`, whose `Enabled`, `Color` and `Size` mean a GUI or a
+/// Part's fields. The Properties panel edits a Clouds object through
+/// `celestial_panel`; these arms persist a script's writes (Clouds'
+/// `Coverage` is the script name for the panel's Cover).
+fn route_lighting_fx_property(
+    class_name: &str,
+    key: &str,
+    val: &str,
+) -> Option<(&'static str, &'static str, toml::Value)> {
+    use toml::Value;
+    let num = |s: &str| s.trim().parse::<f64>().ok().filter(|v| v.is_finite());
+    let flag = |s: &str| {
+        Value::Boolean(matches!(s.trim().to_ascii_lowercase().as_str(), "true" | "1" | "yes" | "on"))
+    };
+    let unit = |s: &str| num(s).map(|v| Value::Float(v.clamp(0.0, 1.0)));
+    let non_negative = |s: &str| num(s).map(|v| Value::Float(v.max(0.0)));
+    match (class_name, key) {
+        ("Clouds", "Enabled") => Some(("clouds", "enabled", flag(val))),
+        ("Clouds", "Cover" | "Coverage") => unit(val).map(|v| ("clouds", "cover", v)),
+        ("Clouds", "Density") => unit(val).map(|v| ("clouds", "density", v)),
+        ("Clouds", "Color") => {
+            let channels: Vec<i64> = val
+                .split(',')
+                .filter_map(|s| num(s))
+                .map(|v| v.round().clamp(0.0, 255.0) as i64)
+                .collect();
+            (channels.len() >= 3).then(|| {
+                ("clouds", "color", Value::Array(channels[..3].iter().map(|c| Value::Integer(*c)).collect()))
+            })
+        }
+        ("Clouds", "LayerType") => Some(("clouds", "layer_type", Value::String(val.trim().to_string()))),
+        ("Clouds", "Altitude") => non_negative(val).map(|v| ("clouds", "altitude", v)),
+        ("Clouds", "Thickness") => non_negative(val).map(|v| ("clouds", "thickness", v)),
+        ("Clouds", "WindSpeed") => non_negative(val).map(|v| ("clouds", "wind_speed", v)),
+        ("Clouds", "WindDirection") => num(val).map(|v| ("clouds", "wind_direction", Value::Float(v.rem_euclid(360.0)))),
+        ("BloomEffect", "Enabled") => Some(("bloom", "enabled", flag(val))),
+        ("BloomEffect", "Intensity") => non_negative(val).map(|v| ("bloom", "intensity", v)),
+        ("BloomEffect", "Size") => non_negative(val).map(|v| ("bloom", "size", v)),
+        ("BloomEffect", "Threshold") => non_negative(val).map(|v| ("bloom", "threshold", v)),
+        ("SunRaysEffect", "Enabled") => Some(("sun_rays", "enabled", flag(val))),
+        ("SunRaysEffect", "Intensity") => non_negative(val).map(|v| ("sun_rays", "intensity", v)),
+        ("SunRaysEffect", "Spread") => unit(val).map(|v| ("sun_rays", "spread", v)),
+        _ => None,
+    }
+}
+
+/// Rows of the Camera section: `(name, value, type, editable)`.
+///
+/// A camera's lens is its live `Projection`. The editor camera (the one with
+/// an `EustressCamera` controller) also shows its Perspective: ViewMode (3D or
+/// 2D), Projection and OrthographicSize, read from the controller because the
+/// component only holds the settled result, never the mode it is heading to.
+/// Edits to those three become `ViewCommand`s (see their arms in the property
+/// writer). FieldOfView and the clip planes are still written into
+/// `Projection`, which the controller adopts while perspective is settled;
+/// in orthographic, where the component holds no lens, they are read-only.
+fn camera_property_rows(
+    entity: Entity,
+    extra_q: &PropertyExtraQueries,
+) -> Vec<(&'static str, String, &'static str, bool)> {
+    let (fov_deg, near, far) = match extra_q.projection.get(entity) {
+        Ok(Projection::Perspective(p)) => (p.fov.to_degrees(), p.near, p.far),
+        _ => (70.0, 0.1, 10000.0),
+    };
+    let Ok(cam) = extra_q.editor_camera.get(entity) else {
+        return vec![
+            ("FieldOfView", format!("{:.1}", fov_deg), "float", true),
+            ("NearClipPlane", format!("{:.3}", near), "float", true),
+            ("FarClipPlane", format!("{:.1}", far), "float", true),
+        ];
+    };
+    let ortho = cam.wants_ortho();
+    vec![
+        ("ViewMode", cam.dimension.label().to_string(), "choice", true),
+        (
+            "Projection",
+            (if ortho { "Orthographic" } else { "Perspective" }).to_string(),
+            "choice",
+            // 2D is always orthographic.
+            !cam.is_2d(),
+        ),
+        ("OrthographicSize", format!("{:.3}", cam.ortho_height()), "float", true),
+        // Written straight into `Projection`, which only holds the lens
+        // while perspective is settled.
+        ("FieldOfView", format!("{:.1}", cam.fov.to_degrees()), "float", !ortho),
+        ("NearClipPlane", format!("{:.3}", cam.near), "float", !ortho),
+        ("FarClipPlane", format!("{:.1}", cam.far), "float", !ortho),
+    ]
 }
 
 /// Syncs the selected entity's properties to the Slint properties panel.
@@ -21117,13 +25708,19 @@ fn filter_property_rows(rows: Vec<PropertyData>, query: &str) -> Vec<PropertyDat
 
     // Two passes so a header's fate can depend on rows that come AFTER it:
     // first decide which headers keep at least one child, then emit.
+    // A Parameters domain's group row is kept the same way, by the rows under
+    // it; an empty section's hint never matches, so filtering hides it.
     let mut header_keeps = vec![false; rows.len()];
     let mut current_header: Option<usize> = None;
+    let mut current_group: Option<usize> = None;
     for (i, row) in rows.iter().enumerate() {
         if row.is_header {
             current_header = Some(i);
+            current_group = None;
+        } else if row.property_type.as_str() == "parameter-group" {
+            current_group = Some(i);
         } else if row.name.to_lowercase().contains(&needle) {
-            if let Some(h) = current_header {
+            for h in [current_header, current_group].into_iter().flatten() {
                 header_keeps[h] = true;
             }
         }
@@ -21132,7 +25729,7 @@ fn filter_property_rows(rows: Vec<PropertyData>, query: &str) -> Vec<PropertyDat
     rows.into_iter()
         .enumerate()
         .filter(|(i, row)| {
-            if row.is_header {
+            if row.is_header || row.property_type.as_str() == "parameter-group" {
                 header_keeps[*i]
             } else {
                 row.name.to_lowercase().contains(&needle)
@@ -21140,6 +25737,58 @@ fn filter_property_rows(rows: Vec<PropertyData>, query: &str) -> Vec<PropertyDat
         })
         .map(|(_, row)| row)
         .collect()
+}
+
+/// Row order inside Parameters: the default domain's keys first, then each
+/// named domain in turn, keys A-Z within it (case-insensitively, so a group
+/// reads in order however its keys are cased).
+fn parameter_row_order(label: &str) -> (bool, String, String) {
+    use eustress_common::parameters::{split_parameter_label, DEFAULT_PARAMETER_DOMAIN};
+    let (domain, key) = split_parameter_label(label);
+    (domain != DEFAULT_PARAMETER_DOMAIN, domain.to_lowercase(), key.to_lowercase())
+}
+
+/// What an empty Attributes or Parameters section says under its header, so
+/// the "+" beside it explains itself.
+fn empty_section_hint(category: &str) -> Option<&'static str> {
+    match category {
+        "Attributes" => Some("No Attributes yet. + adds a named value to this instance."),
+        "Parameters" => Some("No Parameters yet. + adds one: a value in a domain, set here or read from a Connector."),
+        _ => None,
+    }
+}
+
+/// A row that is neither a header nor a property: a Parameters domain's group
+/// row (`parameter-group`, named by its domain) or an empty section's hint
+/// (`hint`, its text in `value`).
+fn section_aux_row(category: &str, name: &str, value: &str, kind: &str, collapsed: bool) -> PropertyData {
+    PropertyData {
+        name: name.into(),
+        value: value.into(),
+        property_type: kind.into(),
+        category: category.into(),
+        editable: false,
+        options: slint::ModelRc::default(),
+        is_header: false,
+        section_collapsed: collapsed,
+        x_value: slint::SharedString::default(),
+        y_value: slint::SharedString::default(),
+        z_value: slint::SharedString::default(),
+        x_scale: slint::SharedString::default(),
+        x_offset: slint::SharedString::default(),
+        y_scale: slint::SharedString::default(),
+        y_offset: slint::SharedString::default(),
+        color_value: slint::Color::from_rgb_u8(0x80, 0x80, 0x80),
+        description: slint::SharedString::default(),
+        learn_url: slint::SharedString::default(),
+        is_attribute: false,
+        attribute_type: slint::SharedString::default(),
+        slider_min: 0.0,
+        slider_max: 1.0,
+        slider_display: slint::SharedString::default(),
+        binding_state: slint::SharedString::default(),
+        display_name: slint::SharedString::default(),
+    }
 }
 
 /// Push a Properties row model, applying the panel's filter first.
@@ -21180,6 +25829,13 @@ fn push_property_rows(ui: &StudioWindow, rows: Vec<PropertyData>) {
         r.editable.hash(&mut hasher);
         r.is_header.hash(&mut hasher);
         r.section_collapsed.hash(&mut hasher);
+        // What a row shows beyond its value: a changed note, type badge or
+        // binding state (a failed read keeps the last value) must re-push.
+        r.description.as_str().hash(&mut hasher);
+        r.is_attribute.hash(&mut hasher);
+        r.attribute_type.as_str().hash(&mut hasher);
+        r.binding_state.as_str().hash(&mut hasher);
+        r.display_name.as_str().hash(&mut hasher);
     }
     let new_hash = hasher.finish();
 
@@ -21400,6 +26056,40 @@ fn sync_properties_to_slint(
         }
     }
 
+    // ── Particle simulations and terrain layers: one row per field of the
+    // class's field table, then a simulation's Runtime section that
+    // `refresh_runtime_rows` updates in place, or a layer's Transform rows.
+    if super::particle_sim_panel::is_field_table_class(instance.class_name) {
+        let flat = super::particle_sim_panel::build_rows(
+            selected_entity,
+            instance,
+            &extra_q.particle_sim,
+            &studio_state.collapsed_sections,
+        );
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        for p in &flat {
+            p.name.hash(&mut hasher);
+            // Runtime values change every step and are updated in place by
+            // `refresh_runtime_rows`; hashing them would re-push the whole
+            // model while a run is live and drop the caret of a field being
+            // edited.
+            if p.category.as_str() != super::particle_sim_panel::RUNTIME_CATEGORY {
+                p.value.hash(&mut hasher);
+            }
+            p.category.hash(&mut hasher);
+            p.is_header.hash(&mut hasher);
+            p.section_collapsed.hash(&mut hasher);
+        }
+        ui.get_property_search_query().hash(&mut hasher);
+        let h = hasher.finish();
+        if h != studio_state.last_properties_hash {
+            studio_state.last_properties_hash = h;
+            push_property_rows(ui, flat);
+        }
+        return;
+    }
+
     // Collect raw properties with categories into buckets
     // category -> Vec<(name, value, type, editable)>
     let mut categorized: std::collections::BTreeMap<String, Vec<(String, String, String, bool)>> = std::collections::BTreeMap::new();
@@ -21408,6 +26098,9 @@ fn sync_properties_to_slint(
     let mut attribute_types: std::collections::HashMap<String, String> = std::collections::HashMap::new();
     // Same, for Parameter rows: label -> ParameterValue type name.
     let mut parameter_types: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    // And label -> (binding state, the note its help icon shows).
+    let mut parameter_rows: std::collections::HashMap<String, (&'static str, String)> =
+        std::collections::HashMap::new();
 
     // Helper to add a property to a category bucket
     let mut add_prop = |cat: &str, name: &str, value: String, prop_type: &str, editable: bool| {
@@ -21454,7 +26147,6 @@ fn sync_properties_to_slint(
             // know from the Instance component.
             if !is_ui_class_outer { return None; }
             Some(crate::space::instance_loader::InstanceDefinition {
-                nuclear: None,
                 plasma: None,
                 asset: None,
                 transform: crate::space::instance_loader::TransformData::default(),
@@ -21542,6 +26234,14 @@ fn sync_properties_to_slint(
                 // its own Transform — same reasoning as the UI classes above.
                 CN::Beam
             );
+            // Lighting's children have no place to edit: the Sun and Moon
+            // stand where Lighting's clock puts them, and the sky, the
+            // atmosphere, the cloud layer and the post effects surround the
+            // camera. Position/Rotation/Scale rows did nothing on them.
+            let is_placeless_lighting_child = matches!(instance.class_name,
+                CN::Star | CN::Moon | CN::Sky | CN::Atmosphere | CN::Clouds
+                    | CN::BloomEffect | CN::SunRaysEffect
+            );
 
             // Read from the LIVE ECS Transform / BasePart, not the
             // on-disk TOML. The TOML only updates after
@@ -21581,7 +26281,7 @@ fn sync_properties_to_slint(
                 .map(|bp| bp.size)
                 .or_else(|_| transforms.get(selected_entity).map(|t| t.scale))
                 .unwrap_or_else(|_| bevy::math::Vec3::from_array(toml_def.transform.scale));
-            if !is_ui_class_for_transform {
+            if !is_ui_class_for_transform && !is_placeless_lighting_child {
                 // Project meter values into the user's chosen DisplayUnit
                 // for the panel. The writer side parses these back as
                 // the same unit and converts to meters before reaching
@@ -21601,8 +26301,12 @@ fn sync_properties_to_slint(
                 let (rx, ry, rz) = live_rotation.to_euler(bevy::math::EulerRot::XYZ);
                 add_prop("Transform", "Rotation", format!("{:.2}, {:.2}, {:.2}",
                     rx.to_degrees(), ry.to_degrees(), rz.to_degrees()), "rotation", true);
-                add_prop("Transform", "Scale", format!("{:.3}, {:.3}, {:.3}",
-                    size_d[0], size_d[1], size_d[2]), "vec3", true);
+                // A light has no size: Range is its extent, and its loader
+                // forces scale 1.
+                if !super::light_panel::is_light_class(instance.class_name) {
+                    add_prop("Transform", "Scale", format!("{:.3}, {:.3}, {:.3}",
+                        size_d[0], size_d[1], size_d[2]), "vec3", true);
+                }
             } else {
                 // For UI classes the live_*/transform reads still need to
                 // be evaluated so any downstream code that uses them
@@ -21621,13 +26325,9 @@ fn sync_properties_to_slint(
             // Default (70°) matches `default_scene::studio_camera_bundle`'s
             // spawn-time FOV for entities that haven't been resolved yet.
             if instance.class_name == eustress_common::classes::ClassName::Camera {
-                let (fov_deg, near, far) = match extra_q.projection.get(selected_entity) {
-                    Ok(Projection::Perspective(p)) => (p.fov.to_degrees(), p.near, p.far),
-                    _ => (70.0, 0.1, 10000.0),
-                };
-                add_prop("Camera", "FieldOfView", format!("{:.1}", fov_deg), "float", true);
-                add_prop("Camera", "NearClipPlane", format!("{:.3}", near), "float", true);
-                add_prop("Camera", "FarClipPlane", format!("{:.1}", far), "float", true);
+                for (name, value, kind, editable) in camera_property_rows(selected_entity, &extra_q) {
+                    add_prop("Camera", name, value, kind, editable);
+                }
             }
 
             // ── UI class properties (TextLabel, TextButton, Frame, etc.) ────────
@@ -21720,6 +26420,35 @@ fn sync_properties_to_slint(
                             add_prop(&desc.category, &desc.name, val_str, prop_type, !desc.read_only);
                         }
                     }
+                }
+            } else if let Some(rows) =
+                super::celestial_panel::celestial_rows(instance.class_name, selected_entity, &extra_q.celestial)
+            {
+                // Sun, Moon, Sky, Atmosphere and Clouds: their own fields
+                // from the live component. Edits go through
+                // `celestial_panel::handle_edit`.
+                for (category, name, value, kind) in rows {
+                    add_prop(category, name, value, kind, true);
+                }
+            } else if let Some(rows) = lighting_fx_rows(instance.class_name, selected_entity, &extra_q) {
+                // The post effects: their own fields, not a Part's
+                // Appearance/Physics, which they have no use for.
+                for (category, name, value, kind) in rows {
+                    add_prop(category, name, value, kind, true);
+                }
+            } else if let Some(rows) =
+                super::light_panel::light_rows(
+                    instance.class_name,
+                    selected_entity,
+                    display_unit.0,
+                    &extra_q.lights,
+                )
+            {
+                // Lights: Enabled, Brightness, Color, Range, Shadows and, per
+                // class, Angle, Face and Radius, from the live component.
+                // Edits go through `light_panel::handle_edit`.
+                for (category, name, value, kind) in rows {
+                    add_prop(category, name, value, kind, true);
                 }
             } else {
             // -- Properties section (BasePart / non-UI) --
@@ -22096,13 +26825,9 @@ fn sync_properties_to_slint(
         // this duplicate, FieldOfView silently never appeared for the one
         // Camera entity most users actually select (the live editor camera).
         if instance.class_name == eustress_common::classes::ClassName::Camera {
-            let (fov_deg, near, far) = match extra_q.projection.get(selected_entity) {
-                Ok(Projection::Perspective(p)) => (p.fov.to_degrees(), p.near, p.far),
-                _ => (70.0, 0.1, 10000.0),
-            };
-            add_prop("Camera", "FieldOfView", format!("{:.1}", fov_deg), "float", true);
-            add_prop("Camera", "NearClipPlane", format!("{:.3}", near), "float", true);
-            add_prop("Camera", "FarClipPlane", format!("{:.1}", far), "float", true);
+            for (name, value, kind, editable) in camera_property_rows(selected_entity, &extra_q) {
+                add_prop("Camera", name, value, kind, editable);
+            }
         }
 
         // BasePart properties
@@ -22164,16 +26889,26 @@ fn sync_properties_to_slint(
         // domain-scoped, so a key outside the default domain renders as
         // `domain.key` and the basic case stays a bare key.
         if let Ok(params) = extra_q.params.get(selected_entity) {
-            use eustress_common::parameters::DEFAULT_PARAMETER_DOMAIN;
+            use eustress_common::parameters::{parameter_label, BindingState};
             for (domain, keys) in params.domains.iter() {
                 for (key, value) in keys.iter() {
-                    let label = if domain == DEFAULT_PARAMETER_DOMAIN {
-                        key.clone()
-                    } else {
-                        format!("{domain}.{key}")
+                    let label = parameter_label(domain, key);
+                    let binding = params.binding(domain, key);
+                    let state = match params.binding_state(domain, key) {
+                        BindingState::Local => "local",
+                        BindingState::Sourced => "sourced",
+                        BindingState::Published => "published",
+                        BindingState::Relay => "relay",
+                        BindingState::Faulted => "faulted",
                     };
+                    let note = binding.map(crate::space::parameters_runtime::describe_binding).unwrap_or_default();
+                    // A sourced value belongs to its source: the row is
+                    // read-only rather than taking an edit the next read
+                    // would silently replace.
+                    let editable = !binding.is_some_and(|b| b.value_is_read_only());
                     parameter_types.insert(label.clone(), value.type_name().to_string());
-                    add_prop("Parameters", &label, value.edit_string(), "string", true);
+                    parameter_rows.insert(label.clone(), (state, note));
+                    add_prop("Parameters", &label, value.edit_string(), "string", editable);
                 }
             }
         }
@@ -22291,14 +27026,37 @@ fn sync_properties_to_slint(
             is_attribute: false,
             attribute_type: slint::SharedString::default(),
             slider_min: 0.0, slider_max: 1.0, slider_display: slint::SharedString::default(),
+            binding_state: slint::SharedString::default(),
+            display_name: slint::SharedString::default(),
         });
 
-        // Insert properties in this category (sorted A-Z by name)
+        // Insert properties in this category (sorted A-Z by name). Parameters
+        // sort by domain instead: the default domain's keys first, then each
+        // named domain under its own group row.
         if let Some(entries) = categorized.get(cat.as_str()) {
             let mut sorted_entries = entries.clone();
-            sorted_entries.sort_by(|a, b| a.0.cmp(&b.0));
+            if cat.as_str() == "Parameters" {
+                sorted_entries.sort_by_cached_key(|e| parameter_row_order(&e.0));
+            } else {
+                sorted_entries.sort_by(|a, b| a.0.cmp(&b.0));
+            }
+            if sorted_entries.is_empty() {
+                if let Some(hint) = empty_section_hint(cat) {
+                    flat_props.push(section_aux_row(cat, "", hint, "hint", is_collapsed));
+                }
+            }
 
+            let mut group_domain: Option<String> = None;
             for (name, value, prop_type, editable) in sorted_entries {
+                if cat.as_str() == "Parameters" {
+                    let (domain, _) = eustress_common::parameters::split_parameter_label(&name);
+                    if domain != eustress_common::parameters::DEFAULT_PARAMETER_DOMAIN
+                        && group_domain.as_deref() != Some(domain)
+                    {
+                        flat_props.push(section_aux_row(cat, domain, "", "parameter-group", is_collapsed));
+                        group_domain = Some(domain.to_string());
+                    }
+                }
                 // Parse Vec3/rotation values into x, y, z components.
                 // Vec2 reuses the same parser (the trailing z parse just
                 // fails for a 2-tuple and stays "", which Vec2Row ignores
@@ -22356,12 +27114,34 @@ fn sync_properties_to_slint(
                     value.clone()
                 };
 
-                // Attribute rows (category == "Attributes") get the Roblox-style
-                // type badge + gear/trash controls. `attribute_types` carries the
-                // AttributeValue type name recorded when the row was emitted.
-                let is_attr = cat.as_str() == "Attributes";
-                let attr_type = if is_attr {
-                    attribute_types.get(&name).cloned().unwrap_or_default()
+                // Attribute and Parameter rows get the Roblox-style type badge
+                // + gear/trash controls. `attribute_types` / `parameter_types`
+                // carry the type name recorded when the row was emitted; a
+                // Parameter row also carries its binding state and the note
+                // its help icon shows.
+                let is_attr = cat.as_str() == "Attributes" || cat.as_str() == "Parameters";
+                let attr_type = match cat.as_str() {
+                    "Attributes" => attribute_types.get(&name).cloned().unwrap_or_default(),
+                    "Parameters" => parameter_types.get(&name).cloned().unwrap_or_default(),
+                    _ => String::new(),
+                };
+                let (binding_state, row_note) = if cat.as_str() == "Parameters" {
+                    parameter_rows
+                        .get(&name)
+                        .map(|(state, note)| (*state, note.clone()))
+                        .unwrap_or(("local", String::new()))
+                } else {
+                    ("", String::new())
+                };
+                // Under its domain's group row a Parameter shows only its key;
+                // `name` keeps the full label for edits and callbacks.
+                let display_name = if cat.as_str() == "Parameters" {
+                    let (domain, key) = eustress_common::parameters::split_parameter_label(&name);
+                    if domain == eustress_common::parameters::DEFAULT_PARAMETER_DOMAIN {
+                        String::new()
+                    } else {
+                        key.to_string()
+                    }
                 } else {
                     String::new()
                 };
@@ -22383,11 +27163,13 @@ fn sync_properties_to_slint(
                     y_scale: ys.into(),
                     y_offset: yo.into(),
                     color_value,
-                    description: slint::SharedString::default(),
+                    description: row_note.as_str().into(),
                     learn_url: slint::SharedString::default(),
                     is_attribute: is_attr,
                     attribute_type: attr_type.as_str().into(),
             slider_min: 0.0, slider_max: 1.0, slider_display: slint::SharedString::default(),
+            binding_state: binding_state.into(),
+            display_name: display_name.as_str().into(),
                 });
             }
         }
@@ -22421,19 +27203,54 @@ fn sync_properties_to_slint(
         }
     }
 
-    // Populate unit dropdown options. Six canonical symbols matching
-    // `eustress_common::units::Unit::symbol`; the panel's writer side
-    // re-validates via `Unit::from_symbol` before any disk write, so
-    // a stale model can't corrupt state.
+    // Populate unit dropdown options: the six units a user can pick. The
+    // panel's writer side parses the choice with `Unit::from_any` and
+    // writes `Unit::symbol`, so "stud" always means the current stud.
     {
         let unit_options: Vec<slint::SharedString> = vec![
             "m".into(), "cm".into(), "mm".into(),
-            "ft".into(), "in".into(), "studs".into(),
+            "ft".into(), "in".into(), "stud".into(),
         ];
         let options_model = slint::ModelRc::new(slint::VecModel::from(unit_options));
         for prop in &mut flat_props {
             if prop.property_type.as_str() == "unit" {
                 prop.options = options_model.clone();
+            }
+        }
+    }
+
+    // Choice lists for the editor camera's Perspective rows
+    // (`camera_property_rows`).
+    {
+        let view_modes: Vec<slint::SharedString> = vec!["3D".into(), "2D".into()];
+        let projections: Vec<slint::SharedString> =
+            vec!["Perspective".into(), "Orthographic".into()];
+        let view_modes = slint::ModelRc::new(slint::VecModel::from(view_modes));
+        let projections = slint::ModelRc::new(slint::VecModel::from(projections));
+        // A SpotLight's or SurfaceLight's Face (`light_panel`).
+        let faces = slint::ModelRc::new(slint::VecModel::from(super::light_panel::face_options()));
+        // An Atmosphere's RenderingMode, a Clouds object's LayerType and
+        // CoverageMode, and the Moon's Phase (`celestial_panel`).
+        let rendering_modes =
+            slint::ModelRc::new(slint::VecModel::from(super::celestial_panel::rendering_mode_options()));
+        let layer_types =
+            slint::ModelRc::new(slint::VecModel::from(super::celestial_panel::cloud_layer_type_options()));
+        let coverage_modes =
+            slint::ModelRc::new(slint::VecModel::from(super::celestial_panel::cloud_coverage_options()));
+        let moon_phases = slint::ModelRc::new(slint::VecModel::from(super::celestial_panel::moon_phase_options()));
+        for prop in &mut flat_props {
+            if prop.property_type.as_str() != "choice" {
+                continue;
+            }
+            match prop.name.as_str() {
+                "ViewMode" => prop.options = view_modes.clone(),
+                "Projection" => prop.options = projections.clone(),
+                "Face" => prop.options = faces.clone(),
+                "RenderingMode" => prop.options = rendering_modes.clone(),
+                "LayerType" => prop.options = layer_types.clone(),
+                "CoverageMode" => prop.options = coverage_modes.clone(),
+                "Phase" => prop.options = moon_phases.clone(),
+                _ => {}
             }
         }
     }
@@ -22505,6 +27322,8 @@ fn build_dataset_properties(
         description: slint::SharedString::default(), learn_url: slint::SharedString::default(),
         is_attribute: false, attribute_type: slint::SharedString::default(),
             slider_min: 0.0, slider_max: 1.0, slider_display: slint::SharedString::default(),
+            binding_state: slint::SharedString::default(),
+            display_name: slint::SharedString::default(),
     };
     let rowf = |cat: &str, name: &str, value: &str| PropertyData {
         name: name.into(), value: value.into(), property_type: "string".into(),
@@ -22517,6 +27336,8 @@ fn build_dataset_properties(
         description: slint::SharedString::default(), learn_url: slint::SharedString::default(),
         is_attribute: false, attribute_type: slint::SharedString::default(),
             slider_min: 0.0, slider_max: 1.0, slider_display: slint::SharedString::default(),
+            binding_state: slint::SharedString::default(),
+            display_name: slint::SharedString::default(),
     };
 
     let mut out: Vec<PropertyData> = Vec::new();
@@ -22601,6 +27422,8 @@ fn data_hdr(cat: &str, collapsed: &std::collections::HashSet<String>) -> Propert
         description: slint::SharedString::default(), learn_url: slint::SharedString::default(),
         is_attribute: false, attribute_type: slint::SharedString::default(),
             slider_min: 0.0, slider_max: 1.0, slider_display: slint::SharedString::default(),
+            binding_state: slint::SharedString::default(),
+            display_name: slint::SharedString::default(),
     }
 }
 /// Value row for a data-class Properties panel.
@@ -22616,6 +27439,8 @@ fn data_row(cat: &str, name: &str, value: &str, collapsed: &std::collections::Ha
         description: slint::SharedString::default(), learn_url: slint::SharedString::default(),
         is_attribute: false, attribute_type: slint::SharedString::default(),
             slider_min: 0.0, slider_max: 1.0, slider_display: slint::SharedString::default(),
+            binding_state: slint::SharedString::default(),
+            display_name: slint::SharedString::default(),
     }
 }
 
@@ -22878,6 +27703,10 @@ pub fn apply_property_to_toml_value(
     let mut doc: toml::Value = raw
         .parse()
         .map_err(|e| format!("parse {}: {}", toml_path.display(), e))?;
+    // An imported light whose values still sit in the importer's legacy
+    // `light_*` extras: fold them into `[light]` first, or the extras (which
+    // the loader prefers) would undo the key written below on the next load.
+    eustress_common::class_schema::migrate_legacy_light_extras(&mut doc);
     let root = match doc.as_table_mut() {
         Some(t) => t,
         None => return Err(format!("{}: top-level is not a table", toml_path.display())),
@@ -22921,7 +27750,9 @@ pub fn apply_property_to_toml_value(
     // to engine-native meters, then to the NEW unit. Falls through to
     // the standard route_property arm at the end to stamp the symbol.
     if key == "Unit" {
-        let Some(new_unit) = eustress_common::units::Unit::from_symbol(val) else {
+        // The user's choice, so any spelling picks the current stud; the
+        // file's own unit above is read strictly (`from_symbol`).
+        let Some(new_unit) = eustress_common::units::Unit::from_any(val) else {
             // Reject unknown symbols early; don't touch any other field.
             return Ok(false);
         };
@@ -22932,9 +27763,10 @@ pub fn apply_property_to_toml_value(
                     if let Some(arr) = tf.get(key).cloned() {
                         // Same shape as convert_toml_vec3_engine_to_authored
                         // but from `authored_unit` rather than ENGINE_NATIVE.
+                        // Integers count: `[4, 1, 2]` converts like `[4.0, 1.0, 2.0]`.
                         if let toml::Value::Array(items) = &arr {
                             if items.len() == 3 {
-                                if let Some(nums) = items.iter().map(|x| x.as_float()).collect::<Option<Vec<f64>>>() {
+                                if let Some(nums) = items.iter().map(|x| x.as_float().or_else(|| x.as_integer().map(|i| i as f64))).collect::<Option<Vec<f64>>>() {
                                     let converted = eustress_common::units::convert_vec3_f64(
                                         [nums[0], nums[1], nums[2]], authored_unit, new_unit,
                                     );
@@ -22956,7 +27788,7 @@ pub fn apply_property_to_toml_value(
                 for key in ["units_offset", "units_offset_world_space"] {
                     if let Some(toml::Value::Array(items)) = g.get(key).cloned() {
                         if items.len() == 3 {
-                            if let Some(nums) = items.iter().map(|x| x.as_float()).collect::<Option<Vec<f64>>>() {
+                            if let Some(nums) = items.iter().map(|x| x.as_float().or_else(|| x.as_integer().map(|i| i as f64))).collect::<Option<Vec<f64>>>() {
                                 let converted = eustress_common::units::convert_vec3_f64(
                                     [nums[0], nums[1], nums[2]], authored_unit, new_unit,
                                 );
@@ -22971,7 +27803,7 @@ pub fn apply_property_to_toml_value(
                 }
                 for key in ["max_distance", "distance_lower_limit",
                             "distance_upper_limit", "distance_step"] {
-                    if let Some(n) = g.get(key).and_then(|v| v.as_float()) {
+                    if let Some(n) = g.get(key).and_then(|v| v.as_float().or_else(|| v.as_integer().map(|i| i as f64))) {
                         let c = eustress_common::units::convert(n, authored_unit, new_unit);
                         g.insert(key.into(), toml::Value::Float(c));
                     }
@@ -22983,7 +27815,19 @@ pub fn apply_property_to_toml_value(
     // Route the key → (section, field). If route_property returns None
     // the key isn't persistable through this writer (the live ECS
     // mutation still happened in the match arm — no harm done).
-    let Some((section, field, value)) = route_property(key, val) else {
+    // Clouds and the post effects route first, by class: their `Enabled`,
+    // `Color` and `Size` are not the GUI/Part fields of the same names.
+    let class_name = root
+        .get("metadata")
+        .and_then(|m| m.get("class_name"))
+        .and_then(|v| v.as_str())
+        .map(str::to_owned);
+    let routed = class_name
+        .as_deref()
+        .and_then(|class| route_light_class_property(class, key, val))
+        .or_else(|| class_name.as_deref().and_then(|class| route_lighting_fx_property(class, key, val)))
+        .or_else(|| route_property(key, val));
+    let Some((section, field, value)) = routed else {
         return Ok(false);
     };
 
@@ -23028,6 +27872,57 @@ pub fn apply_property_to_toml_value(
     crate::space::gui_loader::write_atomic(toml_path, serialised.as_bytes())
         .map_err(|e| format!("write {}: {}", toml_path.display(), e))?;
     Ok(true)
+}
+
+/// Where a light-class property lands: the light's `[light]` section, in the
+/// class template's keys (Range and Radius in metres, Color as 0-255
+/// channels, Face as its label). Ahead of the class-blind `route_property`,
+/// whose Brightness, Enabled and Color mean GUI and Part fields: a script's
+/// `Brightness` used to be saved into `[gui]`, where no light reads it.
+fn route_light_class_property(
+    class_name: &str,
+    key: &str,
+    val: &str,
+) -> Option<(&'static str, &'static str, toml::Value)> {
+    use toml::Value;
+    if !matches!(class_name, "PointLight" | "SpotLight" | "SurfaceLight" | "DirectionalLight") {
+        return None;
+    }
+    let num = |s: &str| s.trim().parse::<f64>().ok().filter(|v| v.is_finite());
+    let flag = |s: &str| {
+        Value::Boolean(matches!(s.trim().to_ascii_lowercase().as_str(), "true" | "1" | "yes" | "on"))
+    };
+    let non_negative = |s: &str| num(s).map(|v| Value::Float(v.max(0.0)));
+    let face_light = matches!(class_name, "SpotLight" | "SurfaceLight");
+    match key {
+        "Brightness" => non_negative(val).map(|v| ("light", "brightness", v)),
+        "Range" if class_name != "DirectionalLight" => non_negative(val).map(|v| ("light", "range", v)),
+        "Radius" if class_name == "PointLight" => non_negative(val).map(|v| ("light", "radius", v)),
+        "Angle" if face_light => num(val).map(|v| ("light", "angle", Value::Float(v.clamp(0.0, 180.0)))),
+        "Face" if face_light => Some((
+            "light",
+            "face",
+            Value::String(eustress_common::plugins::light_classes::normalize_face(val).to_string()),
+        )),
+        "Shadows" => Some(("light", "shadows", flag(val))),
+        "Enabled" => Some(("light", "enabled", flag(val))),
+        "Color" => {
+            let parts: Vec<&str> = val.split(',').map(str::trim).filter(|s| !s.is_empty()).collect();
+            let channels: Vec<f64> = parts.iter().take(3).filter_map(|s| num(s)).collect();
+            if channels.len() < 3 {
+                return None;
+            }
+            // `r, g, b` in 0-255, or 0-1 when every channel is a fraction
+            // written with a decimal point.
+            let fractions = parts.iter().take(3).all(|p| p.contains('.')) && channels.iter().all(|c| *c <= 1.0);
+            let to_255 = |c: f64| {
+                let c = if fractions { c * 255.0 } else { c };
+                Value::Integer(c.round().clamp(0.0, 255.0) as i64)
+            };
+            Some(("light", "color", Value::Array(channels.iter().map(|c| to_255(*c)).collect())))
+        }
+        _ => None,
+    }
 }
 
 /// Routing table: property key → (toml section, field name, value).
@@ -23083,11 +27978,12 @@ fn route_property(key: &str, val: &str) -> Option<(&'static str, &'static str, t
         // ── [metadata] ────────────────────────────────────────────────
         "Archivable"     => Some(("metadata", "archivable", bool_value(val))),
         // `Unit` is the authored-unit symbol (m / cm / mm / ft / in /
-        // studs). Validated against `Unit::from_symbol` so the disk
-        // never sees a typo like "meters" or "feet"; unknown symbols
-        // are rejected (the route returns None → caller no-ops the
-        // write, panel keeps the previous value).
-        "Unit"           => eustress_common::units::Unit::from_symbol(val)
+        // stud). The user's choice is parsed leniently (`Unit::from_any`,
+        // so any spelling picks the current stud) and written back as the
+        // canonical `Unit::symbol`, so the disk never sees a typo like
+        // "meters"; unknown values are rejected (the route returns None →
+        // caller no-ops the write, panel keeps the previous value).
+        "Unit"           => eustress_common::units::Unit::from_any(val)
             .map(|u| ("metadata", "unit", Value::String(u.symbol().to_string()))),
 
         // ── [asset] ───────────────────────────────────────────────────
@@ -23456,7 +28352,7 @@ pub fn parse_clock_hours(text: &str) -> Option<f64> {
 
 /// `ColorShift_Bottom` → `color_shift_bottom`, `Brightness` → `brightness`.
 /// Already-snake_case input passes through unchanged.
-fn to_snake_case(name: &str) -> String {
+pub(crate) fn to_snake_case(name: &str) -> String {
     let mut out = String::with_capacity(name.len() + 4);
     for (i, c) in name.chars().enumerate() {
         if c.is_ascii_uppercase() {
@@ -23488,24 +28384,55 @@ fn parse_vec3_value(value: &str) -> Option<(f32, f32, f32)> {
     }
 }
 
-/// Parses a Color4 string "r, g, b, a" into f32 tuple for TOML write-back
-fn parse_color4_value(value: &str) -> Option<(f32, f32, f32, f32)> {
-    let parts: Vec<&str> = value.split(',').map(|s| s.trim()).collect();
-    if parts.len() == 4 {
-        let r = parts[0].parse::<f32>().ok()?;
-        let g = parts[1].parse::<f32>().ok()?;
-        let b = parts[2].parse::<f32>().ok()?;
-        let a = parts[3].parse::<f32>().ok()?;
-        Some((r, g, b, a))
-    } else if parts.len() == 3 {
-        // RGB without alpha - default alpha to 1.0
-        let r = parts[0].parse::<f32>().ok()?;
-        let g = parts[1].parse::<f32>().ok()?;
-        let b = parts[2].parse::<f32>().ok()?;
-        Some((r, g, b, 1.0))
-    } else {
-        None
+/// The channels of a colour written in a service row, 0-1: `#RRGGBB`, or
+/// `r, g, b` / `r, g, b, a` with rgb in 0-255 (alpha 0-1). When every rgb
+/// channel has a decimal point and none is over 1, they are fractions (a
+/// schema default such as `0.75, 0.75, 0.75`).
+fn service_color_channels(text: &str) -> Option<[f32; 4]> {
+    let t = text.trim();
+    let hex = t.trim_start_matches('#');
+    if hex.len() == 6 && hex.chars().all(|c| c.is_ascii_hexdigit()) {
+        let byte = |i: usize| u8::from_str_radix(&hex[i..i + 2], 16).unwrap_or(0) as f32 / 255.0;
+        return Some([byte(0), byte(2), byte(4), 1.0]);
     }
+    let parts: Vec<&str> = t.split(',').map(str::trim).filter(|s| !s.is_empty()).collect();
+    if parts.len() < 3 {
+        return None;
+    }
+    let mut nums = Vec::with_capacity(parts.len());
+    for p in &parts {
+        let v = p.parse::<f32>().ok().filter(|v| v.is_finite())?;
+        nums.push(v);
+    }
+    let fractions = parts[..3].iter().all(|p| p.contains('.')) && nums[..3].iter().all(|v| *v <= 1.0);
+    let scale = if fractions { 1.0 } else { 1.0 / 255.0 };
+    let alpha = nums.get(3).copied().unwrap_or(1.0).clamp(0.0, 1.0);
+    Some([
+        (nums[0] * scale).clamp(0.0, 1.0),
+        (nums[1] * scale).clamp(0.0, 1.0),
+        (nums[2] * scale).clamp(0.0, 1.0),
+        alpha,
+    ])
+}
+
+/// A service colour row's text: `r, g, b` in 0-255, what the swatch and its
+/// picker read and write.
+fn service_color_text(raw: &str) -> String {
+    match service_color_channels(raw) {
+        Some([r, g, b, _]) => {
+            let ch = |v: f32| (v * 255.0).round() as i64;
+            format!("{}, {}, {}", ch(r), ch(g), ch(b))
+        }
+        None => raw.to_string(),
+    }
+}
+
+/// A service colour edited in the panel, stored as the service keeps it
+/// (0-1 channels). The panel shows 0-255, and those numbers used to be
+/// stored unscaled: an OutdoorAmbient of `128, 128, 128` became 128, not
+/// 0.5, and lit the scene 255 times over.
+fn service_color_from_panel(text: &str) -> Option<[f64; 4]> {
+    service_color_channels(text).map(|c| c.map(|v| v as f64))
 }
 
 /// Parses a Vec3 string "x, y, z" into individual components
@@ -23685,6 +28612,8 @@ fn build_file_properties(ui: &StudioWindow, path: &std::path::Path) {
             is_attribute: false,
             attribute_type: slint::SharedString::default(),
             slider_min: 0.0, slider_max: 1.0, slider_display: slint::SharedString::default(),
+            binding_state: slint::SharedString::default(),
+            display_name: slint::SharedString::default(),
         }
     };
 
@@ -23784,6 +28713,8 @@ fn build_streaming_in_properties(ui: &StudioWindow, uuid: &str) {
         is_attribute: false,
         attribute_type: slint::SharedString::default(),
             slider_min: 0.0, slider_max: 1.0, slider_display: slint::SharedString::default(),
+            binding_state: slint::SharedString::default(),
+            display_name: slint::SharedString::default(),
     };
     props.push(mk("Status", "Streaming in…"));
     // Short uuid prefix so the user can confirm which row is loading.
@@ -23847,6 +28778,8 @@ fn build_service_properties(
             is_attribute: false,
             attribute_type: slint::SharedString::default(),
             slider_min: 0.0, slider_max: 1.0, slider_display: slint::SharedString::default(),
+            binding_state: slint::SharedString::default(),
+            display_name: slint::SharedString::default(),
         }
     };
 
@@ -23897,6 +28830,14 @@ fn build_service_properties(
                             let type_str = prop_table.get("type")
                                 .and_then(|v| v.as_str())
                                 .unwrap_or("string");
+                            // A colour row is the swatch and its picker
+                            // (`ColorRow`, type "color"). The schema says
+                            // `Color3`, Roblox's name, which the panel had no
+                            // row for, so every Lighting colour was bare text.
+                            let type_str = match type_str {
+                                "Color3" | "Color" => "color",
+                                other => other,
+                            };
                             
                             let readonly = prop_table.get("readonly")
                                 .and_then(|v| v.as_bool())
@@ -23943,6 +28884,11 @@ fn build_service_properties(
                                 // dawn instead of wrapping in the middle.
                                 ("clock", Some(h)) => format!("{:.4}", clock_hours_to_slider(h)),
                                 _ => raw,
+                            };
+                            let value_str = if type_str == "color" {
+                                service_color_text(&value_str)
+                            } else {
+                                value_str
                             };
 
                             let mut prop_data =
@@ -24061,9 +29007,171 @@ fn drain_pending_build(
     }
 }
 
+/// Refresh one tab's unsaved-changes dot in place: the `StudioState` mirror
+/// and the single Slint row. A full strip rebuild would re-push the editor
+/// text a few frames later, which must not happen mid-typing.
+fn patch_center_tab_dirty(ui: &StudioWindow, state: &mut StudioState, mgr_idx: usize, dirty: bool) {
+    // The strip omits the Scene tab, which is manager index 0.
+    let Some(row) = mgr_idx.checked_sub(1) else { return };
+    if let Some(tab) = state.center_tabs.get_mut(row) {
+        tab.dirty = dirty;
+    }
+    let model = ui.get_center_tabs();
+    if let Some(mut data) = model.row_data(row) {
+        if data.dirty != dirty {
+            data.dirty = dirty;
+            model.set_row_data(row, data);
+        }
+    }
+}
+
+/// Save every dirty code tab that `closing` selects, before a close removes
+/// it from the strip. `entity_source` maps a tab's entity to the source file
+/// the loader read for it.
+fn save_dirty_tabs_before_close(
+    mgr: &mut super::center_tabs::CenterTabManager,
+    entity_source: impl Fn(Entity) -> Option<std::path::PathBuf>,
+    closing: impl Fn(usize, &super::center_tabs::CenterTabEntry) -> bool,
+) -> Vec<Result<std::path::PathBuf, String>> {
+    let mut results = Vec::new();
+    for i in 0..mgr.tabs.len() {
+        let tab = &mgr.tabs[i];
+        if !tab.dirty || !closing(i, tab) {
+            continue;
+        }
+        let src = tab.entity.and_then(&entity_source);
+        match super::center_tabs::save_code_tab(tab, src.as_deref()) {
+            Ok(Some(path)) => {
+                mgr.tabs[i].dirty = false;
+                results.push(Ok(path));
+            }
+            Ok(None) => {}
+            Err(e) => results.push(Err(e)),
+        }
+    }
+    results
+}
+
+/// Carry out a close the unsaved-changes prompt held: close the tabs, or
+/// continue the exit (through the scene snapshot prompt when the scene has
+/// edits since its last snapshot).
+fn finish_tab_close(
+    mgr: &mut super::center_tabs::CenterTabManager,
+    req: super::center_tabs::TabCloseRequest,
+    state: Option<&mut StudioState>,
+    exit_events: &mut MessageWriter<bevy::app::AppExit>,
+) {
+    if req != super::center_tabs::TabCloseRequest::AppExit {
+        mgr.apply_close(req);
+        return;
+    }
+    match state {
+        Some(s) if s.has_unsaved_changes => s.show_exit_confirmation = true,
+        _ => {
+            exit_events.write(bevy::app::AppExit::Success);
+        }
+    }
+}
+
+/// Tab names for the unsaved-changes prompt: up to four, then a count.
+fn unsaved_tab_names(names: &[&str]) -> String {
+    const SHOWN: usize = 4;
+    if names.len() <= SHOWN {
+        return match names {
+            [] => String::new(),
+            [one] => one.to_string(),
+            [init @ .., last] => format!("{} and {}", init.join(", "), last),
+        };
+    }
+    format!("{} and {} more", names[..SHOWN].join(", "), names.len() - SHOWN)
+}
+
+/// Show the unsaved-changes prompt while a close waits on it, naming the
+/// tabs it would close; hide it once the close is answered.
+fn sync_unsaved_changes_dialog(
+    tab_manager: Option<Res<super::center_tabs::CenterTabManager>>,
+    slint_context: Option<NonSend<SlintUiState>>,
+) {
+    let (Some(mgr), Some(ctx)) = (tab_manager, slint_context) else { return };
+    let ui = &ctx.window;
+    let want = mgr.pending_close.is_some();
+    if ui.get_show_unsaved_changes_dialog() == want {
+        return;
+    }
+    if let Some(req) = mgr.pending_close {
+        let dirty = mgr.dirty_tabs_closed_by(req);
+        let names: Vec<&str> = dirty.iter().map(|&i| mgr.tabs[i].name.as_str()).collect();
+        ui.set_unsaved_changes_count(names.len() as i32);
+        ui.set_unsaved_changes_names(unsaved_tab_names(&names).into());
+    }
+    ui.set_show_unsaved_changes_dialog(want);
+}
+
+/// Log the saves a close made. Returns false when any save failed, and the
+/// caller then keeps every tab open so nothing unsaved is dropped.
+fn report_close_saves(
+    results: &[Result<std::path::PathBuf, String>],
+    output: Option<&mut OutputConsole>,
+) -> bool {
+    let ok = results.iter().all(|r| r.is_ok());
+    if let Some(out) = output {
+        for r in results {
+            match r {
+                Ok(path) => out.info(format!("Saved {} before closing its tab", path.display())),
+                Err(e) => out.error(format!("Save failed, tab kept open: {e}")),
+            }
+        }
+    }
+    ok
+}
+
+/// The syntect grammar for a tab's current view, and the source file behind
+/// its Code view (`None` for a Summary or Markdown view, which highlight as
+/// Markdown).
+fn script_view_for_tab(
+    tab: &super::center_tabs::CenterTabEntry,
+    loaded: &Query<&crate::space::LoadedFromFile>,
+) -> (String, Option<std::path::PathBuf>) {
+    use super::center_tabs::{CenterTabType, SoulScriptMode};
+    if matches!(
+        tab.tab_type,
+        CenterTabType::SoulScript { mode: SoulScriptMode::Summary | SoulScriptMode::Markdown }
+    ) {
+        return ("Markdown".to_string(), None);
+    }
+    let entity_source = tab.entity.and_then(|e| loaded.get(e).ok()).map(|l| l.path.clone());
+    let source = super::center_tabs::code_source_file(tab, entity_source.as_deref());
+    let language = source
+        .as_deref()
+        .and_then(|p| p.extension().and_then(|x| x.to_str()))
+        .map(|ext| language_for_ext(ext).to_string())
+        .unwrap_or_else(|| "Rust".to_string());
+    (language, source)
+}
+
+/// The editor's colours, from the live Studio palette.
+fn editor_palette(ui: &StudioWindow) -> crate::script_editor::theme::EditorPalette {
+    use crate::script_editor::theme::{EditorPalette, Rgb};
+    let d = ui.global::<Theme>().get_data();
+    let rgb = |c: slint::Color| Rgb(c.red(), c.green(), c.blue());
+    EditorPalette {
+        background: rgb(d.viewport_background),
+        text_primary: rgb(d.text_primary),
+        text_secondary: rgb(d.text_secondary),
+        text_error: rgb(d.text_error),
+        accent_blue: rgb(d.accent_blue),
+        accent_cyan: rgb(d.accent_cyan),
+        accent_green: rgb(d.accent_green),
+        accent_orange: rgb(d.accent_orange),
+        accent_purple: rgb(d.accent_purple),
+        accent_yellow: rgb(d.accent_yellow),
+    }
+}
+
 fn sync_tab_manager_to_studio_state(
     mut tab_manager: Option<ResMut<super::center_tabs::CenterTabManager>>,
     mut state: Option<ResMut<StudioState>>,
+    loaded: Query<&crate::space::LoadedFromFile>,
 ) {
     let Some(ref mut mgr) = tab_manager else { return };
     if !mgr.dirty { return; }
@@ -24099,6 +29207,7 @@ fn sync_tab_manager_to_studio_state(
                 } else {
                     active_tab.content.clone()
                 };
+                (state.script_language, state.script_source_path) = script_view_for_tab(active_tab, &loaded);
                 state.script_content_dirty = true;
             }
         }
@@ -24137,6 +29246,10 @@ fn sync_tab_manager_to_studio_state(
             } else {
                 active_tab.content.clone()
             };
+            (state.script_language, state.script_source_path) = script_view_for_tab(active_tab, &loaded);
+            // Highlight the content as soon as the tab shows, not on the
+            // first edit.
+            state.script_content_dirty = true;
         }
     }
 
@@ -24173,6 +29286,278 @@ fn floor_char_boundary(s: &str, mut i: usize) -> usize {
     i
 }
 
+/// Byte offset of the caret at 1-based `line` and `col`, where the editor
+/// counts columns in characters. Clamped to the end of the line.
+fn caret_byte_offset(source: &str, line: i32, col: i32) -> usize {
+    let mut start = 0usize;
+    for _ in 1..line.max(1) {
+        match source[start..].find('\n') {
+            Some(i) => start += i + 1,
+            None => return source.len(),
+        }
+    }
+    let end = source[start..].find('\n').map_or(source.len(), |i| start + i);
+    let text = &source[start..end];
+    let chars = (col.max(1) - 1) as usize;
+    start + text.char_indices().nth(chars).map_or(text.len(), |(i, _)| i)
+}
+
+/// The identifier the caret touches: letters, digits and `_` on either side
+/// of `offset`. `None` between two non-identifier characters.
+fn identifier_around(source: &str, offset: usize) -> Option<&str> {
+    let offset = floor_char_boundary(source, offset);
+    let is_ident = |c: char| c.is_alphanumeric() || c == '_';
+    let start = source[..offset]
+        .char_indices()
+        .rev()
+        .take_while(|(_, c)| is_ident(*c))
+        .last()
+        .map_or(offset, |(i, _)| i);
+    let end = source[offset..]
+        .char_indices()
+        .find(|(_, c)| !is_ident(*c))
+        .map_or(source.len(), |(i, _)| offset + i);
+    let ident = &source[start..end];
+    (!ident.is_empty() && !ident.starts_with(|c: char| c.is_ascii_digit())).then_some(ident)
+}
+
+/// Pairs for a file with no language service.
+const DEFAULT_EDITOR_PAIRS: &[(char, char)] = &[('(', ')'), ('[', ']'), ('{', '}'), ('"', '"')];
+
+/// Put an edit the engine made into the editor. The text and selection go
+/// to Slint together (the editor applies both in one handler), and the text
+/// travels the typed-edit path, so the tab is marked dirty and re-analyzed.
+fn apply_script_edit(
+    state: &mut StudioState,
+    edit: crate::script_editor::editing::Edit,
+    queue: &SlintActionQueue,
+) {
+    state.script_editor_content = edit.text.clone();
+    state.script_content_dirty = true;
+    state.pending_external_edit = Some((edit.selection.anchor as u32, edit.selection.cursor as u32));
+    queue.push(SlintAction::ScriptContentChanged(edit.text));
+}
+
+/// Record `before` as its own undo step for the active tab.
+fn record_script_step(
+    state: &mut StudioState,
+    tabs: Option<&super::center_tabs::CenterTabManager>,
+    before: &str,
+    cursor: usize,
+) {
+    let Some(id) = tabs.and_then(|m| m.tabs.get(m.active_tab)).map(|t| t.id) else { return };
+    let history = state.script_history.entry(id).or_default();
+    history.break_group();
+    history.record(before, cursor, std::time::Instant::now());
+    history.break_group();
+}
+
+/// Select the current find match in the editor, scroll it into view when it
+/// is off screen, and show "3 of 12" (or "No results").
+fn select_find_match(state: &mut StudioState, matches: &[(usize, usize)], ui: Option<&StudioWindow>) {
+    let status = if state.find_query.is_empty() {
+        String::new()
+    } else if matches.is_empty() {
+        "No results".to_string()
+    } else {
+        state.find_index = state.find_index.min(matches.len() - 1);
+        let (a, b) = matches[state.find_index];
+        state.pending_external_edit = Some((a as u32, b as u32));
+        if let Some(ui) = ui {
+            let line = crate::script_editor::editing::line_of(&state.script_editor_content, a) as i32;
+            let first = ui.get_script_visible_first_line();
+            let count = ui.get_script_visible_line_count().max(3);
+            if line - 1 < first || line - 1 >= first + count - 2 {
+                ui.set_script_scroll_to_line((line - count / 3).max(1));
+            }
+        }
+        format!("{} of {}", state.find_index + 1, matches.len())
+    };
+    if let Some(ui) = ui {
+        ui.set_script_find_status(status.into());
+    }
+}
+
+/// The longest line in characters, a tab counting as eight: the width the
+/// script editor makes scrollable when lines do not wrap. Over-counting a
+/// tab only adds scroll room; under-counting would cut a line short.
+fn max_line_chars(text: &str) -> i32 {
+    text.lines()
+        .map(|line| line.chars().map(|c| if c == '\t' { 8 } else { 1 }).sum::<usize>())
+        .max()
+        .unwrap_or(0)
+        .min(i32::MAX as usize) as i32
+}
+
+/// 0-based line and character column of a byte offset.
+fn line_col0(source: &str, offset: usize) -> (i32, i32) {
+    let offset = floor_char_boundary(source, offset);
+    let start = source[..offset].rfind('\n').map_or(0, |i| i + 1);
+    (source[..start].matches('\n').count() as i32, source[start..offset].chars().count() as i32)
+}
+
+/// The active Code view's language service: the one the analyzer runs, when
+/// it belongs to the view's source file. A Summary or Markdown view has no
+/// source file, so it gets none.
+fn active_code_service(
+    state: &StudioState,
+    analysis: Option<&crate::script_editor::ScriptAnalysis>,
+) -> Option<std::sync::Arc<dyn crate::script_editor::language::LanguageService>> {
+    let path = state.script_source_path.as_deref()?;
+    let service = analysis?.service.clone()?;
+    (service.id() == crate::script_editor::language::language_for_path(path)).then_some(service)
+}
+
+/// The trailing `a.b:c` chain of `text`, as written; `None` when empty.
+fn trailing_chain(text: &str) -> Option<&str> {
+    let start = text
+        .char_indices()
+        .rev()
+        .take_while(|(_, c)| c.is_alphanumeric() || matches!(c, '_' | '.' | ':'))
+        .last()
+        .map(|(i, _)| i)?;
+    Some(&text[start..])
+}
+
+/// The string argument the caret sits in, from the line up to the caret:
+/// the call's name as written and the argument's index. `None` outside a
+/// string, or in a string that is not a call argument on this line.
+fn string_arg_at(line_to_caret: &str) -> Option<crate::script_editor::language::StringArg> {
+    let mut open: Option<(usize, char)> = None;
+    let mut escaped = false;
+    for (i, c) in line_to_caret.char_indices() {
+        match open {
+            Some((_, quote)) => {
+                if escaped {
+                    escaped = false;
+                } else if c == '\\' {
+                    escaped = true;
+                } else if c == quote {
+                    open = None;
+                }
+            }
+            None if matches!(c, '"' | '\'' | '`') => open = Some((i, c)),
+            None => {}
+        }
+    }
+    let (quote_at, _) = open?;
+    let before = &line_to_caret[..quote_at];
+    let mut depth = 0i32;
+    let mut arg_index = 0u32;
+    for (i, c) in before.char_indices().rev() {
+        match c {
+            ')' | ']' | '}' => depth += 1,
+            '(' if depth == 0 => {
+                let callee = trailing_chain(before[..i].trim_end())?;
+                return Some(crate::script_editor::language::StringArg {
+                    callee: callee.to_string(),
+                    arg_index,
+                });
+            }
+            '(' | '[' | '{' => depth -= 1,
+            ',' if depth == 0 => arg_index += 1,
+            _ => {}
+        }
+    }
+    None
+}
+
+/// What the shell knows about the caret, for a language service's
+/// completion: the identifier prefix, a `.` or `:` access and the receiver
+/// before it, and a string argument the caret sits in. `::` is a path, not
+/// an access.
+fn completion_context(
+    source: &str,
+    offset: usize,
+    script_class: Option<crate::script_editor::language::ScriptClass>,
+) -> crate::script_editor::language::CompletionContext<'_> {
+    use crate::script_editor::language::{Access, CompletionContext};
+    let offset = floor_char_boundary(source, offset);
+    let prefix_start = source[..offset]
+        .char_indices()
+        .rev()
+        .take_while(|(_, c)| c.is_alphanumeric() || *c == '_')
+        .last()
+        .map_or(offset, |(i, _)| i);
+    let line_start = source[..prefix_start].rfind('\n').map_or(0, |i| i + 1);
+    let head = &source[line_start..prefix_start];
+    let (access, receiver) = if head.ends_with("::") || head.ends_with("..") {
+        (None, None)
+    } else if let Some(rest) = head.strip_suffix('.') {
+        (Some(Access::Dot), trailing_chain(rest))
+    } else if let Some(rest) = head.strip_suffix(':') {
+        (Some(Access::Colon), trailing_chain(rest))
+    } else {
+        (None, None)
+    };
+    CompletionContext {
+        source,
+        offset,
+        prefix: &source[prefix_start..offset],
+        receiver,
+        access,
+        in_string: string_arg_at(&source[line_start..offset]),
+        script_class,
+        instance_tree: None,
+    }
+}
+
+#[cfg(test)]
+mod completion_context_tests {
+    use super::*;
+    use crate::script_editor::language::Access;
+
+    #[test]
+    fn caret_columns_count_characters() {
+        let src = "héllo\nwörld x";
+        assert_eq!(caret_byte_offset(src, 1, 3), "hé".len());
+        assert_eq!(caret_byte_offset(src, 2, 7), "héllo\nwörld ".len());
+        assert_eq!(caret_byte_offset(src, 2, 99), src.len(), "clamped to the line end");
+        assert_eq!(caret_byte_offset(src, 9, 1), src.len());
+    }
+
+    #[test]
+    fn the_identifier_under_the_caret() {
+        let src = "local héro = spawn(x)";
+        assert_eq!(identifier_around(src, "local hé".len()), Some("héro"));
+        assert_eq!(identifier_around(src, "local ".len()), Some("héro"), "at its first character");
+        assert_eq!(identifier_around(src, "local héro".len()), Some("héro"), "just after it");
+        assert_eq!(identifier_around(src, "local héro =".len()), None);
+        assert_eq!(identifier_around("x = 42", 5), None, "a number is not an identifier");
+    }
+
+    #[test]
+    fn member_access_and_receiver() {
+        let src = "local p = game.Players.LocalPlayer:Kic";
+        let cx = completion_context(src, src.len(), None);
+        assert_eq!(cx.prefix, "Kic");
+        assert_eq!(cx.access, Some(Access::Colon));
+        assert_eq!(cx.receiver, Some("game.Players.LocalPlayer"));
+
+        let src = "workspace.";
+        let cx = completion_context(src, src.len(), None);
+        assert_eq!((cx.prefix, cx.access, cx.receiver), ("", Some(Access::Dot), Some("workspace")));
+
+        let src = "let v = Vec::ne";
+        let cx = completion_context(src, src.len(), None);
+        assert_eq!(cx.access, None, "a Rune path is not a member access");
+    }
+
+    #[test]
+    fn string_arguments_name_their_call() {
+        let src = "local rs = game:GetService(\"Repl";
+        let cx = completion_context(src, src.len(), None);
+        let arg = cx.in_string.expect("inside the string argument");
+        assert_eq!(arg.callee, "game:GetService");
+        assert_eq!(arg.arg_index, 0);
+        assert_eq!(cx.prefix, "Repl");
+
+        let src = "x:FindFirstChild(\"a\", \"b";
+        assert_eq!(completion_context(src, src.len(), None).in_string.map(|a| a.arg_index), Some(1));
+        assert!(completion_context("print(\"done\") x", 16, None).in_string.is_none());
+    }
+}
+
 /// Push completion state into Slint.
 ///
 /// Change-gated on `completion_dirty`: a steady editor rebuilds no models, so
@@ -24195,6 +29580,16 @@ fn sync_completion_to_slint(
         ui.set_script_caret_to_offset(offset as i32);
     }
 
+    // An edit the engine made: the text and selection go together, and the
+    // editor applies both in one handler when the revision changes.
+    if let Some((anchor, cursor)) = state.pending_external_edit.take() {
+        state.script_external_revision = state.script_external_revision.wrapping_add(1);
+        ui.set_script_editor_content(state.script_editor_content.as_str().into());
+        ui.set_script_edit_anchor(anchor as i32);
+        ui.set_script_edit_cursor(cursor as i32);
+        ui.set_script_external_revision(state.script_external_revision);
+    }
+
     if state.signature_dirty {
         state.signature_dirty = false;
         ui.set_script_signature_label(state.signature_label.as_str().into());
@@ -24215,11 +29610,14 @@ fn sync_completion_to_slint(
             // The popup keys its glyph and colour off this string. `Module`
             // covers both engine types (`Vector3`) and namespaces, which read
             // the same way in a completion list.
-            kind: match c.kind {
-                crate::script_editor::CompletionKind::Keyword => "keyword",
-                crate::script_editor::CompletionKind::Function => "function",
-                crate::script_editor::CompletionKind::Module => "type",
-                crate::script_editor::CompletionKind::Variable => "variable",
+            kind: {
+                use crate::script_editor::language::CompletionKind as K;
+                match c.kind {
+                    K::Keyword | K::Snippet => "keyword",
+                    K::Function | K::Method => "function",
+                    K::Class | K::Enum | K::Module | K::Service | K::Instance => "type",
+                    K::Property | K::Event | K::Variable | K::Constant => "variable",
+                }
             }
             .into(),
         })
@@ -24356,6 +29754,8 @@ fn sync_center_tabs_to_slint(
     slint_context: Option<NonSend<SlintUiState>>,
     mut state: Option<ResMut<StudioState>>,
     space_root: Option<Res<crate::space::SpaceRoot>>,
+    languages: Option<Res<crate::script_editor::plugin::ScriptLanguages>>,
+    mut last_palette: Local<Option<crate::script_editor::theme::EditorPalette>>,
 ) {
     let Some(slint_context) = slint_context else { return };
     let Some(ref mut state) = state else { return };
@@ -24510,6 +29910,7 @@ fn sync_center_tabs_to_slint(
         // Also push editor content now that ScriptEditor exists
         if tab_type == "script" || tab_type == "code" {
             ui.set_script_editor_content(state.script_editor_content.as_str().into());
+            ui.set_script_max_line_chars(max_line_chars(&state.script_editor_content));
             let nums = build_line_numbers_text(&state.script_editor_content);
             ui.set_script_line_numbers(nums.into());
             let nums_arr = build_line_numbers_array(&state.script_editor_content);
@@ -24530,12 +29931,27 @@ fn sync_center_tabs_to_slint(
 
     // Sync editor content + line numbers to Slint when a script or code tab is active.
     // Skip during deferred tab switch — content is pushed in Frame N+3 instead.
+    // The spans carry colours, so a theme change re-highlights the script.
+    let palette = editor_palette(ui);
+    if *last_palette != Some(palette) {
+        if last_palette.is_some() && (tab_type == "script" || tab_type == "code") {
+            state.script_content_dirty = true;
+        }
+        *last_palette = Some(palette);
+    }
     let script_dirty = state.script_content_dirty;
     let in_deferred = state.tabs_deferred_frames > 0;
     // Don't consume the dirty flag during deferral — wait until we can actually apply it
-    if !in_deferred && script_dirty { state.script_content_dirty = false; }
+    if !in_deferred && script_dirty {
+        state.script_content_dirty = false;
+        // The analyzer follows this counter, so this system is the flag's
+        // only consumer and the two can never race for one edit.
+        state.script_content_revision = state.script_content_revision.wrapping_add(1);
+    }
     if !in_deferred && (tab_type == "script" || tab_type == "code") && script_dirty {
-        let language = if state.active_center_tab > 0 {
+        let language = if !state.script_language.is_empty() {
+            state.script_language.clone()
+        } else if state.active_center_tab > 0 {
             let idx = (state.active_center_tab - 1) as usize;
             if let Some(tab) = state.center_tabs.get(idx) {
                 let lower_name = tab.name.to_lowercase();
@@ -24564,21 +29980,28 @@ fn sync_center_tabs_to_slint(
             })
             .collect();
 
-        // Per-token spans for true syntax highlighting
-        let token_spans: Vec<TokenSpan> = highlight_to_token_spans(&state.script_editor_content, &language)
-            .into_iter()
-            .map(|s| TokenSpan {
-                line: s.line,
-                x: s.x,
-                text: s.text.into(),
-                r: s.r,
-                g: s.g,
-                b: s.b,
-                bold: s.bold,
-            })
-            .collect();
+        // Per-token spans. A file whose language has a service is lexed by it
+        // and coloured from the Studio palette; any other file uses syntect.
+        let service = state
+            .script_source_path
+            .as_deref()
+            .and_then(|path| languages.as_ref().and_then(|l| l.0.for_path(path)));
+        let spans = match service {
+            Some(service) => crate::ui::highlight::service_token_spans(
+                &state.script_editor_content,
+                service.as_ref(),
+                &palette,
+            ),
+            None => highlight_to_token_spans(&state.script_editor_content, &language),
+        };
+        // Kept whole; the window push after this block hands Slint only the
+        // spans near the visible lines.
+        ui.set_script_highlight_active(!spans.is_empty());
+        state.script_spans_all = spans;
+        state.script_span_window = None;
 
         ui.set_script_editor_content(state.script_editor_content.as_str().into());
+        ui.set_script_max_line_chars(max_line_chars(&state.script_editor_content));
         let nums = build_line_numbers_text(&state.script_editor_content);
         ui.set_script_line_numbers(nums.into());
         let nums_arr = build_line_numbers_array(&state.script_editor_content);
@@ -24586,18 +30009,71 @@ fn sync_center_tabs_to_slint(
         ui.set_script_line_numbers_array(slint::ModelRc::from(nums_model));
         let highlight_model = std::rc::Rc::new(slint::VecModel::from(state.script_highlight_lines.clone()));
         ui.set_script_highlight_lines(slint::ModelRc::from(highlight_model));
-        let token_model = std::rc::Rc::new(slint::VecModel::from(token_spans));
-        ui.set_script_token_spans(slint::ModelRc::from(token_model));
         // On tab switch (not on every keystroke): reset editor scroll to line 1
         if tabs_changed {
             ui.set_script_scroll_to_top(true);
         }
-    } else {
-        state.script_highlight_lines.clear();
-        let highlight_model = std::rc::Rc::new(slint::VecModel::from(Vec::<HighlightLine>::new()));
-        ui.set_script_highlight_lines(slint::ModelRc::from(highlight_model));
-        let token_model = std::rc::Rc::new(slint::VecModel::from(Vec::<TokenSpan>::new()));
-        ui.set_script_token_spans(slint::ModelRc::from(token_model));
+    } else if in_deferred || !(tab_type == "script" || tab_type == "code") {
+        // Clear only while the editor's content is leaving: a tab switch in
+        // flight, or a tab that is not a script. A frame without an edit keeps
+        // the spans already pushed; the editor's text is transparent while
+        // spans exist, so the overlay IS the visible text.
+        if ui.get_script_token_spans().row_count() > 0
+            || !state.script_highlight_lines.is_empty()
+            || !state.script_spans_all.is_empty()
+        {
+            state.script_highlight_lines.clear();
+            state.script_spans_all.clear();
+            state.script_span_window = None;
+            ui.set_script_highlight_active(false);
+            let highlight_model = std::rc::Rc::new(slint::VecModel::from(Vec::<HighlightLine>::new()));
+            ui.set_script_highlight_lines(slint::ModelRc::from(highlight_model));
+            let token_model = std::rc::Rc::new(slint::VecModel::from(Vec::<TokenSpan>::new()));
+            ui.set_script_token_spans(slint::ModelRc::from(token_model));
+        }
+    }
+
+    // Draw only the spans near the visible lines. The window reaches two
+    // screens above and two below the view, and is re-pushed once the view
+    // leaves it, so scrolling rarely rebuilds and never builds the whole file.
+    if !in_deferred && (tab_type == "script" || tab_type == "code") {
+        let first = ui.get_script_visible_first_line().max(0);
+        let count = ui.get_script_visible_line_count().max(1);
+        let covered = state
+            .script_span_window
+            .is_some_and(|(start, end)| first >= start && first + count <= end);
+        if !covered {
+            let (start, end) = ((first - 2 * count).max(0), first + 3 * count);
+            let all = &state.script_spans_all;
+            let lo = all.partition_point(|s| s.line < start);
+            let hi = all.partition_point(|s| s.line < end);
+            let window: Vec<TokenSpan> = all[lo..hi]
+                .iter()
+                .map(|s| TokenSpan {
+                    line: s.line,
+                    x: s.x,
+                    text: s.text.as_str().into(),
+                    r: s.r,
+                    g: s.g,
+                    b: s.b,
+                    bold: s.bold,
+                })
+                .collect();
+            let token_model = std::rc::Rc::new(slint::VecModel::from(window));
+            ui.set_script_token_spans(slint::ModelRc::from(token_model));
+            state.script_span_window = Some((start, end));
+        }
+    }
+
+    // Problems-panel jump: wait until no tab switch is in flight, so the
+    // scroll lands on the new tab's content instead of being reset by it.
+    // Dropped when the target turned out not to be a script or code tab.
+    if state.tabs_deferred_frames == 0 && !tabs_changed {
+        if let Some(line) = state.pending_script_jump_line.take() {
+            if tab_type == "script" || tab_type == "code" {
+                ui.set_script_scroll_to_line(line);
+            }
+        }
     }
 
     // Always sync web browser properties when a web tab is active (loading can change each frame)
@@ -24628,8 +30104,18 @@ fn class_name_to_icon_filename(class_name: &eustress_common::classes::ClassName)
         ClassName::DirectionalLight => "directionallight",
         ClassName::Sound => "sound",
         ClassName::ParticleEmitter => "particleemitter",
+        ClassName::ParticleSimulation => "particlesimulation",
+        ClassName::ParticleSpecies => "particlespecies",
         ClassName::Beam => "beam",
         ClassName::Terrain => "terrain",
+        ClassName::TerrainSpline => "terrainspline",
+        ClassName::TerrainSplinePoint => "terrainsplinepoint",
+        ClassName::TerrainStamp => "terrainstamp",
+        ClassName::TerrainFlattenPad => "terrainflattenpad",
+        ClassName::TerrainNoise => "terrainnoise",
+        ClassName::TerrainMaterialFill => "terrainmaterialfill",
+        ClassName::TerrainScatter => "terrainscatter",
+        ClassName::TerrainWaterBody => "terrainwaterbody",
         ClassName::Sky => "sky",
         ClassName::Atmosphere => "atmosphere",
         ClassName::Star => "sun",
@@ -24638,6 +30124,12 @@ fn class_name_to_icon_filename(class_name: &eustress_common::classes::ClassName)
         // Shares the atmosphere icon: both are environment-lighting volumes,
         // and Clouds already shares with Sky on the same reasoning.
         ClassName::ReflectionProbe => "atmosphere",
+        // Post-processing effects, which live under Lighting.
+        ClassName::BloomEffect => "bloomeffect",
+        ClassName::SunRaysEffect => "sunrayseffect",
+        ClassName::DepthOfFieldEffect => "depthoffieldeffect",
+        ClassName::ColorCorrectionEffect | ClassName::ColorGradingEffect => "colorcorrectioneffect",
+        ClassName::BlurEffect => "blureffect",
         ClassName::SoulScript => "soulservice",
         ClassName::Decal => "decal",
         ClassName::Attachment => "attachment",
@@ -24788,7 +30280,7 @@ fn asset_icon(asset_type: &str) -> slint::Image {
         "Fonts" | "font" => "ui/new-file",
         _ => "ui/new-file",
     };
-    let icon_path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+    let icon_path = crate::resource_root()
         .join("assets")
         .join("icons")
         .join(format!("{}.svg", icon_name));
@@ -24843,7 +30335,13 @@ fn sync_asset_manager_to_slint(
         .unwrap_or_else(crate::space::default_space_root);
 
     let universe_root = crate::space::universe_root_for_path(&space_root);
-    let category = state.category.clone();
+    // "" is the state before the first tab click: it means All (the filters
+    // below would otherwise hide every asset until a tab is clicked).
+    let category = if state.category.is_empty() { "All".to_string() } else { state.category.clone() };
+    // The category tabs highlight whichever filter this pushes.
+    if ui.get_asset_category().as_str() != category {
+        ui.set_asset_category(category.as_str().into());
+    }
     let search = state.search.to_lowercase();
 
     let mut asset_nodes: Vec<(i32, String, slint::Image, String, i32, bool, bool, bool, String, String)> = Vec::new();
@@ -24857,7 +30355,7 @@ fn sync_asset_manager_to_slint(
     let custom_meshes_id: i32 = -3;
     let user_images_id: i32 = -4;
     let user_videos_id: i32 = -5;
-    let space_section_id: i32 = -4;
+    let space_section_id: i32 = -6;
 
     // Auto-expand Space Assets on first load
     if state.frame <= 1 {
@@ -25578,7 +31076,7 @@ fn load_class_icon(class_name: &eustress_common::classes::ClassName) -> slint::I
         if let Some(img) = cache.borrow().get(filename) {
             return img.clone();
         }
-        let icon_path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        let icon_path = crate::resource_root()
             .join("assets")
             .join("icons")
             .join(format!("{}.svg", filename));
@@ -25590,10 +31088,11 @@ fn load_class_icon(class_name: &eustress_common::classes::ClassName) -> slint::I
 
 /// Push the current Soul API key + its computed validity status to Slint so
 /// File > Settings shows the actual stored key, and the Soul/Workshop panels
-/// dismiss the "Configure API key" banner once a key is present. Validity
-/// here is a presence check only — full validation happens when the user
-/// runs "Test Connection" in Settings. Fires on resource change (and once at
-/// startup) so the banner updates immediately after Save.
+/// dismiss the "Configure API key" banner once a key is present (the status
+/// string is a presence check). The Settings dialog's "validated" mark is
+/// shown only after Test Connection accepted the stored key. Fires on
+/// resource change (and once at startup) so the banner updates immediately
+/// after Save.
 fn sync_soul_api_key_to_slint(
     slint_context: Option<NonSend<SlintUiState>>,
     global_settings: Option<Res<crate::soul::GlobalSoulSettings>>,
@@ -25630,7 +31129,7 @@ fn sync_soul_api_key_to_slint(
         // Same contract for OpenAI, and for the same reason.
         ui.set_soul_openai_api_key(global.global_openai_api_key.clone().into());
     }
-    ui.set_soul_api_key_valid(!effective_key.is_empty());
+    ui.set_soul_api_key_valid(!effective_key.is_empty() && global.api_key_valid == Some(true));
     ui.set_soul_api_key_status(status.into());
 }
 
@@ -25708,6 +31207,7 @@ const KEYBINDING_ROWS: &[(&str, Option<crate::keybindings::Action>)] = {
         ("", Some(A::Paste)),
         ("", Some(A::PasteInto)),
         ("", Some(A::InsertObject)),
+        ("", Some(A::FindReplace)),
         ("", Some(A::Duplicate)),
         ("", Some(A::Delete)),
         ("", Some(A::SelectAll)),
@@ -25758,6 +31258,10 @@ const KEYBINDING_ROWS: &[(&str, Option<crate::keybindings::Action>)] = {
         ("", Some(A::ViewFront)),
         ("", Some(A::ViewSideLeft)),
         ("", Some(A::ViewSideRight)),
+        ("", Some(A::ViewMode2D)),
+        ("", Some(A::ViewMode3D)),
+        ("", Some(A::SaveViewpoint)),
+        ("", Some(A::NextViewpoint)),
         ("SNAPPING & PLACEMENT", None),
         ("", Some(A::SnapMode1)),
         ("", Some(A::SnapMode2)),
@@ -25766,6 +31270,41 @@ const KEYBINDING_ROWS: &[(&str, Option<crate::keybindings::Action>)] = {
         ("", Some(A::SettleSelection)),
         ("", Some(A::RotateY90)),
         ("", Some(A::TiltZ90)),
+        // Live while the terrain tools are the current tool, where they win
+        // over the keys above (`ActionContext::Terrain`); Terrain Tools
+        // itself is global.
+        ("TERRAIN TOOLS", None),
+        ("", Some(A::TerrainTools)),
+        ("", Some(A::TerrainDraw)),
+        ("", Some(A::TerrainSculpt)),
+        ("", Some(A::TerrainSmooth)),
+        ("", Some(A::TerrainFlatten)),
+        ("", Some(A::TerrainPaint)),
+        ("", Some(A::TerrainSeaLevel)),
+        ("", Some(A::TerrainRegion)),
+        ("", Some(A::TerrainSizeDown)),
+        ("", Some(A::TerrainSizeUp)),
+        ("", Some(A::TerrainStrengthDown)),
+        ("", Some(A::TerrainStrengthUp)),
+        ("", Some(A::TerrainPivotPrev)),
+        ("", Some(A::TerrainPivotNext)),
+        ("", Some(A::TerrainPlaneLock)),
+        ("", Some(A::TerrainPlanePick)),
+        ("", Some(A::TerrainPlaneUp)),
+        ("", Some(A::TerrainPlaneDown)),
+        ("", Some(A::TerrainPlaneUpFast)),
+        ("", Some(A::TerrainPlaneDownFast)),
+        ("", Some(A::TerrainSnap)),
+        ("", Some(A::TerrainSnapStep)),
+        ("", Some(A::TerrainContours)),
+        ("", Some(A::TerrainMirror)),
+        ("", Some(A::TerrainMirrorAxis)),
+        ("", Some(A::TerrainSampleMaterial)),
+        ("", Some(A::TerrainRegionCopy)),
+        ("", Some(A::TerrainRegionCut)),
+        ("", Some(A::TerrainRegionPaste)),
+        ("", Some(A::TerrainRegionDuplicate)),
+        ("", Some(A::TerrainRegionDelete)),
         ("SIMULATION", None),
         ("", Some(A::PlayWithCharacter)),
         ("", Some(A::PlaySolo)),
@@ -26351,6 +31890,24 @@ mod property_key_tests {
         // not in the panel's display casing.
         let props: HashMap<String, PropertyValue> = HashMap::new();
         assert_eq!(resolve_service_property_key(&props, "SomeNewThing"), "some_new_thing");
+    }
+
+    #[test]
+    fn a_service_colour_edit_is_stored_as_fractions() {
+        let c = service_color_from_panel("128, 128, 128").expect("parses");
+        assert!((c[0] - 128.0 / 255.0).abs() < 1e-6 && c[3] == 1.0, "{c:?}");
+        let c = service_color_from_panel("0.5, 0.25, 1.0").expect("parses");
+        assert!((c[0] - 0.5).abs() < 1e-6 && (c[1] - 0.25).abs() < 1e-6);
+        let c = service_color_from_panel("#FF8000").expect("parses");
+        assert!((c[1] - 128.0 / 255.0).abs() < 1e-6);
+        assert!(service_color_from_panel("blue").is_none());
+    }
+
+    #[test]
+    fn a_service_colour_row_shows_0_to_255_without_alpha() {
+        // The live value's display form, and a schema default's.
+        assert_eq!(service_color_text("128, 128, 128, 1.00"), "128, 128, 128");
+        assert_eq!(service_color_text("0.75, 0.75, 0.75"), "191, 191, 191");
     }
 }
 

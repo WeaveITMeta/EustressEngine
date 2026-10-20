@@ -1,10 +1,12 @@
-//! Spline path + terrain-conform core for the road tool.
+//! Spline path, elevation profile and drivable surface of a road.
 //!
-//! Pure math + `TerrainData` read/write — no `Entity`/`Commands`/ECS. The
-//! caller (the `StudioPlugin` in the engine crate) owns node placement,
-//! entity spawning, and the pristine-baseline snapshot; this module only
-//! turns `[Vec3]` control points + a terrain baseline into (a) a smoothed
-//! elevation profile, (b) terrain writes, and (c) a ribbon mesh.
+//! Pure math, no `Entity`/`Commands`/ECS. A road is a `TerrainSpline` layer
+//! (see `layers` and `layer_instances`): the layer bake calls
+//! [`build_road_path_with`] for the corridor's path and smoothed profile and
+//! carves the ground to them, and `road_surface` lays the ribbon mesh
+//! ([`build_ribbon_mesh`]) and the collision boxes ([`ribbon_segments`])
+//! along the stations that bake produced ([`RoadPath::from_positions`]), so
+//! the drivable surface and the carved ground follow one line.
 //!
 //! Deliberately self-contained rather than reusing
 //! `realism::numerics::interpolation::{spline_build, spline_eval}` (an
@@ -25,28 +27,23 @@
 //!    on tight curves).
 //! 3. **Elevation profile** — sampling raw terrain height AT EVERY station
 //!    would just reproduce every bump the mountain already has. Instead,
-//!    sample height at SPARSE knots (~15 m apart) from the baseline terrain,
-//!    then fit those knots with the same natural-cubic-spline technique —
-//!    the road's target elevation is smooth by construction.
-//! 4. **Corridor stamp** — for every terrain texel near the path, find the
-//!    SINGLE closest station (not every station within range — stamping
-//!    per-station ridges the inside of a hairpin, since multiple stations
-//!    claim the same texel there). Flat bed inside `half_width`, smoothstep
-//!    shoulder out to `half_width + falloff` blending to the pristine
-//!    baseline. Always reads from `baseline`, writes into `data` — so
-//!    re-applying after a node edit re-stamps fresh rather than compounding
-//!    a trench into already-carved terrain.
+//!    sample height at SPARSE knots (~15 m apart) from the ground, then fit
+//!    those knots with the same natural-cubic-spline technique, so the
+//!    road's target elevation is smooth by construction.
+//!
+//! The corridor itself (for every cell, the closest point on the station
+//! polyline, a flat bed and a smoothstep shoulder back to the ground) is the
+//! layer bake's, in `layers`. It never writes the terrain's base, so moving a
+//! node re-carves from the untouched ground instead of compounding a trench.
 
 use bevy::prelude::*;
-use super::{TerrainConfig, TerrainData};
-use super::height_query::{height_at_world, set_height_at_world, set_splat_at_world};
 
 // ============================================================================
 // Self-contained natural cubic spline (Thomas tridiagonal algorithm) — see
 // module docs for why this isn't `realism::numerics::interpolation`.
 // ============================================================================
 
-fn smoothstep(t: f32) -> f32 {
+pub(crate) fn smoothstep(t: f32) -> f32 {
     let t = t.clamp(0.0, 1.0);
     t * t * (3.0 - 2.0 * t)
 }
@@ -144,7 +141,7 @@ fn catmull_rom_centripetal(p0: Vec2, p1: Vec2, p2: Vec2, p3: Vec2, t: f32) -> Ve
 
 /// Samples per Catmull-Rom segment in [`sample_path_xz`]'s dense polyline.
 /// A named constant (not just the literal passed at its one call site)
-/// because [`build_road_path`] also needs it: control point `i` sits at
+/// because [`build_road_path_with`] also needs it: control point `i` sits at
 /// EXACTLY dense-index `i * CATMULL_ROM_SAMPLES` (the `t=0` sample of
 /// segment `i`), so elevation-knot derivation can index directly instead of
 /// nearest-point-searching the polyline — a hairpin (this is a drift
@@ -179,6 +176,14 @@ fn sample_path_xz(control_points: &[Vec3], samples_per_segment: u32) -> Vec<Vec2
     out
 }
 
+/// The dense XZ polyline [`build_road_path_with`] follows through
+/// `control_points`: every station it emits lies on it, so its bounding box
+/// holds the whole path. Terrain layers take their footprint from it before
+/// any elevation is sampled.
+pub(crate) fn dense_path_xz(control_points: &[Vec3]) -> Vec<Vec2> {
+    sample_path_xz(control_points, CATMULL_ROM_SAMPLES)
+}
+
 /// One station along the road's arc length.
 #[derive(Clone, Copy, Debug)]
 pub struct RoadStation {
@@ -191,25 +196,52 @@ pub struct RoadStation {
 }
 
 /// A fully-resolved road path: densely arc-length-sampled stations carrying
-/// a smoothed elevation profile, ready for terrain-conform or ribbon-mesh
+/// a smoothed elevation profile, ready for a corridor bake or ribbon-mesh
 /// generation.
 pub struct RoadPath {
     pub stations: Vec<RoadStation>,
     pub total_length: f32,
 }
 
-/// Build a [`RoadPath`] from control points against `baseline` terrain
-/// (elevation knots are sampled from `baseline`, NEVER from `data` being
-/// actively edited — see module docs on why conform always reads a
-/// pristine snapshot). `station_spacing` governs stamp/render density
-/// (~1-2 m is reasonable); `elevation_knot_spacing` governs how coarsely the
-/// SMOOTHED profile is fit (~10-20 m — finer just reproduces terrain bumps).
-pub fn build_road_path(
-    config: &TerrainConfig,
-    baseline: &TerrainData,
+impl RoadPath {
+    /// The path through `positions`, world points in path order with the
+    /// profile as their Y (the stations a layer bake carved a corridor
+    /// along): arc length measured in XZ, as [`build_road_path_with`]
+    /// measures it, and each tangent the XZ direction from the point before
+    /// to the point after, one-sided at the ends. `None` for fewer than two
+    /// points, a point that is not finite, or a path with no length.
+    pub fn from_positions(positions: &[Vec3]) -> Option<RoadPath> {
+        if positions.len() < 2 || positions.iter().any(|p| !p.is_finite()) {
+            return None;
+        }
+        let xz = |p: Vec3| Vec2::new(p.x, p.z);
+        let last = positions.len() - 1;
+        let mut s = 0.0f32;
+        let mut stations = Vec::with_capacity(positions.len());
+        for (i, &pos) in positions.iter().enumerate() {
+            if i > 0 {
+                s += (xz(pos) - xz(positions[i - 1])).length();
+            }
+            let tangent = (xz(positions[(i + 1).min(last)]) - xz(positions[i.saturating_sub(1)])).normalize_or_zero();
+            stations.push(RoadStation { s, pos, tangent });
+        }
+        (s >= 1e-3).then_some(RoadPath { stations, total_length: s })
+    }
+}
+
+/// Build a [`RoadPath`] from control points, with the ground its extra
+/// elevation knots sample supplied as `ground(world_x, world_z)`, called once
+/// per knot in path order. `station_spacing` governs corridor and render
+/// density (~1-2 m is reasonable); `elevation_knot_spacing` governs how
+/// coarsely the SMOOTHED profile is fit (~10-20 m; finer just reproduces
+/// terrain bumps). Terrain layers pass the ground as the layers ordered
+/// before them leave it, so a road laid over a noise layer follows the noisy
+/// ground rather than the raster underneath.
+pub fn build_road_path_with(
     control_points: &[Vec3],
     station_spacing: f32,
     elevation_knot_spacing: f32,
+    mut ground: impl FnMut(f32, f32) -> f32,
 ) -> Option<RoadPath> {
     if control_points.len() < 2 || station_spacing <= 0.0 {
         return None;
@@ -269,7 +301,7 @@ pub fn build_road_path(
                 let sub_s = s + span * k as f32 / (sub_knots + 1) as f32;
                 let xz = sample_polyline_at_arclength(&dense, &cum, sub_s);
                 knot_s.push(sub_s);
-                knot_h.push(height_at_world(config, baseline, xz.x, xz.y));
+                knot_h.push(ground(xz.x, xz.y));
             }
         }
     }
@@ -309,7 +341,7 @@ fn sample_polyline_at_arclength(pts: &[Vec2], cum: &[f32], s: f32) -> Vec2 {
 }
 
 // ============================================================================
-// Terrain conform — closest-approach corridor stamp
+// Drivable surface: ribbon mesh and collision boxes
 // ============================================================================
 
 /// Road cross-section parameters.
@@ -317,8 +349,8 @@ fn sample_polyline_at_arclength(pts: &[Vec2], cum: &[f32], s: f32) -> Vec2 {
 pub struct RoadProfile {
     /// Half-width of the flat driving bed (metres).
     pub half_width: f32,
-    /// Extra distance beyond `half_width` over which the shoulder
-    /// smoothsteps back down to the untouched baseline.
+    /// Width of the shoulder beyond `half_width` over which the corridor
+    /// blends back into the ground (metres).
     pub shoulder_falloff: f32,
 }
 
@@ -328,93 +360,45 @@ impl Default for RoadProfile {
     }
 }
 
-/// Result of a terrain-conform pass, for UI feedback.
-#[derive(Debug, Default)]
-pub struct ConformResult {
-    pub cells_written: usize,
+/// How much longer than its segment each collision box is, metres, so
+/// neighbouring boxes overlap rather than leave a seam where the road bends.
+const SEGMENT_OVERLAP: f32 = 0.1;
+
+/// One box of a road's collision surface.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct RoadSegmentBox {
+    /// World centre of the box.
+    pub center: Vec3,
+    /// Local -Z runs along the road, local +Y is up the road's grade.
+    pub rotation: Quat,
+    /// Full side lengths along local X (across the bed), Y and Z (along it).
+    pub size: Vec3,
 }
 
-/// Stamp `path` into `data` (mutated), reading ONLY from `baseline` (never
-/// from `data`) — every call is a fresh re-stamp from the pristine terrain,
-/// so repeated Apply presses after moving a node never compound into a
-/// trench. Resolves each texel by its SINGLE closest station (not every
-/// station within range) to avoid ridging on the inside of tight turns.
-///
-/// `cell_size` should match the terrain's own cell spacing
-/// (`chunk_size / chunk_resolution`) — finer sampling wastes work, coarser
-/// leaves gaps.
-pub fn conform_terrain_to_road(
-    config: &TerrainConfig,
-    baseline: &TerrainData,
-    data: &mut TerrainData,
-    path: &RoadPath,
-    profile: RoadProfile,
-    cell_size: f32,
-) -> ConformResult {
-    let mut result = ConformResult::default();
-    if path.stations.len() < 2 || cell_size <= 0.0 {
-        return result;
-    }
-
-    let reach = profile.half_width + profile.shoulder_falloff;
-
-    // World-space AABB of the path expanded by the corridor's full reach.
-    let (mut min_x, mut max_x, mut min_z, mut max_z) = (f32::MAX, f32::MIN, f32::MAX, f32::MIN);
-    for st in &path.stations {
-        min_x = min_x.min(st.pos.x - reach);
-        max_x = max_x.max(st.pos.x + reach);
-        min_z = min_z.min(st.pos.z - reach);
-        max_z = max_z.max(st.pos.z + reach);
-    }
-
-    let mut x = min_x;
-    while x <= max_x {
-        let mut z = min_z;
-        while z <= max_z {
-            // Closest-approach: scan stations for the nearest one (linear —
-            // fine for a single mountain road's station count; a coarse
-            // spatial bucket over stations is the natural follow-up if this
-            // ever needs to run on a much longer road).
-            let mut best_dist_sq = f32::MAX;
-            let mut best_station: Option<&RoadStation> = None;
-            for st in &path.stations {
-                let d = Vec2::new(x - st.pos.x, z - st.pos.z).length_squared();
-                if d < best_dist_sq {
-                    best_dist_sq = d;
-                    best_station = Some(st);
-                }
+/// The boxes a collider chains along `path` so a wheel meets the surface
+/// [`build_ribbon_mesh`] draws with the same `lift`: one per pair of
+/// stations, as wide as the bed, `thickness` thick with its top face `lift`
+/// above the profile and the rest in the ground (so a fast wheel cannot pass
+/// through), and [`SEGMENT_OVERLAP`] longer than its segment.
+pub fn ribbon_segments(path: &RoadPath, profile: RoadProfile, lift: f32, thickness: f32) -> Vec<RoadSegmentBox> {
+    path.stations
+        .windows(2)
+        .filter_map(|pair| {
+            let along = pair[1].pos - pair[0].pos;
+            let length = along.length();
+            if !(length > 1e-4) {
+                return None;
             }
-            if let Some(st) = best_station {
-                // Signed lateral offset from the path centerline at this station.
-                let to_point = Vec2::new(x - st.pos.x, z - st.pos.z);
-                let normal = Vec2::new(-st.tangent.y, st.tangent.x);
-                let lateral = to_point.dot(normal).abs();
-
-                if lateral <= reach {
-                    let baseline_h = height_at_world(config, baseline, x, z);
-                    let (target_h, weight, channel) = if lateral <= profile.half_width {
-                        (st.pos.y, 1.0, 2usize) // flat bed, full overwrite, dirt
-                    } else {
-                        let t = (lateral - profile.half_width) / profile.shoulder_falloff.max(1e-3);
-                        let blend = 1.0 - smoothstep(t); // 1 at bed edge, 0 at baseline
-                        (st.pos.y * blend + baseline_h * (1.0 - blend), blend.max(0.05), 1usize) // rock shoulder
-                    };
-                    set_height_at_world(config, data, x, z, target_h, weight);
-                    set_splat_at_world(config, data, x, z, channel, weight);
-                    result.cells_written += 1;
-                }
-            }
-            z += cell_size;
-        }
-        x += cell_size;
-    }
-
-    result
+            let rotation = Transform::IDENTITY.looking_to(along / length, Vec3::Y).rotation;
+            let up = rotation * Vec3::Y;
+            Some(RoadSegmentBox {
+                center: (pair[0].pos + pair[1].pos) * 0.5 + up * (lift - thickness * 0.5),
+                rotation,
+                size: Vec3::new(profile.half_width * 2.0, thickness, length + SEGMENT_OVERLAP),
+            })
+        })
+        .collect()
 }
-
-// ============================================================================
-// Ribbon mesh (visible/drivable surface)
-// ============================================================================
 
 /// A generated quad-strip ribbon mesh along the road path.
 pub struct RoadRibbonMesh {
@@ -424,10 +408,10 @@ pub struct RoadRibbonMesh {
     pub indices: Vec<u32>,
 }
 
-/// Build a quad-strip ribbon (UV by arc length) slightly above the conformed
-/// bed to avoid z-fighting with the terrain mesh. This is the actual
-/// drivable surface — it carries its own collider (added by the caller, an
-/// ECS concern) because terrain colliders are disabled project-wide.
+/// Build a quad-strip ribbon (UV by arc length) `lift` above the carved bed
+/// to avoid z-fighting with the terrain mesh. This is the drivable surface:
+/// the caller gives it a collider of [`ribbon_segments`] (an ECS concern),
+/// since the terrain's own heightfield collider sits `lift` below it.
 pub fn build_ribbon_mesh(path: &RoadPath, profile: RoadProfile, lift: f32) -> RoadRibbonMesh {
     let mut positions = Vec::with_capacity(path.stations.len() * 2);
     let mut normals = Vec::with_capacity(path.stations.len() * 2);
@@ -448,8 +432,10 @@ pub fn build_ribbon_mesh(path: &RoadPath, profile: RoadProfile, lift: f32) -> Ro
 
     for i in 0..path.stations.len().saturating_sub(1) {
         let base = (i * 2) as u32;
-        // Two triangles per quad, matching the ribbon's left/right winding.
-        indices.extend_from_slice(&[base, base + 1, base + 2, base + 1, base + 3, base + 2]);
+        // Two triangles per quad, counter-clockwise seen from above (left
+        // lies on the tangent's anticlockwise side), so back-face culling
+        // keeps the top face.
+        indices.extend_from_slice(&[base, base + 2, base + 1, base + 1, base + 2, base + 3]);
     }
 
     RoadRibbonMesh { positions, normals, uvs, indices }
@@ -458,26 +444,6 @@ pub fn build_ribbon_mesh(path: &RoadPath, profile: RoadProfile, lift: f32) -> Ro
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn test_config() -> TerrainConfig {
-        TerrainConfig {
-            chunk_size: 64.0,
-            chunk_resolution: 32,
-            chunks_x: 4,
-            chunks_z: 4,
-            lod_levels: 1,
-            lod_distances: vec![64.0],
-            view_distance: 512.0,
-            height_scale: 50.0,
-            seed: 1,
-        }
-    }
-
-    fn flat_data(config: &TerrainConfig) -> TerrainData {
-        let mut data = TerrainData::procedural();
-        data.resize_cache(config);
-        data
-    }
 
     #[test]
     fn spline_build_eval_passes_through_knots() {
@@ -505,58 +471,74 @@ mod tests {
     }
 
     #[test]
-    fn build_road_path_produces_stations_spanning_full_length() {
-        let config = test_config();
-        let data = flat_data(&config);
+    fn build_road_path_with_produces_stations_spanning_full_length() {
         let pts = vec![
             Vec3::new(-20.0, 0.0, 0.0),
             Vec3::new(0.0, 0.0, 10.0),
             Vec3::new(20.0, 0.0, 0.0),
         ];
-        let path = build_road_path(&config, &data, &pts, 2.0, 15.0).expect("should build");
+        let path = build_road_path_with(&pts, 2.0, 15.0, |_, _| 0.0).expect("should build");
         assert!(path.total_length > 0.0);
         assert!((path.stations.first().unwrap().s - 0.0).abs() < 1e-3);
         assert!((path.stations.last().unwrap().s - path.total_length).abs() < 1e-3);
     }
 
     #[test]
-    fn conform_flattens_bed_and_preserves_far_field() {
-        let config = test_config();
-        let baseline = flat_data(&config);
-        let mut data = flat_data(&config);
-        let pts = vec![Vec3::new(-30.0, 10.0, 0.0), Vec3::new(0.0, 10.0, 0.0), Vec3::new(30.0, 10.0, 0.0)];
-        let path = build_road_path(&config, &baseline, &pts, 2.0, 15.0).expect("should build");
-        let profile = RoadProfile { half_width: 4.0, shoulder_falloff: 6.0 };
-        let cell_size = config.chunk_size / config.chunk_resolution as f32;
-        let result = conform_terrain_to_road(&config, &baseline, &mut data, &path, profile, cell_size);
-        assert!(result.cells_written > 0);
+    fn a_path_through_stations_measures_xz_and_takes_neighbour_tangents() {
+        let path = RoadPath::from_positions(&[
+            Vec3::new(0.0, 1.0, 0.0),
+            Vec3::new(3.0, 5.0, 4.0),
+            Vec3::new(6.0, 5.0, 8.0),
+        ])
+        .expect("a path");
+        assert_eq!(path.stations.len(), 3);
+        assert!((path.stations[1].s - 5.0).abs() < 1e-5, "arc length is measured in XZ");
+        assert!((path.total_length - 10.0).abs() < 1e-5);
+        assert_eq!(path.stations[1].pos, Vec3::new(3.0, 5.0, 4.0), "the profile is the points' own Y");
+        for station in &path.stations {
+            assert!((station.tangent - Vec2::new(0.6, 0.8)).length() < 1e-5, "{:?}", station.tangent);
+        }
 
-        // On the centerline, height should read close to the road's target (10.0).
-        let bed_h = height_at_world(&config, &data, 0.0, 0.0);
-        assert!((bed_h - 10.0).abs() < 2.0, "expected bed near 10.0, got {bed_h}");
-
-        // Far outside the corridor, height should remain the untouched baseline (0.0).
-        let far_h = height_at_world(&config, &data, 0.0, 200.0);
-        assert!(far_h.abs() < 1.0, "expected far-field untouched near 0.0, got {far_h}");
+        assert!(RoadPath::from_positions(&[Vec3::ZERO]).is_none());
+        assert!(RoadPath::from_positions(&[Vec3::ONE, Vec3::ONE + Vec3::Y]).is_none(), "no length on the ground");
+        assert!(RoadPath::from_positions(&[Vec3::ZERO, Vec3::new(f32::NAN, 0.0, 0.0)]).is_none());
     }
 
     #[test]
-    fn reapply_from_baseline_does_not_dig_trench() {
-        let config = test_config();
-        let baseline = flat_data(&config);
-        let mut data = flat_data(&config);
-        let pts = vec![Vec3::new(-30.0, 10.0, 0.0), Vec3::new(30.0, 10.0, 0.0)];
-        let path = build_road_path(&config, &baseline, &pts, 2.0, 15.0).expect("should build");
-        let profile = RoadProfile::default();
-        let cell_size = config.chunk_size / config.chunk_resolution as f32;
+    fn the_ribbon_faces_up_and_its_boxes_meet_it() {
+        let path = RoadPath::from_positions(&[
+            Vec3::new(0.0, 10.0, 0.0),
+            Vec3::new(10.0, 10.0, 0.0),
+            Vec3::new(20.0, 12.0, 0.0),
+        ])
+        .expect("a path");
+        let profile = RoadProfile { half_width: 4.0, shoulder_falloff: 2.0 };
 
-        conform_terrain_to_road(&config, &baseline, &mut data, &path, profile, cell_size);
-        let first_pass = height_at_world(&config, &data, 0.0, 0.0);
-        // Re-apply several times — always from `baseline`, into the ALREADY-carved `data`.
-        for _ in 0..5 {
-            conform_terrain_to_road(&config, &baseline, &mut data, &path, profile, cell_size);
+        let mesh = build_ribbon_mesh(&path, profile, 0.05);
+        assert_eq!(mesh.indices.len(), 12);
+        let at = |i: u32| Vec3::from(mesh.positions[i as usize]);
+        for triangle in mesh.indices.chunks(3) {
+            let normal = (at(triangle[1]) - at(triangle[0])).cross(at(triangle[2]) - at(triangle[0]));
+            assert!(normal.y > 0.0, "triangle {triangle:?} faces down, so culling hides it from above");
         }
-        let repeated_pass = height_at_world(&config, &data, 0.0, 0.0);
-        assert!((first_pass - repeated_pass).abs() < 0.5, "re-apply should not drift: {first_pass} vs {repeated_pass}");
+
+        let boxes = ribbon_segments(&path, profile, 0.05, 0.3);
+        assert_eq!(boxes.len(), 2, "one box per pair of stations");
+
+        // Level: full bed width, a little longer than the segment, the top
+        // face 5 cm above the profile.
+        let level = boxes[0];
+        assert!((level.center - Vec3::new(5.0, 9.9, 0.0)).length() < 1e-4, "{:?}", level.center);
+        assert!((level.size - Vec3::new(8.0, 0.3, 10.1)).length() < 1e-4, "{:?}", level.size);
+
+        // Climbing: local -Z along the segment, local +Y leaning back against
+        // the climb, and the top face's centre `lift` above the midpoint.
+        let climb = boxes[1];
+        let forward = climb.rotation * Vec3::NEG_Z;
+        assert!((forward - Vec3::new(10.0, 2.0, 0.0).normalize()).length() < 1e-4, "{forward:?}");
+        let up = climb.rotation * Vec3::Y;
+        assert!(up.y > 0.9 && up.x < 0.0, "{up:?}");
+        let top = climb.center + up * 0.15;
+        assert!((top - (Vec3::new(15.0, 11.0, 0.0) + up * 0.05)).length() < 1e-4, "{top:?}");
     }
 }

@@ -47,7 +47,7 @@ impl Plugin for ParticlePlugin {
                 systems::update_thermodynamics,
                 systems::update_kinematics,
                 systems::apply_particle_forces,
-            ).chain());
+            ).chain().in_set(crate::realism::PhysicsDomain::Particles));
 
         info!("ParticlePlugin initialized");
     }

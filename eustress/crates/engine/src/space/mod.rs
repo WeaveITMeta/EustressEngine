@@ -26,9 +26,15 @@ pub struct DataRecording {
 }
 
 pub mod active_db;
+/// Snapshots of a Space's database, and the revert that puts one back.
+pub mod checkpoint;
+/// Restore points: snapshots of the Space and reverting to one.
+pub mod snapshot;
 pub mod class_defaults;
 pub mod launch;
 pub mod file_loader;
+pub mod pose_anchor;
+pub mod rule_migration;
 /// Lightweight, always-compiled load-phase instrumentation (env-gated on
 /// `EUSTRESS_PROFILE`). Records wall-clock at each open→interactive
 /// milestone so the ~50s a huge import spends loading can be attributed.
@@ -37,6 +43,8 @@ pub mod file_watcher;
 pub mod gui_loader;
 pub mod instance_create;
 pub mod instance_loader;
+/// Instance Parameters: disk sync, saving edits, and reads from bound Connectors.
+pub mod parameters_runtime;
 pub mod material_loader;
 pub mod service_loader;
 pub mod draco_decoder;
@@ -62,6 +70,15 @@ pub mod world_db_binary;
 pub mod promote;
 #[cfg(feature = "world-db")]
 pub mod db_export;
+/// A world as `.echk` chunks: what publishing uploads and hosting serves.
+#[cfg(feature = "world-db")]
+pub mod echk_export;
+/// Publishing a Universe to the gallery as `.echk` chunks.
+#[cfg(feature = "world-db")]
+pub mod echk_publish;
+/// Edit on an open-source gallery listing: download its world as a new
+/// Universe and open it (`eustress://edit/<id>`).
+pub mod gallery_edit;
 #[cfg(feature = "world-db")]
 pub mod residency;
 /// Velocity-predictive streaming: prefetch along the heading, order the
@@ -116,7 +133,13 @@ pub fn skip_disk_scans() -> bool {
         .unwrap_or(false)
 }
 
-/// Resource holding the current Space root path
+/// Resource holding the current Space root path: the Space that is open.
+///
+/// Anything that reads or writes Space files resolves the Space through this
+/// resource (see [`open_space_root`]), never through [`default_space_root`],
+/// which re-reads the settings file and names the last Space the settings
+/// remember, not the one opened with `--space`, a `.eustress` launch file or
+/// an in-session switch.
 #[derive(Resource, Debug, Clone)]
 pub struct SpaceRoot(pub PathBuf);
 
@@ -124,6 +147,19 @@ impl Default for SpaceRoot {
     fn default() -> Self {
         Self(default_space_root())
     }
+}
+
+/// The open Space's root: the live [`SpaceRoot`], or the settings default
+/// when no Space has been opened yet.
+pub fn open_space_root(space_root: Option<&SpaceRoot>) -> PathBuf {
+    space_root.map(|r| r.0.clone()).unwrap_or_else(default_space_root)
+}
+
+/// The Space an app is being built for, for plugins that load Space files in
+/// `Plugin::build`: the [`SpaceRoot`] the shell inserted from its launch
+/// arguments, else the settings default.
+pub fn open_space_root_of(app: &App) -> PathBuf {
+    open_space_root(app.world().get_resource::<SpaceRoot>())
 }
 
 pub fn workspace_root() -> PathBuf {
@@ -248,7 +284,17 @@ pub fn looks_like_space_root(path: &Path) -> bool {
 /// destructive surface (Delete shortcut, Explorer Cut, MCP
 /// `delete_entity`, future bulk-trash flows) to refuse the operation
 /// up front with a clear toast rather than silently corrupting state.
+///
+/// A terrain's data directory, `Workspace/Terrain`, is protected the same
+/// way, with the entries directly in it (see
+/// `eustress_common::terrain::layer_instances::is_terrain_data_path`):
+/// trashing it takes the heightmaps, material maps and every layer in one
+/// rename while the terrain stays alive in memory, and the next open finds
+/// no terrain. Clear Terrain is how a terrain goes.
 pub fn is_protected_service_path(path: &Path) -> bool {
+    if eustress_common::terrain::layer_instances::is_terrain_data_path(path) {
+        return true;
+    }
     // Direct `_service.toml` file — services are loaded with
     // `LoadedFromFile.path = .../<Service>/_service.toml` (see
     // `service_loader::spawn_service`), so this is the path Delete

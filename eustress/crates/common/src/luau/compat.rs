@@ -463,11 +463,15 @@ pub struct ScriptTransformer;
 /// keyed by the value-object's `Name`. That `Name` goes into [`names`](Self::names).
 /// The subset that were `ObjectValue` (an instance reference, stored as a UUID
 /// string attribute) additionally go into [`ref_names`](Self::ref_names) so reads
-/// can be wrapped in the `FindByUUID` resolver.
+/// can be wrapped in the `FindByUUID` resolver. The subset that were
+/// `IntConstrainedValue` or `DoubleConstrainedValue` go into
+/// [`range_names`](Self::range_names): their range was folded beside the value
+/// as `<Name>_MinValue` and `<Name>_MaxValue`.
 #[derive(Debug, Clone, Default)]
 pub struct ValueObjectContext {
     pub names: std::collections::HashSet<String>,     // all converted value-object Names
     pub ref_names: std::collections::HashSet<String>, // subset that were ObjectValue
+    pub range_names: std::collections::HashSet<String>, // subset that were *ConstrainedValue
 }
 
 impl ScriptTransformer {
@@ -545,6 +549,10 @@ impl ScriptTransformer {
     /// - `X.Name.Changed:Connect(F)`            → `X:GetAttributeChangedSignal("Name"):Connect(F)`
     /// - `X.Name:GetPropertyChangedSignal("Value"):Connect(F)`
     ///                                          → `X:GetAttributeChangedSignal("Name"):Connect(F)`
+    /// - for a constrained value (`vo.range_names`): `X.Name.MinValue` and
+    ///   `X.Name.MaxValue` → `X:GetAttribute("Name_MinValue")` and
+    ///   `X:GetAttribute("Name_MaxValue")`, assignments → `SetAttribute`, and
+    ///   `X.Name.ConstrainedValue` like `X.Name.Value`
     ///
     /// For names that were `ObjectValue` (`vo.ref_names`), a value READ is
     /// additionally wrapped in the runtime resolver
@@ -578,9 +586,21 @@ impl ScriptTransformer {
         result
     }
 
-    /// Core value-object rewrite pass (CONTRACT D). String/substring based to
-    /// match the rest of this transformer; best-effort about skipping string
-    /// literals and comments (see `line_is_skippable`).
+    /// Core value-object rewrite pass (CONTRACT D). String based, like the
+    /// rest of this transformer; whole-line comments are skipped.
+    ///
+    /// Every rewrite works on the SUFFIX that reaches the value object
+    /// (`.Name.Value`, `:WaitForChild("Name").Value`, ...), so the receiver
+    /// may be any expression, a call chain included:
+    /// `A:WaitForChild("B"):WaitForChild("Name").Value` becomes
+    /// `A:WaitForChild("B"):GetAttribute("Name")`. The receiver is needed only
+    /// to read the value again for a compound assignment and to wrap an
+    /// ObjectValue read in `FindByUUID`; a receiver that is not a plain
+    /// dotted name is not duplicated, and those two forms get a warning.
+    ///
+    /// The context holds every value object's name in the place (thousands);
+    /// each line tries only the names it mentions, in sorted order, so the
+    /// output does not depend on hash order.
     ///
     /// Returns the rewritten source, the number of substitutions made (each
     /// counts toward `TransformResult.changes`), and any warnings raised for
@@ -591,14 +611,6 @@ impl ScriptTransformer {
     ) -> (String, u32, Vec<TransformWarning>) {
         let mut changes = 0u32;
         let mut warnings: Vec<TransformWarning> = Vec::new();
-
-        // The "receiver" preceding `.Name` / `:FindFirstChild(...)` — a dotted
-        // identifier chain like `game.Workspace.Cfg` or a bare `script`. We do
-        // NOT try to parse Luau; we greedily capture the identifier/`.`/`_`
-        // run immediately to the left of the match site.
-        //
-        // Process the source line-by-line so we can (a) cheaply skip full-line
-        // comments and (b) attach 1-based line numbers to warnings.
         let mut out_lines: Vec<String> = Vec::with_capacity(source.lines().count());
 
         for (idx, raw_line) in source.lines().enumerate() {
@@ -609,17 +621,18 @@ impl ScriptTransformer {
                 out_lines.push(raw_line.to_string());
                 continue;
             }
+            let names = Self::names_on_line(raw_line, vo);
+            if names.is_empty() {
+                out_lines.push(raw_line.to_string());
+                continue;
+            }
 
             let mut line = raw_line.to_string();
-
-            for name in &vo.names {
+            for name in names {
                 let is_ref = vo.ref_names.contains(name);
 
-                // ---- Detect unsafe constructs (warn, do NOT rewrite) ----------
-                // 1. value-object captured into a local: `local x = <recv>.Name`
-                //    that is NOT immediately followed by `.Value` / `.Changed` /
-                //    `:GetPropertyChangedSignal`. Such a local is later used as
-                //    `x.Value`, which we cannot trace here.
+                // A value object captured into a local (`local v = obj.Name`)
+                // is later used as `v.Value`, which cannot be traced here.
                 if Self::has_unsafe_local_capture(&line, name) {
                     warnings.push(TransformWarning {
                         line: Some(line_no),
@@ -632,65 +645,64 @@ impl ScriptTransformer {
                     });
                 }
 
-                // ---- Ordered rewrites (longest / most specific first) ---------
-
-                // A) Observer: `<recv>.Name.Changed:Connect`
-                //    → `<recv>:GetAttributeChangedSignal("Name"):Connect`
-                let pat_changed = format!(".{name}.Changed");
-                changes += Self::replace_with_receiver(
-                    &mut line,
-                    &pat_changed,
-                    |recv| format!("{recv}:GetAttributeChangedSignal(\"{name}\")"),
-                );
-
-                // B) Observer: `<recv>.Name:GetPropertyChangedSignal("Value")`
-                //    → `<recv>:GetAttributeChangedSignal("Name")`
-                //    (accept both quote styles)
+                // Observers: `.Name.Changed` and
+                // `.Name:GetPropertyChangedSignal("Value")` →
+                // `:GetAttributeChangedSignal("Name")`.
+                let signal = format!(":GetAttributeChangedSignal(\"{name}\")");
+                changes += Self::replace_suffix(&mut line, &format!(".{name}.Changed"), &signal);
                 for q in ['"', '\''] {
-                    let pat_gpcs = format!(".{name}:GetPropertyChangedSignal({q}Value{q})");
-                    changes += Self::replace_with_receiver(
+                    changes += Self::replace_suffix(
                         &mut line,
-                        &pat_gpcs,
-                        |recv| format!("{recv}:GetAttributeChangedSignal(\"{name}\")"),
+                        &format!(".{name}:GetPropertyChangedSignal({q}Value{q})"),
+                        &signal,
                     );
                 }
 
-                // C) FindFirstChild / WaitForChild read:
-                //    `<recv>:FindFirstChild("Name").Value` → read form
-                //    `<recv>:WaitForChild("Name").Value`   → read form
+                // The value itself, through a member or a child lookup.
+                let mut markers = vec![format!(".{name}.Value")];
                 for method in ["FindFirstChild", "WaitForChild"] {
                     for q in ['"', '\''] {
-                        let pat_find = format!(":{method}({q}{name}{q}).Value");
-                        changes += Self::replace_with_receiver(
-                            &mut line,
-                            &pat_find,
-                            |recv| Self::read_expr(recv, name, is_ref),
-                        );
+                        markers.push(format!(":{method}({q}{name}{q}).Value"));
                     }
                 }
+                for marker in &markers {
+                    changes += Self::rewrite_value_access(
+                        &mut line,
+                        marker,
+                        name,
+                        is_ref,
+                        &mut warnings,
+                        line_no,
+                    );
+                }
 
-                // D) Assignment: `<recv>.Name.Value = V` → SetAttribute form.
-                //    MUST run before the bare-read rule (E) so we don't first
-                //    turn the LHS into a GetAttribute call.
-                let assign_marker = format!(".{name}.Value");
-                changes += Self::replace_assignment_with_receiver(
-                    &mut line,
-                    &assign_marker,
-                    name,
-                    is_ref,
-                    &mut warnings,
-                    line_no,
-                );
-
-                // E) Bare read: `<recv>.Name.Value` → read form.
-                let pat_read = format!(".{name}.Value");
-                changes += Self::replace_with_receiver(
-                    &mut line,
-                    &pat_read,
-                    |recv| Self::read_expr(recv, name, is_ref),
-                );
+                // A constrained value's range was folded beside it, and
+                // `ConstrainedValue` is another name for its value.
+                if vo.range_names.contains(name) {
+                    for (member, attribute) in [
+                        ("ConstrainedValue", name.to_string()),
+                        ("MinValue", format!("{name}_MinValue")),
+                        ("MaxValue", format!("{name}_MaxValue")),
+                    ] {
+                        let mut markers = vec![format!(".{name}.{member}")];
+                        for method in ["FindFirstChild", "WaitForChild"] {
+                            for q in ['"', '\''] {
+                                markers.push(format!(":{method}({q}{name}{q}).{member}"));
+                            }
+                        }
+                        for marker in &markers {
+                            changes += Self::rewrite_value_access(
+                                &mut line,
+                                marker,
+                                &attribute,
+                                false,
+                                &mut warnings,
+                                line_no,
+                            );
+                        }
+                    }
+                }
             }
-
             out_lines.push(line);
         }
 
@@ -700,11 +712,230 @@ impl ScriptTransformer {
             rewritten.push('\n');
         }
 
-        // Runtime-created value objects and value-objects-as-arguments are
-        // global (not per-name) concerns — scan the whole source once.
+        // Runtime-created value objects are a whole-source concern.
         Self::warn_runtime_value_objects(source, &mut warnings);
 
         (rewritten, changes, warnings)
+    }
+
+    /// The folded value-object names a line mentions, in sorted order: its
+    /// identifiers, and the contents of its string literals (a name reached
+    /// through `FindFirstChild("Car Spawn Delay")` may hold spaces).
+    fn names_on_line<'a>(line: &str, vo: &'a ValueObjectContext) -> Vec<&'a String> {
+        let mut found: std::collections::BTreeSet<&'a String> = std::collections::BTreeSet::new();
+        for token in line.split(|c: char| !(c.is_ascii_alphanumeric() || c == '_')) {
+            if let Some(name) = vo.names.get(token) {
+                found.insert(name);
+            }
+        }
+        for q in ['"', '\''] {
+            let mut rest = line;
+            while let Some(open) = rest.find(q) {
+                let after = &rest[open + 1..];
+                let Some(close) = after.find(q) else { break };
+                if let Some(name) = vo.names.get(&after[..close]) {
+                    found.insert(name);
+                }
+                rest = &after[close + 1..];
+            }
+        }
+        found.into_iter().collect()
+    }
+
+    /// Replace every occurrence of `marker` that is not followed by an
+    /// identifier character (so `.Name.ChangedX` is left alone) with
+    /// `replacement`. Returns the number of replacements.
+    fn replace_suffix(line: &mut String, marker: &str, replacement: &str) -> u32 {
+        let mut changes = 0u32;
+        let mut search_from = 0usize;
+        while let Some(rel) = line[search_from..].find(marker) {
+            let start = search_from + rel;
+            let end = start + marker.len();
+            if Self::continues_identifier(line, end) {
+                search_from = end;
+                continue;
+            }
+            line.replace_range(start..end, replacement);
+            changes += 1;
+            search_from = start + replacement.len();
+        }
+        changes
+    }
+
+    /// Whether the character at byte `at` continues an identifier.
+    fn continues_identifier(line: &str, at: usize) -> bool {
+        line[at..]
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_ascii_alphanumeric() || c == '_')
+    }
+
+    /// Rewrite every use of one value marker (`.Name.Value`,
+    /// `:FindFirstChild("Name").Value`, ...) on a line:
+    ///
+    /// - `<m> = V`   → `:SetAttribute("Name", V)`
+    /// - `<m> += V`  → `:SetAttribute("Name", <recv>:GetAttribute("Name") + (V))`
+    ///   (every compound operator; needs a plain dotted receiver)
+    /// - `<m>`       → `:GetAttribute("Name")`, or for an ObjectValue
+    ///   `FindByUUID(<recv>:GetAttribute("Name"))` (needs a plain receiver)
+    ///
+    /// An assigned value ends at a `;` or a `--` comment outside brackets and
+    /// strings, which stay after the rewrite; a value that continues on the
+    /// next line is not rewritten and gets a warning. For an ObjectValue the
+    /// stored value is the referent's UUID (a warning notes the loss).
+    fn rewrite_value_access(
+        line: &mut String,
+        marker: &str,
+        name: &str,
+        is_ref: bool,
+        warnings: &mut Vec<TransformWarning>,
+        line_no: u32,
+    ) -> u32 {
+        const COMPOUND: [&str; 8] = ["//=", "..=", "+=", "-=", "*=", "/=", "%=", "^="];
+        let mut changes = 0u32;
+        let mut search_from = 0usize;
+        while let Some(rel) = line[search_from..].find(marker) {
+            let m_start = search_from + rel;
+            let m_end = m_start + marker.len();
+            // `.Name.ValueMap` is another member.
+            if Self::continues_identifier(line, m_end) {
+                search_from = m_end;
+                continue;
+            }
+            let after = &line[m_end..];
+            let trimmed = after.trim_start();
+            let op_at = m_end + (after.len() - trimmed.len());
+            let compound = COMPOUND.iter().copied().find(|op| trimmed.starts_with(op));
+            let plain = compound.is_none() && trimmed.starts_with('=') && !trimmed.starts_with("==");
+
+            if plain || compound.is_some() {
+                let op_len = compound.map_or(1, str::len);
+                let rhs_start = op_at + op_len;
+                let Some(rhs_end) = Self::expression_end(line, rhs_start) else {
+                    warnings.push(TransformWarning {
+                        line: Some(line_no),
+                        message: format!(
+                            "The value assigned to value-object '{name}' continues on the next \
+                             line; rewrite it by hand as `obj:SetAttribute(\"{name}\", value)`.",
+                        ),
+                        severity: WarningSeverity::Warning,
+                    });
+                    search_from = m_end;
+                    continue;
+                };
+                let rhs = line[rhs_start..rhs_end].trim().to_string();
+                let value = match compound {
+                    None => rhs,
+                    Some(op) => {
+                        let recv_start = Self::receiver_start(line, m_start);
+                        if is_ref || recv_start == m_start {
+                            warnings.push(TransformWarning {
+                                line: Some(line_no),
+                                message: format!(
+                                    "Compound assignment to value-object '{name}' through a \
+                                     call result can't be rewritten; write \
+                                     `obj:SetAttribute(\"{name}\", obj:GetAttribute(\"{name}\") ...)`.",
+                                ),
+                                severity: WarningSeverity::Warning,
+                            });
+                            search_from = m_end;
+                            continue;
+                        }
+                        let receiver = &line[recv_start..m_start];
+                        format!(
+                            "{receiver}:GetAttribute(\"{name}\") {} ({rhs})",
+                            &op[..op.len() - 1]
+                        )
+                    }
+                };
+                let value = if is_ref {
+                    warnings.push(TransformWarning {
+                        line: Some(line_no),
+                        message: format!(
+                            "Assignment to ObjectValue '{name}' stores only the referent's UUID \
+                             (live-instance reference is lossy); rewritten to \
+                             `:SetAttribute(\"{name}\", inst and inst:GetUuid() or \"\")`. \
+                             Verify the right-hand side is an Instance.",
+                        ),
+                        severity: WarningSeverity::Warning,
+                    });
+                    format!("({value}) and ({value}):GetUuid() or \"\"")
+                } else {
+                    value
+                };
+                // Keep the spacing that separated the value from what follows.
+                let tail_gap = &line[rhs_start..rhs_end];
+                let gap = &tail_gap[tail_gap.trim_end().len()..];
+                let replacement = format!(":SetAttribute(\"{name}\", {value}){gap}");
+                line.replace_range(m_start..rhs_end, &replacement);
+                changes += 1;
+                search_from = m_start + replacement.len();
+                continue;
+            }
+
+            // A read.
+            if is_ref {
+                let recv_start = Self::receiver_start(line, m_start);
+                if recv_start == m_start {
+                    warnings.push(TransformWarning {
+                        line: Some(line_no),
+                        message: format!(
+                            "ObjectValue '{name}' is read through a call result; wrap it by \
+                             hand as `FindByUUID(obj:GetAttribute(\"{name}\"))`.",
+                        ),
+                        severity: WarningSeverity::Warning,
+                    });
+                    search_from = m_end;
+                    continue;
+                }
+                let receiver = line[recv_start..m_start].to_string();
+                let replacement = Self::read_expr(&receiver, name, true);
+                line.replace_range(recv_start..m_end, &replacement);
+                changes += 1;
+                search_from = recv_start + replacement.len();
+            } else {
+                let replacement = format!(":GetAttribute(\"{name}\")");
+                line.replace_range(m_start..m_end, &replacement);
+                changes += 1;
+                search_from = m_start + replacement.len();
+            }
+        }
+        changes
+    }
+
+    /// Where the expression starting at byte `from` ends on this line: at a
+    /// `;` or a `--` comment outside brackets and strings, else the line's
+    /// end. `None` when a bracket is still open at the end of the line (the
+    /// expression continues on the next one).
+    fn expression_end(line: &str, from: usize) -> Option<usize> {
+        let bytes = line.as_bytes();
+        let mut depth = 0i32;
+        let mut quote: Option<u8> = None;
+        let mut i = from;
+        while i < bytes.len() {
+            let c = bytes[i];
+            if let Some(q) = quote {
+                if c == b'\\' {
+                    i += 2;
+                    continue;
+                }
+                if c == q {
+                    quote = None;
+                }
+                i += 1;
+                continue;
+            }
+            match c {
+                b'"' | b'\'' => quote = Some(c),
+                b'(' | b'[' | b'{' => depth += 1,
+                b')' | b']' | b'}' => depth -= 1,
+                b';' if depth == 0 => return Some(i),
+                b'-' if depth == 0 && bytes.get(i + 1) == Some(&b'-') => return Some(i),
+                _ => {}
+            }
+            i += 1;
+        }
+        (depth <= 0 && quote.is_none()).then_some(bytes.len())
     }
 
     /// Build the read-side expression for a value-object access.
@@ -717,137 +948,6 @@ impl ScriptTransformer {
         } else {
             format!("{recv}:GetAttribute(\"{name}\")")
         }
-    }
-
-    /// Find every occurrence of `marker` in `line`, capture the receiver
-    /// expression immediately to its left, and replace
-    /// `<receiver><marker>` with `make(receiver)`. Returns the number of
-    /// replacements performed.
-    ///
-    /// The receiver is the maximal run of `[A-Za-z0-9_.]` ending at the marker
-    /// (so `game.Workspace.Cfg.Name.Value` captures receiver
-    /// `game.Workspace.Cfg`). A leading `:` / call-paren just before the run is
-    /// NOT consumed, so method-call results like `…):Foo` are left intact.
-    fn replace_with_receiver<F>(line: &mut String, marker: &str, make: F) -> u32
-    where
-        F: Fn(&str) -> String,
-    {
-        let mut changes = 0u32;
-        // Scan forward; `search_from` advances past every occurrence (rewritten
-        // or skipped) so the loop always terminates. None of the replacement
-        // forms re-contain their own marker, so a rewrite never re-matches.
-        let mut search_from = 0usize;
-        loop {
-            let Some(rel) = line[search_from..].find(marker) else { break };
-            let m_start = search_from + rel;
-
-            // Capture receiver: walk left over identifier/dot chars.
-            let recv_start = Self::receiver_start(line, m_start);
-            if recv_start == m_start {
-                // No receiver to the left (e.g. marker at line start or after a
-                // bare operator) — cannot safely rewrite; skip past this marker
-                // and keep scanning for later valid occurrences.
-                search_from = m_start + marker.len();
-                continue;
-            }
-
-            let receiver = line[recv_start..m_start].to_string();
-            let replacement = make(&receiver);
-            let m_end = m_start + marker.len();
-            line.replace_range(recv_start..m_end, &replacement);
-            changes += 1;
-            // Resume scanning after the inserted text.
-            search_from = recv_start + replacement.len();
-        }
-        changes
-    }
-
-    /// Like [`replace_with_receiver`](Self::replace_with_receiver) but for the
-    /// assignment form `<receiver>.Name.Value = V`. Only rewrites when the
-    /// marker is followed (after optional whitespace) by a single `=` that is
-    /// NOT part of `==`, `~=`, `<=`, `>=` (i.e. a real assignment, not a
-    /// comparison). Produces `<receiver>:SetAttribute("Name", V)`.
-    ///
-    /// For ObjectValue names, `V` is wrapped so a live instance is stored as
-    /// its UUID: `recv:SetAttribute("Name", V and V:GetUuid() or "")`, and a
-    /// lossy-assignment warning is recorded.
-    fn replace_assignment_with_receiver(
-        line: &mut String,
-        marker: &str,
-        name: &str,
-        is_ref: bool,
-        warnings: &mut Vec<TransformWarning>,
-        line_no: u32,
-    ) -> u32 {
-        let mut changes = 0u32;
-        let mut search_from = 0usize;
-        loop {
-            let Some(rel) = line[search_from..].find(marker) else { break };
-            let m_start = search_from + rel;
-            let m_end = m_start + marker.len();
-
-            // Look past the marker for an assignment `=` (skip spaces/tabs).
-            let after = &line[m_end..];
-            let trimmed = after.trim_start();
-            let ws_len = after.len() - trimmed.len();
-
-            let is_assignment = {
-                let bytes = trimmed.as_bytes();
-                if bytes.first() == Some(&b'=') {
-                    // Not `==` (next char `=`).
-                    bytes.get(1) != Some(&b'=')
-                } else {
-                    false
-                }
-            };
-            // Also reject comparison operators that put a char *before* `=`
-            // immediately after the marker (`~=`, `<=`, `>=`): those would have
-            // their operator char as `trimmed[0]`, so `is_assignment` is already
-            // false for them. The `==` case is handled above.
-
-            if !is_assignment {
-                // Leave for the bare-read rule; advance past this marker.
-                search_from = m_end;
-                continue;
-            }
-
-            let recv_start = Self::receiver_start(line, m_start);
-            if recv_start == m_start {
-                search_from = m_end;
-                continue;
-            }
-            let receiver = line[recv_start..m_start].to_string();
-
-            // Position of the `=` and the start of the RHS value expression.
-            let eq_pos = m_end + ws_len; // index of '='
-            let rhs = line[eq_pos + 1..].to_string();
-            let rhs_trimmed = rhs.trim();
-
-            let value_expr = if is_ref {
-                warnings.push(TransformWarning {
-                    line: Some(line_no),
-                    message: format!(
-                        "Assignment to ObjectValue '{name}' stores only the referent's UUID \
-                         (live-instance reference is lossy); rewritten to \
-                         `:SetAttribute(\"{name}\", inst and inst:GetUuid() or \"\")`. \
-                         Verify the right-hand side is an Instance.",
-                    ),
-                    severity: WarningSeverity::Warning,
-                });
-                format!("({rhs_trimmed}) and ({rhs_trimmed}):GetUuid() or \"\"")
-            } else {
-                rhs_trimmed.to_string()
-            };
-
-            let replacement =
-                format!("{receiver}:SetAttribute(\"{name}\", {value_expr})");
-            line.replace_range(recv_start.., &replacement);
-            changes += 1;
-            // The remainder of the line was the RHS we just consumed; nothing
-            // after it to scan.
-            break;
-        }
-        changes
     }
 
     /// Index where the receiver expression (maximal `[A-Za-z0-9_.]` run) that
@@ -965,4 +1065,128 @@ pub enum WarningSeverity {
     Warning,
     /// Error — script will definitely fail without changes
     Error,
+}
+
+#[cfg(test)]
+mod value_object_rewrite_tests {
+    use super::*;
+
+    fn ctx(names: &[&str], refs: &[&str]) -> ValueObjectContext {
+        ValueObjectContext {
+            names: names.iter().map(|s| s.to_string()).collect(),
+            ref_names: refs.iter().map(|s| s.to_string()).collect(),
+            range_names: Default::default(),
+        }
+    }
+
+    fn rewrite(src: &str, vo: &ValueObjectContext) -> String {
+        ScriptTransformer::transform_value_objects(src, vo).source
+    }
+
+    #[test]
+    fn a_constrained_values_range_reads_and_writes_its_attributes() {
+        let mut vo = ctx(&["NitroAmount"], &[]);
+        vo.range_names.insert("NitroAmount".into());
+        assert_eq!(
+            rewrite("local cap = car.Handling.Nitro.NitroAmount.MaxValue", &vo),
+            "local cap = car.Handling.Nitro:GetAttribute(\"NitroAmount_MaxValue\")"
+        );
+        assert_eq!(rewrite("n.NitroAmount.MinValue = 5", &vo), "n:SetAttribute(\"NitroAmount_MinValue\", 5)");
+        assert_eq!(
+            rewrite("x = n:FindFirstChild(\"NitroAmount\").ConstrainedValue", &vo),
+            "x = n:GetAttribute(\"NitroAmount\")"
+        );
+        assert_eq!(
+            rewrite("n.NitroAmount.Value = n.NitroAmount.MaxValue", &vo),
+            "n:SetAttribute(\"NitroAmount\", n:GetAttribute(\"NitroAmount_MaxValue\"))"
+        );
+        // Only a constrained value's MaxValue is folded.
+        let plain = ctx(&["Speed"], &[]);
+        assert_eq!(rewrite("x = car.Speed.MaxValue", &plain), "x = car.Speed.MaxValue");
+    }
+
+    #[test]
+    fn a_child_lookup_assignment_becomes_set_attribute() {
+        let vo = ctx(&["data"], &[]);
+        assert_eq!(
+            rewrite("script:WaitForChild(\"data\").Value = game:GetService(\"HttpService\"):JSONEncode(VehicleData)", &vo),
+            "script:SetAttribute(\"data\", game:GetService(\"HttpService\"):JSONEncode(VehicleData))"
+        );
+        assert_eq!(rewrite("script.data.Value = x", &vo), "script:SetAttribute(\"data\", x)");
+    }
+
+    #[test]
+    fn a_read_through_a_call_chain_is_rewritten() {
+        let vo = ctx(&["CarSpawnDelay"], &[]);
+        assert_eq!(
+            rewrite("local d = RS:WaitForChild(\"VehicleEvents\"):WaitForChild(\"CarSpawnDelay\").Value", &vo),
+            "local d = RS:WaitForChild(\"VehicleEvents\"):GetAttribute(\"CarSpawnDelay\")"
+        );
+        assert_eq!(
+            rewrite("wait(game:GetService(\"ReplicatedStorage\").CarSpawnDelay.Value)", &vo),
+            "wait(game:GetService(\"ReplicatedStorage\"):GetAttribute(\"CarSpawnDelay\"))"
+        );
+    }
+
+    #[test]
+    fn compound_assignments_read_the_value_again() {
+        let vo = ctx(&["Count"], &[]);
+        assert_eq!(rewrite("cfg.Count.Value += 1", &vo), "cfg:SetAttribute(\"Count\", cfg:GetAttribute(\"Count\") + (1))");
+        // A child lookup on a plain receiver reads the value the same way.
+        assert_eq!(
+            rewrite("a:WaitForChild(\"Count\").Value += 1", &vo),
+            "a:SetAttribute(\"Count\", a:GetAttribute(\"Count\") + (1))"
+        );
+        // A receiver that is a call result is never evaluated twice: it is
+        // left alone, with a warning.
+        let src = "RS:WaitForChild(\"Cfg\"):WaitForChild(\"Count\").Value += 1";
+        let through_call = ScriptTransformer::transform_value_objects(src, &vo);
+        assert_eq!(through_call.source, src, "left alone, never broken");
+        assert!(through_call.warnings.iter().any(|w| w.message.contains("Compound")));
+    }
+
+    #[test]
+    fn comments_and_statements_after_an_assignment_survive() {
+        let vo = ctx(&["Speed", "Gear"], &[]);
+        assert_eq!(rewrite("car.Speed.Value = 5 -- max", &vo), "car:SetAttribute(\"Speed\", 5) -- max");
+        assert_eq!(
+            rewrite("car.Speed.Value = 1; car.Gear.Value = 2", &vo),
+            "car:SetAttribute(\"Speed\", 1); car:SetAttribute(\"Gear\", 2)"
+        );
+    }
+
+    #[test]
+    fn comparisons_are_reads_and_longer_members_are_left_alone() {
+        let vo = ctx(&["Count", "data"], &[]);
+        assert_eq!(rewrite("if cfg.Count.Value == 3 then", &vo), "if cfg:GetAttribute(\"Count\") == 3 then");
+        assert_eq!(rewrite("x = obj.data.ValueMap", &vo), "x = obj.data.ValueMap");
+    }
+
+    #[test]
+    fn a_value_continuing_on_the_next_line_is_not_broken() {
+        let vo = ctx(&["Cfg"], &[]);
+        let r = ScriptTransformer::transform_value_objects("obj.Cfg.Value = {\n  a = 1,\n}", &vo);
+        assert_eq!(r.source, "obj.Cfg.Value = {\n  a = 1,\n}");
+        assert!(r.warnings.iter().any(|w| w.message.contains("next line")));
+    }
+
+    #[test]
+    fn object_values_resolve_by_uuid() {
+        let vo = ctx(&["Target"], &["Target"]);
+        assert_eq!(rewrite("local t = cfg.Target.Value", &vo), "local t = FindByUUID(cfg:GetAttribute(\"Target\"))");
+        let r = ScriptTransformer::transform_value_objects("local t = f():WaitForChild(\"Target\").Value", &vo);
+        assert_eq!(r.source, "local t = f():WaitForChild(\"Target\").Value");
+        assert!(r.warnings.iter().any(|w| w.message.contains("FindByUUID")));
+    }
+
+    #[test]
+    fn observers_and_the_output_are_stable() {
+        let vo = ctx(&["A", "B"], &[]);
+        let src = "x.A.Changed:Connect(f) x.B:GetPropertyChangedSignal(\"Value\"):Connect(g)";
+        let want = "x:GetAttributeChangedSignal(\"A\"):Connect(f) x:GetAttributeChangedSignal(\"B\"):Connect(g)";
+        for _ in 0..8 {
+            assert_eq!(rewrite(src, &vo), want);
+        }
+        assert_eq!(rewrite("print(nothing.Here)", &vo), "print(nothing.Here)");
+    }
 }

@@ -4,6 +4,18 @@ use leptos::prelude::*;
 use leptos::task::spawn_local;
 use serde::Deserialize;
 
+/// Native assets and browser previews have separate size budgets. Keep the
+/// descriptor's native path intact when saving an avatar to the account.
+fn preview_asset_url(asset: &str) -> String {
+    if asset == "bundled://characters/voltec_supreme.glb" {
+        "/assets/characters/voltec_supreme_preview.glb".into()
+    } else if let Some(path) = asset.strip_prefix("bundled://") {
+        format!("/assets/{path}")
+    } else {
+        asset.into()
+    }
+}
+
 #[derive(Deserialize)]
 struct AvatarResponse {
     descriptor: Option<AvatarDescriptor>,
@@ -154,7 +166,7 @@ pub fn AvatarCustomizer() -> impl IntoView {
             <div class="avatar-preview-section">
                 <div class="avatar-viewport">
                     <model-viewer
-                        src=move || avatar.get().resolved_rig().body_asset.replace("bundled://", "/assets/")
+                        src=move || preview_asset_url(&avatar.get().resolved_rig().body_asset)
                         alt=move || format!("{} animated avatar preview", avatar.get().resolved_rig().label)
                         animation-name=move || animation.get()
                         scale=move || {

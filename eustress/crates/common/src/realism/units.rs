@@ -222,14 +222,14 @@ impl Meters {
         self.0 * 1000.0
     }
     
-    /// Convert from Eustress studs (1 stud = 0.28 meters, like Roblox)
+    /// Convert from studs, the engine's one stud ([`crate::units::Unit::Stud`])
     pub fn from_studs(studs: f32) -> Self {
-        Self(studs * 0.28)
+        Self(studs * crate::units::Unit::Stud.to_meters() as f32)
     }
-    
-    /// Convert to Eustress studs
+
+    /// Convert to studs, the engine's one stud ([`crate::units::Unit::Stud`])
     pub fn to_studs(self) -> f32 {
-        self.0 / 0.28
+        self.0 / crate::units::Unit::Stud.to_meters() as f32
     }
 }
 

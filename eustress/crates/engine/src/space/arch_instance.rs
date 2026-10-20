@@ -218,7 +218,6 @@ pub fn arch_to_instance(core: &ArchInstanceCore) -> InstanceDefinition {
     };
 
     InstanceDefinition {
-        nuclear: None,
         plasma: None,
         asset,
         transform: TransformData {
@@ -315,7 +314,6 @@ mod tests {
             material: None,
             thermodynamic: None,
             electrochemical: None,
-            nuclear: None,
             plasma: None,
             ui: None,
             attributes: Some(attributes),
@@ -372,7 +370,6 @@ mod tests {
             material: None,
             thermodynamic: None,
             electrochemical: None,
-            nuclear: None,
             plasma: None,
             ui: None,
             attributes: None,

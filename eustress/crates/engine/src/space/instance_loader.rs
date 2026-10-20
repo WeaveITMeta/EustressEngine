@@ -47,9 +47,6 @@ pub struct InstanceDefinition {
     /// Optional electrochemical state (dynamic on any class)
     #[serde(default)]
     pub electrochemical: Option<TomlElectrochemicalState>,
-    /// Optional nuclear reactor state (ArcReactorCore class)
-    #[serde(default)]
-    pub nuclear: Option<TomlNuclearState>,
     /// Optional plasma state (dynamic on any class)
     #[serde(default)]
     pub plasma: Option<TomlPlasmaState>,
@@ -720,10 +717,11 @@ where
 {
     let values: Vec<toml::Value> = serde::Deserialize::deserialize(deserializer)?;
 
+    // A bad colour is one bad property, not a bad part: failing here dropped
+    // the whole instance from the scene over its colour.
     if values.len() < 3 {
-        return Err(serde::de::Error::custom(
-            "color array must have at least 3 elements (RGB)",
-        ));
+        warn!("color {:?} has fewer than 3 components; using the default grey", values);
+        return Ok(default_color());
     }
 
     // Check if all values are integers (0-255 format)
@@ -815,8 +813,41 @@ pub struct CreatorStamp {
     pub name: String,
     /// Stable identity (AuthUser.id today; upgrade to full public key later).
     pub public_key: String,
-    /// RFC 3339 timestamp of the edit.
+    /// RFC 3339 timestamp of the edit; on a merged entry, of its latest save.
     pub timestamp: String,
+    /// On a merged entry, the first save of the author's run.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub first_timestamp: Option<String>,
+    /// How many saves the entry stands for: 1 unless merged.
+    #[serde(default = "one_save", skip_serializing_if = "is_one_save")]
+    pub saves: u32,
+}
+
+fn one_save() -> u32 {
+    1
+}
+
+fn is_one_save(saves: &u32) -> bool {
+    *saves <= 1
+}
+
+/// One save's stamp in an audit chain. A save by the author of the last entry
+/// extends that entry: its `timestamp` becomes this save's, `first_timestamp`
+/// keeps the run's first, and `saves` counts them. A save by anyone else
+/// appends. Who edited, and in what order, is kept, while a run of saves by
+/// one author (an autosave after every edit) grows the file by nothing.
+pub fn record_modification(chain: &mut Vec<CreatorStamp>, stamp: &CreatorStamp) {
+    match chain.last_mut() {
+        Some(last) if last.public_key == stamp.public_key => {
+            if last.first_timestamp.is_none() {
+                last.first_timestamp = Some(last.timestamp.clone());
+            }
+            last.timestamp = stamp.timestamp.clone();
+            last.name = stamp.name.clone();
+            last.saves = last.saves.max(1) + 1;
+        }
+        _ => chain.push(CreatorStamp { first_timestamp: None, saves: 1, ..stamp.clone() }),
+    }
 }
 
 /// Instance metadata
@@ -838,7 +869,8 @@ pub struct InstanceMetadata {
     /// Absent for entities created offline.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub created_by: Option<CreatorStamp>,
-    /// Append-only record of every signed modification. Never capped — the full
+    /// The signed modifications in order, one entry per run of saves by the
+    /// same author ([`record_modification`]). Never capped — the full
     /// chain is kept as training signal for Bliss attribution + AI learning.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub modifications: Vec<CreatorStamp>,
@@ -1443,70 +1475,6 @@ impl TomlElectrochemicalState {
     }
 }
 
-/// Nuclear reactor state as it appears in the [nuclear] TOML section.
-///
-/// All fields default to nominal ARC-1 operating conditions so a minimal
-/// `[nuclear]` section (or no section at all) still produces a valid reactor.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct TomlNuclearState {
-    /// Initial neutron population (normalised; 1.0 = steady-state critical).
-    #[serde(default = "default_one")]
-    pub neutron_population: f32,
-    /// Initial core temperature [°C].
-    #[serde(default = "default_core_temp")]
-    pub core_temp_celsius: f32,
-    /// Initial coolant flow rate [%].
-    #[serde(default = "default_coolant_flow")]
-    pub coolant_flow_pct: f32,
-    /// Initial V-Cell state of charge [%].
-    #[serde(default = "default_soc")]
-    pub battery_soc_pct: f32,
-    /// Initial electrical load demand [W].
-    #[serde(default = "default_load_demand")]
-    pub load_demand_watts: f32,
-    /// Rod bank A insertion [0–100 %].
-    #[serde(default = "default_rod_insertion")]
-    pub rod_bank_a_pct: f32,
-    /// Rod bank B insertion [0–100 %].
-    #[serde(default = "default_rod_insertion")]
-    pub rod_bank_b_pct: f32,
-    /// Thermoelectric efficiency [fraction].
-    #[serde(default = "default_te_eff")]
-    pub te_efficiency: f32,
-    /// Stirling engine efficiency [fraction].
-    #[serde(default = "default_stirling_eff")]
-    pub stirling_efficiency: f32,
-    /// Whether the AI PID controller starts in Regulation mode.
-    #[serde(default = "default_true_val")]
-    pub ai_regulation_enabled: bool,
-}
-
-fn default_core_temp()     -> f32 { 847.0  }
-fn default_coolant_flow()  -> f32 { 70.0   }
-fn default_soc()           -> f32 { 82.0   }
-fn default_load_demand()   -> f32 { 280.0  }
-fn default_rod_insertion() -> f32 { 50.0   }
-fn default_te_eff()        -> f32 { 0.14   }
-fn default_stirling_eff()  -> f32 { 0.28   }
-fn default_true_val()      -> bool { true  }
-
-impl Default for TomlNuclearState {
-    fn default() -> Self {
-        Self {
-            neutron_population: 1.0,
-            core_temp_celsius: default_core_temp(),
-            coolant_flow_pct: default_coolant_flow(),
-            battery_soc_pct: default_soc(),
-            load_demand_watts: default_load_demand(),
-            rod_bank_a_pct: default_rod_insertion(),
-            rod_bank_b_pct: default_rod_insertion(),
-            te_efficiency: default_te_eff(),
-            stirling_efficiency: default_stirling_eff(),
-            ai_regulation_enabled: true,
-        }
-    }
-}
-
 /// Plasma state as it appears in the [plasma] TOML section. Attaches a
 /// `PlasmaState` component to any class — same model as [thermodynamic].
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1551,25 +1519,6 @@ impl TomlPlasmaState {
             ion_temperature_k: self.ion_temperature_k,
             ionization_degree: self.ionization_degree,
             magnetic_field: self.magnetic_field,
-        }
-    }
-}
-
-impl TomlNuclearState {
-    /// Convert to the `NuclearInit` carrier component that `FissionPlugin`
-    /// applies over the ArcReactorCore default components during hydration.
-    pub fn to_init(&self) -> eustress_common::realism::nuclear::components::NuclearInit {
-        eustress_common::realism::nuclear::components::NuclearInit {
-            neutron_population: self.neutron_population,
-            core_temp_celsius: self.core_temp_celsius,
-            coolant_flow_pct: self.coolant_flow_pct,
-            battery_soc_pct: self.battery_soc_pct,
-            load_demand_watts: self.load_demand_watts,
-            rod_bank_a_pct: self.rod_bank_a_pct,
-            rod_bank_b_pct: self.rod_bank_b_pct,
-            te_efficiency: self.te_efficiency,
-            stirling_efficiency: self.stirling_efficiency,
-            ai_regulation_enabled: self.ai_regulation_enabled,
         }
     }
 }
@@ -1732,6 +1681,72 @@ pub fn spawn_instance_from_toml_str(
     ))
 }
 
+/// The unit a file's numbers are in, as the loader reads it at spawn: its
+/// `[metadata] unit`, metres when that is missing or unknown.
+pub fn file_unit(symbol: Option<&str>) -> eustress_common::units::Unit {
+    symbol
+        .and_then(eustress_common::units::Unit::from_symbol)
+        .unwrap_or(eustress_common::units::ENGINE_NATIVE_UNIT)
+}
+
+/// A length in engine metres as a file written in `unit` holds it: the
+/// inverse of the loader's conversion at spawn, under the same `units_v1`
+/// gate, so the file reads back to the same place.
+pub fn authored_vec3(v: Vec3, unit: eustress_common::units::Unit) -> [f32; 3] {
+    #[cfg(feature = "units_v1")]
+    {
+        eustress_common::units::engine_to_authored_vec3_f32(v.to_array(), unit)
+    }
+    #[cfg(not(feature = "units_v1"))]
+    {
+        let _ = unit;
+        v.to_array()
+    }
+}
+
+/// Set a loaded definition's `[transform]` from an entity's pose (engine
+/// metres) and, when given, its size, in the unit its file is written in
+/// (`[metadata] unit`). Every save of a transform into a definition goes
+/// through here: `load_instance_definition` returns a file's numbers as
+/// written, and `write_instance_definition` writes them as they are, so a
+/// pose assigned in metres into a file in feet would read back 3.28 times too
+/// small. `size` `None` keeps the file's `scale` (a custom mesh's multiplier).
+pub fn set_authored_transform(def: &mut InstanceDefinition, translation: Vec3, rotation: Quat, size: Option<Vec3>) {
+    let unit = file_unit(def.metadata.unit.as_deref());
+    def.transform.position = authored_vec3(translation, unit);
+    def.transform.rotation = [rotation.x, rotation.y, rotation.z, rotation.w];
+    if let Some(size) = size {
+        def.transform.scale = authored_vec3(size, unit);
+    }
+}
+
+/// [`set_authored_transform`] for a file held as a TOML document (a pasted
+/// copy, a placed quad): its own `[metadata] unit` decides, and every other
+/// key is kept.
+pub fn set_authored_transform_toml(
+    doc: &mut toml::Value,
+    translation: Vec3,
+    rotation: Quat,
+    size: Option<Vec3>,
+) -> Result<(), String> {
+    let unit = file_unit(doc.get("metadata").and_then(|m| m.get("unit")).and_then(|u| u.as_str()));
+    let float = |x: f32| toml::Value::Float(format!("{x}").parse::<f64>().unwrap_or(x as f64));
+    let floats = |v: &[f32]| toml::Value::Array(v.iter().map(|x| float(*x)).collect());
+    let tf = doc
+        .as_table_mut()
+        .ok_or("the document is not a table")?
+        .entry("transform".to_string())
+        .or_insert_with(|| toml::Value::Table(toml::map::Map::new()))
+        .as_table_mut()
+        .ok_or("[transform] is not a table")?;
+    tf.insert("position".into(), floats(&authored_vec3(translation, unit)));
+    tf.insert("rotation".into(), floats(&[rotation.x, rotation.y, rotation.z, rotation.w]));
+    if let Some(size) = size {
+        tf.insert("scale".into(), floats(&authored_vec3(size, unit)));
+    }
+    Ok(())
+}
+
 /// Persist an instance definition.
 ///
 /// DB-first: a converted Space writes the binary ECS record into
@@ -1748,8 +1763,11 @@ pub fn write_instance_definition(
         return Ok(());
     }
 
-    let toml_str = toml::to_string_pretty(instance)
-        .map_err(|e| format!("Failed to serialize instance: {}", e))?;
+    // Only what changed, in the file's own layout (`planned_write`).
+    let toml_str = match planned_write(toml_path, instance)? {
+        PlannedWrite::Unchanged => return Ok(()),
+        PlannedWrite::Text(text) => text,
+    };
 
     // Atomic write + retry on Windows file-lock races (file watcher
     // reload pass, antivirus scanning, text-editor reads).
@@ -1757,6 +1775,259 @@ pub fn write_instance_definition(
         .map_err(|e| format!("Failed to write {}: {}", toml_path.display(), e))?;
 
     Ok(())
+}
+
+/// What a typed write does to its file (see [`planned_write`]).
+enum PlannedWrite {
+    /// The file already holds this instance: nothing is written.
+    Unchanged,
+    /// The file's new text.
+    Text(String),
+}
+
+/// The text a typed write leaves in `toml_path`. A file the instance was read
+/// from is edited in place: only the values that differ from how the file
+/// loads now are written, in the file's own layout (its comments, key order,
+/// inline arrays, a colour's float or 0 to 255 form), each float in its
+/// shortest `f32` form. So saving an unchanged instance leaves the file byte
+/// for byte, and moving one changes only its position. The typed model is
+/// authoritative for what it models, both ways: a value it clears is deleted.
+/// A key it does not carry is never touched, and a key the file lacks is
+/// added only when its value differs from what the file loads as. A new or
+/// unreadable file gets the whole instance.
+fn planned_write(toml_path: &Path, instance: &InstanceDefinition) -> Result<PlannedWrite, String> {
+    let typed = typed_document(instance)?;
+    if let Ok(text) = std::fs::read_to_string(toml_path) {
+        let loaded = load_instance_definition_from_str(&text).ok().and_then(|d| typed_document(&d).ok());
+        let colour = Some(instance.properties.color);
+        if let Some(edit) = loaded.and_then(|old| edit_document(&text, &old, &typed, NAMED_SECTIONS, colour)) {
+            return Ok(edit.map_or(PlannedWrite::Unchanged, PlannedWrite::Text));
+        }
+    }
+    toml::to_string(&typed)
+        .map(PlannedWrite::Text)
+        .map_err(|e| format!("Failed to serialize instance: {}", e))
+}
+
+/// An instance as the table the writer compares and writes, each float in
+/// its shortest `f32` form.
+fn typed_document(instance: &InstanceDefinition) -> Result<toml::Table, String> {
+    let value = toml::Value::try_from(instance).map_err(|e| format!("Failed to serialize instance: {}", e))?;
+    match narrow_floats(value) {
+        toml::Value::Table(table) => Ok(table),
+        _ => Err("an instance serializes as a table".to_string()),
+    }
+}
+
+/// The sections [`InstanceDefinition`] names as fields; every other top-level
+/// key rides in its flattened `extra`. Only these are ever deleted from a
+/// file, so a definition built without its file's unknown sections leaves
+/// them. Keep in step with the struct (`the_named_sections_are_the_structs_fields`).
+const NAMED_SECTIONS: &[&str] = &[
+    "asset",
+    "transform",
+    "properties",
+    "metadata",
+    "material",
+    "thermodynamic",
+    "electrochemical",
+    "plasma",
+    "ui",
+    "attributes",
+    "tags",
+    "parameters",
+];
+
+/// A float that is exactly an `f32` as the shortest decimal that reads back
+/// as that `f32` (`113.6`, never `113.5999984741211`); any other float as it
+/// is.
+fn shortest_f32(f: f64) -> f64 {
+    let narrow = f as f32;
+    if narrow.is_finite() && narrow as f64 == f {
+        narrow.to_string().parse().unwrap_or(f)
+    } else {
+        f
+    }
+}
+
+/// Every float in `value` as [`shortest_f32`] makes it.
+fn narrow_floats(value: toml::Value) -> toml::Value {
+    match value {
+        toml::Value::Float(f) => toml::Value::Float(shortest_f32(f)),
+        toml::Value::Array(a) => toml::Value::Array(a.into_iter().map(narrow_floats).collect()),
+        toml::Value::Table(t) => toml::Value::Table(t.into_iter().map(|(k, v)| (k, narrow_floats(v))).collect()),
+        other => other,
+    }
+}
+
+/// Whether two typed values are the same to the precision the model holds:
+/// floats within one part in a million (an `f32` round trip through a unit
+/// conversion), everything else exactly.
+pub(crate) fn same_value(a: &toml::Value, b: &toml::Value) -> bool {
+    match (a, b) {
+        (toml::Value::Float(x), toml::Value::Float(y)) => x == y || (x - y).abs() <= 1e-6 * x.abs().max(y.abs()),
+        (toml::Value::Array(x), toml::Value::Array(y)) => {
+            x.len() == y.len() && x.iter().zip(y).all(|(p, q)| same_value(p, q))
+        }
+        (toml::Value::Table(x), toml::Value::Table(y)) => {
+            x.len() == y.len() && x.iter().all(|(k, v)| y.get(k).is_some_and(|w| same_value(v, w)))
+        }
+        _ => a == b,
+    }
+}
+
+/// Whether two keys name the same thing: equal but for case and underscores
+/// (`class_name`, `ClassName`, `Class_Name`).
+pub(crate) fn same_key(a: &str, b: &str) -> bool {
+    let norm = |s: &str| s.chars().filter(|c| *c != '_').flat_map(char::to_lowercase).collect::<String>();
+    norm(a) == norm(b)
+}
+
+/// A typed value as a `toml_edit` value: inline, arrays on one line.
+pub(crate) fn to_value(value: &toml::Value) -> toml_edit::Value {
+    match value {
+        toml::Value::String(s) => s.as_str().into(),
+        toml::Value::Integer(i) => (*i).into(),
+        toml::Value::Float(f) => (*f).into(),
+        toml::Value::Boolean(b) => (*b).into(),
+        toml::Value::Datetime(d) => d.to_string().parse().unwrap_or_else(|_| d.to_string().as_str().into()),
+        toml::Value::Array(a) => toml_edit::Value::Array(a.iter().map(to_value).collect()),
+        toml::Value::Table(t) => {
+            toml_edit::Value::InlineTable(t.iter().map(|(k, v)| (k.as_str(), to_value(v))).collect())
+        }
+    }
+}
+
+/// A typed value as the item it becomes under a key: a table as a
+/// `[section]` and a list of tables as `[[sections]]` in a standard table,
+/// everything else (and everything inside an inline table) a value.
+pub(crate) fn to_item(value: &toml::Value, inline: bool) -> toml_edit::Item {
+    let table = |t: &toml::Table| {
+        let mut out = toml_edit::Table::new();
+        for (k, v) in t {
+            out.insert(k, to_item(v, false));
+        }
+        out
+    };
+    match value {
+        toml::Value::Table(t) if !inline => toml_edit::Item::Table(table(t)),
+        toml::Value::Array(a) if !inline && !a.is_empty() && a.iter().all(toml::Value::is_table) => {
+            let mut list = toml_edit::ArrayOfTables::new();
+            for v in a {
+                if let toml::Value::Table(t) = v {
+                    list.push(table(t));
+                }
+            }
+            toml_edit::Item::ArrayOfTables(list)
+        }
+        other => toml_edit::Item::Value(to_value(other)),
+    }
+}
+
+/// A part's colour in the form its file already writes it: floats from 0 to
+/// 1 when the file has floats (four channels when it had four, or when the
+/// colour is not opaque), else the model's 0 to 255 integers.
+fn colour_value(existing: Option<&toml_edit::Item>, typed: &toml::Value, rgba: [f32; 4]) -> toml_edit::Value {
+    let array = existing.and_then(|i| i.as_array());
+    let floats = array.is_some_and(|a| a.iter().any(|v| v.as_float().is_some()));
+    if !floats {
+        return to_value(typed);
+    }
+    let channels = if array.is_some_and(|a| a.len() == 4) || rgba[3] != 1.0 { 4 } else { 3 };
+    toml_edit::Value::Array(rgba[..channels].iter().map(|c| shortest_f32(*c as f64)).collect())
+}
+
+/// Writes into `file` every value where `new` differs from `old` (how the
+/// file loads now), recursing into tables, and deletes what `new` cleared.
+/// Unchanged values keep their text. A table the file lacks is added only
+/// when a value in it changed, holding only the changed values. Keys match
+/// the file's in any case or underscore style. At the top level only a
+/// section in `named` is ever deleted, since a definition built without its
+/// file's unknown sections must not remove them. Returns whether anything
+/// changed.
+fn apply_changes(
+    file: &mut dyn toml_edit::TableLike,
+    old: &toml::Table,
+    new: &toml::Table,
+    path: &str,
+    inline: bool,
+    named: &[&str],
+    colour: Option<[f32; 4]>,
+) -> bool {
+    let mut keys: Vec<&String> = old.keys().chain(new.keys()).collect();
+    keys.sort();
+    keys.dedup();
+    let mut changed = false;
+    for key in keys {
+        let here = if path.is_empty() { key.clone() } else { format!("{path}.{key}") };
+        let file_key = file.iter().map(|(k, _)| k.to_string()).find(|k| same_key(k, key));
+        match (old.get(key), new.get(key)) {
+            (Some(o), Some(n)) if same_value(o, n) => {}
+            (Some(toml::Value::Table(o)), Some(toml::Value::Table(n))) => {
+                let name = file_key.unwrap_or_else(|| key.clone());
+                match file.get_mut(&name) {
+                    Some(item) if item.is_table_like() => {
+                        let sub_inline = inline || item.is_inline_table();
+                        if let Some(sub) = item.as_table_like_mut() {
+                            changed |= apply_changes(sub, o, n, &here, sub_inline, named, colour);
+                        }
+                    }
+                    _ => {
+                        // The file lacks it: a new table holding only what changed.
+                        let mut fresh = toml_edit::Table::new();
+                        if apply_changes(&mut fresh, o, n, &here, inline, named, colour) {
+                            let item = if inline {
+                                toml_edit::Item::Value(toml_edit::Value::InlineTable(fresh.into_inline_table()))
+                            } else {
+                                toml_edit::Item::Table(fresh)
+                            };
+                            file.insert(&name, item);
+                            changed = true;
+                        }
+                    }
+                }
+            }
+            (_, Some(n)) => {
+                let name = file_key.unwrap_or_else(|| key.clone());
+                let existing = file.get(&name);
+                let mut item = match colour {
+                    Some(rgba) if here == "properties.color" => toml_edit::Item::Value(colour_value(existing, n, rgba)),
+                    _ => to_item(n, inline),
+                };
+                // A replaced value keeps its comments.
+                if let (Some(old_value), Some(new_value)) = (existing.and_then(|i| i.as_value()), item.as_value_mut()) {
+                    *new_value.decor_mut() = old_value.decor().clone();
+                }
+                file.insert(&name, item);
+                changed = true;
+            }
+            (Some(_), None) => {
+                let deletable = !path.is_empty() || named.iter().any(|s| same_key(s, key));
+                if let (true, Some(name)) = (deletable, file_key) {
+                    file.remove(&name);
+                    changed = true;
+                }
+            }
+            (None, None) => {}
+        }
+    }
+    changed
+}
+
+/// `text` edited to hold `new`, where `old` is how `text` loads now:
+/// `Some(None)` when nothing differs (the file is left byte for byte),
+/// `Some(Some(text))` with only the changed values rewritten, `None` when
+/// `text` is not a TOML document.
+fn edit_document(
+    text: &str,
+    old: &toml::Table,
+    new: &toml::Table,
+    named: &[&str],
+    colour: Option<[f32; 4]>,
+) -> Option<Option<String>> {
+    let mut doc = text.parse::<toml_edit::DocumentMut>().ok()?;
+    let changed = apply_changes(doc.as_table_mut(), old, new, "", false, named, colour);
+    Some(changed.then(|| doc.to_string()))
 }
 
 // Naming helpers (entity_name_is_available, is_eep_reserved_name,
@@ -1785,6 +2056,8 @@ pub fn current_stamp(auth: &crate::auth::AuthState) -> Option<CreatorStamp> {
         name: user.username.clone(),
         public_key: user.id.clone(),
         timestamp: chrono::Utc::now().to_rfc3339(),
+        first_timestamp: None,
+        saves: 1,
     })
 }
 
@@ -1804,12 +2077,18 @@ pub fn write_instance_definition_signed(
     instance: &mut InstanceDefinition,
     stamp: Option<&CreatorStamp>,
 ) -> Result<(), String> {
+    // An instance its file already holds is not written and gains no stamp:
+    // a save without an edit changes nothing, and the audit chain records
+    // only real modifications.
+    if matches!(planned_write(toml_path, instance)?, PlannedWrite::Unchanged) {
+        return Ok(());
+    }
     match stamp {
         Some(s) => {
             if instance.metadata.created_by.is_none() {
                 instance.metadata.created_by = Some(s.clone());
             }
-            instance.metadata.modifications.push(s.clone());
+            record_modification(&mut instance.metadata.modifications, s);
             instance.metadata.last_modified = s.timestamp.clone();
         }
         None => {
@@ -1823,92 +2102,8 @@ pub fn write_instance_definition_signed(
 /// `{ type = "...", value = ..., description = "..." }` inline table) into an
 /// `AttributeValue` suitable for storage in the ECS `Attributes` component.
 fn rich_toml_value_to_attribute(v: &toml::Value) -> Option<eustress_common::AttributeValue> {
-    match v {
-        toml::Value::Boolean(b) => Some(eustress_common::AttributeValue::Bool(*b)),
-        toml::Value::Integer(i) => Some(eustress_common::AttributeValue::Int(*i)),
-        toml::Value::Float(f)   => Some(eustress_common::AttributeValue::Number(*f)),
-        toml::Value::String(s)  => Some(eustress_common::AttributeValue::String(s.clone())),
-        toml::Value::Array(arr) => {
-            let floats: Vec<f64> = arr.iter().filter_map(|item| match item {
-                toml::Value::Float(f)   => Some(*f),
-                toml::Value::Integer(i) => Some(*i as f64),
-                _ => None,
-            }).collect();
-            match floats.len() {
-                2 => Some(eustress_common::AttributeValue::Vector2(
-                    Vec2::new(floats[0] as f32, floats[1] as f32),
-                )),
-                3 => Some(eustress_common::AttributeValue::Vector3(
-                    Vec3::new(floats[0] as f32, floats[1] as f32, floats[2] as f32),
-                )),
-                4 => Some(eustress_common::AttributeValue::Color(
-                    Color::srgba(floats[0] as f32, floats[1] as f32, floats[2] as f32, floats[3] as f32),
-                )),
-                _ => None,
-            }
-        }
-        // Tagged inline tables produced by the Roblox-import ValueObject fold
-        // (Contract A). Each holds exactly one key naming the source type:
-        //   { Color3 = [r,g,b] }                          → Color3
-        //   { CFrame = [px,py,pz, qx,qy,qz,qw] }          → CFrame
-        //   { BrickColor = N }                            → BrickColor
-        // (Bare scalars / strings / [3]-arrays decode in the arms above;
-        // ObjectValue folds to a bare UUID string → AttributeValue::String,
-        // also handled above — GetAttribute returns that uuid for the
-        // resolver.)
-        toml::Value::Table(tbl) => {
-            // Helper: pull an N-float array out of a tagged-table value.
-            let floats_of = |val: &toml::Value| -> Vec<f64> {
-                match val {
-                    toml::Value::Array(a) => a
-                        .iter()
-                        .filter_map(|item| match item {
-                            toml::Value::Float(f) => Some(*f),
-                            toml::Value::Integer(i) => Some(*i as f64),
-                            _ => None,
-                        })
-                        .collect(),
-                    _ => Vec::new(),
-                }
-            };
-
-            if let Some(c) = tbl.get("Color3") {
-                let f = floats_of(c);
-                if f.len() == 3 {
-                    return Some(eustress_common::AttributeValue::Color3(Color::srgb(
-                        f[0] as f32,
-                        f[1] as f32,
-                        f[2] as f32,
-                    )));
-                }
-                return None;
-            }
-            if let Some(cf) = tbl.get("CFrame") {
-                let f = floats_of(cf);
-                if f.len() == 7 {
-                    return Some(eustress_common::AttributeValue::CFrame(Transform {
-                        translation: Vec3::new(f[0] as f32, f[1] as f32, f[2] as f32),
-                        rotation: Quat::from_xyzw(
-                            f[3] as f32,
-                            f[4] as f32,
-                            f[5] as f32,
-                            f[6] as f32,
-                        ),
-                        ..Default::default()
-                    }));
-                }
-                return None;
-            }
-            if let Some(bc) = tbl.get("BrickColor") {
-                if let toml::Value::Integer(n) = bc {
-                    return Some(eustress_common::AttributeValue::BrickColor(*n as u32));
-                }
-                return None;
-            }
-            None
-        }
-        _ => None,
-    }
+    // One reading, shared with a Player's reader of the same records.
+    eustress_common::datamodel::record::toml_to_attribute(v)
 }
 
 /// Build an ECS `Attributes` component from the typed `[attributes]` TOML
@@ -1932,45 +2127,6 @@ fn attributes_from_toml_table(
         }
     }
     attrs
-}
-
-/// Build an `InstanceParameters` component from an instance's `[parameters]`
-/// table.
-///
-/// The on-disk table is flat (`key = value`) while the component is
-/// domain-scoped (`domain -> key -> value`), so a flat authoring shape lands in
-/// [`DEFAULT_PARAMETER_DOMAIN`] — that is what "basic by default" means: a
-/// parameter is usable before any Domain exists, and promoting it into a real
-/// domain is an edit, not a migration.
-///
-/// A dotted key (`telemetry.sample_rate`) is read as an explicit
-/// `domain.key`, so an author can opt into a domain straight from the TOML.
-fn parameters_from_toml_table(
-    table: Option<&std::collections::HashMap<String, toml::Value>>,
-) -> eustress_common::parameters::InstanceParameters {
-    use eustress_common::parameters::{
-        InstanceParameters, ParameterValue, DEFAULT_PARAMETER_DOMAIN,
-    };
-    let mut params = InstanceParameters::new();
-    let Some(map) = table else { return params };
-    for (k, v) in map {
-        let value = match v {
-            toml::Value::String(s) => ParameterValue::String(s.clone()),
-            toml::Value::Integer(i) => ParameterValue::Int(*i),
-            toml::Value::Float(f) => ParameterValue::Float(*f),
-            toml::Value::Boolean(b) => ParameterValue::Bool(*b),
-            // Arrays/tables have no scalar parameter form; keep them verbatim as
-            // JSON so nothing authored on disk is silently dropped.
-            other => ParameterValue::Json(other.to_string()),
-        };
-        match k.split_once('.') {
-            Some((domain, key)) if !domain.is_empty() && !key.is_empty() => {
-                params.set(domain, key, value)
-            }
-            _ => params.set(DEFAULT_PARAMETER_DOMAIN, k, value),
-        }
-    }
-    params
 }
 
 /// Known primitive mesh filenames that map to engine asset parts
@@ -2159,6 +2315,7 @@ pub fn sync_workspace_render_distance(
         Changed<crate::space::service_loader::ServiceComponent>,
     >,
     parts_q: Query<(Entity, &Transform), With<eustress_common::classes::Part>>,
+    mut scatter_distance: Option<ResMut<eustress_common::terrain::scatter::ScatterRenderDistance>>,
 ) {
     use crate::space::service_loader::PropertyValue;
     for svc in service_q.iter() {
@@ -2167,6 +2324,14 @@ pub fn sync_workspace_render_distance(
         }
         if let Some(PropertyValue::Float(v)) = svc.properties.get("render_distance") {
             set_workspace_render_distance(*v as f32);
+            // Terrain scatter (trees above all) streams no farther than the
+            // parts draw.
+            if let Some(distance) = scatter_distance.as_deref_mut() {
+                let metres = Some((*v as f32).clamp(1.0, 1_000_000.0));
+                if distance.0 != metres {
+                    distance.0 = metres;
+                }
+            }
             for (e, transform) in parts_q.iter() {
                 // Transform.scale = world size for unit-mesh parts, so
                 // the re-stamp keeps each part's size-aware cull margin.
@@ -2204,10 +2369,17 @@ pub fn spawn_instance(
         }
     });
 
-    // Parse class name early — needed for the no-mesh branch too
-    let class_name = eustress_common::classes::ClassName::from_str(
-        &instance.metadata.class_name
-    ).unwrap_or(eustress_common::classes::ClassName::Part);
+    // Parse the class name early; the no-mesh branch needs it too. A class
+    // the engine does not know loads as a Part, and the log says so once per
+    // class name. A file with no class_name reads as "Part" and never gets here.
+    let class_name = eustress_common::classes::ClassName::from_str(&instance.metadata.class_name)
+        .unwrap_or_else(|_| {
+            eustress_common::datamodel::record::warn_unknown_class(
+                &instance.metadata.class_name,
+                eustress_common::classes::ClassName::Part,
+            );
+            eustress_common::classes::ClassName::Part
+        });
 
     // Authoring unit — drives the engine's per-entity unit awareness.
     // Missing or unknown symbol → engine-native default (Meter). A
@@ -2255,10 +2427,12 @@ pub fn spawn_instance(
 
     // ── Part-class fallback: default to block primitive when no [asset] section ──
     // MCP tools and external IDEs create _instance.toml files with [transform]
-    // + [properties] but no [asset]. Without this, Part entities hit the
-    // non-visual branch and are invisible.
+    // + [properties] but no [asset], and the Roblox importer writes none for a
+    // block-shaped Seat, VehicleSeat or SpawnLocation. Without this, those
+    // entities hit the non-visual branch and are invisible. Every part class
+    // (`record::loads_as_part`), as a Player's reader defaults them.
     let mut instance = instance;
-    if instance.asset.is_none() && matches!(class_name, eustress_common::classes::ClassName::Part) {
+    if instance.asset.is_none() && eustress_common::datamodel::record::loads_as_part(class_name) {
         instance.asset = Some(AssetReference {
             mesh: "parts/block.glb".to_string(),
             scene: default_scene(),
@@ -2296,7 +2470,9 @@ pub fn spawn_instance(
         Some(Vec3::from_array(out))
     }
     let mesh_visual_scale = take_vec3_extra(&mut instance.extra, "mesh_scale");
-    let mesh_visual_offset = take_vec3_extra(&mut instance.extra, "mesh_offset");
+    // Converted to meters below when `units_v1` is on (it is a length).
+    #[allow(unused_mut)]
+    let mut mesh_visual_offset = take_vec3_extra(&mut instance.extra, "mesh_offset");
 
     // ── Stage 3: authored-unit → meter conversion ──────────────────────
     //
@@ -2325,6 +2501,16 @@ pub fn spawn_instance(
             instance.transform.scale = eustress_common::units::convert_vec3_f32(
                 instance.transform.scale, from_unit, to_unit,
             );
+            // `mesh_offset` (a DataMesh `Offset`) is a length in the file's
+            // authored unit, and it is added to the already-converted
+            // translation below, so it must be converted too. Left in feet,
+            // every imported SpecialMesh offset landed 3.28x too far.
+            // `mesh_scale` is a ratio and needs no conversion.
+            if let Some(mo) = mesh_visual_offset {
+                mesh_visual_offset = Some(Vec3::from_array(
+                    eustress_common::units::convert_vec3_f32(mo.to_array(), from_unit, to_unit),
+                ));
+            }
             debug!(
                 "📐 Converted {:?} from {} → m (pos={:?}, scale={:?})",
                 toml_path, from_unit.symbol(),
@@ -2343,12 +2529,13 @@ pub fn spawn_instance(
         // rich-schema `extra` sections on top.
         let mut attrs = base_attributes.clone();
         for (_section_name, section_val) in &instance.extra {
-            // `[gaussian_splats]` is a FIRST-CLASS section: it is attached as a
-            // SplatCloud component and surfaced as built-in Appearance
-            // properties (CullFloaters / Path / PPISP in PascalCase), NOT a
-            // generic user attribute. Skip it here so its keys don't ALSO fold
-            // into the Attributes component as snake_case attribute rows.
-            if _section_name == "gaussian_splats" {
+            // A class's own field table is read into its component (below),
+            // never folded into user attributes: `[gaussian_splats]` (a
+            // SplatCloud, surfaced as built-in Appearance properties), the
+            // particle and terrain-layer sections, a light's `[light]` and a
+            // KeyframeSequence's `[keyframe_sequence]`. One list, which a
+            // Player's tree reader shares, so both trees agree.
+            if eustress_common::datamodel::record::class_owned_section(class_name, _section_name) {
                 continue;
             }
             // Each top-level entry under [extra] is a section table (e.g. [Appearance])
@@ -2400,6 +2587,91 @@ pub fn spawn_instance(
         // land here. Attaches the typed component from [particle]/[beam] so
         // Properties + scripts see live data (renderers are still stubs).
         attach_vfx_component(&mut commands.entity(entity), class_name, &instance.extra);
+        attach_class_props(
+            &mut commands.entity(entity),
+            class_name,
+            false,
+            &instance.extra,
+            instance.metadata.unit.as_deref(),
+        );
+        crate::particles::bridge::attach_class_component(
+            &mut commands.entity(entity),
+            class_name,
+            &instance.extra,
+            &toml_path,
+        );
+        crate::terrain_layers::attach_class_component(
+            &mut commands.entity(entity),
+            class_name,
+            &instance.extra,
+            &toml_path,
+        );
+        // PointLight / SpotLight / SurfaceLight / DirectionalLight: the class
+        // component from `[light]`, which `light_classes` turns into a Bevy
+        // light. Without it a light created at runtime (Insert, Toolbox, MCP)
+        // stayed dark until the Space was reopened.
+        if eustress_common::plugins::light_classes::is_light_class(class_name) {
+            let section = instance
+                .extra
+                .get("light")
+                .or_else(|| instance.extra.get("Light"));
+            let light = eustress_common::plugins::light_classes::LightSection::from_parts(section, None);
+            if let Some(component) =
+                eustress_common::plugins::light_classes::LightComponent::from_section(class_name, &light)
+            {
+                component.insert(&mut commands.entity(entity));
+            }
+        }
+        // Star / Moon / Sky / Atmosphere / Clouds: the class component from
+        // its own section (`[star]`, `[moon]`, `[sky]`, `[atmosphere]`,
+        // `[clouds]`), so the
+        // renderer and the Properties panel read what the file says. The
+        // lighting hydration adds a Star's and a Moon's light and marker
+        // around the component and keeps its values.
+        if let Some(own) = eustress_common::plugins::celestial_sections::section_name(class_name) {
+            let section = instance.extra.get(own).or_else(|| {
+                instance
+                    .extra
+                    .iter()
+                    .find(|(k, _)| k.eq_ignore_ascii_case(own))
+                    .map(|(_, v)| v)
+            });
+            eustress_common::plugins::celestial_sections::insert_class_component(
+                &mut commands.entity(entity),
+                class_name,
+                section,
+            );
+            if matches!(
+                class_name,
+                eustress_common::classes::ClassName::Sky
+                    | eustress_common::classes::ClassName::Atmosphere
+                    | eustress_common::classes::ClassName::Clouds
+            ) {
+                commands
+                    .entity(entity)
+                    .insert(crate::plugins::lighting_plugin::LightingServiceOwner);
+            }
+        }
+        // A Decal without a mesh of its own projects from its own Transform
+        // (one placed on the terrain). `decal_place_tool::sync_standalone_decals`
+        // draws it from this component with the live decal material store,
+        // which not every caller of this spawn path can hand over.
+        if matches!(class_name, eustress_common::classes::ClassName::Decal) {
+            if let Some(sec) = section_table(&instance.extra, "decal") {
+                commands.entity(entity).insert(decal_from_section(sec));
+            }
+        }
+        // A Texture has no mesh of its own either: it tiles its image over a
+        // face of its parent part, drawn by `decal_place_tool::
+        // sync_texture_surfaces` from this component. Only the mesh branches
+        // attached it, and a Texture never has an `[asset]` mesh, so every
+        // texture loaded from disk, placed in Studio or imported, drew
+        // nothing.
+        if matches!(class_name, eustress_common::classes::ClassName::Texture) {
+            if let Some(sec) = section_table(&instance.extra, "texture") {
+                commands.entity(entity).insert(texture_from_section(sec));
+            }
+        }
         // GaussianSplats: attach the real radiance-field rendering components
         // (splats have no [asset], so they land in this no-mesh branch too).
         #[cfg(feature = "gaussian-splatting")]
@@ -2410,6 +2682,13 @@ pub fn spawn_instance(
                 &toml_path,
                 &instance.extra,
             );
+        }
+        // A DataMesh (SpecialMesh, BlockMesh, CylinderMesh, FileMesh) never has
+        // an `[asset]` of its own, so it always lands here: its component from
+        // its `[mesh]`, by the builder a Player's reader shares.
+        if eustress_common::datamodel::record::is_data_mesh_class(class_name) {
+            let section = instance.extra.iter().find(|(k, _)| k.eq_ignore_ascii_case("mesh")).map(|(_, v)| v);
+            eustress_common::datamodel::record::insert_data_mesh(&mut commands.entity(entity), class_name, section);
         }
         // DEBUG: per-entity; an INFO here is a log-I/O stall at scale.
         debug!("🌅 Spawned non-visual instance '{}' ({}) from {:?}", name, instance.metadata.class_name, toml_path);
@@ -2618,7 +2897,10 @@ pub fn spawn_instance(
         // `attributes_from_toml_table` establishes for Attributes. Inserted
         // here rather than in the spawn bundle to stay clear of Bevy's tuple
         // arity limit.
-        ec.insert(parameters_from_toml_table(instance.parameters.as_ref()));
+        ec.insert(super::parameters_runtime::loaded_parameters(
+            instance.parameters.as_ref(),
+            instance.extra.get("parameter_bindings"),
+        ));
         ec.insert(part_visibility_range(part_half_extent(scale)));
 
         // Only add physics collider when can_collide is true — avoids broadphase
@@ -2675,10 +2957,6 @@ pub fn spawn_instance(
         if let Some(ref echem) = instance.electrochemical {
             ec.insert(echem.to_component());
             debug!("  + ElectrochemicalState: V={:.2}V SOC={:.1}%", echem.voltage, echem.soc * 100.0);
-        }
-        if let Some(ref nuc) = instance.nuclear {
-            ec.insert(nuc.to_init());
-            debug!("  + NuclearInit: T={:.0}°C load={:.0}W", nuc.core_temp_celsius, nuc.load_demand_watts);
         }
         if let Some(ref plasma) = instance.plasma {
             ec.insert(plasma.to_component());
@@ -2788,7 +3066,10 @@ pub fn spawn_instance(
     ec.insert(measure_unit);
     // See the sibling spawn path above: Parameters mirror `[parameters]` from
     // disk into the live component.
-    ec.insert(parameters_from_toml_table(instance.parameters.as_ref()));
+    ec.insert(super::parameters_runtime::loaded_parameters(
+        instance.parameters.as_ref(),
+        instance.extra.get("parameter_bindings"),
+    ));
     ec.insert(part_visibility_range(part_half_extent(scale)));
 
     // Only add physics collider when can_collide is true — avoids broadphase
@@ -2888,16 +3169,14 @@ pub fn spawn_instance(
         ec.insert(echem.to_component());
         debug!("  + ElectrochemicalState: V={:.2}V SOC={:.1}%", echem.voltage, echem.soc * 100.0);
     }
-    if let Some(ref nuc) = instance.nuclear {
-        ec.insert(nuc.to_init());
-        debug!("  + NuclearInit: T={:.0}°C load={:.0}W", nuc.core_temp_celsius, nuc.load_demand_watts);
-    }
     if let Some(ref plasma) = instance.plasma {
         ec.insert(plasma.to_component());
         debug!("  + PlasmaState: ne={:.1e} Te={:.1e}K", plasma.electron_density, plasma.electron_temperature_k);
     }
     // Attach UI ECS component if this is a UI class
     attach_ui_component(&mut ec, class_name, instance.ui.as_ref());
+    attach_spawn_location(&mut ec, class_name, &instance.extra);
+    attach_class_props(&mut ec, class_name, is_custom_mesh, &instance.extra, instance.metadata.unit.as_deref());
     // End the EntityCommands borrow before the decal/mesh attach (needs
     // `&mut commands`); the attach removes the consumed `decal`/`mesh` key
     // so PendingExtraSections below never double-dispatches it.
@@ -3092,6 +3371,69 @@ pub fn attach_ui_component(
 
 /// Borrow a named `[section]` table out of the flattened `extra` map
 /// (case-insensitive on the section name).
+/// A SpawnLocation is a Part plus the `SpawnLocation` component Play looks
+/// for when it places the player, read from the `[spawn]` section.
+fn attach_spawn_location(
+    ec: &mut bevy::ecs::system::EntityCommands,
+    class_name: eustress_common::classes::ClassName,
+    extra: &std::collections::HashMap<String, toml::Value>,
+) {
+    if class_name != eustress_common::classes::ClassName::SpawnLocation {
+        return;
+    }
+    let mut spawn = eustress_common::classes::SpawnLocation::default();
+    if let Some(sec) = section_table(extra, "spawn") {
+        if let Some(v) = sec.get("enabled").and_then(|v| v.as_bool()) {
+            spawn.enabled = v;
+        }
+        if let Some(v) = sec.get("neutral").and_then(|v| v.as_bool()) {
+            spawn.neutral = v;
+        }
+        if let Some(v) = sec.get("allow_team_change_on_touch").and_then(|v| v.as_bool()) {
+            spawn.allow_team_change = v;
+        }
+        if let Some(v) = toml_f32(sec.get("duration")) {
+            spawn.spawn_protection_duration = v.max(0.0);
+        }
+        if let Some(v) = sec.get("team_color").and_then(|v| v.as_str()) {
+            spawn.team_name = v.to_string();
+        }
+    }
+    ec.insert(spawn);
+}
+
+/// A Seat's or VehicleSeat's own settings (`[seat]`, `[vehicle]`), read by the
+/// conversion a Player's tree reader uses too and kept for Studio's Play seed.
+/// A class's own properties in the tree (`RecordClassProps`), read from its
+/// file's class sections by the rules a Player's reader shares
+/// (`record::record_class_props`, keyed by the class's tree name): a seat's,
+/// a KeyframeSequence's, a Luau script's `ScriptOrigin`. Every flat file goes
+/// through here, so a class added to `record_class_props` needs nothing on
+/// Studio's side. A file with no section of its own has none.
+fn attach_class_props(
+    ec: &mut bevy::ecs::system::EntityCommands,
+    class_name: eustress_common::classes::ClassName,
+    custom_mesh: bool,
+    extra: &std::collections::HashMap<String, toml::Value>,
+    unit: Option<&str>,
+) {
+    use eustress_common::datamodel::record::{record_class_props, tree_class, RecordClassProps};
+    if extra.is_empty() {
+        return;
+    }
+    // The file's unit too: a seat's speed is in its length unit a second.
+    let mut doc: toml::Table = extra.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+    if let Some(unit) = unit {
+        let mut metadata = toml::Table::new();
+        metadata.insert("unit".to_string(), toml::Value::String(unit.to_string()));
+        doc.insert("metadata".to_string(), toml::Value::Table(metadata));
+    }
+    let props = record_class_props(&tree_class(class_name, custom_mesh), &toml::Value::Table(doc));
+    if !props.is_empty() {
+        ec.insert(RecordClassProps(props));
+    }
+}
+
 fn section_table<'a>(
     extra: &'a std::collections::HashMap<String, toml::Value>,
     name: &str,
@@ -3140,19 +3482,6 @@ fn toml_f32(v: Option<&toml::Value>) -> Option<f32> {
     })
 }
 
-/// Read a 3-element array (int or float) → `Vec3`.
-fn toml_vec3(v: Option<&toml::Value>) -> Option<Vec3> {
-    let arr = v.and_then(|v| v.as_array())?;
-    if arr.len() != 3 {
-        return None;
-    }
-    let mut out = [0.0f32; 3];
-    for (slot, item) in out.iter_mut().zip(arr.iter()) {
-        *slot = item.as_float().or_else(|| item.as_integer().map(|n| n as f64))? as f32;
-    }
-    Some(Vec3::from_array(out))
-}
-
 /// Map an importer `[decal].face` string → engine `Face` enum.
 fn face_from_str(s: &str) -> eustress_common::classes::Face {
     use eustress_common::classes::Face;
@@ -3166,20 +3495,51 @@ fn face_from_str(s: &str) -> eustress_common::classes::Face {
     }
 }
 
-/// Map an importer `[mesh].mesh_type` string → engine `MeshType` enum.
-fn mesh_type_from_str(s: &str) -> eustress_common::classes::MeshType {
-    use eustress_common::classes::MeshType;
-    match s {
-        "Head" => MeshType::Head,
-        "Torso" => MeshType::Torso,
-        "Brick" => MeshType::Brick,
-        "Sphere" => MeshType::Sphere,
-        "Cylinder" => MeshType::Cylinder,
-        _ => MeshType::FileMesh,
+/// A `Decal` from its `[decal]` section, the importer's and the Studio's
+/// alike. A missing key keeps the class default; `depth_fade_factor` is
+/// written by the terrain placement, which sizes it to the ground's relief.
+pub(crate) fn decal_from_section(sec: &toml::value::Table) -> eustress_common::classes::Decal {
+    let defaults = eustress_common::classes::Decal::default();
+    eustress_common::classes::Decal {
+        texture: sec
+            .get("texture")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string(),
+        face: sec
+            .get("face")
+            .and_then(|v| v.as_str())
+            .map(face_from_str)
+            .unwrap_or(defaults.face),
+        transparency: toml_f32(sec.get("transparency")).unwrap_or(defaults.transparency),
+        depth_fade_factor: toml_f32(sec.get("depth_fade_factor")).unwrap_or(defaults.depth_fade_factor),
+        color: color_u8_array_to_rgba(sec.get("color"), defaults.color),
+        z_index: sec
+            .get("z_index")
+            .and_then(|v| v.as_integer())
+            .map_or(defaults.z_index, |z| z as i32),
     }
 }
 
-/// Attach the Decal / SpecialMesh component from the importer-written
+/// A `Texture` from its `[texture]` section. A missing key keeps the class
+/// default. Shared by the no-mesh spawn path and the mesh branches.
+pub(crate) fn texture_from_section(sec: &toml::value::Table) -> eustress_common::classes::Texture {
+    let mut t = eustress_common::classes::Texture::default();
+    if let Some(s) = sec.get("texture").and_then(|v| v.as_str()) { t.texture = s.to_string(); }
+    if let Some(s) = sec.get("face").and_then(|v| v.as_str()) { t.face = s.to_string(); }
+    if let Some(v) = toml_f32(sec.get("studs_per_tile_u")) { t.studs_per_tile_u = v; }
+    if let Some(v) = toml_f32(sec.get("studs_per_tile_v")) { t.studs_per_tile_v = v; }
+    if let Some(v) = toml_f32(sec.get("offset_studs_u")) { t.offset_studs_u = v; }
+    if let Some(v) = toml_f32(sec.get("offset_studs_v")) { t.offset_studs_v = v; }
+    if let Some(rgb) = sec.get("color3").or_else(|| sec.get("color")) {
+        let c = color_u8_array_to_rgba(Some(rgb), [1.0, 1.0, 1.0, 1.0]);
+        t.color3 = [c[0], c[1], c[2]];
+    }
+    if let Some(v) = toml_f32(sec.get("transparency")) { t.transparency = v; }
+    t
+}
+
+/// Attach the Decal / DataMesh component from the importer-written
 /// `[decal]` / `[mesh]` section. For a `Decal` it ALSO spawns a real
 /// `ForwardDecal` child (a bare `Decal` component renders nothing) and
 /// parents it to `host`. The consumed `decal`/`mesh` key is REMOVED from
@@ -3195,34 +3555,11 @@ fn attach_decal_mesh_component(
     base_transform: Transform,
     name: &str,
 ) {
-    use eustress_common::classes::{ClassName, Decal, Instance, SpecialMesh};
+    use eustress_common::classes::{ClassName, Instance};
     match class_name {
         ClassName::Decal => {
             let Some(sec) = section_table(extra, "decal") else { return; };
-            let color = color_u8_array_to_rgba(sec.get("color"), [1.0, 1.0, 1.0, 1.0]);
-            let transparency = toml_f32(sec.get("transparency")).unwrap_or(0.0);
-            let z_index = sec
-                .get("z_index")
-                .and_then(|v| v.as_integer())
-                .unwrap_or(0) as i32;
-            let face = sec
-                .get("face")
-                .and_then(|v| v.as_str())
-                .map(face_from_str)
-                .unwrap_or(eustress_common::classes::Face::Front);
-            let texture = sec
-                .get("texture")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string();
-            let decal = Decal {
-                texture,
-                face,
-                transparency,
-                color,
-                z_index,
-                ..Default::default()
-            };
+            let decal = decal_from_section(sec);
             let inst = Instance {
                 name: name.to_string(),
                 class_name: ClassName::Decal,
@@ -3252,42 +3589,16 @@ fn attach_decal_mesh_component(
             // this loader path needs no mesh/material assets. See
             // `decal_place_tool::sync_texture_surfaces`.
             let Some(sec) = section_table(extra, "texture") else { return; };
-            let mut t = eustress_common::classes::Texture::default();
-            if let Some(s) = sec.get("texture").and_then(|v| v.as_str()) { t.texture = s.to_string(); }
-            if let Some(s) = sec.get("face").and_then(|v| v.as_str()) { t.face = s.to_string(); }
-            if let Some(v) = toml_f32(sec.get("studs_per_tile_u")) { t.studs_per_tile_u = v; }
-            if let Some(v) = toml_f32(sec.get("studs_per_tile_v")) { t.studs_per_tile_v = v; }
-            if let Some(v) = toml_f32(sec.get("offset_studs_u")) { t.offset_studs_u = v; }
-            if let Some(v) = toml_f32(sec.get("offset_studs_v")) { t.offset_studs_v = v; }
-            if let Some(rgb) = sec.get("color3").or_else(|| sec.get("color")) {
-                let c = color_u8_array_to_rgba(Some(rgb), [1.0, 1.0, 1.0, 1.0]);
-                t.color3 = [c[0], c[1], c[2]];
-            }
-            if let Some(v) = toml_f32(sec.get("transparency")) { t.transparency = v; }
-            commands.entity(host).insert(t);
+            commands.entity(host).insert(texture_from_section(sec));
             extra.remove("texture");
             extra.remove("Texture");
         }
-        ClassName::SpecialMesh => {
-            let Some(sec) = section_table(extra, "mesh") else { return; };
-            let mut sm = SpecialMesh::default();
-            if let Some(s) = sec.get("mesh_type").and_then(|v| v.as_str()) {
-                sm.mesh_type = mesh_type_from_str(s);
-            }
-            if let Some(v) = toml_vec3(sec.get("scale")) {
-                sm.scale = v;
-            }
-            if let Some(v) = toml_vec3(sec.get("offset")) {
-                sm.offset = v;
-            }
-            if let Some(s) = sec.get("mesh_id").and_then(|v| v.as_str()) {
-                sm.mesh_id = s.to_string();
-            }
-            commands.entity(host).insert(sm);
-            // texture_id / vertex_color have no SpecialMesh field — leave
-            // them in `extra` for round-trip.
-            extra.remove("mesh");
-            extra.remove("Mesh");
+        c if eustress_common::datamodel::record::is_data_mesh_class(c) => {
+            // SpecialMesh, BlockMesh, CylinderMesh or FileMesh: its component
+            // from its `[mesh]`, by the builder a Player's reader shares.
+            let key = extra.keys().find(|k| k.eq_ignore_ascii_case("mesh")).cloned();
+            let section = key.and_then(|k| extra.remove(&k));
+            eustress_common::datamodel::record::insert_data_mesh(&mut commands.entity(host), c, section.as_ref());
         }
         _ => {}
     }
@@ -3802,6 +4113,16 @@ fn attach_vfx_component(
                 b.transparency_sequence = vec![(0.0, t), (1.0, t)];
             }
             ec.insert(b);
+            // The two nodes it joins, by `Instance.uuid`: what
+            // `sync_beam_transforms` stretches it between.
+            let uuid = |key: &str| {
+                sec.get(key).and_then(|v| v.as_str()).filter(|s| !s.is_empty()).map(str::to_string)
+            };
+            ec.insert(crate::spawners::audio_vfx::BeamSegmentLink {
+                attachment0_uuid: uuid("attachment0_uuid"),
+                attachment1_uuid: uuid("attachment1_uuid"),
+                ..Default::default()
+            });
         }
         _ => {}
     }
@@ -3848,10 +4169,42 @@ pub fn write_instance_changes_system(
         // is for non-drag changes (Properties panel edits, scripts, MCP).
         Without<BeingDragged>,
     )>,
+    // The same instances without the change filter: entities picked up
+    // from the deferred set or from a drag that just ended are written from
+    // their CURRENT state.
+    current: Query<(
+        Entity,
+        &Transform,
+        &InstanceFile,
+        Option<&eustress_common::classes::BasePart>,
+        Option<&eustress_common::units::MeasureUnit>,
+    ), Without<BeingDragged>>,
     added_instances: Query<Entity, Added<Transform>>,
     mut recently_written: ResMut<super::file_watcher::RecentlyWrittenFiles>,
     load_in_progress: Res<super::file_loader::LoadInProgress>,
+    // A drag ends by removing `BeingDragged`, and by then the transform's
+    // change tick is older than this system's last run, so the change
+    // filter never sees it. Without this, a tool that relies on this writer
+    // (Rotate does) left the dragged pose unsaved.
+    mut undragged: RemovedComponents<BeingDragged>,
+    // Changes that arrived while their file was inside the recent-write
+    // window. They are written once the window passes; they used to be
+    // dropped, which lost an undo made within two seconds of a drag: the
+    // file kept the moved pose and the part came back moved on reload.
+    mut deferred: Local<std::collections::HashSet<Entity>>,
+    // Light-class instances. They may live under `Lighting/` (the Toolbox
+    // put them there), but their pose is authored, unlike the sky's.
+    light_classes: Query<
+        (),
+        Or<(
+            With<eustress_common::classes::EustressPointLight>,
+            With<eustress_common::classes::EustressSpotLight>,
+            With<eustress_common::classes::SurfaceLight>,
+            With<eustress_common::classes::EustressDirectionalLight>,
+        )>,
+    >,
 ) {
+    deferred.extend(undragged.read());
     // Gate every disk write while the cold-load / rescan path is still
     // settling. Without this, mesh-handle resolution and class-default
     // backfill mark BasePart as Changed for every just-loaded entity,
@@ -3888,18 +4241,29 @@ pub fn write_instance_changes_system(
         /// the mesh bounding box and would clobber the user's value with
         /// whatever the mesh happens to measure in scene units).
         is_custom_mesh: bool,
-        /// Authored unit of the file we're writing into. Position and
-        /// scale are converted from engine-native meters to this unit
-        /// at serialisation (identity short-circuit on `Meter`).
-        authored_unit: eustress_common::units::Unit,
     }
     let mut jobs: Vec<WriteJob> = Vec::new();
 
-    for (entity, transform, instance_file, base_part, measure_unit) in instances.iter() {
+    // This frame's changes plus everything still waiting from earlier ones.
+    let mut candidates: Vec<Entity> = instances.iter().map(|(e, ..)| e).collect();
+    candidates.extend(deferred.drain());
+    candidates.sort_unstable();
+    candidates.dedup();
+
+    for candidate in candidates {
+        let Ok((entity, transform, instance_file, base_part, _measure_unit)) = current.get(candidate) else {
+            // Despawned, or picked up by a new drag (whose own release
+            // writes it): nothing to do here.
+            continue;
+        };
         if just_added.contains(&entity) {
             continue;
         }
+        // Writing inside the window would re-arm the watcher reload loop the
+        // window exists to break. Hold the change and write the latest state
+        // once the window has passed; never drop it.
         if recently_written.was_recently_written(&instance_file.toml_path) {
+            deferred.insert(entity);
             continue;
         }
         // Lighting-service entities (Star/Sun, Moon, Sky, Atmosphere) have
@@ -3908,7 +4272,11 @@ pub fn write_instance_changes_system(
         // LightingService, not the TOML. Writing them would produce a stutter
         // loop: transform write → file-watcher event → class_schema self-heal
         // → another file-watcher event, every ~2 s.
-        if instance_file.toml_path.components().any(|c| c.as_os_str() == "Lighting") {
+        // A light-class instance there is not one of them: its position and
+        // aim are authored, and dropping them lost every move or rotation.
+        if instance_file.toml_path.components().any(|c| c.as_os_str() == "Lighting")
+            && !light_classes.contains(entity)
+        {
             continue;
         }
 
@@ -3942,9 +4310,6 @@ pub fn write_instance_changes_system(
             !matches!(fname, "block.glb"|"ball.glb"|"cylinder.glb"|"wedge.glb"|"corner_wedge.glb"|"cone.glb")
             && !p.is_empty()
         };
-        let authored_unit = measure_unit
-            .map(|m| m.0)
-            .unwrap_or(eustress_common::units::ENGINE_NATIVE_UNIT);
         let mut job = WriteJob {
             path: instance_file.toml_path.clone(),
             transform: td.clone(),
@@ -3956,7 +4321,6 @@ pub fn write_instance_changes_system(
             can_collide: None,
             locked: None,
             is_custom_mesh,
-            authored_unit,
         };
         if let Some(bp) = base_part {
             // Same guard for `BasePart.size` — sanitize_size clamps each
@@ -4024,6 +4388,11 @@ pub fn write_instance_changes_system(
                 };
                 let mut doc: toml::Value = text.parse()
                     .map_err(|e: toml::de::Error| format!("parse {:?}: {}", job.path, e))?;
+                // The unit the file declares (`[metadata] unit`), which the
+                // loader converts from at spawn: values enter the file in it.
+                let unit = file_unit(
+                    doc.get("metadata").and_then(|m| m.get("unit")).and_then(|u| u.as_str()),
+                );
 
                 let root = doc.as_table_mut()
                     .ok_or_else(|| format!("TOML root is not a table: {:?}", job.path))?;
@@ -4037,15 +4406,9 @@ pub fn write_instance_changes_system(
                     .as_table_mut()
                     .ok_or("transform is not a table")?;
 
-                // Convert engine-native meters back to the file's
-                // authored unit at the very edge. Identity short-circuit
-                // when `authored_unit == Meter`, so meter-authored files
-                // pay zero conversion cost. The conversion mirrors the
-                // load path: any value entering the file is in the
-                // unit symbol the file's `[metadata].unit` declares.
-                let [px, py, pz] = eustress_common::units::engine_to_authored_vec3_f32(
-                    job.transform.position, job.authored_unit,
-                );
+                // Engine metres into the file's own unit at the very edge
+                // (`authored_vec3`), mirroring the load path.
+                let [px, py, pz] = authored_vec3(Vec3::from_array(job.transform.position), unit);
                 tf.insert("position".into(), toml::Value::Array(vec![
                     toml::Value::Float(px as f64),
                     toml::Value::Float(py as f64),
@@ -4059,9 +4422,7 @@ pub fn write_instance_changes_system(
                     toml::Value::Float(rw as f64),
                 ]));
                 if !job.is_custom_mesh {
-                    let [sx, sy, sz] = eustress_common::units::engine_to_authored_vec3_f32(
-                        job.transform.scale, job.authored_unit,
-                    );
+                    let [sx, sy, sz] = authored_vec3(Vec3::from_array(job.transform.scale), unit);
                     tf.insert("scale".into(), toml::Value::Array(vec![
                         toml::Value::Float(sx as f64),
                         toml::Value::Float(sy as f64),
@@ -4162,49 +4523,10 @@ pub fn write_instance_changes_system(
 // Properties panel, or future MCP-ECS-mediated paths would live only in
 // the ECS and disappear on restart.
 
-/// Convert a rich in-memory `AttributeValue` into a plain `toml::Value`
-/// suitable for the `[attributes]` section. Mirrors the inverse mapping
-/// in `rich_toml_value_to_attribute` (which loads TOML → ECS). Types
-/// outside the round-trip-safe set (Object / EntityRef / CFrame / …)
-/// fall back to a string display so the file stays human-readable even
-/// when the data isn't recoverable on load.
-pub(crate) fn attribute_to_toml(value: &eustress_common::AttributeValue) -> toml::Value {
-    use eustress_common::AttributeValue as A;
-    match value {
-        A::Bool(b)      => toml::Value::Boolean(*b),
-        A::Int(i)       => toml::Value::Integer(*i),
-        A::Number(n)    => toml::Value::Float(*n),
-        A::String(s)    => toml::Value::String(s.clone()),
-        A::Vector2(v)   => toml::Value::Array(vec![
-            toml::Value::Float(v.x as f64),
-            toml::Value::Float(v.y as f64),
-        ]),
-        A::Vector3(v)   => toml::Value::Array(vec![
-            toml::Value::Float(v.x as f64),
-            toml::Value::Float(v.y as f64),
-            toml::Value::Float(v.z as f64),
-        ]),
-        A::Color(c) | A::Color3(c) => {
-            let s = c.to_srgba();
-            toml::Value::Array(vec![
-                toml::Value::Float(s.red as f64),
-                toml::Value::Float(s.green as f64),
-                toml::Value::Float(s.blue as f64),
-                toml::Value::Float(s.alpha as f64),
-            ])
-        }
-        // Less common types fall through to display strings — readable
-        // in a TOML file but not currently re-parseable on reload. Good
-        // enough for diff-friendly snapshotting; full round-trip can
-        // be plumbed when a user surface needs it.
-        other => toml::Value::String(other.display_value()),
-    }
-}
-
 /// Patch a single `_instance.toml` with the entity's current tags and
 /// attributes. Pure on-disk operation — no Bevy types in or out. Runs
 /// on a background thread.
-fn patch_tags_attributes_toml(
+pub(crate) fn patch_tags_attributes_toml(
     path: &std::path::Path,
     tags: Option<Vec<String>>,
     attributes: Option<std::collections::HashMap<String, toml::Value>>,
@@ -4218,6 +4540,12 @@ fn patch_tags_attributes_toml(
     };
 
     if let Some(tags) = tags {
+        // The root `tags` is the one copy. A `[metadata] tags` an older
+        // importer wrote would come back as the fallback once the root is
+        // gone, so it goes too.
+        if let Some(meta) = root.get_mut("metadata").and_then(|m| m.as_table_mut()) {
+            meta.remove("tags");
+        }
         if tags.is_empty() {
             root.remove("tags");
         } else {
@@ -4229,14 +4557,17 @@ fn patch_tags_attributes_toml(
     }
 
     if let Some(attrs) = attributes {
-        if attrs.is_empty() {
-            root.remove("attributes");
-        } else {
-            let mut tbl = toml::map::Map::new();
-            for (k, v) in attrs {
-                tbl.insert(k, v);
+        // Merged into what the file holds: an entry the engine cannot read (a
+        // kind the reader does not model) stays as written, and a readable
+        // entry missing from the component is one the user deleted.
+        let existing = root.get("attributes").and_then(|a| a.as_table()).cloned();
+        match eustress_common::datamodel::record::merge_attribute_table(existing.as_ref(), attrs) {
+            Some(table) => {
+                root.insert("attributes".into(), toml::Value::Table(table));
             }
-            root.insert("attributes".into(), toml::Value::Table(tbl));
+            None => {
+                root.remove("attributes");
+            }
         }
     }
 
@@ -4274,14 +4605,14 @@ fn patch_tags_attributes_toml(
 pub fn ensure_tags_and_attributes_components(
     mut commands: Commands,
     needs_tags: Query<
-        Entity,
+        (Entity, &InstanceFile),
         (
             Added<InstanceFile>,
             Without<eustress_common::attributes::Tags>,
         ),
     >,
     needs_attrs: Query<
-        Entity,
+        (Entity, &InstanceFile),
         (
             Added<InstanceFile>,
             Without<eustress_common::attributes::Attributes>,
@@ -4300,15 +4631,36 @@ pub fn ensure_tags_and_attributes_components(
         ),
     >,
 ) {
-    for entity in needs_tags.iter() {
+    // A spawn path that did not fill them gets them from the entity's file, so
+    // a later tag or attribute save keeps the file's others. A file that
+    // cannot be read (a synthetic binary-core path, a Fjall-only world) gets
+    // empty ones, as before.
+    let mut docs: std::collections::HashMap<Entity, Option<toml::Value>> = std::collections::HashMap::new();
+    let mut doc_of = |entity: Entity, file: &InstanceFile| -> Option<toml::Value> {
+        docs.entry(entity)
+            .or_insert_with(|| {
+                std::fs::read_to_string(&file.toml_path)
+                    .ok()
+                    .and_then(|text| text.parse::<toml::Value>().ok())
+            })
+            .clone()
+    };
+    for (entity, file) in needs_tags.iter() {
+        let tags = doc_of(entity, file)
+            .map(|doc| eustress_common::datamodel::record::record_tags(&doc))
+            .unwrap_or_default();
         commands
             .entity(entity)
-            .insert(eustress_common::attributes::Tags::new());
+            .insert(eustress_common::attributes::Tags(tags));
     }
-    for entity in needs_attrs.iter() {
-        commands
-            .entity(entity)
-            .insert(eustress_common::attributes::Attributes::new());
+    for (entity, file) in needs_attrs.iter() {
+        let mut attributes = eustress_common::attributes::Attributes::new();
+        if let Some(doc) = doc_of(entity, file) {
+            for (key, value) in eustress_common::datamodel::record::record_attribute_values(&doc) {
+                attributes.set(&key, value);
+            }
+        }
+        commands.entity(entity).insert(attributes);
     }
     for entity in needs_params.iter() {
         commands
@@ -4415,7 +4767,10 @@ pub fn save_tags_and_attributes_changes(
         let attrs_payload = attrs.map(|a| {
             let mut out = std::collections::HashMap::new();
             for (k, v) in a.values.iter() {
-                out.insert(k.clone(), attribute_to_toml(v));
+                // A runtime reference (an Object) never persists.
+                if let Some(value) = eustress_common::datamodel::record::attribute_to_toml(v) {
+                    out.insert(k.clone(), value);
+                }
             }
             out
         });
@@ -4445,4 +4800,388 @@ pub fn save_tags_and_attributes_changes(
             );
         }
     });
+}
+
+#[cfg(test)]
+mod authored_transform_tests {
+    use super::*;
+
+    fn temp_file(name: &str, text: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("eustress_authored_{name}_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("_instance.toml");
+        std::fs::write(&path, text).unwrap();
+        path
+    }
+
+    /// Where the loader spawns a file's numbers: its unit to metres, as
+    /// `spawn_instance` converts them.
+    fn spawned(v: [f32; 3], unit: Option<&str>) -> Vec3 {
+        #[cfg(feature = "units_v1")]
+        {
+            Vec3::from_array(eustress_common::units::convert_vec3_f32(
+                v,
+                file_unit(unit),
+                eustress_common::units::ENGINE_NATIVE_UNIT,
+            ))
+        }
+        #[cfg(not(feature = "units_v1"))]
+        {
+            let _ = unit;
+            Vec3::from_array(v)
+        }
+    }
+
+    fn close(a: Vec3, b: Vec3) -> bool {
+        (a - b).abs().max_element() < 1e-4
+    }
+
+    /// A part imported in feet, moved and resized in metres, saved, and read
+    /// back: its file stays in feet and it spawns where it was left.
+    #[test]
+    fn a_file_in_feet_reads_back_where_it_was_saved() {
+        let path = temp_file(
+            "feet",
+            "[metadata]\nclass_name = \"Part\"\nunit = \"ft\"\n\n[transform]\nposition = [10.0, 0.0, 0.0]\nrotation = [0.0, 0.0, 0.0, 1.0]\nscale = [4.0, 1.0, 2.0]\n",
+        );
+        let mut def = load_instance_definition(&path).unwrap();
+        let moved = Vec3::new(3.048 + 1.0, 0.5, -2.0);
+        let size = Vec3::new(1.2192, 0.3048, 0.9144);
+        set_authored_transform(&mut def, moved, Quat::from_rotation_y(0.5), Some(size));
+        write_instance_definition(&path, &def).unwrap();
+        let back = load_instance_definition(&path).unwrap();
+        assert_eq!(back.metadata.unit.as_deref(), Some("ft"));
+        let unit = back.metadata.unit.as_deref();
+        assert!(close(spawned(back.transform.position, unit), moved), "{:?}", back.transform.position);
+        assert!(close(spawned(back.transform.scale, unit), size), "{:?}", back.transform.scale);
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    /// A file with no unit is in metres and takes the numbers as they are;
+    /// a size of `None` keeps the file's scale.
+    #[test]
+    fn a_file_in_metres_takes_metres_and_keeps_its_scale() {
+        let path = temp_file(
+            "metres",
+            "[metadata]\nclass_name = \"Part\"\n\n[transform]\nposition = [1.0, 2.0, 3.0]\nrotation = [0.0, 0.0, 0.0, 1.0]\nscale = [2.0, 2.0, 2.0]\n",
+        );
+        let mut def = load_instance_definition(&path).unwrap();
+        set_authored_transform(&mut def, Vec3::new(4.0, 5.0, 6.0), Quat::IDENTITY, None);
+        assert_eq!(def.transform.position, [4.0, 5.0, 6.0]);
+        assert_eq!(def.transform.scale, [2.0, 2.0, 2.0]);
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    /// A pasted copy of a part in feet gets its new pose and size in feet.
+    #[test]
+    fn a_toml_document_in_feet_takes_feet() {
+        let mut doc: toml::Value = "[metadata]\nclass_name = \"Part\"\nunit = \"ft\"\n\n[properties]\nanchored = true\n"
+            .parse()
+            .unwrap();
+        set_authored_transform_toml(&mut doc, Vec3::new(3.048, 0.0, 0.0), Quat::IDENTITY, Some(Vec3::splat(0.6096))).unwrap();
+        let get = |k: &str| -> Vec<f64> {
+            doc["transform"][k].as_array().unwrap().iter().map(|v| v.as_float().unwrap()).collect()
+        };
+        #[cfg(feature = "units_v1")]
+        {
+            assert!((get("position")[0] - 10.0).abs() < 1e-4, "{:?}", get("position"));
+            assert!((get("scale")[1] - 2.0).abs() < 1e-4, "{:?}", get("scale"));
+        }
+        assert_eq!(doc["properties"]["anchored"].as_bool(), Some(true), "other keys are kept");
+    }
+}
+
+/// The typed writer against the file it writes onto (`planned_write`).
+#[cfg(test)]
+mod typed_write_tests {
+    use super::*;
+
+    const PART: &str = r#"# A crate
+[metadata]
+class_name = "Part"
+name = "Crate"
+uuid = "0123456789abcdef0123456789abcdef"
+unit = "ft"
+roblox_brick_color = 194
+
+[transform]
+position = [113.6, 0.071, 95.0] # studs
+rotation = [0.0, 0.0, 0.0, 1.0]
+scale = [4.0, 1.0, 2.0]
+pivot_note = "kept"
+
+[properties]
+anchored = true
+color = [0.8627, 0.2745, 0.2353, 1.0]
+material = "Wood"
+collision_group = "Crates"
+
+[properties.extras]
+CanQuery = true
+BackSurface = 0
+
+[properties.physics]
+density = 0.7
+roblox_note = "kept"
+
+[asset]
+mesh = "parts/block.glb"
+scene = "Scene0"
+
+[attributes]
+Health = 100
+Owner = "npc"
+
+[gui_hint]
+label = "a top-level section no struct models"
+"#;
+
+    /// Box Head's pistol as an earlier writer left it (multi-line arrays).
+    const PISTOL: &str = r#"[asset]
+mesh = "../../../meshes/gun_pistol.glb"
+scene = "Scene0"
+
+[metadata]
+archivable = true
+class_name = "Part"
+name = "Pistol"
+uuid = "0d03f50cf79683cb104d7faf1650491f"
+
+[properties]
+anchored = true
+can_collide = false
+cast_shadow = true
+color = [
+    1.0,
+    1.0,
+    1.0,
+    1.0,
+]
+locked = false
+material = "SmoothPlastic"
+reflectance = 0.0
+transparency = 0.0
+
+[transform]
+position = [
+    0.0,
+    -50.0,
+    0.0,
+]
+rotation = [
+    0.0,
+    0.0,
+    0.0,
+    1.0,
+]
+scale = [
+    1.0,
+    1.0,
+    1.0,
+]
+"#;
+
+    const FOLDER: &str = "[metadata]\nclass_name = \"Folder\"\nname = \"Stuff\"\n\n[attributes]\nCount = 3\n";
+
+    fn file(name: &str, text: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("eustress_typed_write_{name}_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("_instance.toml");
+        std::fs::write(&path, text).unwrap();
+        path
+    }
+
+    fn text(path: &Path) -> String {
+        std::fs::read_to_string(path).unwrap()
+    }
+
+    fn done(path: &Path) {
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    /// Saving without an edit leaves every file byte for byte, signed or not,
+    /// and adds no stamp.
+    #[test]
+    fn an_unchanged_save_leaves_the_file_byte_for_byte() {
+        let stamp = CreatorStamp {
+            name: "Tester".to_string(),
+            public_key: "key".to_string(),
+            timestamp: "2026-09-25T12:00:00Z".to_string(),
+            first_timestamp: None,
+            saves: 1,
+        };
+        for (name, original) in [("part", PART), ("pistol", PISTOL), ("folder", FOLDER)] {
+            let path = file(name, original);
+            let mut def = load_instance_definition_from_str(original).unwrap();
+            write_instance_definition(&path, &def).unwrap();
+            assert_eq!(text(&path), original, "{name}: unsigned");
+            write_instance_definition_signed(&path, &mut def, Some(&stamp)).unwrap();
+            assert_eq!(text(&path), original, "{name}: signed");
+            assert!(def.metadata.created_by.is_none() && def.metadata.modifications.is_empty(), "{name}: no stamp");
+            done(&path);
+        }
+    }
+
+    /// A run of saves by one author is one entry; another author appends.
+    #[test]
+    fn a_run_of_saves_by_one_author_is_one_entry() {
+        let stamp = |who: &str, at: &str| CreatorStamp {
+            name: who.to_string(),
+            public_key: format!("{who}-key"),
+            timestamp: at.to_string(),
+            first_timestamp: None,
+            saves: 1,
+        };
+        let mut chain = Vec::new();
+        for (who, at) in [("a", "t1"), ("a", "t2"), ("b", "t3"), ("a", "t4")] {
+            record_modification(&mut chain, &stamp(who, at));
+        }
+        assert_eq!(chain.len(), 3);
+        assert_eq!((chain[0].first_timestamp.as_deref(), chain[0].timestamp.as_str(), chain[0].saves), (Some("t1"), "t2", 2));
+        assert_eq!((chain[1].first_timestamp.as_deref(), chain[1].timestamp.as_str(), chain[1].saves), (None, "t3", 1));
+        assert_eq!((chain[2].timestamp.as_str(), chain[2].saves), ("t4", 1));
+
+        // In a file: two signed moves by one author leave one entry, saves = 2.
+        let path = file("stamps", PART);
+        let mut def = load_instance_definition_from_str(PART).unwrap();
+        def.transform.position = [1.0, 2.0, 3.0];
+        write_instance_definition_signed(&path, &mut def, Some(&stamp("a", "t1"))).unwrap();
+        let mut def = load_instance_definition_from_str(&text(&path)).unwrap();
+        def.transform.position = [4.0, 5.0, 6.0];
+        write_instance_definition_signed(&path, &mut def, Some(&stamp("a", "t2"))).unwrap();
+        let doc: toml::Value = text(&path).parse().unwrap();
+        let chain = doc["metadata"]["modifications"].as_array().unwrap();
+        assert_eq!(chain.len(), 1, "{doc}");
+        assert_eq!(chain[0]["saves"].as_integer(), Some(2));
+        assert_eq!(chain[0]["first_timestamp"].as_str(), Some("t1"));
+        assert_eq!(chain[0]["timestamp"].as_str(), Some("t2"));
+        done(&path);
+    }
+
+    /// A move rewrites the position line and nothing else, in the shortest
+    /// f32 form, keeping its comment.
+    #[test]
+    fn a_move_changes_only_the_position_line() {
+        let path = file("move", PART);
+        let mut def = load_instance_definition_from_str(PART).unwrap();
+        def.transform.position = [5.1, 6.0, 7.0];
+        write_instance_definition(&path, &def).unwrap();
+        let after = text(&path);
+        let changed: Vec<(&str, &str)> = PART.lines().zip(after.lines()).filter(|(a, b)| a != b).collect();
+        assert_eq!(
+            changed,
+            vec![("position = [113.6, 0.071, 95.0] # studs", "position = [5.1, 6.0, 7.0] # studs")],
+            "{after}"
+        );
+        assert_eq!(PART.lines().count(), after.lines().count());
+        done(&path);
+    }
+
+    /// A changed colour keeps the file's float form and its alpha.
+    #[test]
+    fn a_colour_change_keeps_the_files_float_form() {
+        let path = file("colour", PART);
+        let mut def = load_instance_definition_from_str(PART).unwrap();
+        def.properties.color = [0.5, 0.25, 0.125, 1.0];
+        write_instance_definition(&path, &def).unwrap();
+        let after = text(&path);
+        assert!(after.contains("color = [0.5, 0.25, 0.125, 1.0]\n"), "{after}");
+        done(&path);
+    }
+
+    /// A value the model clears is deleted; every key it does not know stays.
+    #[test]
+    fn a_cleared_value_stays_cleared_and_unmodeled_keys_stay() {
+        let path = file("clear", PART);
+        let before: toml::Value = PART.parse().unwrap();
+        let mut def = load_instance_definition_from_str(PART).unwrap();
+        def.asset = None;
+        def.metadata.name = None;
+        def.attributes.as_mut().unwrap().remove("Owner");
+        if let Some(physics) = def.properties.physics.as_mut() {
+            physics.density = None;
+        }
+        write_instance_definition(&path, &def).unwrap();
+        let after: toml::Value = text(&path).parse().unwrap();
+        assert!(after.get("asset").is_none(), "a removed asset mesh stays removed: {after}");
+        assert!(after["metadata"].get("name").is_none());
+        assert!(after["attributes"].get("Owner").is_none());
+        assert_eq!(after["attributes"]["Health"].as_integer(), Some(100));
+        assert!(after["properties"]["physics"].get("density").is_none());
+        for (section, key) in [("transform", "pivot_note"), ("metadata", "roblox_brick_color"), ("properties", "collision_group"), ("properties", "extras")] {
+            assert_eq!(after[section].get(key), before[section].get(key), "[{section}] {key}");
+        }
+        assert_eq!(after["properties"]["physics"]["roblox_note"].as_str(), Some("kept"));
+        assert_eq!(after["gui_hint"], before["gui_hint"]);
+        done(&path);
+    }
+
+    /// A class with no pose gains no part sections or defaults from a save.
+    #[test]
+    fn a_folder_gains_no_part_sections() {
+        let path = file("folder_edit", FOLDER);
+        let mut def = load_instance_definition_from_str(FOLDER).unwrap();
+        def.metadata.name = Some("Things".to_string());
+        write_instance_definition(&path, &def).unwrap();
+        assert_eq!(text(&path), FOLDER.replace("name = \"Stuff\"", "name = \"Things\""));
+        done(&path);
+    }
+
+    /// Every named section is a field, never `extra`, and a definition built
+    /// without its file's unknown sections leaves them on disk.
+    #[test]
+    fn the_named_sections_are_the_structs_fields() {
+        let mut def = load_instance_definition_from_str(PART).unwrap();
+        for named in NAMED_SECTIONS {
+            assert!(!def.extra.contains_key(*named), "{named} is a field of InstanceDefinition");
+        }
+        assert!(def.extra.contains_key("gui_hint"));
+        let path = file("named", PART);
+        def.extra.clear();
+        write_instance_definition(&path, &def).unwrap();
+        assert_eq!(text(&path), PART);
+        done(&path);
+    }
+
+    /// A real Space, copied: saving each of its files without an edit changes
+    /// none. Set `EUSTRESS_SAVE_SAMPLE` to a Space folder.
+    #[test]
+    #[ignore = "real data: set EUSTRESS_SAVE_SAMPLE to a Space folder"]
+    fn a_real_space_saves_without_changing_a_file() {
+        let Some(sample) = std::env::var_os("EUSTRESS_SAVE_SAMPLE").map(PathBuf::from) else { return };
+        let temp = std::env::temp_dir().join(format!("eustress_save_sample_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&temp);
+        std::fs::create_dir_all(&temp).unwrap();
+        let (mut checked, mut changed) = (0usize, Vec::new());
+        let mut dirs = vec![sample.clone()];
+        while let Some(dir) = dirs.pop() {
+            for entry in std::fs::read_dir(&dir).unwrap().flatten() {
+                let path = entry.path();
+                let name = entry.file_name().to_string_lossy().to_string();
+                if path.is_dir() {
+                    if !name.starts_with('.') {
+                        dirs.push(path);
+                    }
+                    continue;
+                }
+                if !name.ends_with(".toml") || name == "space.toml" || name == "_service.toml" {
+                    continue;
+                }
+                let Ok(original) = std::fs::read_to_string(&path) else { continue };
+                let Ok(def) = load_instance_definition_from_str(&original) else { continue };
+                let copy = temp.join(format!("{checked}.toml"));
+                std::fs::write(&copy, &original).unwrap();
+                write_instance_definition(&copy, &def).unwrap();
+                if std::fs::read_to_string(&copy).unwrap() != original {
+                    changed.push(path.display().to_string());
+                }
+                checked += 1;
+            }
+        }
+        let _ = std::fs::remove_dir_all(&temp);
+        eprintln!("{}: {checked} files saved without an edit, {} changed", sample.display(), changed.len());
+        assert!(changed.is_empty(), "changed: {:?}", &changed[..changed.len().min(10)]);
+    }
 }

@@ -217,8 +217,8 @@ impl MemoryTierController {
     /// archival and resets state for the next episode.
     ///
     /// Caller is responsible for:
-    /// 1. Serialising the buffer into an `ArcEpisodeRecord`.
-    /// 2. Publishing to the `arc_episodes` Iggy topic.
+    /// 1. Serialising the buffer into an `EpisodeRecord`.
+    /// 2. Publishing to the `episodes` Iggy topic.
     /// 3. Writing the compressed summary to RocksDB Tier 2.
     pub fn end_episode(&mut self, ended_at_ms: u64) -> Option<EpisodeBuffer> {
         let buf = self.episode_buffer.take();

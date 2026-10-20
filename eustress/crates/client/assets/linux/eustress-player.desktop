@@ -1,0 +1,13 @@
+[Desktop Entry]
+Name=Eustress Player
+GenericName=Simulation Player
+Comment=Play Eustress Spaces and join live sessions.
+Exec=eustress-client %u
+Icon=eustress-player
+Terminal=false
+Type=Application
+Categories=Education;Simulation;
+MimeType=x-scheme-handler/eustress-player;
+Keywords=eustress;player;simulation;3d;multiplayer;
+StartupWMClass=eustress-client
+StartupNotify=true

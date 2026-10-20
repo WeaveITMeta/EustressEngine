@@ -2,225 +2,10 @@ use bevy::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-/// Actions that can be bound to keys
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub enum Action {
-    // Tools
-    SelectTool,
-    MoveTool,
-    RotateTool,
-    ScaleTool,
-    
-    // File
-    /// Create a new Space inside the active Universe.
-    NewSpace,
-    /// Create a new Universe folder.
-    NewUniverse,
-    /// Open an existing Space / scene through the file picker.
-    OpenFile,
-    /// Manual save — writes ECS to disk + commits to git as a save point.
-    SaveScene,
-    /// Save the current Space under a new name.
-    SaveSceneAs,
-    /// Publish the whole Universe to the Eustress platform.
-    PublishUniverse,
-    /// Publish only the active Space (incremental update).
-    PublishSpace,
-
-    // Edit
-    Undo,
-    Redo,
-    Copy,
-    Cut,
-    Paste,
-    Duplicate,
-    Delete,
-    SelectAll,
-    /// Add the direct children of the current selection (single level).
-    SelectChildren,
-    /// Recursively add every descendant of the current selection.
-    SelectDescendants,
-    /// Replace selection with the parent(s) of the current selection.
-    SelectParent,
-    /// Add siblings sharing the same parent.
-    SelectSiblings,
-    /// Flip selection to everything NOT currently selected.
-    InvertSelection,
-    Group,
-    Ungroup,
-    LockSelection,
-    UnlockSelection,
-    ToggleAnchor,
-    
-    // View Panels
-    ToggleExplorer,
-    ToggleProperties,
-    ToggleOutput,
-    
-    // Windows
-    ToggleCommandBar,
-    ToggleAssets,
-    ToggleCollaboration,
-    
-    // Transform
-    ToggleTransformSpace, // Toggle World/Local space
-    
-    // Camera
-    FocusSelection, // Focus camera on selected part (F key)
-    
-    // Camera View Modes (Blender-style numpad)
-    ViewPerspectiveToggle, // Toggle Perspective/Orthographic (Numpad 5)
-    ViewTop,               // Top view (Numpad 8)
-    ViewFront,             // Front view (Numpad 2)
-    ViewSideLeft,          // Left side view (Numpad 4)
-    ViewSideRight,         // Right side view (Numpad 6)
-    
-    // Snapping
-    SnapMode1,      // 1 unit snapping (1 key)
-    SnapMode2,      // 0.2 unit snapping (2 key)
-    SnapModeOff,    // No snapping (3 key)
-    
-    // Vertical placement: `-` lifts by grid unit, `+` is the smart settle
-    // (raycast-down flush, or pop-on-top when inside a container). The
-    // names say what the key DOES — the old `NudgeUp` / `NudgeDown` pair
-    // read as a symmetric up/down nudge, which is not what `+` does.
-    LiftSelection,     // Move selection up by one grid unit (- key)
-    SettleSelection,   // Smart settle: raycast down + flush OR pop on top (+ key)
-
-    // Quick Rotation
-    RotateY90,      // Rotate 90° on Y axis (Ctrl+R)
-    TiltZ90,        // Tilt 90° on Z axis (Ctrl+T)
-    
-    // Network
-    StartServer,    // Start local server (F9)
-    StopServer,     // Stop server
-    ToggleNetworkPanel, // Toggle network panel (Ctrl+Alt+N)
-
-    // Play mode. These exist so F5–F8 go through the same text-focus
-    // gate + remapping table as every other shortcut; the behaviour
-    // itself lives in `play_mode.rs`, which reads MenuActionEvent.
-    PlayWithCharacter,  // F5 — enter play mode with a character
-    PauseResume,        // F6 — pause / resume a running play session
-    PlaySolo,           // F7 — enter play mode without a character
-    StopPlay,           // F8 — stop play mode, restore the editor snapshot
-    
-    // CSG Operations
-    CSGNegate,      // Negate selected part (CSG subtract)
-    CSGUnion,       // Union selected parts
-    CSGIntersect,   // Intersect selected parts
-    CSGSeparate,    // Separate union into parts
-
-    // Smart Build Modal Tools (activate via ModalToolRegistry)
-    ToolPartSwap,   // Ctrl+Alt+P — swap two parts' positions
-    ToolEdgeAlign,  // Ctrl+Alt+E — translate source to target's edge
-    ToolModelReflect, // Ctrl+Alt+M — reflect selection across a plane
-    ToolGapFill,    // Ctrl+Alt+G — fill the gap between two parts
-    ToolResizeAlign,// Ctrl+Alt+A — resize source until its face meets target's
-    ToolMaterialFlip,// Ctrl+Alt+F — flip texture UVs on selected parts
-
-    // Array tools (Phase 1)
-    ToolLinearArray, // Ctrl+Alt+L — N copies along a step vector
-    ToolRadialArray, // Ctrl+Alt+R — N copies around a pivot axis
-    ToolGridArray,   // Ctrl+Alt+K — Nx × Ny × Nz 3D pattern
-    // Ctrl+Alt+H — N copies along a clicked polyline. `H` for patH: Ctrl+Alt+P
-    // is ToolPartSwap and Ctrl+Alt+G is ToolGapFill, so both obvious letters
-    // are taken.
-    ToolPathArray,
-    // Roblox Studio parity. Shipped as defaults so the muscle memory carries
-    // over; the Roblox keymap preset covers the chords that differ.
-    /// Ctrl+I: searchable class picker that inserts under the selection.
-    InsertObject,
-    /// Ctrl+Shift+V: paste as children of the primary selection.
-    PasteInto,
-    /// Ctrl+Shift+X: put the keyboard in the Explorer search box.
-    FocusExplorerSearch,
-    /// Ctrl+Shift+E: put the keyboard in the Properties filter box.
-    FocusPropertiesFilter,
-    /// Ribbon toggle (no default chord): dragged parts stop at other parts.
-    ToggleCollisions,
-}
-
-impl Action {
-    pub fn name(&self) -> &'static str {
-        match self {
-            Action::SelectTool => "Select Tool",
-            Action::MoveTool => "Move Tool",
-            Action::RotateTool => "Rotate Tool",
-            Action::ScaleTool => "Scale Tool",
-            Action::NewSpace => "New Space",
-            Action::NewUniverse => "New Universe",
-            Action::OpenFile => "Open File",
-            Action::SaveScene => "Save Scene",
-            Action::SaveSceneAs => "Save Space As",
-            Action::PublishUniverse => "Publish Universe",
-            Action::PublishSpace => "Publish Space",
-            Action::Undo => "Undo",
-            Action::Redo => "Redo",
-            Action::Copy => "Copy",
-            Action::Cut => "Cut",
-            Action::Paste => "Paste",
-            Action::Duplicate => "Duplicate",
-            Action::Delete => "Delete",
-            Action::SelectAll => "Select All",
-            Action::SelectChildren => "Select Children",
-            Action::SelectDescendants => "Select Descendants",
-            Action::SelectParent => "Select Parent",
-            Action::SelectSiblings => "Select Siblings",
-            Action::InvertSelection => "Invert Selection",
-            Action::Group => "Group",
-            Action::Ungroup => "Ungroup",
-            Action::LockSelection => "Lock Selection",
-            Action::UnlockSelection => "Unlock Selection",
-            Action::ToggleAnchor => "Toggle Anchor",
-            Action::ToggleExplorer => "Toggle Explorer",
-            Action::ToggleProperties => "Toggle Properties",
-            Action::ToggleOutput => "Toggle Output",
-            Action::ToggleCommandBar => "Toggle Command Bar",
-            Action::ToggleAssets => "Toggle Assets",
-            Action::ToggleCollaboration => "Toggle Collaboration",
-            Action::ToggleTransformSpace => "Toggle Transform Space",
-            Action::FocusSelection => "Focus Selection",
-            Action::ViewPerspectiveToggle => "Toggle Perspective/Ortho",
-            Action::ViewTop => "Top View",
-            Action::ViewFront => "Front View",
-            Action::ViewSideLeft => "Left Side View",
-            Action::ViewSideRight => "Right Side View",
-            Action::SnapMode1 => "Snap Mode: 1m",
-            Action::SnapMode2 => "Snap Mode: 0.2m",
-            Action::SnapModeOff => "Snap Mode: Off",
-            Action::LiftSelection => "Lift (grid unit)",
-            Action::SettleSelection => "Settle onto Surface",
-            Action::RotateY90 => "Rotate 90° (Y Axis)",
-            Action::TiltZ90 => "Tilt 90° (Z Axis)",
-            Action::StartServer => "Start Server",
-            Action::StopServer => "Stop Server",
-            Action::ToggleNetworkPanel => "Toggle Network Panel",
-            Action::PlayWithCharacter => "Play (with Character)",
-            Action::PauseResume => "Pause / Resume",
-            Action::PlaySolo => "Play Solo",
-            Action::StopPlay => "Stop Play",
-            Action::CSGNegate => "CSG Negate",
-            Action::CSGUnion => "CSG Union",
-            Action::CSGIntersect => "CSG Intersect",
-            Action::CSGSeparate => "CSG Separate",
-            Action::ToolPartSwap => "Part Swap",
-            Action::ToolEdgeAlign => "Edge Align",
-            Action::ToolModelReflect => "Model Reflect",
-            Action::ToolGapFill => "Gap Fill",
-            Action::ToolResizeAlign => "Resize Align",
-            Action::ToolMaterialFlip => "Material Flip",
-            Action::ToolLinearArray => "Linear Array",
-            Action::ToolRadialArray => "Radial Array",
-            Action::ToolGridArray => "Grid Array",
-            Action::ToolPathArray => "Path Array",
-            Action::InsertObject => "Insert Object",
-            Action::PasteInto => "Paste Into",
-            Action::FocusExplorerSearch => "Search Explorer",
-            Action::FocusPropertiesFilter => "Filter Properties",
-            Action::ToggleCollisions => "Toggle Collisions",
-        }
-    }
-}
+// The action type lives in `eustress_common::editor_action`, shared with the
+// tool registry's permission gate, which has to judge exactly the action the
+// engine runs. Re-exported so every `keybindings::Action` path stays put.
+pub use eustress_common::editor_action::{Action, ActionContext, TERRAIN_ACTIONS};
 
 /// Key combination with modifiers
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -423,6 +208,7 @@ impl Default for KeyBindings {
         // Ctrl+I is Insert Object in Roblox Studio; Invert moves to Ctrl+Shift+I.
         bindings.insert(Action::InvertSelection, KeyBinding::new(KeyCode::KeyI).with_ctrl().with_shift());
         bindings.insert(Action::InsertObject, KeyBinding::new(KeyCode::KeyI).with_ctrl());
+        bindings.insert(Action::FindReplace, KeyBinding::new(KeyCode::KeyF).with_ctrl());
         bindings.insert(Action::PasteInto, KeyBinding::new(KeyCode::KeyV).with_ctrl().with_shift());
         bindings.insert(Action::FocusExplorerSearch, KeyBinding::new(KeyCode::KeyX).with_ctrl().with_shift());
         // Roblox uses Ctrl+Shift+P here, which Eustress gives to Publish Space;
@@ -477,6 +263,13 @@ impl Default for KeyBindings {
         bindings.insert(Action::ViewFront, KeyBinding::new(KeyCode::Numpad2));             // Numpad 2 for front view
         bindings.insert(Action::ViewSideLeft, KeyBinding::new(KeyCode::Numpad4));          // Numpad 4 for left side view
         bindings.insert(Action::ViewSideRight, KeyBinding::new(KeyCode::Numpad6));         // Numpad 6 for right side view
+        // Top-row 5 as well: most keyboards have no numpad.
+        alternates.entry(Action::ViewPerspectiveToggle).or_default()
+            .push(KeyBinding::new(KeyCode::Digit5));
+        // 2D / 3D. Alt+digit is free (bare 1/2/3 are the snap modes, Ctrl+1/2/3
+        // the panels) and reads as the mode it enters.
+        bindings.insert(Action::ViewMode2D, KeyBinding::new(KeyCode::Digit2).with_alt());
+        bindings.insert(Action::ViewMode3D, KeyBinding::new(KeyCode::Digit3).with_alt());
         
         // Snapping shortcuts
         bindings.insert(Action::SnapMode1, KeyBinding::new(KeyCode::Digit1));    // 1 for 1 unit snapping
@@ -506,6 +299,46 @@ impl Default for KeyBindings {
         bindings.insert(Action::PauseResume, KeyBinding::new(KeyCode::F6));
         bindings.insert(Action::PlaySolo, KeyBinding::new(KeyCode::F7));
         bindings.insert(Action::StopPlay, KeyBinding::new(KeyCode::F8));
+
+        // Terrain tools (docs/design/TERRAIN_TOOLS_UX.md section 6). `T` is
+        // global and free (Ctrl+T is TiltZ90; exact modifiers keep them
+        // apart). The rest are terrain-context chords: while the terrain
+        // tools are the current tool they win over the global snap (1-3),
+        // perspective (5) and nudge keys on the same chords.
+        bindings.insert(Action::TerrainTools, KeyBinding::new(KeyCode::KeyT));
+        bindings.insert(Action::TerrainDraw, KeyBinding::new(KeyCode::Digit1));
+        bindings.insert(Action::TerrainSculpt, KeyBinding::new(KeyCode::Digit2));
+        bindings.insert(Action::TerrainSmooth, KeyBinding::new(KeyCode::Digit3));
+        bindings.insert(Action::TerrainFlatten, KeyBinding::new(KeyCode::Digit4));
+        bindings.insert(Action::TerrainPaint, KeyBinding::new(KeyCode::Digit5));
+        bindings.insert(Action::TerrainSeaLevel, KeyBinding::new(KeyCode::Digit6));
+        bindings.insert(Action::TerrainRegion, KeyBinding::new(KeyCode::Digit7));
+        bindings.insert(Action::TerrainSizeDown, KeyBinding::new(KeyCode::BracketLeft));
+        bindings.insert(Action::TerrainSizeUp, KeyBinding::new(KeyCode::BracketRight));
+        bindings.insert(Action::TerrainStrengthDown, KeyBinding::new(KeyCode::BracketLeft).with_shift());
+        bindings.insert(Action::TerrainStrengthUp, KeyBinding::new(KeyCode::BracketRight).with_shift());
+        bindings.insert(Action::TerrainPivotPrev, KeyBinding::new(KeyCode::Comma));
+        bindings.insert(Action::TerrainPivotNext, KeyBinding::new(KeyCode::Period));
+        bindings.insert(Action::TerrainPlaneLock, KeyBinding::new(KeyCode::KeyP));
+        bindings.insert(Action::TerrainPlanePick, KeyBinding::new(KeyCode::KeyP).with_shift());
+        bindings.insert(Action::TerrainPlaneUp, KeyBinding::new(KeyCode::PageUp));
+        bindings.insert(Action::TerrainPlaneDown, KeyBinding::new(KeyCode::PageDown));
+        bindings.insert(Action::TerrainPlaneUpFast, KeyBinding::new(KeyCode::PageUp).with_shift());
+        bindings.insert(Action::TerrainPlaneDownFast, KeyBinding::new(KeyCode::PageDown).with_shift());
+        bindings.insert(Action::TerrainSnap, KeyBinding::new(KeyCode::KeyG));
+        bindings.insert(Action::TerrainSnapStep, KeyBinding::new(KeyCode::KeyG).with_shift());
+        bindings.insert(Action::TerrainContours, KeyBinding::new(KeyCode::KeyC));
+        bindings.insert(Action::TerrainMirror, KeyBinding::new(KeyCode::KeyM));
+        bindings.insert(Action::TerrainMirrorAxis, KeyBinding::new(KeyCode::KeyM).with_shift());
+        bindings.insert(Action::TerrainSampleMaterial, KeyBinding::new(KeyCode::KeyI));
+        // Region's edits on the part-editing chords: in the terrain context
+        // they are the terrain's, so a selected part is never copied or
+        // deleted from under the terrain tools.
+        bindings.insert(Action::TerrainRegionCopy, KeyBinding::new(KeyCode::KeyC).with_ctrl());
+        bindings.insert(Action::TerrainRegionCut, KeyBinding::new(KeyCode::KeyX).with_ctrl());
+        bindings.insert(Action::TerrainRegionPaste, KeyBinding::new(KeyCode::KeyV).with_ctrl());
+        bindings.insert(Action::TerrainRegionDuplicate, KeyBinding::new(KeyCode::KeyD).with_ctrl());
+        bindings.insert(Action::TerrainRegionDelete, KeyBinding::new(KeyCode::Delete));
 
         Self { bindings, alternates, preset: KeymapPreset::Eustress.id().to_string() }
     }
@@ -624,15 +457,20 @@ impl KeyBindings {
     /// remap that would make two actions fire off one chord — with
     /// [`KeyBinding::matches`] demanding exact modifier equality, the
     /// loser of such a clash is simply dead, silently.
+    ///
+    /// Only actions of `except`'s own context count: a chord may be bound
+    /// once per [`ActionContext`], and the context's binding wins while it
+    /// is active.
     fn claimant(&self, binding: &KeyBinding, except: Action) -> Option<Action> {
+        let context = except.context();
         self.bindings
             .iter()
-            .find(|(a, b)| **a != except && *b == binding)
+            .find(|(a, b)| **a != except && a.context() == context && *b == binding)
             .map(|(a, _)| *a)
             .or_else(|| {
                 self.alternates
                     .iter()
-                    .find(|(a, v)| **a != except && v.contains(binding))
+                    .find(|(a, v)| **a != except && a.context() == context && v.contains(binding))
                     .map(|(a, _)| *a)
             })
     }
@@ -719,7 +557,8 @@ impl Plugin for KeyBindingsPlugin {
                     .after(crate::ui::slint_ui::update_slint_ui_focus),
                 handle_menu_action_events.after(dispatch_keyboard_shortcuts),
                 handle_nudge_keys
-                    .after(crate::ui::slint_ui::update_slint_ui_focus),
+                    .after(crate::ui::slint_ui::update_slint_ui_focus)
+                    .run_if(crate::play_mode::editor_input_enabled),
             ));
     }
 }
@@ -753,6 +592,8 @@ const DISPATCHED_ACTIONS: &[Action] = &[
     Action::FocusSelection,
     Action::ViewPerspectiveToggle, Action::ViewTop, Action::ViewFront,
     Action::ViewSideLeft, Action::ViewSideRight,
+    Action::ViewMode2D, Action::ViewMode3D,
+    Action::SaveViewpoint, Action::NextViewpoint,
     Action::SnapMode1, Action::SnapMode2, Action::SnapModeOff,
     Action::LiftSelection, Action::SettleSelection,
     Action::RotateY90, Action::TiltZ90,
@@ -763,8 +604,20 @@ const DISPATCHED_ACTIONS: &[Action] = &[
     Action::ToolResizeAlign, Action::ToolMaterialFlip,
     Action::ToolLinearArray, Action::ToolRadialArray, Action::ToolGridArray,
     Action::ToolPathArray,
-    Action::InsertObject, Action::PasteInto,
+    Action::InsertObject, Action::PasteInto, Action::FindReplace,
     Action::FocusExplorerSearch, Action::FocusPropertiesFilter,
+    Action::TerrainTools,
+];
+
+/// The shortcuts that stay live during a Play session: the session controls
+/// and the panel toggles. Everything else in [`DISPATCHED_ACTIONS`] edits or
+/// persists the scene, so it waits for Stop, and its keys belong to the
+/// running game: F, Delete, the tool keys and the rest reach the game's
+/// input unprocessed, as in Roblox Studio (`play_allowlist_tests`).
+const PLAY_SESSION_ACTIONS: &[Action] = &[
+    Action::PlayWithCharacter, Action::PauseResume, Action::PlaySolo, Action::StopPlay,
+    Action::ToggleExplorer, Action::ToggleProperties, Action::ToggleOutput,
+    Action::ToggleCommandBar,
 ];
 
 /// Actions that are dispatched but deliberately have NO default chord.
@@ -790,6 +643,10 @@ const ALLOWED_UNBOUND: &[Action] = &[
     Action::CSGSeparate,
     // A ribbon toggle; reachable over the bridge and rebindable, no chord by default.
     Action::ToggleCollisions,
+    // In the View menu and over the bridge; rebindable, no chord by default:
+    // every free single chord near the view keys is already taken.
+    Action::SaveViewpoint,
+    Action::NextViewpoint,
 ];
 
 /// Reads keyboard input each frame and dispatches tool changes + MenuActionEvents.
@@ -805,6 +662,15 @@ fn dispatch_keyboard_shortcuts(
     // tool owns the cursor does it fall through to delete-selection below.
     // DRAFTING_UX.md Law 1: one owner per keypress, innermost first.
     active_modal_tool: Option<Res<crate::modal_tool::ActiveModalTool>>,
+    play_state: Option<Res<State<crate::play_mode::PlayModeState>>>,
+    // A live part drag owns bare T (see `TerrainTools` below).
+    (select_state, move_state): (
+        Option<Res<crate::select_tool::SelectToolState>>,
+        Option<Res<crate::move_tool::MoveToolState>>,
+    ),
+    // Which terrain tool is current: Region's copy, cut, paste, duplicate and
+    // delete chords belong to it alone (see `TerrainTools` below).
+    terrain_brush: Option<Res<eustress_common::terrain::TerrainBrush>>,
 ) {
     // Block keyboard shortcuts when a text input has focus or overlay modal is open
     // (typing in Properties, Settings dialog, Workshop chat, etc.)
@@ -818,6 +684,53 @@ fn dispatch_keyboard_shortcuts(
     }
     let Some(mut studio_state) = studio_state else { return };
     let Some(bindings) = bindings else { return };
+
+    // While a Play session runs, the keyboard belongs to the game: only the
+    // session controls and the panel toggles stay live. Delete, Undo, tool
+    // switching, snap modes, Save and the rest would edit (or persist) the
+    // scene the game is playing in.
+    if !crate::play_mode::editor_input_enabled(play_state) {
+        for action in PLAY_SESSION_ACTIONS.iter().copied() {
+            if bindings.check(action, &keys) {
+                info!("⌨️ Shortcut (Play): {:?}", action);
+                menu_events.write(crate::ui::MenuActionEvent::new(action));
+                return;
+            }
+        }
+        return;
+    }
+
+    // The terrain context: while the terrain tools are the current tool,
+    // their chords win over global ones on the same keys (1-3 snap, 5
+    // perspective), so one keypress has one owner.
+    if studio_state.current_tool == crate::ui::Tool::Terrain {
+        // Ctrl C, X, V, D and Delete are Region's edits only while Region is
+        // the tool. With any other terrain tool current nothing consumes
+        // them, so they used to vanish: a layer or spline point selected in
+        // the Explorer could not be copied, duplicated or deleted until the
+        // terrain tools were closed. They fall through to the editor's own
+        // chords then.
+        let region_is_tool = terrain_brush
+            .as_deref()
+            .is_some_and(|brush| brush.tool == eustress_common::terrain::TerrainTool::Region);
+        for action in TERRAIN_ACTIONS.iter().copied() {
+            let region_edit = matches!(
+                action,
+                Action::TerrainRegionCopy
+                    | Action::TerrainRegionCut
+                    | Action::TerrainRegionPaste
+                    | Action::TerrainRegionDuplicate
+                    | Action::TerrainRegionDelete
+            );
+            if region_edit && !region_is_tool {
+                continue;
+            }
+            if bindings.check(action, &keys) {
+                menu_events.write(crate::ui::MenuActionEvent::new(action));
+                return;
+            }
+        }
+    }
 
     // Tool switching — directly update StudioState for instant response
     if bindings.check(Action::SelectTool, &keys) {
@@ -889,7 +802,16 @@ fn dispatch_keyboard_shortcuts(
     // All other actions → dispatch as MenuActionEvent. The list lives in
     // `DISPATCHED_ACTIONS` so the binding-coverage test can walk exactly
     // what this loop walks.
+    // Bare T tilts the dragged part during a live Select or Move drag
+    // (`select_tool::rotate_tilt_shortcuts`, same condition). Entering the
+    // terrain tools on that press would switch tools mid-drag and commit the
+    // tilted part, so the drag keeps the key.
+    let part_drag_live = select_state.as_ref().is_some_and(|s| s.dragging && s.drag_started)
+        || move_state.as_ref().is_some_and(|s| s.free_drag);
     for action in DISPATCHED_ACTIONS.iter().copied() {
+        if action == Action::TerrainTools && part_drag_live {
+            continue;
+        }
         if bindings.check(action, &keys) {
             // Delete (like Cut / Duplicate / Group / Ungroup) must work from
             // the Explorer — that's the natural place to pick a named item and
@@ -1021,8 +943,8 @@ fn handle_menu_action_events(
     ),
 ) {
     let (
-        ref mut undo_events,
-        ref mut redo_events,
+        ref mut _selection_undo_events,
+        ref mut _selection_redo_events,
         ref mut frame_events,
         ref mut go_to_camera_events,
         ref mut copy_events,
@@ -1076,15 +998,15 @@ fn handle_menu_action_events(
             Action::OpenFile   => { file_events.write(crate::ui::FileEvent::OpenScene); }
             Action::SaveSceneAs => { file_events.write(crate::ui::FileEvent::SaveSceneAs); }
 
-            // Undo/Redo — fire both event types:
-            // UndoCommandEvent → CommandHistory (selection undo)
-            // UndoEvent → UndoStack (transform undo)
+            // Undo/Redo walk the ONE edit history (UndoStack, the one the
+            // History panel shows). They used to also step the separate
+            // selection history, so a single Ctrl+Z reverted a selection
+            // AND an unrelated edit, and a Ctrl+Z meant to get a selection
+            // back undid real work. Undo now re-selects what it changed.
             Action::Undo => {
-                undo_events.write(crate::commands::UndoCommandEvent);
                 undo_action_events.write(crate::undo::UndoEvent);
             }
             Action::Redo => {
-                redo_events.write(crate::commands::RedoCommandEvent);
                 redo_action_events.write(crate::undo::RedoEvent);
             }
 
@@ -1099,7 +1021,9 @@ fn handle_menu_action_events(
             Action::Paste => { studio_state.pending_paste = true; }
 
             // Command bar
-            Action::ToggleCommandBar => { /* Handled by Slint UI directly */ }
+            Action::ToggleCommandBar => {
+                studio_state.toggle_command_bar_pulse = studio_state.toggle_command_bar_pulse.wrapping_add(1);
+            }
 
             // Focus camera on selection (F key)
             // Reads from SelectionSyncManager directly so it works even on the same
@@ -1691,37 +1615,26 @@ fn handle_menu_action_events(
                     if let Some(ref mut es) = explorer_state {
                         es.needs_immediate_sync = true;
                     }
-                    // Respawn a default camera at origin so the viewport is never left without one
+                    // No respawn here: `camera_controller::ensure_camera_exists`
+                    // is the one place an editor camera comes back, built the
+                    // way startup builds it, as soon as no window camera is left.
                     if camera_deleted {
-                        use bevy::core_pipeline::tonemapping::Tonemapping;
-                        use eustress_common::classes::{Instance, ClassName};
-                        commands.spawn((
-                            Camera3d::default(),
-                            Tonemapping::Reinhard,
-                            Transform::from_xyz(10.0, 8.0, 10.0)
-                                .looking_at(Vec3::ZERO, Vec3::Y),
-                            Projection::Perspective(PerspectiveProjection {
-                                fov: 70.0_f32.to_radians(),
-                                near: 0.1,
-                                far: 10000.0,
-                                ..default()
-                            }),
-                            Instance {
-                                name: "Camera".to_string(),
-                                class_name: ClassName::Camera,
-                                archivable: true,
-                                id: 0,
-                                ..Default::default()
-                            },
-                            Name::new("Camera"),
-                        ));
-                        info!("📷 Camera deleted — respawned default camera at origin");
+                        info!("📷 Camera deleted — a new editor camera spawns at the origin");
                     }
                     if skipped_services > 0 {
                         warn!(
-                            "🔒 Refused to delete {} core service{} — Workspace, Lighting, SoulService, etc. are protected scaffolding.",
+                            "🔒 Refused to delete {} protected item{}: Workspace, Lighting, SoulService, etc. are protected scaffolding, and so is a terrain's data folder.",
                             skipped_services, if skipped_services == 1 { "" } else { "s" },
                         );
+                        commands.queue(|world: &mut World| {
+                            if let Some(mut notifications) = world.get_resource_mut::<crate::notifications::NotificationManager>() {
+                                notifications.warning(
+                                    "Delete refused: services (Workspace, Lighting, ...) and a terrain's data folder \
+                                     (Workspace/Terrain) cannot be deleted. Use Clear Terrain in the Terrain ribbon to remove \
+                                     a terrain, or delete its layers one by one.",
+                                );
+                            }
+                        });
                     }
                 }
             }
@@ -1833,6 +1746,9 @@ fn handle_menu_action_events(
                 studio_state.show_insert_object_dialog = true;
             }
             Action::PasteInto => { studio_state.pending_paste_into = true; }
+            Action::FindReplace => {
+                studio_state.open_find_pulse = studio_state.open_find_pulse.wrapping_add(1);
+            }
             Action::FocusExplorerSearch => {
                 studio_state.show_explorer = true;
                 studio_state.focus_explorer_search_pulse =
@@ -2168,6 +2084,14 @@ pub struct NudgeContext<'w, 's> {
         With<crate::selection_box::Selected>,
     >,
     pub spatial: avian3d::prelude::SpatialQuery<'w, 's>,
+    /// Every nudge is one undo step (a held key folds into one).
+    pub undo: ResMut<'w, crate::undo::UndoStack>,
+    /// Children, parents and parents' world transforms: nudges move in
+    /// world space, skip parts carried by a selected ancestor, and never
+    /// settle a part onto its own children.
+    pub children: Query<'w, 's, &'static Children>,
+    pub parents: Query<'w, 's, &'static ChildOf>,
+    pub parent_globals: Query<'w, 's, &'static GlobalTransform, Without<crate::selection_box::Selected>>,
 }
 
 fn handle_nudge_keys(
@@ -2203,11 +2127,75 @@ fn handle_nudge_keys(
         &mut timer.settle_held, &mut timer.settle_timer,
     );
 
+    if !lift_fire && !settle_fire {
+        return;
+    }
+    let before: Vec<(Entity, Vec3, Quat)> = ctx
+        .selected
+        .iter()
+        .map(|(e, t, _, _)| (e, t.translation, t.rotation))
+        .collect();
     if lift_fire {
-        lift_selection(&mut ctx.selected, snap);
+        lift_selection(&mut ctx, snap);
     }
     if settle_fire {
         settle_selection(&mut ctx, snap);
+    }
+    record_nudge(&mut ctx, &before, if lift_fire { "Lift" } else { "Settle" });
+}
+
+/// Record a nudge as an undo step. A held key repeats every few frames;
+/// the repeats fold into the one step (`push_coalesced`), so one Ctrl+Z
+/// undoes the whole hold, however long.
+fn record_nudge(ctx: &mut NudgeContext, before: &[(Entity, Vec3, Quat)], verb: &str) {
+    let mut old_transforms = Vec::new();
+    let mut new_transforms = Vec::new();
+    for (entity, pos, rot) in before {
+        let Ok((_, t, _, _)) = ctx.selected.get(*entity) else { continue };
+        if (t.translation - *pos).length() > 1e-5 || t.rotation.angle_between(*rot) > 1e-5 {
+            old_transforms.push((entity.to_bits(), pos.to_array(), rot.to_array()));
+            new_transforms.push((entity.to_bits(), t.translation.to_array(), t.rotation.to_array()));
+        }
+    }
+    let n = old_transforms.len();
+    if n == 0 {
+        return;
+    }
+    ctx.undo.push_coalesced(
+        "nudge",
+        format!("{} {} object{}", verb, n, if n == 1 { "" } else { "s" }),
+        crate::undo::Action::TransformEntities { old_transforms, new_transforms },
+    );
+}
+
+/// True when an ancestor of `entity` is also selected: it moves with that
+/// ancestor and must not be nudged a second time.
+fn carried_by_selection(
+    entity: Entity,
+    selected: &std::collections::HashSet<Entity>,
+    parents: &Query<&ChildOf>,
+) -> bool {
+    let mut current = entity;
+    while let Ok(child_of) = parents.get(current) {
+        let parent = child_of.parent();
+        if selected.contains(&parent) {
+            return true;
+        }
+        current = parent;
+    }
+    false
+}
+
+/// Write a world-space position for `entity` back through its parent.
+fn place_world(ctx: &mut NudgeContext, entity: Entity, world_pos: Vec3, world_rot: Quat) {
+    let parent_gt = ctx
+        .parents
+        .get(entity)
+        .ok()
+        .and_then(|c| ctx.parent_globals.get(c.parent()).ok());
+    let (local_pos, _) = crate::math_utils::world_to_local_pose(parent_gt, world_pos, world_rot);
+    if let Ok((_, mut t, _, _)) = ctx.selected.get_mut(entity) {
+        t.translation = local_pos;
     }
 }
 
@@ -2244,21 +2232,22 @@ fn nudge_should_fire(
     false
 }
 
-/// Simple lift: every selected entity moves up by `snap` on +Y.
-fn lift_selection(
-    selected: &mut Query<
-        (
-            Entity,
-            &mut Transform,
-            &GlobalTransform,
-            Option<&crate::classes::BasePart>,
-        ),
-        With<crate::selection_box::Selected>,
-    >,
-    snap: f32,
-) {
-    for (_, mut t, _, _) in selected.iter_mut() {
-        t.translation.y += snap;
+/// Simple lift: every selected entity moves up by `snap` in WORLD +Y,
+/// written back through its parent, so a part inside a rotated Model still
+/// rises straight up. Parts carried by a selected ancestor move with it.
+fn lift_selection(ctx: &mut NudgeContext, snap: f32) {
+    let selected: std::collections::HashSet<Entity> = ctx.selected.iter().map(|(e, ..)| e).collect();
+    let moves: Vec<(Entity, Vec3, Quat)> = ctx
+        .selected
+        .iter()
+        .filter(|(e, ..)| !carried_by_selection(*e, &selected, &ctx.parents))
+        .map(|(e, _, gt, _)| {
+            let world = gt.compute_transform();
+            (e, world.translation + Vec3::Y * snap, world.rotation)
+        })
+        .collect();
+    for (entity, world_pos, world_rot) in moves {
+        place_world(ctx, entity, world_pos, world_rot);
     }
 }
 
@@ -2278,32 +2267,42 @@ fn settle_selection(ctx: &mut NudgeContext, snap: f32) {
     // Snapshot the selected set before mutating — we need to call
     // `ctx.spatial` while still being able to write back to
     // `ctx.selected`, and Bevy queries don't allow that simultaneously.
-    let mut snapshot: Vec<(Entity, Vec3, f32)> = Vec::new();
+    let selected: std::collections::HashSet<Entity> = ctx.selected.iter().map(|(e, ..)| e).collect();
+    // The downward ray must never find the part itself: its own children
+    // (a MeshPart's mesh node, a Model's parts) are excluded with it, or a
+    // settle "lands" on the part's own geometry and goes nowhere.
+    let moving = crate::math_utils::moving_set(selected.iter().copied(), &ctx.children);
+    let filter = avian3d::prelude::SpatialQueryFilter::default()
+        .with_excluded_entities(moving.iter().copied());
+    let mut snapshot: Vec<(Entity, Vec3, Quat, f32)> = Vec::new();
     for (entity, _, gt, bp) in ctx.selected.iter() {
-        let center = gt.translation();
-        let half_height = bp.map(|b| b.size.y * 0.5).unwrap_or(0.5);
-        snapshot.push((entity, center, half_height));
+        if carried_by_selection(entity, &selected, &ctx.parents) {
+            continue;
+        }
+        let world = gt.compute_transform();
+        // Half the part's height as it stands, rotation included.
+        let half_height = bp
+            .map(|b| {
+                let (lo, hi) = crate::math_utils::calculate_rotated_aabb(world.translation, b.size * 0.5, world.rotation);
+                (hi.y - lo.y) * 0.5
+            })
+            .unwrap_or(0.5);
+        snapshot.push((entity, world.translation, world.rotation, half_height));
     }
 
-    for (entity, center, half_height) in snapshot {
+    for (entity, center, rotation, half_height) in snapshot {
         // Cast straight down from the part's current center so we can
         // see how far the support surface is below the part's bottom.
         let support_y_world = {
             let Ok(down) = Dir3::new(Vec3::NEG_Y) else { continue };
-            let hits = ctx.spatial.ray_hits(
-                center,
-                down,
-                10_000.0,
-                16,
-                true,
-                &avian3d::prelude::SpatialQueryFilter::default(),
-            );
-            // Skip the part's own collider — first non-self hit is the
-            // real support surface (or `None` if the part is hovering
-            // over empty space).
+            let hits = ctx.spatial.ray_hits(center, down, 10_000.0, 16, true, &filter);
+            // The nearest surface below (hits arrive in no particular
+            // order), or `None` if the part is hovering over empty space.
             hits.into_iter()
-                .find(|h| h.entity != entity)
-                .map(|h| center.y - h.distance)
+                .map(|h| h.distance)
+                .filter(|d| d.is_finite())
+                .min_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
+                .map(|d| center.y - d)
         };
 
         // Where the part *would* land if we just stepped down by `snap`.
@@ -2326,12 +2325,8 @@ fn settle_selection(ctx: &mut NudgeContext, snap: f32) {
             None => stepped_center_y,
         };
 
-        // Apply via world-space delta so parented entities resolve the
-        // local-Y change correctly.
-        if let Ok((_, mut tf, gt, _)) = ctx.selected.get_mut(entity) {
-            let cur_world_y = gt.translation().y;
-            tf.translation.y += new_center_y - cur_world_y;
-        }
+        // World-space target, written back through the parent.
+        place_world(ctx, entity, Vec3::new(center.x, new_center_y, center.z), rotation);
     }
 }
 
@@ -2358,11 +2353,12 @@ mod tests {
     /// `dispatch_keyboard_shortcuts` returns on the first match, so the
     /// loser never fires and there is nothing on screen to explain why.
     /// Primaries and alternates share one namespace because `check()`
-    /// tests both.
+    /// tests both. The namespace is per [`ActionContext`]: a terrain chord on
+    /// a global chord's key is the context's override, not a clash.
     #[test]
     fn no_duplicate_default_bindings() {
         let kb = KeyBindings::default();
-        let mut seen: HashMap<KeyBinding, Action> = HashMap::new();
+        let mut seen: HashMap<(ActionContext, KeyBinding), Action> = HashMap::new();
 
         let all = kb
             .bindings
@@ -2374,7 +2370,7 @@ mod tests {
             }));
 
         for (action, binding) in all {
-            if let Some(previous) = seen.insert(binding.clone(), action) {
+            if let Some(previous) = seen.insert((action.context(), binding.clone()), action) {
                 assert_eq!(
                     previous, action,
                     "duplicate default keybinding {}: it is claimed by both \
@@ -2400,7 +2396,7 @@ mod tests {
     #[test]
     fn every_dispatched_action_is_bound() {
         let kb = KeyBindings::default();
-        for action in DISPATCHED_ACTIONS.iter().copied() {
+        for action in DISPATCHED_ACTIONS.iter().chain(TERRAIN_ACTIONS).copied() {
             if ALLOWED_UNBOUND.contains(&action) {
                 assert!(
                     kb.get(action).is_none(),
@@ -2503,8 +2499,8 @@ mod tests {
 mod preset_tests {
     use super::*;
 
-    /// Two actions on one chord means one of them is dead; a preset must
-    /// never ship that way.
+    /// Two actions on one chord in one context means one of them is dead; a
+    /// preset must never ship that way.
     #[test]
     fn presets_have_no_chord_owned_twice() {
         for preset in KeymapPreset::ALL {
@@ -2513,13 +2509,35 @@ mod preset_tests {
             for (i, (a, chord)) in chords.iter().enumerate() {
                 for (b, other) in chords.iter().skip(i + 1) {
                     assert!(
-                        !(chord == other && a != b),
+                        !(chord == other && a != b && a.context() == b.context()),
                         "{:?}: {} is bound to both {:?} and {:?}",
                         preset, chord.display(), a, b
                     );
                 }
             }
         }
+    }
+
+    /// The terrain tools take `1`-`7` in their own context: the global snap
+    /// keys keep their chords, a terrain chord may share a global one, and a
+    /// clash inside the terrain context is still refused.
+    #[test]
+    fn terrain_chords_live_in_their_own_context() {
+        let mut map = KeyBindings::default();
+        assert_eq!(map.get(Action::TerrainDraw), Some(&KeyBinding::new(KeyCode::Digit1)));
+        assert_eq!(map.get(Action::SnapMode1), Some(&KeyBinding::new(KeyCode::Digit1)));
+        assert_eq!(Action::TerrainDraw.context(), ActionContext::Terrain);
+        assert_eq!(Action::TerrainTools.context(), ActionContext::Global, "T enters the tools from anywhere");
+        assert_eq!(Action::SnapMode1.context(), ActionContext::Global);
+        // A terrain chord on a global chord's key is allowed...
+        assert!(map.claimant(&KeyBinding::new(KeyCode::KeyF), Action::TerrainSnap).is_none());
+        // ...a clash within the terrain context is not.
+        assert_eq!(
+            map.claimant(&KeyBinding::new(KeyCode::Digit2), Action::TerrainSnap),
+            Some(Action::TerrainSculpt)
+        );
+        map.bindings.insert(Action::TerrainSnap, KeyBinding::new(KeyCode::KeyF));
+        assert_eq!(map.get(Action::FocusSelection), Some(&KeyBinding::new(KeyCode::KeyF)), "Focus keeps F");
     }
 
     #[test]
@@ -2537,5 +2555,73 @@ mod preset_tests {
         let map = KeymapPreset::Eustress.bindings();
         assert_eq!(map.get(Action::MoveTool), Some(&KeyBinding::new(KeyCode::KeyX).with_alt()));
         assert_eq!(map.preset(), "eustress");
+    }
+}
+
+#[cfg(test)]
+mod play_allowlist_tests {
+    use super::*;
+    use crate::play_mode::PlayModeState;
+
+    /// Run the shortcut dispatcher once in `state` with `keys` held, and
+    /// return the actions it sent and the tool afterwards.
+    fn dispatch(state: PlayModeState, keys: &[KeyCode]) -> (Vec<Action>, crate::ui::Tool) {
+        let mut app = App::new();
+        app.add_message::<crate::ui::MenuActionEvent>();
+        app.insert_resource(State::new(state));
+        app.insert_resource(KeyBindings::default());
+        app.insert_resource(crate::ui::StudioState::default());
+        let mut input = ButtonInput::<KeyCode>::default();
+        for key in keys {
+            input.press(*key);
+        }
+        app.insert_resource(input);
+        app.add_systems(Update, dispatch_keyboard_shortcuts);
+        app.update();
+        let sent = app
+            .world_mut()
+            .resource_mut::<Messages<crate::ui::MenuActionEvent>>()
+            .drain()
+            .map(|event| event.action)
+            .collect();
+        let tool = app.world().resource::<crate::ui::StudioState>().current_tool;
+        (sent, tool)
+    }
+
+    /// The editor keys a game commonly binds reach the game: during Play
+    /// Studio acts on none of them.
+    #[test]
+    fn play_leaves_editor_keys_to_the_game() {
+        let start_tool = crate::ui::StudioState::default().current_tool;
+        let presses: [&[KeyCode]; 5] = [
+            &[KeyCode::KeyF],
+            &[KeyCode::Delete],
+            &[KeyCode::AltLeft, KeyCode::KeyZ],
+            &[KeyCode::Equal],
+            &[KeyCode::Digit1],
+        ];
+        for keys in presses {
+            let (sent, tool) = dispatch(PlayModeState::Playing, keys);
+            assert!(sent.is_empty(), "{keys:?} sent {sent:?} during Play");
+            assert_eq!(tool, start_tool, "{keys:?} switched the tool during Play");
+        }
+    }
+
+    /// The same F frames the selection while editing, so the Play test above
+    /// is not passing because F does nothing anywhere.
+    #[test]
+    fn editing_keeps_the_editor_keys() {
+        let (sent, _) = dispatch(PlayModeState::Editing, &[KeyCode::KeyF]);
+        assert_eq!(sent, vec![Action::FocusSelection]);
+    }
+
+    /// The session controls stay live during Play.
+    #[test]
+    fn play_keeps_the_session_controls() {
+        let (sent, _) = dispatch(PlayModeState::Playing, &[KeyCode::F8]);
+        assert_eq!(sent, vec![Action::StopPlay]);
+        assert!(PLAY_SESSION_ACTIONS.contains(&Action::StopPlay));
+        assert!(!PLAY_SESSION_ACTIONS.contains(&Action::FocusSelection));
+        assert!(!PLAY_SESSION_ACTIONS.contains(&Action::Delete));
     }
 }

@@ -91,13 +91,14 @@ backwards from this five-minute session:
 These are binding on the Model tab, Drafting tab, and every CAD tool.
 
 ### Law 1 — One panel chrome
-Every floating panel and dialog is built from one shared `PanelChrome`
-component: icon-optional title row (13px/600), optional status dot, and a
-**close ×, 24px hit target, always top-right**. One background token, one
-radius token, one border token, one padding scale. No panel invents its own
-header. Esc closes the topmost floating panel — unless a tool drag is in
-progress, in which case Esc cancels the drag first (strict ordering, one
-owner per keypress).
+Every floating panel and dialog is built on one shared header,
+`FloatingPanelHeader` in `theme.slint`: an optional icon disc in the brand
+accent, a 13px/600 title with an optional subtitle, and a **close × with a
+28px hit box, always top-right**. One background token (`panel-glass`), one
+radius token (`radius-lg`), one border token, one padding scale. No panel
+invents its own header. Esc closes the topmost floating panel, unless a tool
+drag is in progress, in which case Esc cancels the drag first (strict
+ordering, one owner per keypress).
 
 ### Law 2 — One tool lifecycle
 Every tool that needs more than a single click speaks through the **tool
@@ -170,8 +171,12 @@ is a log, not a primary channel. Solver/kernel status is a chip, not prose.
 
 ## 4. Increments
 
-- **UX-0 (now):** Unified chrome + semantics. `PanelChrome` extracted and
-  adopted by the sketch panel and numeric input; tint tokens centralized;
+- **UX-0 (now):** Unified chrome + semantics. `FloatingPanelHeader`
+  extracted and adopted by ToolPanel and the Sketch panel (done; the
+  floating numeric input is a headerless readout and keeps its shape). The
+  Sketch panel shows its solve state as the chip above, its entities in the
+  sketch state palette, and its constraint actions as ribbon buttons in
+  `cat-constraint` (done); tint tokens centralized;
   ribbon regrouped (done); help cards removed; Esc ordering enforced;
   Size-driven resize for all templates (done).
 - **UX-1:** Sketch environment v1 — contextual Sketch tab, viewport

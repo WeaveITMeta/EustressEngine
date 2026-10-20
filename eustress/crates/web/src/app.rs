@@ -37,20 +37,25 @@ use crate::pages::{
     community::CommunityPage,
     contact::ContactPage,
     cookies::CookiesPage,
+    creator::CreatorPage,
     dashboard::DashboardPage,
     dmca::DmcaPage,
     docs_audio::DocsAudioPage,
     docs_building::DocsBuildingPage,
+    docs_cad::DocsCadPage,
     docs_earning::DocsEarningPage,
     docs_getting_started::DocsGettingStartedPage,
+    docs_importing::DocsImportingPage,
     docs_networking::DocsNetworkingPage,
     docs_philosophy::DocsPhilosophyPage,
+    docs_perspective::DocsPerspectivePage,
     docs_physics::DocsPhysicsPage,
     docs_publishing::DocsPublishingPage,
     docs_realism::DocsRealismPage,
     docs_scripting::DocsScriptingPage,
     docs_services::DocsServicesPage,
     docs_simulation::DocsSimulationPage,
+    docs_studio::DocsStudioPage,
     docs_ui::DocsUiPage,
     docs_universes::DocsUniversesPage,
     docs_website::DocsWebsitePage,
@@ -63,9 +68,11 @@ use crate::pages::{
     press::PressPage,
     privacy::PrivacyPage,
     projects::ProjectsPage,
+    purchases::PurchasesPage,
     gallery::GalleryPage,
     leaderboard::LeaderboardPage,
     learn::LearnPage,
+    learn_cli::LearnCliPage,
     learn_ide::LearnIdePage,
     learn_lsp::LearnLspPage,
     learn_mcp::LearnMcpPage,
@@ -266,13 +273,18 @@ pub fn App() -> impl IntoView {
                 <Route path=path!("/marketplace/:id") view=MarketplaceItemPage />
                 <Route path=path!("/learn") view=LearnPage />
                 <Route path=path!("/learn/ide") view=LearnIdePage />
+                <Route path=path!("/learn/cli") view=LearnCliPage />
                 <Route path=path!("/learn/mcp") view=LearnMcpPage />
                 <Route path=path!("/learn/lsp") view=LearnLspPage />
                 <Route path=path!("/docs/getting-started") view=DocsGettingStartedPage />
+                <Route path=path!("/docs/studio") view=DocsStudioPage />
                 <Route path=path!("/docs/scripting") view=DocsScriptingPage />
                 <Route path=path!("/docs/networking") view=DocsNetworkingPage />
                 <Route path=path!("/docs/physics") view=DocsPhysicsPage />
                 <Route path=path!("/docs/building") view=DocsBuildingPage />
+                <Route path=path!("/docs/perspective") view=DocsPerspectivePage />
+                <Route path=path!("/docs/cad") view=DocsCadPage />
+                <Route path=path!("/docs/importing") view=DocsImportingPage />
                 <Route path=path!("/docs/ui") view=DocsUiPage />
                 <Route path=path!("/docs/services") view=DocsServicesPage />
                 <Route path=path!("/docs/simulation") view=DocsSimulationPage />
@@ -298,6 +310,9 @@ pub fn App() -> impl IntoView {
                 <Route path=path!("/premium") view=PremiumPage />
                 <Route path=path!("/profile/:username") view=ProfilePage />
                 <Route path=path!("/profile") view=ProfilePage />
+                <Route path=path!("/purchases") view=PurchasesPage />
+                <Route path=path!("/creator") view=CreatorPage />
+                <Route path=path!("/creator/:sim_id") view=CreatorPage />
                 
                 // Legal pages
                 <Route path=path!("/terms") view=TermsPage />

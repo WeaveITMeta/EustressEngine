@@ -159,13 +159,20 @@ fn declares_portal(attrs: &Attributes) -> bool {
 }
 
 /// Keeps [`IsPortal`] in sync with the `portal_target` attribute. Driven by
-/// `Changed<Attributes>`, so this costs nothing in steady state: it does real
-/// work only on the frame a Space loads (every `Attributes` is freshly inserted)
-/// and whenever someone edits an attribute in the Properties panel.
+/// `Changed<Attributes>`: it does real work only on the frame a Space loads
+/// (every `Attributes` is freshly inserted) and whenever someone edits an
+/// attribute in the Properties panel. The filter still checks a tick on every
+/// instance each frame (every instance carries `Attributes`), so a quiet frame
+/// is answered by `probe_any` first, spread over the compute pool.
 fn sync_portal_markers(
     mut commands: Commands,
     changed: Query<(Entity, &Attributes, Has<IsPortal>), Changed<Attributes>>,
+    // The same filter with no data, for the quiet-frame test.
+    probe: Query<(), Changed<Attributes>>,
 ) {
+    if !eustress_common::utils::probe_any(&probe) {
+        return;
+    }
     for (entity, attrs, marked) in &changed {
         match (declares_portal(attrs), marked) {
             (true, false) => {

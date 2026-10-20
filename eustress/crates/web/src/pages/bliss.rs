@@ -812,9 +812,9 @@ pub fn BlissPage() -> impl IntoView {
                     <img src="/assets/icons/book.svg" alt="Docs" class="docs-icon" />
                     <div class="docs-content">
                         <h3>"Bliss Documentation"</h3>
-                        <p>"Deep dive into tokenomics, contribution scoring, fork registration, and wallet integration"</p>
+                        <p>"How contributions are scored, how the daily BLS emission and the USD drip work, and what runs today"</p>
                     </div>
-                    <a href="/docs/bliss" class="docs-link">
+                    <a href="/docs/earning" class="docs-link">
                         "View Documentation"
                         <img src="/assets/icons/arrow-right.svg" alt="Arrow" />
                     </a>

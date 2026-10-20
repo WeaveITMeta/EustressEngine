@@ -1,6 +1,6 @@
 [package]
 name = "eustress-engine"
-version = "0.3.6"
+version = "0.3.7"
 description = "EustressEngine - Desktop 3D Editor"
 authors = ["EustressEngine Contributors"]
 edition = "2021"
@@ -80,6 +80,9 @@ eustress-bliss = { path = "../bliss" }
 eustress-stream-node = { path = "../stream-node", optional = true }
 # Parametric BRep + Studio Boolean (Drafting tab CSG)
 eustress-cad = { path = "../cad" }
+# Mip chains for material maps as they load (the crate's binary generates
+# the bundled material library).
+texture-gen = { path = "../texture-gen" }
 # Shared tool registry — single source of truth for MCP tool
 # definitions + handlers. The engine enables the `bevy` feature so
 # `ToolRegistry` derives `Resource`; the MCP server depends on this
@@ -98,8 +101,16 @@ eustress-geo = { path = "../geo" }
 # HEAVY dependency out of the default graph (arrow/parquet,
 # bevy_gaussian_splatting, openraft, tower-lsp), and this crate adds nothing to it.
 eustress-genesis = { path = "../genesis" }
-# TODO: Fix Bevy 0.17 compatibility issues in eustress-networking
-# eustress-networking = { path = "../common/eustress-networking", features = ["server", "client", "physics"] }
+# Multiplayer: Studio hosts the Space it is playing (Start Server, F9) over
+# WebTransport, and Players join it. Rides the quinn 0.11 / rustls-on-ring /
+# rcgen 0.13 stack this manifest already links, so nothing compiles twice.
+eustress-networking = { path = "../common/eustress-networking" }
+# The draw side of Play, shared with the Player.
+eustress-play-runtime = { path = "../play-runtime" }
+# The .echk chunk container: publishing and hosting both bake a Space into it.
+# `encode` writes compressed (version 2) chunks with the zstd this manifest
+# already links.
+eustress-echk = { path = "../echk", features = ["encode"] }
 
 # bevy_shader provides ShaderRef, used in MaterialExtension implementations (Bevy 0.18)
 bevy_shader = { version = "0.19", default-features = false }
@@ -119,6 +130,13 @@ bevy = { workspace = true, default-features = false, features = [
     "bevy_gltf",
     "bevy_scene",
     "bevy_audio",
+    # REQUIRED for any sound to play. `bevy_audio` alone is the playback
+    # system with NO decoders: `default-features = false` (workspace) also
+    # drops Bevy's default `vorbis`, so every audio asset failed to decode and
+    # nothing played. Bevy's own bundle rather than a hand-picked list, so a
+    # user-imported .ogg / .wav / .mp3 / .flac / .m4a all load, and the set
+    # tracks upstream if Bevy reshuffles its decoders.
+    "audio-all-formats",
     "bevy_state",
     "default_font",
     "bevy_asset",
@@ -223,6 +241,8 @@ rune = "0.14"
 # names them.
 mlua = { workspace = true }
 rand = "0.8"
+# Find & Replace's ".*" mode (already in the lock through other crates).
+regex = "1"
 rayon = "1.10"
 crossbeam = "0.8"
 tracing = "0.1"
@@ -284,21 +304,25 @@ notify-debouncer-full = "0.3"
 # • `mp4` (alfg/mp4-rust) parses ISO Base Media File Format containers,
 #   walks H.264 video tracks, and yields each sample's bytes in AVCC
 #   length-prefixed NAL format.
-# • `openh264` is the BSD-2-licensed Rust wrapper around Cisco's
-#   OpenH264 decoder. The default build downloads the prebuilt binary
-#   at `cargo build` time (Cisco's H.264 patent licence covers users
-#   of the binary). For offline builds, switch to `openh264 = { ...,
-#   features = ["source"] }` — compiles the C source instead, slower
-#   but reproducible.
+# • `rusty_h264-decoder` decodes the H.264 elementary stream in pure Rust
+#   (`#![forbid(unsafe_code)]`, BSD-2, no C anywhere in its tree): Constrained
+#   Baseline plus B-slices and most of High profile, CAVLC and CABAC. It
+#   replaced Cisco's OpenH264, which compiled C++ and NASM into the engine.
+#   Checked side by side before the swap: on a stream from OpenH264's own
+#   encoder the two decoders produced bit-identical planes on every frame,
+#   and the Rust one was faster.
+#
+#   `default-features = false` is load-bearing. Its default `global-alloc`
+#   feature installs a process-wide `#[global_allocator]`, which a library
+#   must never do to the engine. `asm` is portable Rust SIMD, not assembly.
 #
 # Constraints accepted by this choice:
 #   - H.264-in-MP4 only (95% of "user uploads a clip" cases). HEVC,
 #     AV1, VP9, WebM/Matroska are out of scope until a heavier decoder
-#     stack (ffmpeg-next / gstreamer) is wired in.
-#   - Software decode only. Hardware paths require ffmpeg-next or a
-#     wgpu-direct decoder (not yet a thing in 2026).
+#     stack is wired in.
+#   - Software decode only.
 mp4 = "0.14"
-openh264 = "0.9"
+rusty_h264-decoder = { version = "0.16", default-features = false, features = ["std", "asm"] }
 csv = "1.3"
 crossbeam-channel = "0.5"
 syntect = { version = "5.2", default-features = false, features = ["default-syntaxes", "default-themes", "html", "regex-fancy"] }
@@ -340,8 +364,15 @@ tower-lsp = { version = "0.20", optional = true }
 spin_on = "0.1"
 # Byte casting for GPU buffer operations
 bytemuck = { version = "1.16", features = ["derive"] }
-# Mesh optimization (runtime vertex cache, LOD, meshlets)
-meshopt = "0.4"
+# Mesh optimization (vertex cache, overdraw, vertex fetch, far-LOD
+# simplification). Pure-Rust port of meshoptimizer 0.15; replaced the `meshopt`
+# FFI crate, which compiled meshoptimizer's C++. On y_bot, x_bot and
+# voltec_supreme it matched the C++ output exactly (same cache miss ratio, same
+# simplified triangle counts). `experimental` gates `simplify_sloppy`, which the
+# HLOD proxies need. Its `remap_vertex_buffer` is wrong whenever the remap drops
+# a vertex (it enumerates AFTER filtering), so `space::hlod` compacts with its
+# own loop instead; do not switch to that function.
+meshopt-rs = { version = "0.1.2", features = ["experimental"] }
 # System info detection for stress test scaling
 sysinfo = "0.33"
 
@@ -379,6 +410,8 @@ core = [
     "forge",
     "bliss",
     "clipboard",
+    # Luau in Play. See the `luau` feature below.
+    "luau",
     # LSP server ships inside the engine bundle. `cargo build --release`
     # produces BOTH `eustress-engine` AND `eustress-lsp` automatically —
     # same binary install, no separate download required for external
@@ -407,6 +440,13 @@ core = [
 # ── Individual feature gates ──────────────────────────────────────────────────
 # Rune scripting with VM pooling and ECS bindings
 realism-scripting = []
+# Luau in Play and hot-reload. REQUIRED even though `eustress-common` is
+# already built with its own `luau` feature above: a `#[cfg(feature = "luau")]`
+# in THIS crate's source checks THIS crate's features, not common's. With no
+# `luau` here every gated block in `soul/rune_api.rs` compiled to its no-op
+# fallback, so Luau hot-reload, the Play-start spawn, and `Touched` never ran
+# even though mlua was linked and ready.
+luau = ["eustress-common/luau"]
 # Wry webview support (Windows/macOS/Linux)
 webview = ["wry"]
 # EustressStream streaming: scene deltas, simulation results, iteration history, Rune audit trail.
@@ -501,8 +541,8 @@ gaussian-splatting = ["dep:eustress-radiance"]
 # the default build no longer writes `_instance.toml` on edit;
 # persistence goes to `world.fjalldb/`. Turn this on to restore the
 # file-system-first authoring loop (dual-write: TOML + Fjall) — the
-# recommended path for existing hierarchical universes (Universe1,
-# ARC-AGI-3) until the faithful TOML→Fjall importer lands, because
+# recommended path for existing hierarchical universes (Universe1)
+# until the faithful TOML→Fjall importer lands, because
 # today's importer is a FLAT scaffold (no service/parent-child
 # hierarchy). The TOML *read* path is always compiled regardless of
 # this flag — it's the first-run seed + recovery loader, not gated.
@@ -533,4 +573,11 @@ cef = ["bevy_cef"]
 # semantic layer), so it can't collide with the higher-level `windows`
 # crate version cpal/rodio pin — see the `bevy_audio` note above.
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_JobObjects"] }
+# `window_placement.rs`: save and restore the Studio window's placement, fitted
+# to the monitor's work area.
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_System_JobObjects",
+    "Win32_Graphics_Gdi",
+    "Win32_UI_WindowsAndMessaging",
+] }

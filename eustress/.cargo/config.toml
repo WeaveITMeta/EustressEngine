@@ -58,3 +58,16 @@ incremental = true
 # (fewer monomorphisation explosions trickling into our code) without the
 # heavy compile-time cost of opt-level 2/3.
 opt-level = 1
+
+[profile.dev.package.texture-gen]
+# The engine builds a mip chain for every material map it loads. At
+# opt-level 0 a 2048² chain takes most of a second; optimised it takes
+# milliseconds. The crate is tiny, so this costs nothing to compile.
+opt-level = 3
+
+[profile.dev.package.eustress-particle-sim]
+# The particle solver steps thousands of particles several times a frame. At
+# opt-level 0 a 2000-particle water tank costs about 25 ms per substep, which
+# no frame budget can hide; optimised it costs about 5. The crate is small and
+# compiles optimised in well under a minute.
+opt-level = 3

@@ -24,6 +24,8 @@
 //! Env knobs (same as the engine's File→Import path):
 //!   EUSTRESS_ROBLOX_ASSET_DIR    local asset mirror tried before the network
 //!   EUSTRESS_ROBLOX_NO_NETWORK=1 disable the CDN fetcher entirely
+//!   EUSTRESS_ROBLOX_API_KEY      Open Cloud API key (scope legacy-asset:manage)
+//!                                for gated assets; wins over the cookie (never logged)
 //!   EUSTRESS_ROBLOSECURITY       auth cookie for gated assets (never logged)
 //!   EUSTRESS_ROBLOX_RETRY_ERRORS=1  retry ids the negative cache marked dead
 
@@ -152,10 +154,16 @@ fn main() {
             skipped += 1;
             continue;
         }
+        // The trashed copy, when --clean moved one: a rebuild's own work
+        // comes back from it after the import.
+        let mut trashed: Option<PathBuf> = None;
         if space_root.exists() {
             if clean {
                 match trash_move(&eustress.join(universe).join("Spaces"), space, &space_root) {
-                    Ok(to) => println!("  (moved old Space to {})", to.display()),
+                    Ok(to) => {
+                        println!("  (moved old Space to {})", to.display());
+                        trashed = Some(to);
+                    }
                     Err(e) => {
                         println!("FAIL (trash-move: {e})");
                         fail += 1;
@@ -239,6 +247,22 @@ fn main() {
                     "OK  ({} nodes, {} glb + {} tex + {} snd fetched, {} asset-warn)",
                     r.total_nodes_imported, meshes, textures, sounds, warn
                 );
+                // A rebuild's own work: its `Rebuild` folders and its patches
+                // to imported instances (`eustress_roblox_import::carry_over`).
+                if let Some(old) = &trashed {
+                    match eustress_roblox_import::carry_over::carry_over(old, &space_root) {
+                        Ok(c) if c.folders.is_empty()
+                            && c.patches_applied + c.patches_orphaned + c.patches_invalid == 0 => {}
+                        Ok(c) => println!(
+                            "  carried over: {} Rebuild folder(s), {} patch(es) applied, {} orphaned, {} invalid",
+                            c.folders.len(),
+                            c.patches_applied,
+                            c.patches_orphaned,
+                            c.patches_invalid
+                        ),
+                        Err(e) => println!("  CARRY-OVER FAILED: {e} (the old Space is intact in .trash)"),
+                    }
+                }
                 place_rows.push(serde_json::json!({
                     "universe": universe, "space": space, "ok": true,
                     "nodes": r.total_nodes_imported, "events": r.events_imported,
@@ -306,7 +330,8 @@ fn main() {
 
 /// The engine's File→Import fetcher chain, shared batch-wide: optional
 /// local mirror (`EUSTRESS_ROBLOX_ASSET_DIR`) → network (unless
-/// `EUSTRESS_ROBLOX_NO_NETWORK=1`, cookie via `EUSTRESS_ROBLOSECURITY`),
+/// `EUSTRESS_ROBLOX_NO_NETWORK=1`; credential from `EUSTRESS_ROBLOX_API_KEY`
+/// or `EUSTRESS_ROBLOSECURITY`),
 /// wrapped in a byte + negative cache at `<Eustress>/.rbx_cache` so every
 /// place in the batch (and future engine re-imports pointed here) reuses
 /// fetched bytes.
@@ -322,20 +347,21 @@ fn build_fetcher(eustress_root: &Path) -> Option<Arc<dyn AssetFetcher>> {
         .map(|v| v.trim().is_empty() || v == "0" || v.eq_ignore_ascii_case("false"))
         .unwrap_or(true);
     if network_on {
-        match std::env::var("EUSTRESS_ROBLOSECURITY") {
-            Ok(tok) if !tok.trim().is_empty() => {
-                chain.push(Arc::new(NetworkFetcher::with_cookie(tok)));
-            }
-            _ => {
-                // Say this UP FRONT. Roblox gates most asset downloads behind a
-                // cookie, so without one every mesh/texture/sound 401s — a past
-                // 36-place run logged 62,598 of them and imported almost no
-                // media. Learning that from the report afterwards is too late.
-                println!("  WARNING: EUSTRESS_ROBLOSECURITY is not set. Gated assets will fail with HTTP 401");
-                println!("           and meshes/textures/sounds will be MISSING. Set it to a .ROBLOSECURITY cookie.");
-                chain.push(Arc::new(NetworkFetcher::new()));
-            }
+        let network = NetworkFetcher::from_env();
+        if network.is_authenticated() {
+            println!("Roblox credential: {}", network.credential_kind());
+        } else {
+            // Say this UP FRONT. Roblox gates most asset downloads behind
+            // authentication, so without a credential every mesh, texture and
+            // sound fails: a past 36-place run logged 62,598 rejections and
+            // Vehicle Simulator lost 77,047 asset references the same way.
+            // Learning that from the report afterwards is too late.
+            println!("  WARNING: no Roblox credential is set. Gated assets will fail with HTTP 401");
+            println!("           and meshes, textures and sounds will be MISSING. Set");
+            println!("           {} (an Open Cloud API key with legacy-asset:manage)", eustress_roblox_assets::API_KEY_ENV);
+            println!("           or {} (a .ROBLOSECURITY cookie).", eustress_roblox_assets::COOKIE_ENV);
         }
+        chain.push(Arc::new(network));
     }
     if chain.is_empty() {
         return None;
@@ -395,6 +421,7 @@ fn write_space_toml(space_root: &Path, name: &str) {
          author = \"Simbuilder\"\n\
          version = \"0.1.0\"\n\
          created_with = \"Eustress Engine (Roblox batch import)\"\n\
+         transform_rule = \"parent_pose\"\n\
          \n\
          [metadata]\n\
          created = \"2026-07-09T00:00:00.000000000+00:00\"\n\

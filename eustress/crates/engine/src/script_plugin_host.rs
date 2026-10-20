@@ -113,7 +113,7 @@ pub struct ScriptPluginCallbacks {
     by_action_id: HashMap<String, CallbackHandle>,
 }
 
-/// One-shot latch, mirroring `InsertClassesInitialized`'s pattern exactly —
+/// One-shot latch, the same pattern as `ThemeInitialized` in `ui/slint_ui.rs`:
 /// discovery can't run at `Startup` (the Luau runtime itself only
 /// initializes on the first `Update` tick, per `LuauPlugin::build`), so this
 /// gates a `Update`-schedule system to run its real work exactly once, as
@@ -163,11 +163,9 @@ impl Plugin for ScriptPluginHostPlugin {
 /// function. Never runs its body twice — see `ScriptPluginsDiscovered`.
 ///
 /// LAZILY CREATES the Luau VM if it doesn't exist yet: the EDITOR never
-/// adds common's `LuauPlugin` (whose first-Update init this system
-/// originally waited on) — in the editor the VM is otherwise only created
-/// at Play start (`start_luau_scripts_on_play`), so waiting would mean
-/// script plugins never load in Edit mode. Verified live 2026-07-13: a
-/// full Edit session logged zero "Luau runtime initialized" lines.
+/// adds common's `LuauPlugin`, and Play runs Space scripts in a VM of its
+/// own (`eustress_common::luau::play`), so nothing else creates this one;
+/// waiting for it would mean script plugins never load in Edit mode.
 /// (`RuneModuleRegistry` needs no such wait — populated at `Startup`.)
 fn discover_script_plugins(
     mut discovered: ResMut<ScriptPluginsDiscovered>,

@@ -119,7 +119,13 @@
       "updated_utc": "2026-08-09T18:00:00Z"
     },
     "G7.30": {
-      "status": "PARTIAL",
+      "status": "PASSED",
+      "passed_utc": "2026-08-13T09:26:00Z",
+      "passed_measurement": "Both EXIT=0 markers. sessions_total=30, sessions_unclean=7, crash_free_rate=0.7666666666666666, identity 1-7/30 holds within 1e-9. end_reason histogram: clean 23, orphaned 4, panic 3; zero unknown. 26 real headless sessions generated, none hand-authored. 4 builds of 6.",
+      "passed_artifact": "docs/PROMPTS/artifacts/G7.30/crash_free_baseline.json",
+      "found_on_the_way": "cargo build --release -p eustress-engine could not complete: the build script overflowed the 1 MiB Windows main-thread stack compiling ui/slint/main.slint (STATUS_STACK_OVERFLOW). Fixed by compiling Slint on a spawned 64 MiB thread in eustress/crates/engine/build.rs; the fix landed in 7c1e0d00.",
+      "open_founder_ruling": "Beacon startup cost: median 12.7 ms against a 20 ms ceiling; 4 of 26 sessions exceeded it; the first-ever session cost 179.8 ms. The cost is one fsync.",
+      "superseded_status": "PARTIAL",
       "approach": "A",
       "iteration": 1,
       "builds_consumed": 1,
@@ -137,6 +143,14 @@
       "note": "UsageTelemetryPlugin is registered at app_core.rs:164 inside add_core_sim_plugins, called from BOTH main.rs:241 and bin/headless.rs:275 with no cfg fork — so headless runs emit session records and no GUI launches are required. eustress-headless requires --features world-db.",
       "updated_utc": "2026-08-10T21:00:00Z"
     },
-    "G1.40": { "status": "READY", "note": "NOT_STARTED — wave W0 halted at G1.30" }
+    "G1.40": {
+      "status": "PASSED",
+      "passed_utc": "2026-08-13T09:56:00Z",
+      "builds_consumed": 5,
+      "envelope_builds": 6,
+      "artifact_path": "docs/PROMPTS/artifacts/B2/G1.40/revenue_rail_ledger.json",
+      "last_measurement": { "value": "EXIT=0, RESULT: PASS, rows=22, hard_verified=10, jurisdictions=46", "pass": true },
+      "headline": "The money rail has never carried a payment: the deployed Worker reports deposit_count 0 and treasury_usd 0. The Worker and its Stripe code are live; what is missing is money, not code. Chargeable today: desktop_studio, mcp_tool_surface, commercial_licence."
+    }
   }
 }

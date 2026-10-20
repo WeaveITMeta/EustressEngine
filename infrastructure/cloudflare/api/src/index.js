@@ -26,10 +26,28 @@
 
 /// Model used for document verification, background screening, and search.
 import { handleAvatar } from './avatar.mjs';
+import { handlePurchases, resolveAttribution, recordPurchase, cleanProductId, cleanText, LIMITS as PURCHASE_LIMITS } from './purchases.mjs';
+import {
+  handleCommerceRoute, walletBalance, walletCredit, walletDebit, cleanSpaceName,
+} from './commerce.mjs';
+import {
+  BLISS_UNIT, BLISS_INITIAL_SUPPLY, BLISS_INITIAL_RATE, BLISS_HALVING_YEARS, BLISS_TAIL_RATE,
+  FULL_DAY_SCORE, VALUE_SCORE_PER_TICKET, VALUE_CAP_TICKETS_PER_BUYER, VALUE_CAP_SCORE_PER_CREATOR,
+  toMinor, fromMinor, formatBliss, readEntry, ledgerDeriveMinor, ledgerBalanceMinor, ledgerSpend,
+  blissEmissionRate, yearsSince, readSupplyMinor, readDistributedMinor, valueScoreForDay, projectEmissionMinor,
+} from './bliss.mjs';
+import { treasuryCall, treasuryView, splitSale, dripFor } from './treasury.mjs';
+// Durable Object classes are exported from the Worker's main module.
+export { Wallet, CommerceHub } from './commerce.mjs';
+export { Treasury } from './treasury.mjs';
+export { LiveHost } from './live.mjs';
+import { handleLive } from './live.mjs';
 import {
   handleModerationRoute, sweepModeration, isListable, canServe, publicModeration,
   POLICY_HASH_ANCHORED, MODERATION_VERSION, POLICY_VERSION,
 } from './moderation.mjs';
+import { handleWorldRoute, WORLD_FORMAT } from './world.mjs';
+import { handleIdentityRoute } from './identity.mjs';
 // The Guardian Policy and the moderation playbook, as shipped. Generated from
 // the docs by `npm run sync-policy`; the moderation tests fail when the copy
 // drifts from docs/, and /health reports whether the shipped policy still
@@ -664,29 +682,34 @@ function buildMimeWithAttachment({
 }
 
 export default {
-  // UTC-midnight cron: BLS emission distribution first (mints against
-  // yesterday's score snapshot), then the USD treasury drip payout
-  // (same snapshot). Sequential — both read the same day's scores.
+  // Hourly cron. Each run makes sure yesterday's settlement (the BLS
+  // emission, the USD drip and the ledger backup) has started in the
+  // Treasury, which then runs it to the end on its own alarm in bounded
+  // steps; see treasury.mjs. Starting a settlement twice does nothing, so the
+  // hours after midnight only matter if midnight's start failed. The
+  // midnight run also refreshes the model catalog, sweeps moderation, and
+  // writes the night's record for /api/admin/cron-health.
   async scheduled(event, env, ctx) {
     ctx.waitUntil((async () => {
-      let distribution = null;
-      let payout = null;
-      let backup = null;
-      let models = null;
+      const at = new Date(event?.scheduledTime || Date.now());
+      const scoreDate = new Date(at.getTime() - 86400 * 1000).toISOString().split('T')[0];
+      let settlement = null;
       let failed = [];
-      try { distribution = await runDailyDistribution(env); }
-      catch (e) { failed.push(`distribution: ${e.message}`); console.error('distribution failed:', e); }
-      try { payout = await runDailyPayout(env); }
-      catch (e) { failed.push(`payout: ${e.message}`); console.error('payout failed:', e); }
-      // Backup LAST so it captures the state this run produced.
-      try { backup = await backupLedger(env); }
-      catch (e) { failed.push(`backup: ${e.message}`); console.error('backup failed:', e); }
+      for (let attempt = 1; attempt <= 3 && !settlement?.ok; attempt++) {
+        settlement = await treasuryCall(env, 'start_settlement', { date: scoreDate })
+          .catch((e) => ({ ok: false, error: e.message }));
+      }
+      if (!settlement?.ok) {
+        failed.push(`settlement: ${settlement?.error || 'did not start'}`);
+        console.error(`settlement ${scoreDate} did not start:`, settlement?.error);
+      }
+      if (at.getUTCHours() !== 0) return;
 
-      // Model catalog refresh. Independent of the ledger work above — it
-      // shares only the schedule — so it runs on its own try/catch and a
-      // failed payout never costs us a day of model currency. It keeps its
-      // own detailed record in MODELS:run:{date}; this is just the summary
-      // line so /api/admin/cron-health shows the whole night at a glance.
+      let models = null;
+      // Model catalog refresh. It shares only the schedule with the ledger,
+      // so it runs on its own try/catch. It keeps its own detailed record in
+      // MODELS:run:{date}; this is the summary line so
+      // /api/admin/cron-health shows the whole night at a glance.
       try { models = await runModelDiscovery(env); }
       catch (e) { failed.push(`models: ${e.message}`); console.error('model discovery failed:', e); }
 
@@ -696,20 +719,18 @@ export default {
       try { moderation = await sweepModeration(env, await moderationDeps({})); }
       catch (e) { failed.push(`moderation: ${e.message}`); console.error('moderation sweep failed:', e); }
 
-      // Durable run record. Cron failures used to vanish into console.error
-      // with nothing queryable afterwards, so a silently skipped day was
-      // invisible. `/api/admin/cron-health` reads these.
-      const today = new Date().toISOString().split('T')[0];
+      // The night's record, so a skipped or failed night is visible from
+      // `/api/admin/cron-health`. The settlement's own outcome is written by
+      // the Treasury to `settlement:{scoreDate}` when it finishes.
+      const today = at.toISOString().split('T')[0];
       await env.PAYOUTS.put(`cronrun:${today}`, JSON.stringify({
         ran_at: new Date().toISOString(),
         ok: failed.length === 0,
         failed,
-        minted_minor: distribution?.minted_minor ?? 0,
-        contributors: distribution?.contributor_count ?? 0,
-        truncated: distribution?.truncated ?? false,
-        concentration_flag: distribution?.concentration_flag ?? false,
-        paid_usd: payout?.total_paid_usd ?? 0,
-        backup_key: backup?.key ?? null,
+        score_date: scoreDate,
+        settlement_started: !!settlement?.started,
+        settlement_queued: !!settlement?.queued,
+        settlement_phase: settlement?.settlement?.phase ?? null,
         models_applied: models?.applied ?? false,
         models_version: models?.version ?? models?.kept_version ?? null,
         models_changes: models?.changes ?? [],
@@ -853,10 +874,20 @@ export default {
         return handleTicketBalance(request, env, cors);
       if (url.pathname === '/api/tickets/checkout' && request.method === 'POST')
         return handleTicketCheckout(request, env, cors);
+      // Spending Tickets in a simulation is a commerce purchase: a product the
+      // creator listed, at the price it carries, never the caller's.
       if (url.pathname === '/api/tickets/spend' && request.method === 'POST')
-        return handleTicketSpend(request, env, cors);
+        return json({ error: 'Gone: buy a product with POST /api/commerce/purchases', code: 'gone' }, 410, cors);
       if (url.pathname === '/api/tickets/history' && request.method === 'GET')
         return handleTicketHistory(request, env, cors);
+
+      // Purchases: the signed-in account's own receipts for Tickets and Bliss
+      // spend. Bearer-gated and origin-pinned; there is no route that takes
+      // someone else's account id.
+      if (url.pathname === '/api/purchases' && request.method === 'GET')
+        return handlePurchases(request, env, cors, { verifyAuth, json, blissUnit: BLISS_UNIT });
+      if (url.pathname === '/api/purchases/summary' && request.method === 'GET')
+        return handlePurchases(request, env, cors, { verifyAuth, json, blissUnit: BLISS_UNIT }, { summaryOnly: true });
 
       // Stripe
       if (url.pathname === '/api/stripe/checkout' && request.method === 'POST')
@@ -877,7 +908,7 @@ export default {
         return handlePayoutRate(env, cors);
 
       // Ledger transparency (public, read-only, wildcard CORS) + health.
-      // These three take `publicCors()` so browsers on any origin can audit
+      // These take `publicCors()` so browsers on any origin can audit
       // them; /api/ledger/me below stays origin-pinned AND bearer-gated.
       if (url.pathname === '/api/ledger/summary' && request.method === 'GET')
         return handleLedgerSummary(env, publicCors());
@@ -885,6 +916,8 @@ export default {
         return handleLedgerDistribution(url.pathname.split('/').pop(), env, publicCors());
       if (url.pathname.startsWith('/api/ledger/history/') && request.method === 'GET')
         return handleLedgerHistory(url.pathname.split('/').pop(), env, publicCors());
+      if (url.pathname === '/api/ledger/leaderboard' && request.method === 'GET')
+        return handleLedgerLeaderboard(url, env, publicCors());
       if (url.pathname === '/api/ledger/spend' && request.method === 'POST')
         return handleLedgerSpend(request, env, cors);
       if (url.pathname === '/api/ledger/me' && request.method === 'GET')
@@ -919,6 +952,16 @@ export default {
         if (handled) return handled;
       }
 
+      // A published world as .echk chunks: Studio's upload and commit, and
+      // the Player's reads. See src/world.mjs.
+      if (url.pathname.startsWith('/api/simulations/') && url.pathname.includes('/world/')) {
+        const world = await handleWorldRoute(request, url, env, cors, {
+          verifyAuth, requireAdmin, json, isListable, canServe, readSpaceNames,
+          MODERATION_VERSION, POLICY_VERSION,
+        });
+        if (world) return world;
+      }
+
       // Simulations (published)
       if (url.pathname === '/api/simulations' && request.method === 'GET')
         return handleListSimulations(url, env, cors);
@@ -944,6 +987,10 @@ export default {
         return handleDownloadPak(request, url.pathname.split('/')[3], env, cors);
       if (url.pathname.match(/^\/api\/simulations\/[a-f0-9-]+\/play$/) && request.method === 'POST')
         return handlePlaySimulation(request, url.pathname.split('/')[3], env, cors);
+      // Live hosts: Studio's heartbeat while it hosts a simulation, and the
+      // listing's Live indicator and join link. See src/live.mjs.
+      if (url.pathname.match(/^\/api\/simulations\/[a-f0-9-]+\/live$/) && ['GET', 'POST', 'DELETE'].includes(request.method))
+        return handleLive(request, env, cors, url.pathname.split('/')[3], { verifyAuth, requireAdmin, json, isListable });
       // Website manifest upload. Its own object and its own route, so a publish
       // can never overwrite the listing record the marketplace reads.
       if (url.pathname.match(/^\/api\/simulations\/[a-f0-9-]+\/website-manifest$/) && request.method === 'PUT')
@@ -974,11 +1021,21 @@ export default {
       if (url.pathname === '/api/gallery' && request.method === 'GET')
         return handleListSimulations(url, env, cors);
 
-      // API Keys management
-      if (url.pathname === '/api/keys' && request.method === 'GET')
-        return json({ keys: [] }, 200, cors);
-      if (url.pathname === '/api/keys' && request.method === 'POST')
-        return json({ key: 'ek_' + crypto.randomUUID().replace(/-/g, ''), id: crypto.randomUUID(), name: 'New Key' }, 201, cors);
+      // Commerce (microtransactions in published simulations) and the
+      // account's API keys. See src/commerce.mjs.
+      if (url.pathname.startsWith('/api/commerce/') || url.pathname === '/api/keys' || url.pathname.startsWith('/api/keys/')) {
+        const commerce = await handleCommerceRoute(request, url, env, ctx, cors, {
+          verifyAuth, json, isListable, resolveAttribution,
+        });
+        if (commerce) return commerce;
+      }
+
+      // Identity tickets: a joining Player proves its account to a host
+      // without handing over its session. See src/identity.mjs.
+      if (url.pathname.startsWith('/api/identity/')) {
+        const identity = await handleIdentityRoute(request, url, env, cors, { verifyAuth, json });
+        if (identity) return identity;
+      }
 
       // Marketplace (stub — not yet implemented)
       if (url.pathname.startsWith('/api/marketplace'))
@@ -2115,21 +2172,25 @@ async function handleCosign(request, env, cors) {
   let durSecs = Number(duration_secs);
   if (!Number.isFinite(durSecs)) durSecs = 60;
   durSecs = Math.max(1, Math.min(durSecs, 3600));
+  if (typeof contribution_hash !== 'string' || !/^[A-Za-z0-9]{16,128}$/.test(contribution_hash))
+    return json({ error: 'contribution_hash must be 16 to 128 letters or digits' }, 400, cors);
 
-  // Rate limit: max 120 cosigns per hour per user
-  const hourKey = `cosign-rate:${userId}:${new Date().toISOString().slice(0, 13)}`;
-  const count = parseInt(await env.CHALLENGES.get(hourKey) || '0');
-  if (count >= 120) return json({ error: 'Rate limit: 120 cosigns/hour' }, 429, cors);
-  await env.CHALLENGES.put(hourKey, (count + 1).toString(), { expirationTtl: 3600 });
-
-  // Replay protection — the same contribution hash can only be
-  // co-signed once. The engine binds user, day, type, duration, and a
-  // monotonic chunk id into the hash, so re-submitting persisted work
-  // after a crash is safe (same hash → rejected, no double credit).
-  const dupeKey = `cosign-hash:${userId}:${contribution_hash}`;
-  if (await env.CHALLENGES.get(dupeKey))
-    return json({ error: 'Duplicate contribution hash' }, 409, cors);
-  await env.CHALLENGES.put(dupeKey, '1', { expirationTtl: 86400 * 2 });
+  // Rate limit, per account. The engine sends at most 6 claims per 5-minute
+  // flush, so this only ever meets a script.
+  if (env.COSIGN_RATE_LIMITER) {
+    const { success } = await env.COSIGN_RATE_LIMITER.limit({ key: userId });
+    if (!success) return json({ error: 'Rate limit: too many claims this minute' }, 429, cors);
+  } else {
+    const hourKey = `cosign-rate:${userId}:${new Date().toISOString().slice(0, 13)}`;
+    const count = parseInt(await env.CHALLENGES.get(hourKey) || '0');
+    if (count >= 120) return json({ error: 'Rate limit: 120 cosigns/hour' }, 429, cors);
+    try {
+      await env.CHALLENGES.put(hourKey, (count + 1).toString(), { expirationTtl: 3600 });
+    } catch (e) {
+      // KV refuses a second write to one key within a second; a counter
+      // that misses a beat must not fail the claim.
+    }
+  }
 
   const today = new Date().toISOString().split('T')[0];
 
@@ -2137,9 +2198,9 @@ async function handleCosign(request, env, cors) {
   const observedMode = await env.SOCIAL.get(`node-mode:${userId}`);
   const nodeBonus = observedMode === 'Full' ? 1.1 : 1.0;
 
-  // Load the per-day record early — needed for the ActiveTime presence
-  // check and the daily ceiling. `by_seconds` tracks credited seconds
-  // per type (parallel to by_type's credited score) so the presence cap
+  // The per-day record: the presence check and the daily ceiling read it,
+  // and it holds the day's credited claims. `by_seconds` tracks credited
+  // seconds per type (next to by_type's credited score) so the presence cap
   // can compare against cumulative ActiveTime seconds already credited.
   const dayKey = `contrib:${today}:${userId}`;
   const dayData = await env.INVENTORY.get(dayKey);
@@ -2147,6 +2208,16 @@ async function handleCosign(request, env, cors) {
     ? JSON.parse(dayData)
     : { total_score: 0, by_type: {}, by_seconds: {}, count: 0 };
   if (!day.by_seconds) day.by_seconds = {};
+  if (!Array.isArray(day.hashes)) day.hashes = [];
+
+  // Replay protection: a claim's hash is credited once. The engine binds
+  // user, day, type, duration, node and a monotonic chunk id into it, so
+  // resubmitting persisted work is safe. Credited hashes live in the day's
+  // record itself, written in the same put as the score, so a claim can
+  // never be credited without its hash being recorded, or the reverse.
+  const hashTag = contribution_hash.slice(0, 32);
+  if (day.hashes.includes(hashTag) || (await env.CHALLENGES.get(`cosign-hash:${userId}:${contribution_hash}`)))
+    return json({ error: 'Duplicate contribution hash' }, 409, cors);
 
   // (3) ActiveTime is bounded by server-observed presence. Credited
   // ActiveTime seconds for the day can never exceed the wall-clock
@@ -2165,30 +2236,50 @@ async function handleCosign(request, env, cors) {
   const remaining = Math.max(0, MAX_DAILY_SCORE - (day.total_score || 0));
   if (score > remaining) score = remaining;
 
-  const userData = await env.USERS.get(`user:${userId}`);
-  if (!userData) return json({ error: 'User not found' }, 404, cors);
-  const user = JSON.parse(userData);
+  const userRaw = await env.USERS.get(`user:${userId}`);
+  if (!userRaw) return json({ error: 'User not found' }, 404, cors);
 
-  // Only mutate ledgers when there is real score to credit. A zero-credit
-  // cosign (capped out, or ActiveTime beyond presence) still consumed its
-  // dedupe + rate-limit slot above, so it can't be retried or spammed.
+  // The credit is the day record's put, and it is the last step that can
+  // fail the request: everything after it is best-effort. A claim answered
+  // with an error was therefore never credited, so the engine resubmitting
+  // it cannot credit the same work twice. A claim that credits nothing
+  // (capped out, or ActiveTime beyond presence) writes nothing, and the
+  // engine keeps that work until there is headroom.
+  const stats = { contribution_score: 0, total_cosigns: 0 };
   if (score > 0) {
-    user.contribution_score = (user.contribution_score || 0) + score;
-    user.total_cosigns = (user.total_cosigns || 0) + 1;
-    user.last_contribution = new Date().toISOString();
-    await env.USERS.put(`user:${userId}`, JSON.stringify(user));
-
     day.total_score += score;
     day.by_type[contribution_type] = (day.by_type[contribution_type] || 0) + score;
     day.by_seconds[contribution_type] = (day.by_seconds[contribution_type] || 0) + creditSecs;
     day.count += 1;
+    day.hashes.push(hashTag);
     day.updated_at = new Date().toISOString();
-    await env.INVENTORY.put(dayKey, JSON.stringify(day), { expirationTtl: 86400 * 90 });
-    // Running network-wide score for the day — powers the live projection in
-    // the heartbeat. Advisory only; the distribution recomputes from scratch.
-    const dtKey = `daytotal:${today}`;
-    const dtPrev = parseFloat(await env.INVENTORY.get(dtKey) || '0');
-    await env.INVENTORY.put(dtKey, String(dtPrev + score), { expirationTtl: 86400 * 7 });
+    await kvPutRetry(env.INVENTORY, dayKey, JSON.stringify(day), {
+      expirationTtl: 86400 * 90,
+      // The nightly settlement sums a day from the listing alone.
+      metadata: { s: day.total_score, v: Number(day.value_score) || 0 },
+    });
+
+    // Lifetime counters for display, on their own key: this endpoint runs
+    // every few minutes for every active account and must never rewrite the
+    // account record, where a stale copy could undo a ban or a Stripe link.
+    try {
+      const raw = await env.SOCIAL.get(`cosign-stats:${userId}`);
+      if (raw) {
+        Object.assign(stats, JSON.parse(raw));
+      } else {
+        // First claim since the counters moved off the account record: carry
+        // the lifetime totals that were kept there.
+        const legacy = JSON.parse(userRaw);
+        stats.contribution_score = Number(legacy.contribution_score) || 0;
+        stats.total_cosigns = Number(legacy.total_cosigns) || 0;
+      }
+      stats.contribution_score = (Number(stats.contribution_score) || 0) + score;
+      stats.total_cosigns = (Number(stats.total_cosigns) || 0) + 1;
+      stats.last_contribution = day.updated_at;
+      await env.SOCIAL.put(`cosign-stats:${userId}`, JSON.stringify(stats));
+    } catch (e) {
+      console.error(`cosign-stats:${userId} was not updated:`, e?.message || e);
+    }
   }
 
   // Generate co-signature (hash of contribution + user + timestamp)
@@ -2206,10 +2297,24 @@ async function handleCosign(request, env, cors) {
     weight,
     node_bonus: nodeBonus,
     score_added: score,
-    total_score: user.contribution_score || 0,
+    total_score: stats.contribution_score || 0,
     pending_today: day.total_score,
     capped: score < uncapped - 1e-9,
   }, 200, cors);
+}
+
+/// KV put that waits out KV's limit of one write per key per second, which
+/// it signals with a 429. Two claims from one engine can land within a
+/// second of each other; the second waits instead of failing.
+async function kvPutRetry(ns, key, value, options, attempts = 3) {
+  for (let i = 1; ; i++) {
+    try {
+      return await ns.put(key, value, options);
+    } catch (e) {
+      if (i >= attempts || !/429|too many requests/i.test(String(e?.message || e))) throw e;
+      await new Promise((resolve) => setTimeout(resolve, 1100 * i));
+    }
+  }
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -2252,6 +2357,13 @@ async function handleHealth(env, cors) {
 // ═══════════════════════════════════════════════════════════════════════════
 // JWT (using Web Crypto HMAC-SHA256)
 // ═══════════════════════════════════════════════════════════════════════════
+
+/// True when the request carries a non-empty Bearer credential. Distinguishes
+/// "no token" (anonymous) from "a token we could not verify" (reject), which a
+/// null `verifyAuth` result alone cannot.
+function presentedBearer(request) {
+  return /^Bearer\s+\S+/i.test(request.headers.get('Authorization') || '');
+}
 
 async function createJwt(userId, secret) {
   const header = { alg: 'HS256', typ: 'JWT' };
@@ -3418,7 +3530,7 @@ async function handleAdminScreeningReport(request, env, cors) {
 
 /// `idempotencyKey` (optional) makes a retried POST safe: Stripe returns the
 /// ORIGINAL result instead of performing the action again. Required for
-/// anything that moves money (see runDailyPayout).
+/// anything that moves money.
 async function stripeRequest(method, endpoint, body, env, idempotencyKey) {
   const headers = {
     'Authorization': `Bearer ${env.STRIPE_SECRET_KEY}`,
@@ -3445,15 +3557,14 @@ const STRIPE_PRICES = {
   patron_recurring: 'price_1THyCBRgsC7hEeKMLAlLI8pS',
 };
 
-// Platform fee: 2.5%
-const PLATFORM_FEE_PERCENT = 2.5;
-
-// Create Stripe Checkout session for treasury funding
+// Create Stripe Checkout session for treasury funding. A contribution goes
+// whole to the treasury (see handleStripeWebhook), and a recurring one is
+// tagged so each month's renewal is credited too.
 async function handleStripeCheckout(request, env, cors) {
   if (!env.STRIPE_SECRET_KEY) return json({ error: 'Stripe not configured' }, 503, cors);
 
   const userId = await verifyAuth(request, env);
-  const { tier, mode, custom_amount } = await request.json();
+  const { tier, mode, custom_amount } = await request.json().catch(() => ({}));
   // tier: 'seed'|'growth'|'sustainer'|'patron' or null for custom
   // mode: 'one_time' or 'recurring'
 
@@ -3461,19 +3572,22 @@ async function handleStripeCheckout(request, env, cors) {
   let priceId;
   let amountCents;
 
+  const custom = Number(custom_amount);
   if (tier && STRIPE_PRICES[`${tier}_${isRecurring ? 'recurring' : 'one_time'}`]) {
     priceId = STRIPE_PRICES[`${tier}_${isRecurring ? 'recurring' : 'one_time'}`];
-  } else if (custom_amount && custom_amount >= 5) {
-    amountCents = Math.round(custom_amount * 100);
+  } else if (Number.isFinite(custom) && custom >= 5 && custom <= 100_000) {
+    amountCents = Math.round(custom * 100);
   } else {
-    return json({ error: 'Select a tier or enter a custom amount ($5 minimum)' }, 400, cors);
+    return json({ error: 'Select a tier or enter a custom amount from $5 to $100,000' }, 400, cors);
   }
 
   const params = {
     'mode': isRecurring ? 'subscription' : 'payment',
     'success_url': 'https://eustress.dev/bliss?funded=true',
     'cancel_url': 'https://eustress.dev/bliss?funded=false',
+    'metadata[type]': 'treasury_fund',
   };
+  if (isRecurring) params['subscription_data[metadata][type]'] = 'treasury_fund';
 
   if (priceId) {
     params['line_items[0][price]'] = priceId;
@@ -3489,15 +3603,10 @@ async function handleStripeCheckout(request, env, cors) {
     }
   }
 
-  // 2.5% platform fee (Stripe collects this for us via Connect)
-  if (amountCents) {
-    const feeCents = Math.round(amountCents * PLATFORM_FEE_PERCENT / 100);
-    params['payment_intent_data[application_fee_amount]'] = feeCents.toString();
-  }
-
   if (userId) {
     params['metadata[user_id]'] = userId;
     params['client_reference_id'] = userId;
+    if (isRecurring) params['subscription_data[metadata][user_id]'] = userId;
   }
 
   const session = await stripeRequest('POST', '/checkout/sessions', params, env);
@@ -3546,11 +3655,10 @@ async function stripeSignatureValid(rawBody, sigHeader, secret) {
 async function handleStripeWebhook(request, env) {
   const body = await request.text();
 
-  // SECURITY: this endpoint mints Tickets and credits the USD treasury, so an
-  // unverified body is a direct "print money" primitive — previously anyone
-  // could POST a fake checkout.session.completed and inflate the treasury.
-  // Fail CLOSED: if the signing secret isn't configured we refuse rather than
-  // silently trusting the caller.
+  // SECURITY: this endpoint mints Tickets and moves the USD treasury, so an
+  // unverified body would let anyone print money with a fake
+  // checkout.session.completed. Fail CLOSED: without the signing secret the
+  // request is refused rather than trusted.
   if (!env.STRIPE_WEBHOOK_SECRET) {
     console.error('stripe webhook rejected: STRIPE_WEBHOOK_SECRET not configured');
     return new Response('Webhook not configured', { status: 503 });
@@ -3567,9 +3675,26 @@ async function handleStripeWebhook(request, env) {
     return new Response('Invalid JSON', { status: 400 });
   }
 
-  if (event.type === 'checkout.session.completed') {
+  // An event moves money only in the mode this deployment's key is in. A
+  // Worker holding a live key acknowledges and ignores test-mode events (from
+  // a test-mode endpoint pointed at this URL, or a test event sent from the
+  // dashboard), and a test deployment ignores live ones.
+  const stripeKey = env.STRIPE_SECRET_KEY || '';
+  const keyLive = /^(sk|rk)_live_/.test(stripeKey) ? true : /^(sk|rk)_test_/.test(stripeKey) ? false : null;
+  if (keyLive !== null && typeof event.livemode === 'boolean' && event.livemode !== keyLive) {
+    return new Response(`OK: ${event.livemode ? 'live' : 'test'}-mode event ignored`, { status: 200 });
+  }
+
+  const type = event.type;
+  if (type === 'checkout.session.completed' || type === 'checkout.session.async_payment_succeeded') {
     const session = event.data.object;
-    const amount = (session.amount_total || 0) / 100; // dollars
+    // Money moves only once it has arrived. A delayed payment method (a bank
+    // debit) completes the session unpaid and settles days later with
+    // checkout.session.async_payment_succeeded, which lands here again.
+    if (session.payment_status !== 'paid') return new Response('OK', { status: 200 });
+    // What was paid for, without any tax Stripe collected on top of it.
+    const grossCents = Math.max(0, Math.trunc((session.amount_total || 0) - (session.total_details?.amount_tax || 0)));
+    const amount = grossCents / 100; // dollars
     const userId = session.metadata?.user_id || session.client_reference_id;
 
     const isTicketPurchase = session.metadata?.type === 'ticket_purchase';
@@ -3584,82 +3709,160 @@ async function handleStripeWebhook(request, env) {
       const existing = await env.PAYOUTS.get(`deposit:${session.id}`);
       if (existing) return new Response('OK', { status: 200 }); // Already processed
 
-      // Credit tickets to user
-      if (userId) {
-        const userData = await env.USERS.get(`user:${userId}`);
-        if (userData) {
-          const user = JSON.parse(userData);
-          user.ticket_balance = (user.ticket_balance || 0) + ticketsToCredit;
-          await env.USERS.put(`user:${userId}`, JSON.stringify(user));
+      // Credit tickets to user. Through the wallet, keyed by the session, so
+      // the credit happens once even if two deliveries race past the check
+      // above; a failure answers 500 and Stripe redelivers.
+      if (userId && ticketsToCredit > 0 && (await env.USERS.get(`user:${userId}`))) {
+        const credit = await walletCredit(env, userId, {
+          ref: `stripe:${session.id}`, amount: ticketsToCredit, reason: `${pkg?.name || 'Tickets'} package`, paid: true,
+        });
+        if (!credit.ok) {
+          console.error(`ticket credit for session ${session.id} failed:`, credit.error);
+          return new Response('Ticket credit failed', { status: 500 });
         }
       }
 
-      // Revenue split: 50% treasury, 50% platform
-      // Storefront/processor fee comes off the top, THEN the 50/50. See
-      // TREASURY_SPLIT: splitting gross would have the platform paying the
-      // app store out of its own half once iOS/Android are live.
+      // Revenue split, in the Treasury: the storefront's fee comes off the
+      // top, then half of the net is the contributors' (splitSale in
+      // treasury.mjs). The deposit is keyed by the session, so a redelivery
+      // adds nothing, and a failure answers 500 so Stripe redelivers.
       const channel = session.metadata?.channel || 'web';
-      const fee = channelFee(amount, channel);
-      const net = Math.max(0, amount - fee);
-      const treasuryCut = net * TREASURY_SPLIT;
-      const platformCut = net - treasuryCut;
-      // Track fees so the accounting dashboard can show true take-rate.
-      const feesPrev = parseFloat(await env.PAYOUTS.get('costs:storefront_fees') || '0');
-      await env.PAYOUTS.put('costs:storefront_fees', String(feesPrev + fee));
-
-      const currentTreasury = parseFloat(await env.PAYOUTS.get('treasury:total_usd') || '0');
-      const newTreasuryTotal = currentTreasury + treasuryCut;
-      await env.PAYOUTS.put('treasury:total_usd', newTreasuryTotal.toString());
-      // Deposits raise the high-water mark (scarcity self-heal —
-      // bliss-core Treasury::deposit).
-      const hwmT = parseFloat(await env.PAYOUTS.get('treasury:hwm') || '0');
-      if (newTreasuryTotal > hwmT) await env.PAYOUTS.put('treasury:hwm', newTreasuryTotal.toString());
-
-      const currentPlatform = parseFloat(await env.PAYOUTS.get('platform:total_usd') || '0');
-      await env.PAYOUTS.put('platform:total_usd', (currentPlatform + platformCut).toString());
-
-      // Log transaction
-      if (userId) {
-        await env.INVENTORY.put(`txn:${userId}:${Date.now()}`, JSON.stringify({
-          id: session.id, user_id: userId, type: 'purchase', amount: ticketsToCredit,
-          currency: 'TKT', stripe_session_id: session.id, price_usd: amount,
-          description: `Purchased ${pkg?.name || 'Tickets'} package (${ticketsToCredit} TKT)`,
-          timestamp: new Date().toISOString(),
-        }), { expirationTtl: 86400 * 365 * 3 });
+      const split = splitSale(grossCents, channel);
+      const deposit = await treasuryCall(env, 'deposit', {
+        ref: `stripe:${session.id}`, kind: 'ticket_purchase',
+        gross_cents: split.gross_cents, fee_cents: split.fee_cents,
+        treasury_cents: split.treasury_cents, platform_cents: split.platform_cents,
+        user_id: userId || null, payment_intent: session.payment_intent || null,
+        tickets: ticketsToCredit, channel,
+      });
+      if (!deposit.ok) {
+        console.error(`treasury deposit for session ${session.id} failed:`, deposit.error);
+        return new Response('Treasury deposit failed', { status: 500 });
       }
 
-      // Record deposit with full revenue breakdown
-      await env.PAYOUTS.put(`deposit:${session.id}`, JSON.stringify({
-        id: session.id, type: 'ticket_purchase', amount_usd: amount,
-        channel, storefront_fee: fee, net_usd: net,
-        treasury_cut: treasuryCut, platform_cut: platformCut,
-        tickets_credited: ticketsToCredit, package: pkgKey,
-        user_id: userId || 'anonymous', timestamp: new Date().toISOString(),
-      }));
+      if (!deposit.replay) {
+        // Log transaction
+        if (userId) {
+          await env.INVENTORY.put(`txn:${userId}:${Date.now()}`, JSON.stringify({
+            id: session.id, user_id: userId, type: 'purchase', amount: ticketsToCredit,
+            currency: 'TKT', stripe_session_id: session.id, price_usd: amount,
+            description: `Purchased ${pkg?.name || 'Tickets'} package (${ticketsToCredit} TKT)`,
+            timestamp: new Date().toISOString(),
+          }), { expirationTtl: 86400 * 365 * 3 });
+        }
+
+        // Record deposit with full revenue breakdown
+        await env.PAYOUTS.put(`deposit:${session.id}`, JSON.stringify({
+          id: session.id, type: 'ticket_purchase', amount_usd: amount,
+          channel, storefront_fee: split.fee_cents / 100, net_usd: split.net_cents / 100,
+          treasury_cut: split.treasury_cents / 100, platform_cut: split.platform_cents / 100,
+          tickets_credited: ticketsToCredit, package: pkgKey,
+          user_id: userId || 'anonymous', timestamp: new Date().toISOString(),
+        }));
+      }
 
     } else {
-      // TREASURY FUNDING — direct treasury deposit (existing flow).
-      // Stripe delivers at-least-once and retries on any non-2xx or timeout,
-      // so without this guard a redelivered $500 session credited $1000.
-      const existingFund = await env.PAYOUTS.get(`deposit:${session.id}`);
-      if (existingFund) return new Response('OK', { status: 200 });
-
-      await env.PAYOUTS.put(`deposit:${session.id}`, JSON.stringify({
-        id: session.id, type: 'treasury_fund', amount_usd: amount,
-        user_id: userId || 'anonymous', timestamp: new Date().toISOString(),
-        mode: session.mode, stripe_payment_intent: session.payment_intent,
-      }));
-
-      const currentTotal = parseFloat(await env.PAYOUTS.get('treasury:total_usd') || '0');
-      const newTotal = currentTotal + amount;
-      await env.PAYOUTS.put('treasury:total_usd', newTotal.toString());
-      // Deposits raise the high-water mark (scarcity self-heal).
-      const hwmF = parseFloat(await env.PAYOUTS.get('treasury:hwm') || '0');
-      if (newTotal > hwmF) await env.PAYOUTS.put('treasury:hwm', newTotal.toString());
-
-      const count = parseInt(await env.PAYOUTS.get('treasury:deposit_count') || '0');
-      await env.PAYOUTS.put('treasury:deposit_count', (count + 1).toString());
+      // TREASURY FUNDING: the whole contribution goes to the treasury, keyed
+      // by the session so a redelivery adds nothing.
+      const deposit = await treasuryCall(env, 'deposit', {
+        ref: `stripe:${session.id}`, kind: 'treasury_fund',
+        gross_cents: grossCents, fee_cents: 0, treasury_cents: grossCents, platform_cents: 0,
+        user_id: userId || null, payment_intent: session.payment_intent || null,
+      });
+      if (!deposit.ok) {
+        console.error(`treasury deposit for session ${session.id} failed:`, deposit.error);
+        return new Response('Treasury deposit failed', { status: 500 });
+      }
+      if (!deposit.replay) {
+        await env.PAYOUTS.put(`deposit:${session.id}`, JSON.stringify({
+          id: session.id, type: 'treasury_fund', amount_usd: amount,
+          user_id: userId || 'anonymous', timestamp: new Date().toISOString(),
+          mode: session.mode, stripe_payment_intent: session.payment_intent,
+        }));
+      }
     }
+    return new Response('OK', { status: 200 });
+  }
+
+  // A monthly renewal of a recurring treasury contribution. A subscription's
+  // first invoice is paid through its Checkout Session above, so only the
+  // cycles after it are deposited here.
+  if (type === 'invoice.paid') {
+    const invoice = event.data.object;
+    const meta = invoice.subscription_details?.metadata || invoice.parent?.subscription_details?.metadata || {};
+    if (invoice.billing_reason !== 'subscription_cycle' || meta.type !== 'treasury_fund') {
+      return new Response('OK', { status: 200 });
+    }
+    const cents = Math.max(0, Math.trunc((invoice.amount_paid || 0) - (invoice.tax || 0)));
+    if (cents > 0) {
+      const deposit = await treasuryCall(env, 'deposit', {
+        ref: `stripe-invoice:${invoice.id}`, kind: 'treasury_fund',
+        gross_cents: cents, fee_cents: 0, treasury_cents: cents, platform_cents: 0,
+        user_id: meta.user_id || null, payment_intent: invoice.payment_intent || null,
+      });
+      if (!deposit.ok) {
+        console.error(`treasury deposit for invoice ${invoice.id} failed:`, deposit.error);
+        return new Response('Treasury deposit failed', { status: 500 });
+      }
+    }
+    return new Response('OK', { status: 200 });
+  }
+
+  // Money leaving after it arrived: a refund, or a dispute (chargeback). The
+  // treasury gives back its share of what left, and the buyer's wallet gives
+  // back the Tickets that payment bought, bought Tickets first, going
+  // negative if they were already spent. A dispute won restores both. Each
+  // step is keyed by its source, so a redelivery repeats nothing; a payment
+  // the treasury never recorded is logged for review instead of retried.
+  if (type === 'charge.refunded' || type === 'charge.dispute.created' || type === 'charge.dispute.closed') {
+    const obj = event.data.object;
+    let result;
+    if (type === 'charge.refunded') {
+      if (!obj.payment_intent) return new Response('OK', { status: 200 });
+      result = await treasuryCall(env, 'refund', {
+        payment_intent: obj.payment_intent, refunded_total_cents: Math.trunc(obj.amount_refunded || 0),
+      });
+    } else if (type === 'charge.dispute.created') {
+      if (!obj.payment_intent) return new Response('OK', { status: 200 });
+      result = await treasuryCall(env, 'dispute', {
+        payment_intent: obj.payment_intent, dispute_id: obj.id, amount_cents: Math.trunc(obj.amount || 0),
+      });
+    } else {
+      if (obj.status !== 'won') return new Response('OK', { status: 200 });
+      result = await treasuryCall(env, 'dispute_won', { dispute_id: obj.id });
+    }
+    if (!result.ok) {
+      if (result.code === 'deposit_not_found' || result.code === 'reversal_not_found') {
+        await env.PAYOUTS.put(`unmatched-reversal:${event.id}`, JSON.stringify({
+          type, object_id: obj.id, payment_intent: obj.payment_intent || null,
+          amount_cents: obj.amount_refunded ?? obj.amount ?? null, at: new Date().toISOString(),
+        }), { expirationTtl: 86400 * 365 });
+        return new Response('OK', { status: 200 });
+      }
+      console.error(`${type} ${obj.id} failed in the treasury:`, result.error);
+      return new Response('Reversal failed', { status: 500 });
+    }
+    const rv = result.reversal;
+    if (rv && rv.user_id && rv.tickets > 0) {
+      const wallet = rv.kind === 'dispute_won'
+        ? await walletCredit(env, rv.user_id, {
+          ref: `restore:${rv.ref}`, amount: rv.tickets, reason: 'Dispute resolved', paid: true,
+        })
+        : await walletDebit(env, rv.user_id, {
+          ref: `reversal:${rv.ref}`, amount: rv.tickets,
+          reason: rv.kind === 'refund' ? 'Payment refunded' : 'Payment disputed',
+          allow_negative: true, paid_first: true,
+        });
+      if (!wallet.ok) {
+        console.error(`wallet ${rv.kind} for ${rv.ref} failed:`, wallet.error);
+        return new Response('Wallet reversal failed', { status: 500 });
+      }
+      if (rv.kind === 'dispute') {
+        // For review: accounts whose payments are disputed.
+        await env.PAYOUTS.put(`chargeback:${rv.user_id}:${rv.ref}`, JSON.stringify(rv), { expirationTtl: 86400 * 365 * 3 });
+      }
+    }
+    return new Response('OK', { status: 200 });
   }
 
   return new Response('OK', { status: 200 });
@@ -3821,28 +4024,26 @@ async function syncKycDocsToStripe(userId, connectId, env) {
 // DAILY PAYOUTS — BLS → USD conversion + Stripe Connect transfers
 // ═══════════════════════════════════════════════════════════════════════════
 
-// Trigger the daily cycle manually (admin escape hatch). Runs the SAME
-// code path as the UTC-midnight cron: BLS emission distribution, then
-// USD treasury drip. Both are idempotent per score-date, so re-running
-// after a partial failure is safe.
+// Start (or look in on) a score date's settlement by hand: the admin escape
+// hatch for a night whose cron did not run. The Treasury settles it on its
+// own alarm, the same way the cron does, and a repeat changes nothing.
+// Body: { date?: 'YYYY-MM-DD' }, yesterday by default.
 async function handleDailyPayout(request, env, cors) {
   const adminId = await requireAdmin(request, env);
   if (!adminId) return json({ error: 'Admin access required' }, 403, cors);
 
-  const distribution = await runDailyDistribution(env);
-  const payout = env.STRIPE_SECRET_KEY ? await runDailyPayout(env) : null;
+  const body = await request.json().catch(() => ({}));
+  const date = typeof body.date === 'string' && body.date
+    ? body.date
+    : new Date(Date.now() - 86400 * 1000).toISOString().split('T')[0];
+  const result = await treasuryCall(env, 'start_settlement', { date });
 
   await auditLog(env, 'DAILY_PAYOUT', adminId, 'treasury', {
-    distribution_ran: !!distribution,
-    payout_ran: !!payout,
-    minted: distribution?.minted || 0,
-    total_paid_usd: payout?.total_paid_usd || 0,
+    date, started: !!result.started, queued: !!result.queued, error: result.error || null,
   });
 
-  return json({
-    distribution: distribution || { message: 'Already distributed for this date (or no scores)' },
-    payout: payout || { message: 'Skipped (empty treasury, drip below $0.50, no eligible contributors, or already ran)' },
-  }, 200, cors);
+  if (!result.ok) return json({ error: result.error, code: result.code }, result.status || 500, cors);
+  return json(result, 200, cors);
 }
 
 // Get payout history
@@ -3850,18 +4051,27 @@ async function handlePayoutHistory(request, env, cors) {
   const userId = await verifyAuth(request, env);
   if (!userId) return json({ error: 'Unauthorized' }, 401, cors);
 
-  // Get recent payouts for this user
-  const history = [];
-  const list = await env.PAYOUTS.list({ prefix: 'payout:', limit: 30 });
+  // KV lists keys oldest first, so read every key and keep the newest.
+  const keys = [];
+  let cursor;
+  while (true) {
+    const page = await env.PAYOUTS.list({ prefix: 'payout:', limit: 1000, cursor });
+    keys.push(...page.keys.map((k) => k.name));
+    if (page.list_complete || !page.cursor) break;
+    cursor = page.cursor;
+  }
+  keys.sort().reverse();
 
-  for (const key of list.keys) {
-    const data = await env.PAYOUTS.get(key.name);
+  const history = [];
+  for (const name of keys.slice(0, 60)) {
+    const data = await env.PAYOUTS.get(name);
     if (!data) continue;
     const record = JSON.parse(data);
     const userPayout = record.payouts?.find(p => p.user_id === userId);
     if (userPayout) {
       history.push({
         date: record.date,
+        score_date: record.score_date || name.slice('payout:'.length),
         amount_usd: userPayout.amount_usd,
         transfer_id: userPayout.transfer_id,
       });
@@ -3871,47 +4081,37 @@ async function handlePayoutHistory(request, env, cors) {
   return json({ history, total_received: history.reduce((sum, p) => sum + p.amount_usd, 0) }, 200, cors);
 }
 
-// Get current BLS → USD exchange rate + live emission/supply stats
+// The treasury, its drip, and the emission it is paid beside.
 async function handlePayoutRate(env, cors) {
-  const treasuryUsd = parseFloat(await env.PAYOUTS.get('treasury:total_usd') || '0');
-  const hwm = parseFloat(await env.PAYOUTS.get('treasury:hwm') || '0');
-  const scarce = treasuryUsd > 0 && treasuryUsd <= hwm * TREASURY_SCARCITY_RATIO;
-  const dripRate = scarce ? TREASURY_SCARCITY_RATE : TREASURY_DRIP_RATE;
-  const dailyDripUsd = treasuryUsd * dripRate;
+  const snap = await treasuryCall(env, 'snapshot');
+  if (!snap.ok) return json({ error: snap.error || 'Treasury unavailable' }, snap.status || 503, cors);
+  const view = treasuryView(snap.state);
+  const { drip_cents, scarce } = dripFor(snap.state.cents, snap.state.hwm_cents);
+  const dailyDripUsd = drip_cents / 100;
 
-  // Live emission from the ledger (falls back to genesis defaults
-  // before the first distribution has run). Minor units are authoritative;
-  // the legacy float key is only a pre-migration fallback.
-  const supplyMinorRaw = parseInt(await env.PAYOUTS.get('bliss:supply_minor') || '0', 10);
-  const distributedMinorRaw = parseInt(await env.PAYOUTS.get('bliss:distributed_minor') || '0', 10);
-  const supply = supplyMinorRaw
-    ? fromMinor(supplyMinorRaw)
-    : parseFloat(await env.PAYOUTS.get('bliss:current_supply') || String(BLISS_INITIAL_SUPPLY));
+  const supply = fromMinor(await readSupplyMinor(env));
   const genesis = await env.PAYOUTS.get('bliss:genesis_date');
-  const years = genesis
-    ? Math.max(0, Math.floor((Date.now() - Date.parse(genesis)) / (365 * 86400 * 1000)))
-    : 0;
-  const annualRate = blissEmissionRate(years);
+  const annualRate = blissEmissionRate(yearsSince(genesis, Date.now()));
   const dailyBls = supply * annualRate / 365;
   const blsToUsd = dailyBls > 0 ? dailyDripUsd / dailyBls : 0;
 
-  const platformUsd = parseFloat(await env.PAYOUTS.get('platform:total_usd') || '0');
-
   return json({
-    treasury_usd: treasuryUsd,
-    platform_usd: platformUsd,
+    treasury_usd: view.treasury_usd,
+    platform_usd: view.platform_usd,
+    // The day's drip before the effort gate: a quiet day pays
+    // drip x min(1, day score / full_day_score) and keeps the rest.
     daily_drip_usd: dailyDripUsd,
+    full_day_score: FULL_DAY_SCORE,
     scarcity_active: scarce,
     daily_bls_emission: dailyBls,
     annual_emission_rate: annualRate,
     current_supply: supply,
-    total_distributed: distributedMinorRaw
-      ? fromMinor(distributedMinorRaw)
-      : parseFloat(await env.PAYOUTS.get('bliss:total_distributed') || '0'),
+    total_distributed: fromMinor(await readDistributedMinor(env)),
+    total_paid_usd: view.total_paid_usd,
     genesis_date: genesis || null,
     bls_to_usd_rate: blsToUsd,
     rate_display: blsToUsd > 0 ? `$${blsToUsd.toFixed(6)}/BLS` : 'No treasury funds',
-    deposit_count: parseInt(await env.PAYOUTS.get('treasury:deposit_count') || '0'),
+    deposit_count: view.deposit_count,
   }, 200, cors);
 }
 
@@ -3927,34 +4127,8 @@ const TICKET_PACKAGES = {
   ultra:    { name: 'Ultra',    usd: 99.99, base: 8000, bonus: 2800, total: 10800, price_id: 'price_1THyBVRgsC7hEeKMHTMs0Hsq' },
 };
 
-const DEVELOPER_SHARE = 0.70;
-const PLATFORM_SHARE = 0.30;
-/// Contributor share of NET revenue (after the storefront's cut).
-///
-/// This is deliberately applied to NET, not gross. Taking 50% of gross works
-/// only while Stripe-web is the sole rail; on iOS/Android the storefront takes
-/// ~30% first, so a gross split would leave the platform 20% while
-/// contributors took 50% — the platform would be funding the store out of its
-/// own margin. On net, contributors get 50% of what actually arrives, which
-/// is still ~35% of gross on mobile: comfortably above the ~24.5% a Roblox
-/// creator nets, without making the platform side unsustainable.
-const TREASURY_SPLIT = 0.50;
-
-/// Storefront / processor fee by sales channel, deducted before the split.
-/// `channel` rides in the Stripe session metadata; unknown channels fall back
-/// to web pricing rather than silently assuming zero fees.
-const CHANNEL_FEES = {
-  web:     { rate: 0.029, flat: 0.30 },  // Stripe standard
-  ios:     { rate: 0.30,  flat: 0.0  },  // App Store
-  android: { rate: 0.30,  flat: 0.0  },  // Play Store
-  steam:   { rate: 0.30,  flat: 0.0  },
-};
-
-/// Fee for a gross amount on a channel. Never returns more than the amount.
-function channelFee(amountUsd, channel) {
-  const f = CHANNEL_FEES[channel] || CHANNEL_FEES.web;
-  return Math.min(amountUsd, amountUsd * f.rate + f.flat);
-}
+// A sale's split between the storefront, the contributors' treasury and the
+// platform is splitSale in treasury.mjs.
 
 function handleTicketPackages(env, cors) {
   const packages = Object.entries(TICKET_PACKAGES).map(([key, pkg]) => ({
@@ -3969,9 +4143,10 @@ async function handleTicketBalance(request, env, cors) {
 
   const userData = await env.USERS.get(`user:${userId}`);
   if (!userData) return json({ error: 'User not found' }, 404, cors);
-  const user = JSON.parse(userData);
 
-  return json({ tickets: user.ticket_balance || 0, user_id: userId }, 200, cors);
+  // The wallet is the balance; `user.ticket_balance` is only its mirror.
+  const tickets = await walletBalance(env, userId);
+  return json({ tickets, user_id: userId }, 200, cors);
 }
 
 async function handleTicketCheckout(request, env, cors) {
@@ -4001,83 +4176,6 @@ async function handleTicketCheckout(request, env, cors) {
   if (session.error) return json({ error: session.error.message }, 400, cors);
 
   return json({ url: session.url, session_id: session.id }, 200, cors);
-}
-
-async function handleTicketSpend(request, env, cors) {
-  const userId = await verifyAuth(request, env);
-  if (!userId) return json({ error: 'Unauthorized' }, 401, cors);
-
-  const { product_id, price, developer_id } = await request.json();
-  if (!product_id || !price || price <= 0)
-    return json({ error: 'Invalid product or price' }, 400, cors);
-
-  // Get buyer
-  const buyerData = await env.USERS.get(`user:${userId}`);
-  if (!buyerData) return json({ error: 'Buyer not found' }, 404, cors);
-  const buyer = JSON.parse(buyerData);
-
-  const balance = buyer.ticket_balance || 0;
-  if (balance < price)
-    return json({ error: 'Insufficient tickets', balance, price }, 400, cors);
-
-  // Calculate split
-  const devCut = Math.floor(price * DEVELOPER_SHARE);
-  const platformCut = price - devCut;
-
-  // Deduct from buyer
-  buyer.ticket_balance = balance - price;
-  await env.USERS.put(`user:${userId}`, JSON.stringify(buyer));
-
-  // Credit developer (if provided)
-  if (developer_id) {
-    const devData = await env.USERS.get(`user:${developer_id}`);
-    if (devData) {
-      const dev = JSON.parse(devData);
-      dev.ticket_balance = (dev.ticket_balance || 0) + devCut;
-      await env.USERS.put(`user:${developer_id}`, JSON.stringify(dev));
-    }
-  }
-
-  // Log transactions
-  const txnId = crypto.randomUUID();
-  const now = new Date().toISOString();
-
-  await env.INVENTORY.put(`txn:${userId}:${Date.now()}`, JSON.stringify({
-    id: txnId, user_id: userId, type: 'spend', amount: -price,
-    balance_after: buyer.ticket_balance, currency: 'TKT',
-    product_id, developer_id, description: `Purchased product ${product_id}`, timestamp: now,
-  }), { expirationTtl: 86400 * 365 * 3 });
-
-  // A sale is VERIFIED value: credit the creator BLS contribution score so
-  // the daily distribution pays them for impact, not just for hours logged.
-  if (developer_id && devCut > 0) {
-    const vDay = new Date().toISOString().split('T')[0];
-    const vKey = `contrib:${vDay}:${developer_id}`;
-    const vRaw = await env.INVENTORY.get(vKey);
-    const vRec = vRaw ? JSON.parse(vRaw)
-      : { total_score: 0, by_type: {}, by_seconds: {}, count: 0 };
-    const vScore = devCut * VALUE_SCORE_PER_TICKET;
-    vRec.value_score = (vRec.value_score || 0) + vScore;
-    vRec.by_type.Value = (vRec.by_type.Value || 0) + vScore;
-    vRec.updated_at = new Date().toISOString();
-    await env.INVENTORY.put(vKey, JSON.stringify(vRec), { expirationTtl: 86400 * 90 });
-    const dtKey = `daytotal:${vDay}`;
-    const dtPrev = parseFloat(await env.INVENTORY.get(dtKey) || '0');
-    await env.INVENTORY.put(dtKey, String(dtPrev + vScore), { expirationTtl: 86400 * 7 });
-  }
-
-  if (developer_id) {
-    await env.INVENTORY.put(`txn:${developer_id}:${Date.now()}`, JSON.stringify({
-      id: crypto.randomUUID(), user_id: developer_id, type: 'dev_payout', amount: devCut,
-      currency: 'TKT', product_id, counterparty_id: userId,
-      description: `Sale: product ${product_id} (70% of ${price} TKT)`, timestamp: now,
-    }), { expirationTtl: 86400 * 365 * 3 });
-  }
-
-  return json({
-    success: true, price, developer_cut: devCut, platform_cut: platformCut,
-    buyer_balance: buyer.ticket_balance,
-  }, 200, cors);
 }
 
 async function handleTicketHistory(request, env, cors) {
@@ -4119,6 +4217,16 @@ async function handleNodeHeartbeat(request, env, cors) {
   // still accepted for node telemetry (the `node:` key below), but they carry
   // no user-scoped effects.
   const user_id = await verifyAuth(request, env);
+
+  // A token that was PRESENTED but did not verify -- expired after its 72
+  // hours, or forged -- is an auth failure, not an anonymous beat. Answering it
+  // with 200 and `bliss_balance: 0` made the engine overwrite the user's real
+  // balance with 0.00 and clear its 401 latch ("the witness answered for this
+  // account"), so a signed-out engine flip-flopped between rejected and fine.
+  // Beats with no Authorization header at all stay anonymous telemetry.
+  if (!user_id && presentedBearer(request)) {
+    return json({ error: 'Session expired or invalid; sign in again' }, 401, cors);
+  }
 
   await env.SOCIAL.put(`node:${node_id}`, JSON.stringify({
     node_id, mode: mode || 'light', players: players || 0,
@@ -4190,36 +4298,33 @@ async function handleNodeHeartbeat(request, env, cors) {
       await env.SOCIAL.put(hourKey, JSON.stringify({ date: today, hours: heartbeatHours }), { expirationTtl: 86400 * 2 });
     }
     await env.SOCIAL.put(`last-active:${user_id}`, now.toISOString(), { expirationTtl: 86400 * 30 });
-    // Check today's pending contributions (written by handleCosign;
-    // date-first key so the distribution cron can prefix-scan a day)
-    const pendingKey = `contrib:${today}:${user_id}`;
-    const pendingData = await env.INVENTORY.get(pendingKey);
+    // Today's score so far: effort from the day's record (written by
+    // handleCosign, date-first so the settlement can list a day), plus the
+    // value score of sales filed today, capped as the settlement caps it.
+    const pendingData = await env.INVENTORY.get(`contrib:${today}:${user_id}`);
     if (pendingData) {
       const pending = JSON.parse(pendingData);
-      pending_score = pending.total_score || 0;
+      pending_score = (pending.total_score || 0) + (Number(pending.value_score) || 0);
     }
+    pending_score += await valueScoreForDay(env, today, user_id);
 
-    // Projected BLS for today, so the engine can show earnings GROWING as
-    // work happens instead of only a points number that means nothing to a
-    // person. Same formula the midnight distribution uses:
-    //   emission x min(1, dayTotal/FULL_DAY_SCORE) x (myScore / dayTotal)
-    // `daytotal:` is a cheap running counter maintained by handleCosign; the
-    // real distribution recomputes from the contrib records, so a small drift
-    // here only affects the estimate, never the payout.
-    const dayTotal = Math.max(
-      pending_score,
-      parseFloat(await env.INVENTORY.get(`daytotal:${today}`) || '0')
-    );
-    if (dayTotal > 0 && pending_score > 0) {
-      const supplyMinorNow = parseInt(await env.PAYOUTS.get('bliss:supply_minor') || '0', 10)
-        || toMinor(parseFloat(await env.PAYOUTS.get('bliss:current_supply') || String(BLISS_INITIAL_SUPPLY)));
+    // Projected BLS for today, so the engine can show earnings growing as
+    // work happens. The settlement's rule, with the network's total estimated
+    // from yesterday's (bliss:last_day, written by the settlement). Until
+    // the network passes FULL_DAY_SCORE the estimate is exact, because a
+    // quiet day pays emission x score / FULL_DAY_SCORE whatever others do.
+    if (pending_score > 0) {
+      let lastTotal = 0;
+      try {
+        lastTotal = Number(JSON.parse((await env.PAYOUTS.get('bliss:last_day')) || '{}').total_score) || 0;
+      } catch {
+        lastTotal = 0;
+      }
       const genesisDate = await env.PAYOUTS.get('bliss:genesis_date');
-      const yrs = genesisDate
-        ? Math.max(0, Math.floor((Date.now() - Date.parse(genesisDate)) / (365 * 86400 * 1000)))
-        : 0;
-      const emissionToday = fromMinor(supplyMinorNow) * blissEmissionRate(yrs) / 365;
-      const util = Math.min(1, dayTotal / FULL_DAY_SCORE);
-      projected_bls = Math.floor(emissionToday * BLISS_UNIT * util * (pending_score / dayTotal)) / BLISS_UNIT;
+      const emissionToday = fromMinor(await readSupplyMinor(env)) * blissEmissionRate(yearsSince(genesisDate, Date.now())) / 365;
+      projected_bls = fromMinor(projectEmissionMinor({
+        emissionBls: emissionToday, score: pending_score, dayTotal: Math.max(lastTotal, pending_score),
+      }));
     }
   }
 
@@ -4252,12 +4357,31 @@ async function handleNodeStats(env, cors) {
 // SIMULATIONS — Published spaces (gallery data)
 // ═══════════════════════════════════════════════════════════════════════════
 
+/// The Space names a publish reports: the folders in the Universe's `Spaces/`,
+/// cleaned, deduplicated, at most 200. Commerce sells only in a Space listed
+/// here (or uploaded on its own), which is what "published" means for it.
+/// `null` when the client sent none.
+function readSpaceNames(value) {
+  let list = value;
+  if (typeof value === 'string') {
+    list = value.split(',').map((s) => {
+      try {
+        return decodeURIComponent(s);
+      } catch {
+        return '';
+      }
+    });
+  }
+  if (!Array.isArray(list)) return null;
+  return [...new Set(list.map(cleanSpaceName).filter(Boolean))].slice(0, 200);
+}
+
 async function handlePublishSimulation(request, env, cors) {
   const userId = await verifyAuth(request, env);
   if (!userId) return json({ error: 'Unauthorized' }, 401, cors);
 
   const body = await request.json();
-  const { name, description, genre, max_players, thumbnail_url, r2_key, is_public, content_root } = body;
+  const { name, description, genre, max_players, thumbnail_url, r2_key, is_public, content_root, spaces } = body;
 
   if (!name) return json({ error: 'name required' }, 400, cors);
 
@@ -4286,6 +4410,8 @@ async function handlePublishSimulation(request, env, cors) {
     // BLAKE3 of the .pak as the engine computed it: the chain-facing content
     // id. Client-asserted, so dedup keys on the R2 etag, never on this.
     content_root: typeof content_root === 'string' && content_root.length < 128 ? content_root : null,
+    // The Spaces the Universe package holds, as the engine listed them.
+    space_names: readSpaceNames(spaces) || [],
     moderation: { status: 'pending', version: MODERATION_VERSION, policy_version: POLICY_VERSION },
     thumbnail_url: thumbnail_url || null, r2_key: r2_key || null,
     play_count: 0, favorite_count: 0, version: 1,
@@ -4335,6 +4461,10 @@ async function handleUploadScene(request, simId, env, cors) {
   sim.scene_size_bytes = body.byteLength;
   sim.pak_etag = stored?.etag || null;
   sim.updated_at = new Date().toISOString();
+  // A republish into an existing listing names its Spaces in a header, the
+  // body being the package itself.
+  const spaceNames = readSpaceNames(request.headers.get('X-Eustress-Spaces'));
+  if (spaceNames) sim.space_names = spaceNames;
   await env.SOCIAL.put(`sim:${simId}`, JSON.stringify(sim));
 
   return json({ r2_key: r2Key, size_bytes: body.byteLength }, 200, cors);
@@ -4384,7 +4514,7 @@ async function handleMultipartComplete(request, simId, env, cors) {
   const auth = await verifyAuth(request, env);
   if (!auth) return json({ error: 'Unauthorized' }, 401, cors);
 
-  const { upload_id, parts, total_size } = await request.json();
+  const { upload_id, parts, total_size, spaces } = await request.json();
   if (!upload_id || !parts) return json({ error: 'Missing upload_id or parts' }, 400, cors);
 
   const r2Key = `universes/${simId}/universe.pak`;
@@ -4406,6 +4536,8 @@ async function handleMultipartComplete(request, simId, env, cors) {
     sim.scene_size_bytes = assembled?.size || total_size || 0;
     sim.pak_etag = assembled?.etag || null;
     sim.updated_at = new Date().toISOString();
+    const spaceNames = readSpaceNames(spaces);
+    if (spaceNames) sim.space_names = spaceNames;
     await env.SOCIAL.put(`sim:${simId}`, JSON.stringify(sim));
   }
 
@@ -4560,6 +4692,10 @@ function galleryView(sim) {
     version: sim.version || 1, published_at: sim.published_at, updated_at: sim.updated_at,
     rating: m.rating || null, child_directed: m.child_directed === true, featured: m.featured === true,
     scene_size_bytes: sim.scene_size_bytes || null,
+    // The author shared the source: the gallery offers Edit (open in Studio).
+    is_open_source: sim.open_source === true,
+    // How players get the world: 'echk' chunks, or a 'pak' from before them.
+    format: sim.format || (sim.r2_key ? 'pak' : null),
   };
 }
 
@@ -4636,6 +4772,10 @@ async function handleDownloadPak(request, simId, env, cors) {
       return json({ error: 'Simulation not available' }, sim.moderation?.status === 'quarantined' ? 451 : 403, cors);
   }
 
+  // An .echk listing's r2_key names its manifest, which is not a .pak.
+  if (sim.format === WORLD_FORMAT)
+    return json({ error: 'This simulation is published as .echk chunks', format: WORLD_FORMAT, manifest: `/api/simulations/${simId}/world/manifest` }, 409, cors);
+
   if (!sim.r2_key) return json({ error: 'No published .pak' }, 404, cors);
 
   const object = await env.SCENES.get(sim.r2_key);
@@ -4675,56 +4815,23 @@ async function handlePlaySimulation(request, simId, env, cors) {
     await env.SOCIAL.put(`totalPlays:${sim.author_id}`, plays.toString());
   }
 
-  // Check for an active server running this simulation
-  const nodeList = await env.SOCIAL.list({ prefix: 'node:', limit: 100 });
-  let activeServer = null;
-
-  for (const key of nodeList.keys) {
-    const nodeData = await env.SOCIAL.get(key.name);
-    if (nodeData) {
-      const node = JSON.parse(nodeData);
-      if (node.simulation_id === simId && node.players < (sim.max_players || 100)) {
-        activeServer = node;
-        break;
-      }
-    }
-  }
-
-  if (activeServer) {
-    // Existing server has room
-    return json({
-      status: 'ready',
-      server: {
-        node_id: activeServer.node_id,
-        address: activeServer.address || 'localhost',
-        port: activeServer.port || 7777,
-        protocol: 'quic',
-        players: activeServer.players,
-        max_players: sim.max_players || 100,
-      },
-      simulation: { id: sim.id, name: sim.name },
-    }, 200, cors);
-  }
-
-  // No active server — return launch instructions
-  // In production: Forge SDK dispatches Nomad job here
-  // For now: client launches local server
+  // A published simulation plays solo: the Player downloads the world and
+  // runs it locally. No server registers itself with the API, so there is
+  // none to hand out; a multiplayer session is one a Studio host shares as a
+  // join link, outside this route.
+  const origin = new URL(request.url).origin;
+  const echk = sim.format === WORLD_FORMAT;
   return json({
-    status: 'spawn',
+    status: 'solo',
     launch: {
-      command: 'eustress-server',
-      args: [
-        '--port', '7777',
-        '--max-players', (sim.max_players || 100).toString(),
-        '--sim-id', simId,
-      ],
-      r2_key: sim.r2_key || null,
-      // Was simulations.eustress.dev, whose DNS never resolved, so any server
-      // that followed this URL failed to resolve it. handleDownloadPak is the
-      // route that actually streams the object.
-      pak_url: sim.r2_key ? `${new URL(request.url).origin}/api/simulations/${simId}/download` : null,
+      // Opens the Player, which registers the eustress-player:// scheme.
+      link: `eustress-player://play/${simId}`,
+      command: 'eustress-client',
+      args: ['--sim', simId],
+      manifest_url: echk ? `${origin}/api/simulations/${simId}/world/manifest` : null,
+      pak_url: !echk && sim.r2_key ? `${origin}/api/simulations/${simId}/download` : null,
     },
-    simulation: { id: sim.id, name: sim.name, description: sim.description },
+    simulation: { id: sim.id, name: sim.name, description: sim.description, format: echk ? WORLD_FORMAT : 'pak' },
   }, 200, cors);
 }
 
@@ -5369,23 +5476,25 @@ async function handleAccountingDashboard(request, env, cors) {
   const adminId = await requireAdmin(request, env);
   if (!adminId) return json({ error: 'Admin access required' }, 403, cors);
 
-  // Revenue
-  const treasuryUsd = parseFloat(await env.PAYOUTS.get('treasury:total_usd') || '0');
-  const platformUsd = parseFloat(await env.PAYOUTS.get('platform:total_usd') || '0');
-  const depositCount = parseInt(await env.PAYOUTS.get('treasury:deposit_count') || '0');
+  // Revenue, from the Treasury (integer cents, shown in dollars).
+  const snap = await treasuryCall(env, 'snapshot');
+  if (!snap.ok) return json({ error: snap.error || 'Treasury unavailable' }, snap.status || 503, cors);
+  const tv = treasuryView(snap.state);
+  const treasuryUsd = tv.treasury_usd;
+  const platformUsd = tv.platform_usd;
+  const depositCount = tv.deposit_count;
 
   // Costs
   const totalCostsDeducted = parseFloat(await env.PAYOUTS.get('costs:total_deducted') || '0');
   const forgeCosts = parseFloat(await env.PAYOUTS.get('costs:forge') || '0');
-  const stripeFees = parseFloat(await env.PAYOUTS.get('costs:stripe_fees') || '0');
+  const stripeFees = tv.storefront_fees_usd;
   const infraCosts = parseFloat(await env.PAYOUTS.get('costs:infrastructure') || '0');
 
   // Payouts
-  const totalPaidToContributors = parseFloat(await env.PAYOUTS.get('payouts:total_paid') || '0');
+  const totalPaidToContributors = tv.total_paid_usd;
 
   // Daily metrics
-  const dripRate = 0.00276;
-  const dailyDrip = treasuryUsd * dripRate;           // 100% to contributors
+  const dailyDrip = dripFor(snap.state.cents, snap.state.hwm_cents).drip_cents / 100; // 100% to contributors
   const dailyInfraCost = INFRA_COSTS.daily();          // Paid from platform revenue
   const platformNetDaily = (platformUsd / 30) - dailyInfraCost; // Platform profit after costs
 
@@ -5470,58 +5579,32 @@ async function handleRecordCost(request, env, cors) {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
-// BLISS ECONOMICS — canonical model, ported from bliss-core 0.1.1
-// (economics.rs). Two daily flows, both distributed by the SAME
-// day-score snapshot (contrib:{date}:{user}):
+// BLISS: the ledger, the emission schedule and contribution scores are in
+// bliss.mjs; the treasury and the nightly settlement are in treasury.mjs.
+// A day pays two things, both shared by that day's score:
 //
-//   1. BLS emission  — tail emission: 5% of supply/year, halving every
-//      4 years, 0.5% floor forever. Minted at UTC midnight for the
-//      previous day's contributors. 100% to contributors.
-//   2. USD treasury drip — exponential decay: 0.276%/day of remaining
-//      balance (0.136%/day in scarcity mode: remaining ≤ 15% of the
-//      high-water mark; top-25% contributors get 2x weight while
-//      scarce). HWM decays 0.171%/day toward remaining. 100% of the
-//      drip to contributors via Stripe Connect.
+//   1. BLS emission: 5% of supply a year, halving every 4 years, 0.5% a year
+//      forever after. Credited after UTC midnight for the day before.
+//   2. The USD treasury drip: 0.276% a day of the treasury (0.136% while it
+//      is at or below 15% of its high-water mark, when the top quarter by
+//      score is paid double weight), paid through Stripe Connect. The
+//      high-water mark decays 0.171% a day.
 //
-// KV keys (PAYOUTS namespace):
-//   bliss:genesis_date       — ISO date of the first distribution
-//   bliss:current_supply     — total BLS supply (starts 100,000,000)
-//   bliss:total_distributed  — lifetime BLS minted to contributors
-//   distribution:{date}      — per-day emission record (idempotency)
-//   treasury:total_usd       — remaining treasury balance
-//   treasury:hwm             — treasury high-water mark
-//   payout:{date}            — per-day USD payout record
-//
-// Known deviations from bliss-core, both deliberate:
-//   • Stripe's $0.50 transfer minimum means sub-minimum shares are
-//     skipped; only actually-transferred USD is debited, so skipped
-//     shares stay in the treasury (favors future cycles).
-//   • Balances are f64 (KV JSON), not 18-decimal fixed-point — ~1e-7
-//     BLS precision at 100M scale, fine for the ledger's current stage.
+// Both are effort-gated: a day with less than FULL_DAY_SCORE of work pays
+// that fraction of each; the rest of the emission is never minted and the
+// rest of the drip stays in the treasury.
 // ═══════════════════════════════════════════════════════════════════════════
 
-const BLISS_INITIAL_SUPPLY = 100_000_000;
-const BLISS_INITIAL_RATE = 0.05;      // 5% year one
-const BLISS_HALVING_YEARS = 4;
-const BLISS_TAIL_RATE = 0.005;        // 0.5% floor, forever
-const TREASURY_DRIP_RATE = 0.00276;   // 0.276%/day (normal)
-const TREASURY_SCARCITY_RATE = 0.00136; // 0.136%/day (scarcity)
-const TREASURY_SCARCITY_RATIO = 0.15; // scarce when remaining ≤ 15% of HWM
-const TREASURY_TOP_BOOST = 2.0;       // top-contributor boost in scarcity
-const TREASURY_TOP_FRACTION = 0.25;   // "top" = top 25% by score
-const TREASURY_HWM_DECAY = 0.00171;   // 0.171%/day HWM decay
-
 // ── Contribution integrity (anti-abuse) ─────────────────────────────
-// The cosign endpoint accepts self-reported work, so the witness — not
-// the client — must bound what any single account can earn. See the
-// security notes above handleCosign.
+// The cosign endpoint accepts self-reported work, so the witness, not the
+// client, bounds what any single account can earn. See the security notes
+// above handleCosign.
 //
 // Per-user daily score ceiling. Score is weighted minutes
 // (weight × minutes × node bonus); the max legitimate day is a marathon
 // session at the top weight: 16h × 60 × 3.0 (Development) × 1.1 (Full)
 // ≈ 3,168. A real mixed session lands far below this, so the cap never
-// clips honest work — it only bounds a script hammering the endpoint,
-// shrinking the worst case from ~570k/day to this number.
+// clips honest work; it bounds a script hammering the endpoint.
 const MAX_DAILY_SCORE = 3200;
 // Max presence seconds credited per heartbeat. The engine beats every
 // ~90s; capping the per-beat credit means a heartbeat flood can't
@@ -5529,167 +5612,29 @@ const MAX_DAILY_SCORE = 3200;
 // the session resumes. Presence is thus wall-clock bounded.
 const PRESENCE_MAX_STEP = 150;
 
-// ═══════════════════════════════════════════════════════════════════════════
-// BLS LEDGER — integer minor units, append-only, auditable
-// ═══════════════════════════════════════════════════════════════════════════
-//
-// WHY THIS EXISTS. Balances used to be an f64 field mutated in place on the
-// user record. That had three disqualifying properties for money:
-//   1. Floats don't reconcile — two systems disagree on the last digits and
-//      no amount of rounding makes a float ledger auditable.
-//   2. Read-modify-write on KV (no compare-and-set) loses updates: a
-//      concurrent write could silently erase credited BLS.
-//   3. There was no record of HOW a balance got to its value. You could not
-//      reconstruct, audit, or dispute it.
-//
-// The fix is the standard one: an append-only log of integer entries is the
-// truth; a balance is a derived number.
-//
-// PRECISION: **2 decimals**. 1 BLS = 100 minor units. This deliberately
-// diverges from `bliss-core`'s 18-decimal constant — that figure targets an
-// on-chain token, and this is an off-chain ledger where exact integer math
-// and human-readable amounts matter more. Every stored amount is an INTEGER
-// number of minor units. Never store a fractional BLS amount.
-//
-// KEYS (in the PAYOUTS namespace):
-//   entry:{userId}:{ts}:{id}  append-only entry {amount_minor, kind, ref, ts}
-//   bal:{userId}              integer cache of the summed entries
-//   cp:{userId}               {balance_minor, through} checkpoint for fast sums
-//
-// IDEMPOTENCY: entry keys are deterministic for automated credits (the daily
-// distribution uses the score date), so replaying a cron cannot double-credit
-// — the append is a no-op if the key already exists.
-//
-// The `bal:` cache is an optimization, NOT the source of truth. The daily
-// cron re-derives every touched balance from entries and rewrites the cache,
-// so any drift is self-healing within 24h.
-
-/// Minor units per whole BLS. 2 decimal places.
-const BLISS_UNIT = 100;
-
-/// Contribution score representing ONE FULL DAY of network contribution —
-/// the amount of work that earns the entire daily emission.
-///
-/// Score is weighted minutes (`weight × minutes × node bonus`), so this is
-/// 8 hours at the top weight: 8 × 60 × 3.0 (Development) = 1440.
-///
-/// WHY THIS EXISTS. The pool used to be split purely by SHARE
-/// (`your_score / total_score`), which is the Bitcoin block-reward model: the
-/// only participant collects the whole reward no matter how little they did.
-/// In practice a day with a score of 3.0 — one minute of work — minted the
-/// same ~13,736 BLS as a day with 8x the effort. Effort was decoupled from
-/// reward, which makes "proof of contribution" meaningless at small N.
-///
-/// So the daily emission is a CEILING, not a guarantee. The day mints
-/// `emission × min(1, total_score / FULL_DAY_SCORE)`, and the remainder is
-/// simply never created — supply tracks real contribution instead of the
-/// calendar. Relative split between contributors is unchanged.
-///
-/// TUNING: raising this makes BLS harder to earn; lowering it makes a short
-/// day worth proportionally more. It does not change the long-run supply
-/// ceiling, only how much of each day's allowance is actually minted.
-const FULL_DAY_SCORE = 1440;
-
-/// Contribution score a creator earns per Ticket of verified sales.
-///
-/// This is how Bliss pays for IMPORTANCE rather than time. Effort score is
-/// self-reported minutes; value score is a purchase that actually happened,
-/// so it is server-verified and therefore NOT subject to MAX_DAILY_SCORE —
-/// that cap exists precisely because effort cannot be verified. A creator
-/// whose work people pay for can out-earn one who merely logged hours.
-///
-/// At 0.5, a 1,000-Ticket day (~$11 of sales) is worth 500 score, roughly a
-/// 2.8-hour Development day. Raise it to tilt the economy further toward
-/// outcomes and away from presence.
-const VALUE_SCORE_PER_TICKET = 0.5;
-
-/// Whole-BLS float -> integer minor units. Only for migration and for
-/// converting emission math; never for storing user input.
-function toMinor(bls) {
-  return Math.round((Number(bls) || 0) * BLISS_UNIT);
-}
-
-/// Integer minor units -> whole-BLS number for JSON responses.
-function fromMinor(minor) {
-  return (Number(minor) || 0) / BLISS_UNIT;
-}
-
-/// Human display, always 2dp.
-function formatBliss(minor) {
-  return fromMinor(minor).toFixed(2);
-}
-
-/// Append a ledger entry. Returns true if written, false if the key already
-/// existed (idempotent replay). `id` MUST be stable for automated credits.
-async function ledgerAppend(env, userId, { amount_minor, kind, ref, ts, id }) {
-  const amount = Math.trunc(Number(amount_minor) || 0);
-  if (amount === 0) return false;
-  const stamp = ts || new Date().toISOString();
-  const key = `entry:${userId}:${stamp}:${id}`;
-  if (await env.PAYOUTS.get(key)) return false;
-  await env.PAYOUTS.put(
-    key,
-    JSON.stringify({ amount_minor: amount, kind, ref: ref || null, ts: stamp })
-  );
-  // Advance the cache. Truth is the entries; this is a fast-read convenience
-  // that the daily reconcile rebuilds.
-  const cur = parseInt(await env.PAYOUTS.get(`bal:${userId}`) || '0', 10);
-  await env.PAYOUTS.put(`bal:${userId}`, String(cur + amount));
-  return true;
-}
-
-/// Spend BLS. Appends a NEGATIVE ledger entry and burns the amount from
-/// circulating supply.
-///
-/// A currency needs a sink. Until this existed the ledger could only ever
-/// credit, so BLS accumulated forever with nothing to do — a scoreboard, not
-/// money. Spending is a first-class ledger operation: it writes the same kind
-/// of append-only entry a credit does (so the audit trail stays complete and
-/// the balance stays derived), and it burns rather than transferring, which
-/// keeps the emission schedule the only source of new BLS.
-///
-/// `purpose` is recorded verbatim so a sink can be added without touching the
-/// ledger again. Idempotent per `ref` — a retried client call cannot
-/// double-spend.
-async function ledgerSpend(env, userId, { amount_minor, purpose, ref }) {
-  const amount = Math.trunc(Number(amount_minor) || 0);
-  if (amount <= 0) return { ok: false, error: 'Amount must be positive' };
-  if (!purpose) return { ok: false, error: 'purpose required' };
-
-  const balance = await ledgerBalanceMinor(env, userId);
-  if (balance < amount) {
-    return { ok: false, error: 'Insufficient balance', balance_minor: balance, required_minor: amount };
-  }
-
-  const id = ref ? `spend-${ref}` : `spend-${crypto.randomUUID()}`;
-  const wrote = await ledgerAppend(env, userId, {
-    amount_minor: -amount,
-    kind: 'spend',
-    ref: purpose,
-    id,
-  });
-  if (!wrote) {
-    return { ok: false, error: 'Duplicate spend reference', balance_minor: balance };
-  }
-
-  // Burned, not transferred — emission stays the only mint.
-  const burned = parseInt(await env.PAYOUTS.get('bliss:burned_minor') || '0', 10);
-  await env.PAYOUTS.put('bliss:burned_minor', String(burned + amount));
-
-  return { ok: true, spent_minor: amount, balance_minor: balance - amount };
-}
-
 async function handleLedgerSpend(request, env, cors) {
   const userId = await verifyAuth(request, env);
   if (!userId) return json({ error: 'Unauthorized' }, 401, cors);
 
   const body = await request.json().catch(() => ({}));
-  const { amount, purpose, ref } = body;
+  const { amount, purpose, ref, simulation_id, creator_id, product_id, title, icon } = body;
   const amountMinor = toMinor(amount);
   if (!Number.isFinite(amountMinor) || amountMinor <= 0)
     return json({ error: 'amount must be a positive number of BLS' }, 400, cors);
+  // Both land in KV: `purpose` in the ledger entry, `ref` in its key and
+  // marker. Unbounded, either could make the write fail after the checks.
+  const purposeText = cleanText(purpose, PURCHASE_LIMITS.title);
+  if (!purposeText) return json({ error: 'purpose required' }, 400, cors);
+  if (ref !== undefined && ref !== null && !(typeof ref === 'string' && /^[A-Za-z0-9_.:-]{1,100}$/.test(ref)))
+    return json({ error: 'ref must be 1 to 100 letters, digits, or _ . : -' }, 400, cors);
 
-  const res = await ledgerSpend(env, userId, { amount_minor: amountMinor, purpose, ref });
+  // Bliss is burned rather than paid to anyone, so this is attribution only:
+  // it is what lets the buyer see which creator and simulation the spend went
+  // to. It is still resolved first, so a bad reference refuses the spend.
+  const attribution = await resolveAttribution(env, { simulation_id, creator_id });
+  if (attribution.error) return json({ error: attribution.error }, attribution.status, cors);
+
+  const res = await ledgerSpend(env, userId, { amount_minor: amountMinor, purpose: purposeText, ref });
   if (!res.ok) {
     const status = res.error === 'Insufficient balance' ? 402
       : res.error === 'Duplicate spend reference' ? 409 : 400;
@@ -5698,72 +5643,28 @@ async function handleLedgerSpend(request, env, cors) {
       balance: res.balance_minor !== undefined ? fromMinor(res.balance_minor) : undefined,
     }, status, cors);
   }
+
+  // Written after the ledger entry, for the same reason as the Tickets path:
+  // the ledger is the record of what happened, the receipt describes it.
+  let purchaseId = null;
+  try {
+    const receipt = await recordPurchase(env, userId, {
+      ts: res.ts, currency: 'BLS', units: res.spent_minor,
+      title: cleanText(title, PURCHASE_LIMITS.title) || purposeText, icon,
+      product_id: cleanProductId(product_id), attribution, ref: res.entry_id,
+    });
+    purchaseId = receipt.id;
+  } catch (e) {
+    console.error(`purchase receipt for ledger entry ${res.entry_id} was not written:`, e);
+  }
+
   return json({
     ok: true,
     spent: fromMinor(res.spent_minor),
     balance: fromMinor(res.balance_minor),
     balance_display: formatBliss(res.balance_minor),
+    purchase_id: purchaseId,
   }, 200, cors);
-}
-
-/// Sum every entry for a user (authoritative). Uses the checkpoint to avoid
-/// re-reading history that has already been folded in.
-async function ledgerDeriveMinor(env, userId) {
-  const cpRaw = await env.PAYOUTS.get(`cp:${userId}`);
-  const cp = cpRaw ? JSON.parse(cpRaw) : { balance_minor: 0, through: '' };
-  let total = Math.trunc(cp.balance_minor || 0);
-  let newest = cp.through || '';
-  const prefix = `entry:${userId}:`;
-  let cursor;
-  while (true) {
-    const list = await env.PAYOUTS.list({ prefix, limit: 1000, cursor });
-    for (const k of list.keys) {
-      if (cp.through && k.name <= cp.through) continue;
-      const v = await env.PAYOUTS.get(k.name);
-      if (!v) continue;
-      total += Math.trunc(JSON.parse(v).amount_minor || 0);
-      if (k.name > newest) newest = k.name;
-    }
-    if (list.list_complete || !list.cursor) break;
-    cursor = list.cursor;
-  }
-  return { balance_minor: total, through: newest };
-}
-
-/// Fast balance read (cache). Falls back to deriving when the cache is absent,
-/// and LAZILY MIGRATES a legacy float balance if this account has no ledger
-/// history yet.
-///
-/// The lazy path matters: the distribution cron only migrates accounts that
-/// scored that day, so a holder who stopped contributing would otherwise have
-/// no entries and no cache — and would read as a balance of ZERO. Migrating
-/// on first read guarantees every legacy balance survives.
-async function ledgerBalanceMinor(env, userId) {
-  const cached = await env.PAYOUTS.get(`bal:${userId}`);
-  if (cached !== null && cached !== undefined) return parseInt(cached, 10) || 0;
-
-  let { balance_minor } = await ledgerDeriveMinor(env, userId);
-  if (balance_minor === 0) {
-    const raw = await env.USERS.get(`user:${userId}`);
-    if (raw) {
-      const user = JSON.parse(raw);
-      if (!user.ledger_migrated && (Number(user.bliss_balance) || 0) > 0) {
-        await ledgerMigrateUser(env, userId, user);
-        ({ balance_minor } = await ledgerDeriveMinor(env, userId));
-      }
-    }
-  }
-  await env.PAYOUTS.put(`bal:${userId}`, String(balance_minor));
-  return balance_minor;
-}
-
-/// Re-derive from entries, rewrite the cache and checkpoint. Self-heals any
-/// cache drift. Called for each credited account by the daily cron.
-async function ledgerReconcile(env, userId) {
-  const { balance_minor, through } = await ledgerDeriveMinor(env, userId);
-  await env.PAYOUTS.put(`bal:${userId}`, String(balance_minor));
-  await env.PAYOUTS.put(`cp:${userId}`, JSON.stringify({ balance_minor, through }));
-  return balance_minor;
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -5775,31 +5676,16 @@ async function ledgerReconcile(env, userId) {
 // are already keyed by opaque account ids) — never emails or tokens.
 
 async function handleLedgerSummary(env, cors) {
-  // Fall back to the legacy float keys until the first post-migration cron
-  // writes the minor-unit counters. Without this the endpoint reported
-  // supply=100,000,000 and distributed=0 while the real ledger held ~178k
-  // distributed — a transparency endpoint publishing a wrong number is worse
-  // than publishing none.
-  let supplyMinor = parseInt(await env.PAYOUTS.get('bliss:supply_minor') || '0', 10);
-  if (!supplyMinor) {
-    supplyMinor = toMinor(
-      parseFloat(await env.PAYOUTS.get('bliss:current_supply') || String(BLISS_INITIAL_SUPPLY))
-    );
-  }
-  let distributedMinor = parseInt(await env.PAYOUTS.get('bliss:distributed_minor') || '0', 10);
-  if (!distributedMinor) {
-    distributedMinor = toMinor(parseFloat(await env.PAYOUTS.get('bliss:total_distributed') || '0'));
-  }
+  // Minor-unit counters, read from the legacy float keys until the first
+  // settlement writes them.
+  const supplyMinor = await readSupplyMinor(env);
+  const distributedMinor = await readDistributedMinor(env);
   const genesis = await env.PAYOUTS.get('bliss:genesis_date');
-  const years = genesis
-    ? Math.max(0, Math.floor((Date.now() - Date.parse(genesis)) / (365 * 86400 * 1000)))
-    : 0;
 
-  // Recent distributions so anyone can re-derive today's emission by hand.
-  //
-  // NOTE: KV lists lexicographically, so a bare `limit: 30` returned the
-  // THIRTY OLDEST records while calling them "recent" — the newest days were
-  // invisible. Page the whole prefix, then sort descending and trim.
+  // Recent distributions so anyone can re-derive a day's emission by hand.
+  // KV lists keys oldest first, so the whole prefix is listed, sorted newest
+  // first, and trimmed. A record's summary rides in its key's metadata, so
+  // listing reads no record; older records without it are read.
   const keys = [];
   let cursor;
   while (true) {
@@ -5811,14 +5697,18 @@ async function handleLedgerSummary(env, cors) {
   keys.sort((a, b) => (a.name < b.name ? 1 : -1)); // newest first
   const recent = [];
   for (const k of keys.slice(0, 60)) {
-    const v = await env.PAYOUTS.get(k.name);
-    if (!v) continue;
-    const r = JSON.parse(v);
+    let r = k.metadata && k.metadata.date ? k.metadata : null;
+    if (!r) {
+      const v = await env.PAYOUTS.get(k.name);
+      if (!v) continue;
+      r = JSON.parse(v);
+    }
     recent.push({
       date: r.date,
       emission_pool: r.emission_pool,
       minted: r.minted,
       total_score: r.total_score,
+      utilization: r.utilization ?? null,
       contributors: r.contributor_count ?? (r.recipients || []).length,
       concentration_flag: r.concentration_flag ?? false,
       truncated: r.truncated ?? false,
@@ -5826,6 +5716,7 @@ async function handleLedgerSummary(env, cors) {
   }
   recent.sort((a, b) => (a.date < b.date ? 1 : -1));
 
+  const snap = await treasuryCall(env, 'snapshot');
   const burnedMinor = parseInt(await env.PAYOUTS.get('bliss:burned_minor') || '0', 10);
   return json({
     unit: { decimals: 2, minor_per_bls: BLISS_UNIT },
@@ -5839,15 +5730,19 @@ async function handleLedgerSummary(env, cors) {
     circulating: fromMinor(distributedMinor - burnedMinor),
     effort_full_day_score: FULL_DAY_SCORE,
     value_score_per_ticket: VALUE_SCORE_PER_TICKET,
+    value_score_caps: {
+      tickets_per_buyer_per_creator_per_day: VALUE_CAP_TICKETS_PER_BUYER,
+      score_per_creator_per_day: VALUE_CAP_SCORE_PER_CREATOR,
+    },
     genesis_date: genesis,
-    annual_emission_rate: blissEmissionRate(years),
+    annual_emission_rate: blissEmissionRate(yearsSince(genesis, Date.now())),
     emission_model: {
       initial_rate: BLISS_INITIAL_RATE,
       halving_period_years: BLISS_HALVING_YEARS,
       tail_rate: BLISS_TAIL_RATE,
       initial_supply: BLISS_INITIAL_SUPPLY,
     },
-    treasury_usd: parseFloat(await env.PAYOUTS.get('treasury:total_usd') || '0'),
+    treasury_usd: snap.ok ? treasuryView(snap.state).treasury_usd : null,
     recent_distributions: recent,
   }, 200, cors);
 }
@@ -5870,9 +5765,9 @@ async function handleLedgerHistory(userId, env, cors) {
   while (true) {
     const page = await env.PAYOUTS.list({ prefix, limit: 1000, cursor });
     for (const k of page.keys) {
-      const v = await env.PAYOUTS.get(k.name);
-      if (!v) continue;
-      const e = JSON.parse(v);
+      // From the key's metadata; only entries written without it are read.
+      const e = await readEntry(env, k);
+      if (!e) continue;
       // Fold the 1970 migration-opening entry into the genesis day so the
       // chart starts at the real opening balance instead of showing a
       // 56-year gap.
@@ -5920,6 +5815,76 @@ async function handleLedgerHistory(userId, env, cors) {
   }, 200, cors);
 }
 
+/// Public leaderboard: BLS each account earned from the nightly emission over
+/// the last 7 or 30 settled days, summed from the public distribution
+/// records. Accounts appear by the same ids those records publish. Cached for
+/// ten minutes, since every settled day's record is read to build it.
+async function handleLedgerLeaderboard(url, env, cors) {
+  const days = url.searchParams.get('days') === '7' ? 7 : 30;
+  const cacheKey = `bliss:leaderboard:${days}`;
+  const cached = await env.PAYOUTS.get(cacheKey);
+  if (cached) {
+    try {
+      const c = JSON.parse(cached);
+      if (Date.now() - Date.parse(c.computed_at) < 600e3) return json(c, 200, cors);
+    } catch {
+      // Rebuild below.
+    }
+  }
+
+  const names = [];
+  let cursor;
+  while (true) {
+    const page = await env.PAYOUTS.list({ prefix: 'distribution:', limit: 1000, cursor });
+    names.push(...page.keys.map((k) => k.name));
+    if (page.list_complete || !page.cursor) break;
+    cursor = page.cursor;
+  }
+  names.sort().reverse();
+  const totals = new Map();
+  const dates = [];
+  for (const name of names.slice(0, days)) {
+    const raw = await env.PAYOUTS.get(name);
+    if (!raw) continue;
+    const rec = JSON.parse(raw);
+    dates.push(rec.date);
+    for (const r of rec.recipients || []) {
+      const t = totals.get(r.user_id) || { bls_minor: 0, score: 0, days_active: 0 };
+      t.bls_minor += Number.isSafeInteger(r.bls_minor) ? r.bls_minor : toMinor(r.bls);
+      t.score += Number(r.score) || 0;
+      t.days_active += 1;
+      totals.set(r.user_id, t);
+    }
+  }
+  dates.sort();
+  const entries = [...totals.entries()]
+    .sort((a, b) => b[1].bls_minor - a[1].bls_minor || (a[0] < b[0] ? -1 : 1))
+    .slice(0, 100)
+    .map(([account, t], i) => ({
+      rank: i + 1,
+      account,
+      bls: fromMinor(t.bls_minor),
+      bls_minor: t.bls_minor,
+      score: Math.round(t.score * 10) / 10,
+      days_active: t.days_active,
+    }));
+  const result = {
+    days,
+    settled_days: dates.length,
+    from: dates[0] || null,
+    to: dates[dates.length - 1] || null,
+    contributors: totals.size,
+    entries,
+    computed_at: new Date().toISOString(),
+  };
+  try {
+    await env.PAYOUTS.put(cacheKey, JSON.stringify(result), { expirationTtl: 3600 });
+  } catch {
+    // A concurrent rebuild wrote it; either copy serves.
+  }
+  return json(result, 200, cors);
+}
+
 async function handleLedgerDistribution(date, env, cors) {
   if (!/^\d{4}-\d{2}-\d{2}$/.test(date || '')) return json({ error: 'Bad date' }, 400, cors);
   const raw = await env.PAYOUTS.get(`distribution:${date}`);
@@ -5943,9 +5908,8 @@ async function handleLedgerMe(request, env, cors) {
   while (true) {
     const list = await env.PAYOUTS.list({ prefix, limit: 1000, cursor });
     for (const k of list.keys) {
-      const v = await env.PAYOUTS.get(k.name);
-      if (!v) continue;
-      const e = JSON.parse(v);
+      const e = await readEntry(env, k);
+      if (!e) continue;
       items.push({
         ts: e.ts, kind: e.kind, ref: e.ref,
         amount: fromMinor(e.amount_minor), amount_minor: e.amount_minor,
@@ -5962,8 +5926,8 @@ async function handleLedgerMe(request, env, cors) {
     balance: fromMinor(derived.balance_minor),
     balance_minor: derived.balance_minor,
     balance_display: formatBliss(derived.balance_minor),
-    // Surfaced so drift between the fast cache and the authoritative entries
-    // is visible rather than silent. The daily reconcile self-heals it.
+    // Drift between the fast cache and the entries, shown rather than hidden.
+    // The nightly settlement reconciles every account it credits.
     cache_in_sync: cached === derived.balance_minor,
     entry_count: items.length,
     entries: items,
@@ -5973,265 +5937,49 @@ async function handleLedgerMe(request, env, cors) {
 async function handleCronHealth(request, env, cors) {
   const adminId = await requireAdmin(request, env);
   if (!adminId) return json({ error: 'Admin access required' }, 403, cors);
-  const list = await env.PAYOUTS.list({ prefix: 'cronrun:', limit: 30 });
-  const runs = [];
-  for (const k of list.keys) {
-    const v = await env.PAYOUTS.get(k.name);
-    if (v) runs.push({ date: k.name.slice('cronrun:'.length), ...JSON.parse(v) });
-  }
-  runs.sort((a, b) => (a.date < b.date ? 1 : -1));
+  // Newest 30 of each: KV lists oldest first, so list all and sort.
+  const newest = async (prefix) => {
+    const names = [];
+    let cursor;
+    while (true) {
+      const page = await env.PAYOUTS.list({ prefix, limit: 1000, cursor });
+      names.push(...page.keys.map((k) => k.name));
+      if (page.list_complete || !page.cursor) break;
+      cursor = page.cursor;
+    }
+    names.sort().reverse();
+    const out = [];
+    for (const name of names.slice(0, 30)) {
+      const v = await env.PAYOUTS.get(name);
+      if (v) out.push({ date: name.slice(prefix.length), ...JSON.parse(v) });
+    }
+    return out;
+  };
+  const runs = await newest('cronrun:');
+  const settlements = await newest('settlement:');
+  const active = await treasuryCall(env, 'settlement', {});
   const lastOk = runs.find((r) => r.ok);
+  const settled = new Set(settlements.filter((s) => s.phase === 'done').map((s) => s.date));
   return json({
     runs,
     last_success: lastOk ? lastOk.date : null,
-    // A gap here means a day was silently skipped — distribution is
-    // idempotent per date, so a missed day needs a manual re-run.
-    missing_days: (() => {
-      const have = new Set(runs.map((r) => r.date));
+    // Settlements by score date, and the one the Treasury is running now.
+    settlements,
+    active_settlement: active.ok ? active.settlement : null,
+    // Score dates of the last two weeks with no finished settlement. A
+    // settlement runs to the end on its own once started; one missing here
+    // for more than a day needs a look (POST /api/payouts/daily { date }).
+    unsettled_days: (() => {
       const out = [];
-      for (let i = 1; i <= 14; i++) {
+      for (let i = 2; i <= 15; i++) {
         const d = new Date(Date.now() - i * 86400 * 1000).toISOString().split('T')[0];
-        if (!have.has(d)) out.push(d);
+        if (!settled.has(d)) out.push(d);
       }
       return out;
     })(),
   }, 200, cors);
 }
 
-/// Snapshot the entire BLS ledger to R2. Without this, losing or corrupting
-/// the KV namespace would destroy every balance with no recovery path — the
-/// entries ARE the money, so they need to exist somewhere else too.
-///
-/// Writes a single JSON object per day: every entry, every cached balance,
-/// and the supply counters. Restoring is replaying the entries.
-async function backupLedger(env) {
-  if (!env.SCENES) return null; // R2 not bound — nothing to write to
-  const date = new Date().toISOString().split('T')[0];
-
-  const entries = [];
-  for (const prefix of ['entry:', 'bal:', 'cp:']) {
-    let cursor;
-    while (true) {
-      const list = await env.PAYOUTS.list({ prefix, limit: 1000, cursor });
-      for (const k of list.keys) {
-        const v = await env.PAYOUTS.get(k.name);
-        if (v !== null && v !== undefined) entries.push([k.name, v]);
-      }
-      if (list.list_complete || !list.cursor) break;
-      cursor = list.cursor;
-    }
-  }
-
-  const snapshot = {
-    version: 1,
-    taken_at: new Date().toISOString(),
-    unit_minor_per_bls: BLISS_UNIT,
-    supply_minor: parseInt(await env.PAYOUTS.get('bliss:supply_minor') || '0', 10),
-    distributed_minor: parseInt(await env.PAYOUTS.get('bliss:distributed_minor') || '0', 10),
-    genesis_date: await env.PAYOUTS.get('bliss:genesis_date'),
-    treasury_usd: parseFloat(await env.PAYOUTS.get('treasury:total_usd') || '0'),
-    record_count: entries.length,
-    records: entries,
-  };
-
-  const key = `ledger-backups/${date}.json`;
-  await env.SCENES.put(key, JSON.stringify(snapshot), {
-    httpMetadata: { contentType: 'application/json' },
-  });
-  return { key, record_count: entries.length };
-}
-
-/// One-time migration: fold a legacy float `user.bliss_balance` into an
-/// opening ledger entry so historical balances survive the format change.
-/// Idempotent — the opening entry key is fixed per user.
-async function ledgerMigrateUser(env, userId, user) {
-  if (user.ledger_migrated) return;
-  const legacy = Number(user.bliss_balance) || 0;
-  if (legacy > 0) {
-    await ledgerAppend(env, userId, {
-      amount_minor: toMinor(legacy),
-      kind: 'migration_opening',
-      ref: 'legacy float balance',
-      ts: '1970-01-01T00:00:00.000Z', // sorts first — it is the opening entry
-      id: 'opening',
-    });
-  }
-  user.ledger_migrated = true;
-  await env.USERS.put(`user:${userId}`, JSON.stringify(user));
-}
-
-/// Annual emission rate for a given year since genesis (tail emission).
-function blissEmissionRate(yearsSinceGenesis) {
-  const halvings = Math.floor(yearsSinceGenesis / BLISS_HALVING_YEARS);
-  return Math.max(BLISS_INITIAL_RATE / Math.pow(2, halvings), BLISS_TAIL_RATE);
-}
-
-/// Collect one day's contributors from the contrib:{date}:{user} records.
-/// Returns { entries: [{userId, score}], totalScore, truncated }.
-///
-/// Pages through the full keyspace with a cursor — a bare
-/// `list({limit:1000})` silently dropped every contributor past the first
-/// 1000, which would under-pay them with no error anywhere. `truncated`
-/// is only ever true if we hit the hard safety bound below.
-async function collectDayScores(env, date) {
-  const prefix = `contrib:${date}:`;
-  const entries = [];
-  let totalScore = 0;
-  let cursor = undefined;
-  let truncated = false;
-  // Safety bound so a pathological keyspace can't run the cron past its
-  // CPU limit. 100k contributors/day is far beyond current scale; if this
-  // ever trips, the distribution must move to a queue/Durable Object.
-  const MAX_KEYS = 100_000;
-
-  while (true) {
-    const list = await env.INVENTORY.list({ prefix, limit: 1000, cursor });
-    for (const key of list.keys) {
-      const data = await env.INVENTORY.get(key.name);
-      if (!data) continue;
-      const rec = JSON.parse(data);
-      // Effort (capped at cosign time) + verified sales value (uncapped,
-      // because a real purchase needs no fraud ceiling).
-      const score = (rec.total_score || 0) + (rec.value_score || 0);
-      if (score <= 0) continue;
-      entries.push({ userId: key.name.slice(prefix.length), score });
-      totalScore += score;
-    }
-    if (list.list_complete || !list.cursor) break;
-    if (entries.length >= MAX_KEYS) { truncated = true; break; }
-    cursor = list.cursor;
-  }
-  return { entries, totalScore, truncated };
-}
-
-/// Daily BLS emission distribution — mints the day's emission and
-/// credits each contributor's bliss_balance by score share.
-/// Idempotent per date (distribution:{date} record).
-async function runDailyDistribution(env) {
-  const yesterday = new Date(Date.now() - 86400 * 1000).toISOString().split('T')[0];
-  if (await env.PAYOUTS.get(`distribution:${yesterday}`)) return null; // already ran
-
-  // Genesis is stamped by the first distribution ever run.
-  let genesis = await env.PAYOUTS.get('bliss:genesis_date');
-  if (!genesis) {
-    genesis = yesterday;
-    await env.PAYOUTS.put('bliss:genesis_date', genesis);
-  }
-  const years = Math.max(0, Math.floor((Date.parse(yesterday) - Date.parse(genesis)) / (365 * 86400 * 1000)));
-  // Supply in integer minor units, migrating off the legacy float key the
-  // first time this runs after the ledger change.
-  let supplyMinor = parseInt(await env.PAYOUTS.get('bliss:supply_minor') || '0', 10);
-  if (!supplyMinor) {
-    supplyMinor = toMinor(
-      parseFloat(await env.PAYOUTS.get('bliss:current_supply') || String(BLISS_INITIAL_SUPPLY))
-    );
-    await env.PAYOUTS.put('bliss:supply_minor', String(supplyMinor));
-    const legacyDist = parseFloat(await env.PAYOUTS.get('bliss:total_distributed') || '0');
-    if (legacyDist > 0 && !(await env.PAYOUTS.get('bliss:distributed_minor'))) {
-      await env.PAYOUTS.put('bliss:distributed_minor', String(toMinor(legacyDist)));
-    }
-  }
-  const supply = fromMinor(supplyMinor);
-  const rate = blissEmissionRate(years);
-  const dailyEmission = supply * rate / 365;
-
-  const { entries, totalScore, truncated } = await collectDayScores(env, yesterday);
-
-  const record = {
-    date: yesterday,
-    emission_pool: dailyEmission,
-    annual_rate: rate,
-    supply_before: supply,
-    total_score: totalScore,
-    contributor_count: entries.length,
-    // True only if the 100k safety bound was hit — means some contributors
-    // were NOT paid and the distribution needs re-architecting, not a retry.
-    truncated,
-    // Observability, deliberately NOT a penalty. A per-account share CAP was
-    // considered and rejected: it would strip earnings from the single most
-    // productive contributor (10 people, one does half the work → capped to
-    // a tenth), violating "you earn what you contribute" — and it cannot stop
-    // sybil anyway, since N accounts each get their own cap. Per-account abuse
-    // is bounded in ABSOLUTE terms by MAX_DAILY_SCORE at cosign time, and the
-    // cash-out rail is KYC'd via Stripe Connect. This flag just surfaces
-    // unusual concentration for human review.
-    concentration_flag: false,
-    top_share: 0,
-    recipients: [],
-    minted: 0,
-  };
-
-  if (totalScore > 0 && entries.length > 0) {
-    const topScore = entries.reduce((m, e) => Math.max(m, e.score), 0);
-    record.top_share = topScore / totalScore;
-    // Flag when one account takes >50% of a day that had real breadth.
-    record.concentration_flag = entries.length >= 5 && record.top_share > 0.5;
-  }
-
-  // Effort gate: mint only the fraction of the day's allowance that the
-  // day's ACTUAL work justifies. Without this, a single contributor collected
-  // the full emission for one minute of activity.
-  const utilization = Math.min(1, totalScore / FULL_DAY_SCORE);
-  record.utilization = utilization;
-  record.full_day_score = FULL_DAY_SCORE;
-  record.emission_ceiling = dailyEmission;
-
-  if (totalScore > 0) {
-    // Integer minor units throughout. `floor` on each share guarantees the
-    // sum of credits never exceeds the pool (leftover dust stays unminted
-    // rather than inflating supply).
-    const poolMinor = Math.floor(dailyEmission * BLISS_UNIT * utilization);
-    let mintedMinor = 0;
-    for (const e of entries) {
-      const userData = await env.USERS.get(`user:${e.userId}`);
-      if (!userData) continue;
-      const user = JSON.parse(userData);
-      if (user.banned) continue;
-      await ledgerMigrateUser(env, e.userId, user);
-
-      const shareMinor = Math.floor(poolMinor * (e.score / totalScore));
-      if (shareMinor <= 0) continue;
-
-      // Deterministic entry id => replaying this cron is a no-op. This
-      // REPLACES the old separate `distcredit:` marker: idempotency is now a
-      // property of the ledger itself, not a side table.
-      const wrote = await ledgerAppend(env, e.userId, {
-        amount_minor: shareMinor,
-        kind: 'emission',
-        ref: yesterday,
-        ts: `${yesterday}T00:00:00.000Z`,
-        id: 'dist',
-      });
-      if (!wrote) continue; // already credited on a previous run
-
-      // Rebuild this account's cache/checkpoint from entries — self-heals any
-      // drift introduced by concurrent writes.
-      await ledgerReconcile(env, e.userId);
-
-      mintedMinor += shareMinor;
-      record.recipients.push({
-        user_id: e.userId,
-        score: e.score,
-        bls: fromMinor(shareMinor),
-        bls_minor: shareMinor,
-      });
-    }
-    // Supply counters in minor units, advanced by exactly what was credited.
-    if (mintedMinor > 0) {
-      const supplyMinorNow = parseInt(
-        await env.PAYOUTS.get('bliss:supply_minor') || String(toMinor(BLISS_INITIAL_SUPPLY)), 10
-      );
-      await env.PAYOUTS.put('bliss:supply_minor', String(supplyMinorNow + mintedMinor));
-      const distMinorNow = parseInt(await env.PAYOUTS.get('bliss:distributed_minor') || '0', 10);
-      await env.PAYOUTS.put('bliss:distributed_minor', String(distMinorNow + mintedMinor));
-    }
-    record.minted = fromMinor(mintedMinor);
-    record.minted_minor = mintedMinor;
-  }
-
-  await env.PAYOUTS.put(`distribution:${yesterday}`, JSON.stringify(record), { expirationTtl: 86400 * 365 * 5 });
-  return record;
-}
 // ═══════════════════════════════════════════════════════════════════════════
 // MODEL CATALOG — the list of models Workshop offers, recompiled daily
 // ═══════════════════════════════════════════════════════════════════════════
@@ -6784,118 +6532,6 @@ async function handleAdminModelRollback(request, env, cors) {
 
 
 // ═══════════════════════════════════════════════════════════════════════════
-// CRON — Daily payout (called by scheduled trigger at UTC midnight)
-// ═══════════════════════════════════════════════════════════════════════════
-
-async function runDailyPayout(env) {
-  if (!env.STRIPE_SECRET_KEY) return null;
-
-  // Idempotent per score-date — a cron retry or manual re-run can't
-  // double-pay a day.
-  const scoreDate = new Date(Date.now() - 86400 * 1000).toISOString().split('T')[0];
-  if (await env.PAYOUTS.get(`payout:${scoreDate}`)) return null;
-
-  const treasuryUsd = parseFloat(await env.PAYOUTS.get('treasury:total_usd') || '0');
-  if (treasuryUsd <= 0) return null;
-
-  // ── Scarcity mode (canonical treasury, bliss-core economics.rs) ──
-  let hwm = parseFloat(await env.PAYOUTS.get('treasury:hwm') || '0');
-  if (treasuryUsd > hwm) hwm = treasuryUsd;
-  const scarce = treasuryUsd <= hwm * TREASURY_SCARCITY_RATIO;
-  const dripRate = scarce ? TREASURY_SCARCITY_RATE : TREASURY_DRIP_RATE;
-  const dailyDripUsd = treasuryUsd * dripRate;
-
-  if (dailyDripUsd < 0.50) return null; // below Stripe's practical floor
-
-  // ── Same day-score snapshot the BLS emission uses ──
-  const yesterday = new Date(Date.now() - 86400 * 1000).toISOString().split('T')[0];
-  const { entries, totalScore } = await collectDayScores(env, yesterday);
-  if (totalScore <= 0 || entries.length === 0) return null;
-
-  // Resolve users; only Stripe-connected, non-banned users receive USD.
-  const contributors = [];
-  for (const e of entries) {
-    const data = await env.USERS.get(`user:${e.userId}`);
-    if (!data) continue;
-    const user = JSON.parse(data);
-    if (user.banned || !user.stripe_connect_id) continue;
-    contributors.push({
-      user_id: e.userId, username: user.username,
-      score: e.score, connect_id: user.stripe_connect_id,
-    });
-  }
-  if (contributors.length === 0) return null;
-
-  // Top-contributor boost while scarce: the people keeping the system
-  // alive are paid aggressively (bliss-core scarcity_top_boost).
-  contributors.sort((a, b) => b.score - a.score);
-  const topCount = scarce ? Math.max(1, Math.ceil(contributors.length * TREASURY_TOP_FRACTION)) : 0;
-  let weightTotal = 0;
-  contributors.forEach((c, i) => {
-    c.weight = c.score * (i < topCount ? TREASURY_TOP_BOOST : 1.0);
-    weightTotal += c.weight;
-  });
-
-  let totalPaid = 0;
-  const payouts = [];
-
-  for (const c of contributors) {
-    const share = c.weight / weightTotal;
-    const amountCents = Math.floor(dailyDripUsd * share * 100);
-    if (amountCents < 50) continue; // Stripe minimum: $0.50
-
-    try {
-      // Deterministic idempotency key: if this cron is retried (or a manual
-      // admin run overlaps), Stripe replays the original transfer instead of
-      // sending a SECOND real payment. Without it, an error late in the loop
-      // re-paid everyone already paid on the next attempt.
-      const idemKey = `bliss-payout-${yesterday}-${c.user_id}`;
-      const transfer = await stripeRequest('POST', '/transfers', {
-        'amount': amountCents.toString(),
-        'currency': 'usd',
-        'destination': c.connect_id,
-        'description': `Bliss daily payout - ${c.username}`,
-        'metadata[user_id]': c.user_id,
-        'metadata[date]': yesterday,
-      }, env, idemKey);
-
-      if (!transfer.error) {
-        payouts.push({ user_id: c.user_id, username: c.username, amount_usd: amountCents / 100, transfer_id: transfer.id });
-        totalPaid += amountCents / 100;
-        // Debit incrementally so an interrupted run leaves the treasury
-        // consistent with money that actually left. Re-read each time: a
-        // deposit webhook landing mid-loop would otherwise be erased by a
-        // stale end-of-loop write.
-        const tNow = parseFloat(await env.PAYOUTS.get('treasury:total_usd') || '0');
-        await env.PAYOUTS.put('treasury:total_usd', String(Math.max(0, tNow - amountCents / 100)));
-        const pNow = parseFloat(await env.PAYOUTS.get('payouts:total_paid') || '0');
-        await env.PAYOUTS.put('payouts:total_paid', String(pNow + amountCents / 100));
-      }
-    } catch (e) { /* skip failed transfer, continue with others */ }
-  }
-
-  // Decay the high-water mark toward remaining so a one-time large deposit
-  // can't pin the system in scarcity mode forever. Applied HERE — after a
-  // payout actually ran — because doing it before the early returns meant
-  // every no-op day (empty treasury, sub-$0.50 drip, no eligible
-  // contributors) still compounded the decay.
-  if (hwm > treasuryUsd) {
-    hwm = Math.max(treasuryUsd, hwm * (1 - TREASURY_HWM_DECAY));
-  }
-  await env.PAYOUTS.put('treasury:hwm', hwm.toString());
-
-  const record = {
-    date: new Date().toISOString(), score_date: yesterday,
-    drip_usd: dailyDripUsd, scarcity_active: scarce,
-    total_paid_usd: totalPaid, contributors_paid: payouts.length,
-    treasury_before: treasuryUsd, treasury_after: treasuryUsd - totalPaid,
-    payouts,
-  };
-  await env.PAYOUTS.put(`payout:${yesterday}`, JSON.stringify(record), { expirationTtl: 86400 * 365 * 5 });
-  return record;
-}
-
-// ═══════════════════════════════════════════════════════════════════════════
 // HELPERS
 // ═══════════════════════════════════════════════════════════════════════════
 
@@ -6912,12 +6548,25 @@ async function publicUser(user, env) {
     discord_id: user.discord_id || null,
     bliss_balance: fromMinor(minor),
     bliss_balance_minor: minor,
-    // The web app deserializes this into User.ticket_balance. Omitting it
-    // meant every /api/auth/me refresh reset the displayed Ticket balance to
-    // zero and re-persisted that zero to localStorage.
-    ticket_balance: user.ticket_balance || 0,
+    // The web app deserializes this into User.ticket_balance, so it is always
+    // present. The wallet copies every balance change to `ticketbal:{id}`;
+    // an account whose wallet has never opened still has only the balance
+    // on its record.
+    ticket_balance: await ticketBalanceMirror(env, user),
     created_at: user.created_at,
   };
+}
+
+async function ticketBalanceMirror(env, user) {
+  if (env && user && user.id) {
+    try {
+      const raw = await env.USERS.get(`ticketbal:${user.id}`);
+      if (raw) return Math.trunc(Number(JSON.parse(raw).balance) || 0);
+    } catch (e) {
+      console.error(`ticketbal:${user.id} unreadable:`, e?.message || e);
+    }
+  }
+  return Math.trunc(Number(user?.ticket_balance) || 0);
 }
 
 function json(data, status, headers) {
@@ -6950,12 +6599,13 @@ function corsHeaders(request) {
   return {
     'Access-Control-Allow-Origin': allow,
     'Vary': 'Origin',
-    // PUT is listed because four upload routes use it. Their callers today are
-    // ureq/reqwest and send no Origin, so this changed nothing in practice, but
-    // the first browser upload would have failed preflight for no visible
-    // reason. DELETE stays off the list until a route needs it.
-    'Access-Control-Allow-Methods': 'GET, POST, PUT, OPTIONS',
-    'Access-Control-Allow-Headers': 'Content-Type, Authorization, X-ID-Type, If-None-Match, X-Eustress-Key',
+    // PUT is listed for the upload routes. DELETE is for the website's commerce
+    // views and key list (archive a product, delete a webhook endpoint, revoke
+    // a key). Eustress-Mode is how a signed-in page chooses live commerce data
+    // (src/commerce.mjs); without it in the list every such request fails
+    // preflight.
+    'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
+    'Access-Control-Allow-Headers': 'Content-Type, Authorization, X-ID-Type, If-None-Match, X-Eustress-Key, Eustress-Mode',
     'Access-Control-Max-Age': '86400',
   };
 }

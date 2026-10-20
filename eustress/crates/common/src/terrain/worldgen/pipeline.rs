@@ -485,6 +485,11 @@ pub struct WorldSpec {
     /// Prevailing wind (unit-ish, world XZ) for the climate pass.
     pub wind_dx: f32,
     pub wind_dz: f32,
+    /// Have the export also write the world's default terrain layers: scatter
+    /// that follows the biomes and a lake over every significant filled
+    /// depression (see [`super::default_layers`]). Generation itself ignores
+    /// it. Off leaves the Space with no generated layers at all.
+    pub default_layers: bool,
 }
 
 impl Default for WorldSpec {
@@ -499,6 +504,7 @@ impl Default for WorldSpec {
             height_scale: 180.0,
             wind_dx: 1.0,
             wind_dz: 0.25,
+            default_layers: true,
         }
     }
 }
@@ -1469,6 +1475,7 @@ mod tests {
             height_scale: 140.0,
             wind_dx: 1.0,
             wind_dz: 0.25,
+            default_layers: true,
         }
     }
 

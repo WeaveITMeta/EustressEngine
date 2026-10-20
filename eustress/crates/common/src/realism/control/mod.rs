@@ -1,8 +1,6 @@
 ﻿//! # Control Systems — PID, state-space, frequency analysis, digital filters.
 //!
-//! Generalizes the nuclear reactor PID into a universal control toolkit.
-//! Use PidController from this module; the nuclear/components.rs PidState
-//! is kept for backward compatibility but new code should use this.
+//! `PidController` is the one PID controller for every domain.
 
 pub mod pid;
 pub mod state_space;

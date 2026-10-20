@@ -1531,7 +1531,6 @@ c.to_hsv()                                  // Returns (h, s, v) tuple
 ### Entity Creation
 - spawn_part(shape, w, h, d) -> entity_id   // shape: "cube", "sphere", "cylinder"
 - spawn_model(name) -> entity_id
-- spawn_point_light() -> entity_id
 
 ### Transform Functions
 - set_position(entity_id, x, y, z)
@@ -1543,10 +1542,22 @@ c.to_hsv()                                  // Returns (h, s, v) tuple
 - set_material(entity_id, material)          // "Plastic", "Metal", "Wood", "Concrete", "Brick"
 - set_anchored(entity_id, anchored)          // true/false
 
-### Lights
-- set_light_brightness(entity_id, brightness)
-- set_light_range(entity_id, range)
-- set_light_color(entity_id, r, g, b)
+### Lights (in Play, through the `eustress::dm` module, as in Roblox)
+A light lives in a part (or an Attachment) and shines from it.
+```rune
+use eustress::dm;
+let lamp = dm::find_path("Workspace/Lamp");
+let light = dm::create("PointLight");       // or "SpotLight", "SurfaceLight"
+dm::set_parent(light, lamp);
+dm::set_number(light, "Brightness", 2.0);   // 1 = a normal lamp, same on screen day and night
+dm::set_number(light, "Range", 10.0);       // reach in metres
+dm::set_color(light, 1.0, 0.85, 0.6);       // 0.0-1.0
+dm::set_bool(light, "Shadows", true);
+dm::set_bool(light, "Enabled", true);
+// SpotLight / SurfaceLight only:
+dm::set_number(light, "Angle", 60.0);       // full cone angle, degrees
+dm::set_string(light, "Face", "Bottom");    // face of the part it shines out of
+```
 
 ### Finding Entities
 - find_entity_by_name(name) -> entity_id     // Returns 0 if not found
@@ -1716,13 +1727,7 @@ pub fn main() {
     set_color(cube, 1.0, 0.2, 0.2, 1.0);
     set_material(cube, "Metal");
     set_anchored(cube, true);
-    
-    // Create a light above it
-    let light = spawn_point_light();
-    set_position(light, 0.0, 5.0, 0.0);
-    set_light_brightness(light, 2.0);
-    set_light_range(light, 10.0);
-    
+
     // Raycast down to find ground
     let origin = Vector3::new(5.0, 50.0, 5.0);
     let direction = Vector3::new(0.0, -100.0, 0.0);

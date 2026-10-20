@@ -1,542 +1,525 @@
 // =============================================================================
-// Eustress Web - Learn Page (Industrial Design)
+// Eustress Web - Learn Page
 // =============================================================================
-// Documentation, tutorials, and resources for building Eustress spaces
-// Features MindSpace as the premiere 3D learning tool
+// The index of every Learn guide: a short path for newcomers, then every topic
+// grouped into tracks (Build, Script, Simulate, Ship, Agents & Tools,
+// Foundations), with each guide's level and reading time.
 // =============================================================================
 
 use leptos::prelude::*;
 use crate::components::{CentralNav, Footer};
 
 // -----------------------------------------------------------------------------
-// Data Types
+// Data
 // -----------------------------------------------------------------------------
 
-/// Documentation category.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum DocCategory {
-    GettingStarted,
-    SoulScript,
-    Scripting,
-    Building,
-    Physics,
-    Networking,
-    Audio,
-    UI,
-    Publishing,
+/// One guide in the Learn index.
+struct Topic {
+    href: &'static str,
+    title: &'static str,
+    icon: &'static str,
+    summary: &'static str,
+    level: &'static str,
+    minutes: u32,
+    is_new: bool,
 }
 
-impl DocCategory {
-    fn as_str(&self) -> &'static str {
-        match self {
-            Self::GettingStarted => "getting-started",
-            Self::SoulScript => "soulscript",
-            Self::Scripting => "scripting",
-            Self::Building => "building",
-            Self::Physics => "physics",
-            Self::Networking => "networking",
-            Self::Audio => "audio",
-            Self::UI => "ui",
-            Self::Publishing => "publishing",
-        }
-    }
-    
-    fn display_name(&self) -> &'static str {
-        match self {
-            Self::GettingStarted => "Getting Started",
-            Self::SoulScript => "SoulScript",
-            Self::Scripting => "Scripting",
-            Self::Building => "Building",
-            Self::Physics => "Physics",
-            Self::Networking => "Networking",
-            Self::Audio => "Audio",
-            Self::UI => "UI Systems",
-            Self::Publishing => "Publishing",
-        }
-    }
-    
-    fn icon_path(&self) -> &'static str {
-        match self {
-            Self::GettingStarted => "/assets/icons/rocket.svg",
-            Self::SoulScript => "/assets/icons/brain.svg",
-            Self::Scripting => "/assets/icons/code.svg",
-            Self::Building => "/assets/icons/cube.svg",
-            Self::Physics => "/assets/icons/physics.svg",
-            Self::Networking => "/assets/icons/network.svg",
-            Self::Audio => "/assets/icons/audio.svg",
-            Self::UI => "/assets/icons/template.svg",
-            Self::Publishing => "/assets/icons/upload.svg",
-        }
-    }
-    
-    fn description(&self) -> &'static str {
-        match self {
-            Self::GettingStarted => "Set up your environment and create your first place",
-            Self::SoulScript => "Write natural language descriptions that become 3D experiences",
-            Self::Scripting => "Learn to code behavior with Soul and the Eustress API",
-            Self::Building => "Master 3D modeling, terrain, and level design",
-            Self::Physics => "Implement realistic physics and collisions",
-            Self::Networking => "Build multiplayer experiences with real-time sync",
-            Self::Audio => "Add music, sound effects, and spatial audio",
-            Self::UI => "Create menus, HUDs, and interactive interfaces",
-            Self::Publishing => "Deploy your place and reach players worldwide",
-        }
-    }
+/// One step of the newcomer path.
+struct Step {
+    href: &'static str,
+    title: &'static str,
+    summary: &'static str,
 }
 
-/// Tutorial item.
-#[derive(Clone, Debug, PartialEq)]
-pub struct Tutorial {
-    pub id: String,
-    pub title: String,
-    pub description: String,
-    pub category: DocCategory,
-    pub duration: String,
-    pub difficulty: String,
-    pub is_video: bool,
-}
+const START_HERE: &[Step] = &[
+    Step {
+        href: "/docs/getting-started",
+        title: "Getting Started",
+        summary: "Install Eustress Engine, create a Universe and a Space, and press Play.",
+    },
+    Step {
+        href: "/docs/studio",
+        title: "Studio",
+        summary: "Find your way around the editor: Explorer, Properties, tools and shortcuts.",
+    },
+    Step {
+        href: "/docs/building",
+        title: "Building",
+        summary: "Build with parts, materials, CSG, terrain and light.",
+    },
+    Step {
+        href: "/docs/scripting",
+        title: "Scripting",
+        summary: "Give the world behavior with Rune, and build from the command bar in Luau.",
+    },
+    Step {
+        href: "/docs/simulation",
+        title: "Simulation",
+        summary: "Run it forward, measure it, and compare runs.",
+    },
+];
 
-/// Resource link.
-#[derive(Clone, Debug, PartialEq)]
-pub struct Resource {
-    pub title: String,
-    pub description: String,
-    pub url: String,
-    pub icon: String,
-}
+const BUILD: &[Topic] = &[
+    Topic {
+        href: "/docs/studio",
+        title: "Studio",
+        icon: "/assets/icons/monitor.svg",
+        summary: "The editor: Explorer and its search, Properties, Insert Object, tools, History, shortcuts, modes and MindSpace.",
+        level: "Beginner",
+        minutes: 23,
+        is_new: true,
+    },
+    Topic {
+        href: "/docs/building",
+        title: "Building",
+        icon: "/assets/icons/cube.svg",
+        summary: "Parts and their properties, materials, CSG, terrain, lights and atmosphere.",
+        level: "Beginner",
+        minutes: 19,
+        is_new: false,
+    },
+    Topic {
+        href: "/docs/perspective",
+        title: "Perspective",
+        icon: "/assets/icons/perspective.svg",
+        summary: "2D and 3D views, perspective and orthographic, one world with no conversion.",
+        level: "Beginner",
+        minutes: 8,
+        is_new: true,
+    },
+    Topic {
+        href: "/docs/cad",
+        title: "CAD",
+        icon: "/assets/icons/grid.svg",
+        summary: "Parametric parts on a B-rep kernel: features, variables, booleans and export.",
+        level: "Intermediate",
+        minutes: 18,
+        is_new: true,
+    },
+    Topic {
+        href: "/docs/importing",
+        title: "Importing",
+        icon: "/assets/icons/download.svg",
+        summary: "Bring in Roblox places, glTF and GLB models, Gaussian splats, images, video and data.",
+        level: "Intermediate",
+        minutes: 19,
+        is_new: true,
+    },
+    Topic {
+        href: "/docs/ui",
+        title: "UI Systems",
+        icon: "/assets/icons/template.svg",
+        summary: "Screen and in-world interfaces for the people inside a Space.",
+        level: "Intermediate",
+        minutes: 12,
+        is_new: false,
+    },
+    Topic {
+        href: "/docs/audio",
+        title: "Audio",
+        icon: "/assets/icons/audio.svg",
+        summary: "The Sound object, SoundService, audio formats, and where playback stands.",
+        level: "Beginner",
+        minutes: 7,
+        is_new: false,
+    },
+];
+
+const SCRIPT: &[Topic] = &[
+    Topic {
+        href: "/docs/scripting",
+        title: "Scripting",
+        icon: "/assets/icons/code.svg",
+        summary: "Luau, Rune and SoulScript: where scripts live, when they run, and the API they reach.",
+        level: "Intermediate",
+        minutes: 14,
+        is_new: false,
+    },
+    Topic {
+        href: "/docs/services",
+        title: "Services",
+        icon: "/assets/icons/settings.svg",
+        summary: "Every service a Space starts with, what each one owns, and its properties.",
+        level: "Intermediate",
+        minutes: 14,
+        is_new: false,
+    },
+];
+
+const SIMULATE: &[Topic] = &[
+    Topic {
+        href: "/docs/physics",
+        title: "Physics",
+        icon: "/assets/icons/physics.svg",
+        summary: "Avian rigid bodies, colliders, constraints, queries, deformation and fracture.",
+        level: "Intermediate",
+        minutes: 20,
+        is_new: false,
+    },
+    Topic {
+        href: "/docs/simulation",
+        title: "Simulation",
+        icon: "/assets/icons/play.svg",
+        summary: "The simulation clock, time compression, watchpoints, recordings and experiments.",
+        level: "Intermediate",
+        minutes: 16,
+        is_new: false,
+    },
+    Topic {
+        href: "/docs/realism",
+        title: "Realism",
+        icon: "/assets/icons/fire.svg",
+        summary: "Material science, thermodynamics and electrochemistry models, with a worked case study.",
+        level: "Advanced",
+        minutes: 20,
+        is_new: false,
+    },
+    Topic {
+        href: "/docs/universes",
+        title: "Universes",
+        icon: "/assets/icons/star.svg",
+        summary: "Where work lives: Space folders, the WorldDb, git history, and branches for what-if runs.",
+        level: "Intermediate",
+        minutes: 15,
+        is_new: false,
+    },
+];
+
+const SHIP: &[Topic] = &[
+    Topic {
+        href: "/docs/networking",
+        title: "Networking",
+        icon: "/assets/icons/network.svg",
+        summary: "What runs today for multiplayer, and the transport that comes next.",
+        level: "Intermediate",
+        minutes: 12,
+        is_new: false,
+    },
+    Topic {
+        href: "/docs/publishing",
+        title: "Publishing",
+        icon: "/assets/icons/upload.svg",
+        summary: "Publish a Universe from Studio: sign-in, the package, review, and its page on eustress.dev.",
+        level: "Intermediate",
+        minutes: 13,
+        is_new: false,
+    },
+    Topic {
+        href: "/docs/website",
+        title: "Website Service",
+        icon: "/assets/icons/web.svg",
+        summary: "Mark values as References, publish once, and every number on your site updates from one fetch.",
+        level: "Intermediate",
+        minutes: 19,
+        is_new: false,
+    },
+    Topic {
+        href: "/docs/earning",
+        title: "Earning",
+        icon: "/assets/icons/bliss.svg",
+        summary: "Bliss (BLS) for contributions, Tickets (TKT), and how payouts work.",
+        level: "Intermediate",
+        minutes: 17,
+        is_new: false,
+    },
+];
+
+const AGENTS: &[Topic] = &[
+    Topic {
+        href: "/learn/mcp",
+        title: "MCP Server",
+        icon: "/assets/icons/sparkles.svg",
+        summary: "Give an AI agent tools to read, build and simulate inside your Spaces.",
+        level: "Intermediate",
+        minutes: 20,
+        is_new: false,
+    },
+    Topic {
+        href: "/learn/cli",
+        title: "CLI & Headless",
+        icon: "/assets/icons/list.svg",
+        summary: "Open, list and close engines from a terminal, and run Spaces with no window.",
+        level: "Intermediate",
+        minutes: 17,
+        is_new: true,
+    },
+    Topic {
+        href: "/learn/ide",
+        title: "IDE Integration",
+        icon: "/assets/icons/edit.svg",
+        summary: "Edit scripts in your own editor, with changes picked up by the running engine.",
+        level: "Beginner",
+        minutes: 8,
+        is_new: false,
+    },
+    Topic {
+        href: "/learn/lsp",
+        title: "Rune LSP",
+        icon: "/assets/icons/brain.svg",
+        summary: "The Rune language server: diagnostics, hover and navigation for Rune scripts.",
+        level: "Intermediate",
+        minutes: 10,
+        is_new: false,
+    },
+];
+
+const FOUNDATIONS: &[Topic] = &[
+    Topic {
+        href: "/docs/getting-started",
+        title: "Getting Started",
+        icon: "/assets/icons/rocket.svg",
+        summary: "From install to a first Space: a part, Play mode, a save and a first script.",
+        level: "Beginner",
+        minutes: 13,
+        is_new: false,
+    },
+    Topic {
+        href: "/docs/philosophy",
+        title: "Philosophy",
+        icon: "/assets/icons/book.svg",
+        summary: "Why Eustress is built the way it is, and the mechanism behind each principle.",
+        level: "Beginner",
+        minutes: 11,
+        is_new: false,
+    },
+];
 
 // -----------------------------------------------------------------------------
-// Main Component
+// Components
 // -----------------------------------------------------------------------------
 
-/// Learn page - documentation, tutorials, and resources.
+/// A grid of guide cards.
+#[component]
+fn TopicGrid(topics: &'static [Topic]) -> impl IntoView {
+    view! {
+        <div class="docs-grid">
+            {topics.iter().map(|t| view! {
+                <a href=t.href class="doc-card">
+                    <div class="doc-card-top">
+                        <img src=t.icon alt="" class="doc-icon" />
+                        {t.is_new.then(|| view! { <span class="doc-badge">"NEW"</span> })}
+                    </div>
+                    <h3>{t.title}</h3>
+                    <p>{t.summary}</p>
+                    <div class="doc-card-meta">
+                        <span>{t.level}</span>
+                        <span>{format!("{} min read", t.minutes)}</span>
+                    </div>
+                </a>
+            }).collect::<Vec<_>>()}
+        </div>
+    }
+}
+
+/// Learn page: the index of every guide.
 #[component]
 pub fn LearnPage() -> impl IntoView {
-    let selected_category = RwSignal::new("all".to_string());
-    
-    // Sample tutorials
-    let tutorials = vec![
-        Tutorial {
-            id: "1".to_string(),
-            title: "Your First Place".to_string(),
-            description: "Create a simple interactive environment from scratch".to_string(),
-            category: DocCategory::GettingStarted,
-            duration: "15 min".to_string(),
-            difficulty: "Beginner".to_string(),
-            is_video: true,
-        },
-        Tutorial {
-            id: "2".to_string(),
-            title: "Introduction to Scripting".to_string(),
-            description: "Learn the basics of Lua scripting in Eustress".to_string(),
-            category: DocCategory::Scripting,
-            duration: "25 min".to_string(),
-            difficulty: "Beginner".to_string(),
-            is_video: true,
-        },
-        Tutorial {
-            id: "3".to_string(),
-            title: "Building with Parts".to_string(),
-            description: "Master the fundamentals of 3D construction".to_string(),
-            category: DocCategory::Building,
-            duration: "20 min".to_string(),
-            difficulty: "Beginner".to_string(),
-            is_video: false,
-        },
-        Tutorial {
-            id: "4".to_string(),
-            title: "Physics Simulations".to_string(),
-            description: "Create realistic physics-based interactions".to_string(),
-            category: DocCategory::Physics,
-            duration: "30 min".to_string(),
-            difficulty: "Intermediate".to_string(),
-            is_video: true,
-        },
-        Tutorial {
-            id: "5".to_string(),
-            title: "Multiplayer Basics".to_string(),
-            description: "Sync player data and create shared experiences".to_string(),
-            category: DocCategory::Networking,
-            duration: "35 min".to_string(),
-            difficulty: "Intermediate".to_string(),
-            is_video: true,
-        },
-        Tutorial {
-            id: "6".to_string(),
-            title: "Custom UI Design".to_string(),
-            description: "Build beautiful interfaces with the UI system".to_string(),
-            category: DocCategory::UI,
-            duration: "25 min".to_string(),
-            difficulty: "Intermediate".to_string(),
-            is_video: false,
-        },
-        // SoulScript Tutorials
-        Tutorial {
-            id: "7".to_string(),
-            title: "Introduction to SoulScript".to_string(),
-            description: "Write natural language descriptions that become 3D worlds".to_string(),
-            category: DocCategory::SoulScript,
-            duration: "10 min".to_string(),
-            difficulty: "Beginner".to_string(),
-            is_video: true,
-        },
-        Tutorial {
-            id: "8".to_string(),
-            title: "SoulScript API Reference".to_string(),
-            description: "Complete guide to spawning entities, physics, and animations".to_string(),
-            category: DocCategory::SoulScript,
-            duration: "30 min".to_string(),
-            difficulty: "Intermediate".to_string(),
-            is_video: false,
-        },
-        Tutorial {
-            id: "9".to_string(),
-            title: "Building a Solar System".to_string(),
-            description: "Create an animated solar system with orbiting planets using SoulScript".to_string(),
-            category: DocCategory::SoulScript,
-            duration: "20 min".to_string(),
-            difficulty: "Intermediate".to_string(),
-            is_video: true,
-        },
-    ];
-    
-    // Filter tutorials
-    let filtered_tutorials = {
-        let tutorials = tutorials.clone();
-        move || {
-            let cat = selected_category.get();
-            if cat == "all" {
-                tutorials.clone()
-            } else {
-                tutorials.iter()
-                    .filter(|t| t.category.as_str() == cat)
-                    .cloned()
-                    .collect()
-            }
-        }
-    };
-    
-    // Resources
-    let resources = vec![
-        Resource {
-            title: "API Reference".to_string(),
-            description: "Complete documentation of all Eustress APIs".to_string(),
-            url: "/docs/api".to_string(),
-            icon: "/assets/icons/book.svg".to_string(),
-        },
-        Resource {
-            title: "Community Forums".to_string(),
-            description: "Get help and share knowledge with other creators".to_string(),
-            url: "/community".to_string(),
-            icon: "/assets/icons/users.svg".to_string(),
-        },
-        Resource {
-            title: "Sample Projects".to_string(),
-            description: "Download and learn from complete example spaces".to_string(),
-            url: "/samples".to_string(),
-            icon: "/assets/icons/folder.svg".to_string(),
-        },
-    ];
-    
+    let guide_count = BUILD.len() + SCRIPT.len() + SIMULATE.len() + SHIP.len() + AGENTS.len() + FOUNDATIONS.len();
+
     view! {
         <div class="page page-learn-industrial">
             <CentralNav active="learn".to_string() />
-            
-            // Background
+
             <div class="learn-bg">
                 <div class="learn-grid-overlay"></div>
                 <div class="learn-glow glow-1"></div>
                 <div class="learn-glow glow-2"></div>
             </div>
-            
-            // Hero Section
+
+            // Hero
             <section class="learn-hero">
                 <div class="hero-header">
                     <div class="header-line"></div>
                     <span class="header-tag">"LEARN"</span>
                     <div class="header-line"></div>
                 </div>
-                <h1 class="learn-title">"Master Eustress"</h1>
-                <p class="learn-subtitle">"Everything you need to build amazing 3D simulations"</p>
+                <h1 class="learn-title">"Learn Eustress"</h1>
+                <p class="learn-subtitle">
+                    "Eustress is a source-available simulation and data platform built in Rust.
+                    These guides cover building a Space, giving it behavior, simulating it,
+                    publishing it, and handing it to AI agents."
+                </p>
+                <nav class="learn-jump" aria-label="Tracks">
+                    <a href="#start" class="chip">"Start Here"</a>
+                    <a href="#build" class="chip">"Build"</a>
+                    <a href="#script" class="chip">"Script"</a>
+                    <a href="#simulate" class="chip">"Simulate"</a>
+                    <a href="#ship" class="chip">"Ship"</a>
+                    <a href="#agents" class="chip">"Agents & Tools"</a>
+                    <a href="#foundations" class="chip">"Foundations"</a>
+                </nav>
+                <p class="learn-count">{format!("{} guides, each ending with what comes next", guide_count)}</p>
             </section>
-            
-            // MindSpace Feature Section
-            <section class="mindspace-feature">
-                <div class="mindspace-card">
-                    <div class="mindspace-visual">
-                        <div class="mindspace-orb">
-                            <img src="/assets/icons/brain.svg" alt="MindSpace" class="mindspace-icon" />
-                        </div>
-                        <div class="mindspace-rings">
-                            <div class="ring ring-1"></div>
-                            <div class="ring ring-2"></div>
-                            <div class="ring ring-3"></div>
-                        </div>
+
+            // Start here
+            <section id="start" class="learn-section">
+                <div class="section-header-industrial">
+                    <img src="/assets/icons/rocket.svg" alt="Start" class="section-icon" />
+                    <h2>"Start Here"</h2>
+                </div>
+                <p class="learn-lede">
+                    "New to Eustress? Read these five in order, and branch into any track below."
+                </p>
+                <ol class="learn-path">
+                    {START_HERE.iter().enumerate().map(|(i, s)| view! {
+                        <li>
+                            <a href=s.href class="learn-step">
+                                <span class="learn-step-num">{i + 1}</span>
+                                <div class="learn-step-body">
+                                    <h3>{s.title}</h3>
+                                    <p>{s.summary}</p>
+                                </div>
+                            </a>
+                        </li>
+                    }).collect::<Vec<_>>()}
+                </ol>
+            </section>
+
+            // Tracks
+            <section id="build" class="learn-section learn-track">
+                <div class="learn-track-header">
+                    <div class="section-header-industrial">
+                        <img src="/assets/icons/cube.svg" alt="Build" class="section-icon" />
+                        <h2>"Build"</h2>
                     </div>
-                    <div class="mindspace-content">
-                        <div class="mindspace-badge">"FEATURED"</div>
-                        <h2 class="mindspace-title">"MindSpace"</h2>
-                        <p class="mindspace-tagline">"The premiere way to mind map and learn in 3D"</p>
-                        <p class="mindspace-description">
-                            "Visualize concepts, connect ideas, and explore knowledge in an immersive 3D environment. 
-                            MindSpace transforms how you learn by letting you build spatial relationships between topics, 
-                            creating memorable mental models that stick."
+                    <p class="learn-lede">
+                        "Make the world: the editor, parts and materials, 2D and 3D views, parametric
+                        CAD, imports, interfaces and sound."
+                    </p>
+                </div>
+                <TopicGrid topics=BUILD />
+            </section>
+
+            <section id="script" class="learn-section learn-track">
+                <div class="learn-track-header">
+                    <div class="section-header-industrial">
+                        <img src="/assets/icons/code.svg" alt="Script" class="section-icon" />
+                        <h2>"Script"</h2>
+                    </div>
+                    <p class="learn-lede">
+                        "Give it behavior with scripts, through the services every Space starts with."
+                    </p>
+                </div>
+                <TopicGrid topics=SCRIPT />
+            </section>
+
+            <section id="simulate" class="learn-section learn-track">
+                <div class="learn-track-header">
+                    <div class="section-header-industrial">
+                        <img src="/assets/icons/play.svg" alt="Simulate" class="section-icon" />
+                        <h2>"Simulate"</h2>
+                    </div>
+                    <p class="learn-lede">
+                        "Run it: physics, the simulation clock, physical-law models, and Universes
+                        you can branch."
+                    </p>
+                </div>
+                <TopicGrid topics=SIMULATE />
+            </section>
+
+            <section id="ship" class="learn-section learn-track">
+                <div class="learn-track-header">
+                    <div class="section-header-industrial">
+                        <img src="/assets/icons/upload.svg" alt="Ship" class="section-icon" />
+                        <h2>"Ship"</h2>
+                    </div>
+                    <p class="learn-lede">
+                        "Share it: multiplayer, publishing, live values for websites, and earning."
+                    </p>
+                </div>
+                <TopicGrid topics=SHIP />
+            </section>
+
+            <section id="agents" class="learn-section learn-track">
+                <div class="learn-track-header">
+                    <div class="section-header-industrial">
+                        <img src="/assets/icons/sparkles.svg" alt="Agents and tools" class="section-icon" />
+                        <h2>"Agents & Tools"</h2>
+                    </div>
+                    <p class="learn-lede">
+                        "Drive it from outside: AI agents over MCP, the command line, and your own editor."
+                    </p>
+                </div>
+                <TopicGrid topics=AGENTS />
+            </section>
+
+            <section id="foundations" class="learn-section learn-track">
+                <div class="learn-track-header">
+                    <div class="section-header-industrial">
+                        <img src="/assets/icons/book.svg" alt="Foundations" class="section-icon" />
+                        <h2>"Foundations"</h2>
+                    </div>
+                    <p class="learn-lede">
+                        "Where to begin, and why Eustress is built the way it is."
+                    </p>
+                </div>
+                <TopicGrid topics=FOUNDATIONS />
+            </section>
+
+            // For AI assistants
+            <section class="learn-section">
+                <div class="learn-agents-card">
+                    <img src="/assets/icons/brain.svg" alt="" class="learn-agents-icon" />
+                    <div class="learn-agents-body">
+                        <h3>"Reading this as an AI assistant?"</h3>
+                        <p>
+                            "Every guide is served as plain HTML, and "<a href="/llms.txt">"/llms.txt"</a>
+                            " lists them with one-line summaries. To act inside a Space rather than read
+                            about it, connect the "<a href="/learn/mcp">"MCP server"</a>"."
                         </p>
-                        <ul class="mindspace-features">
-                            <li>
-                                <img src="/assets/icons/check.svg" alt="Check" />
-                                "3D mind mapping with infinite canvas"
-                            </li>
-                            <li>
-                                <img src="/assets/icons/check.svg" alt="Check" />
-                                "Collaborative learning spaces"
-                            </li>
-                            <li>
-                                <img src="/assets/icons/check.svg" alt="Check" />
-                                "VR/AR support for immersive study"
-                            </li>
-                            <li>
-                                <img src="/assets/icons/check.svg" alt="Check" />
-                                "AI-powered concept connections"
-                            </li>
-                        </ul>
-                        <div class="mindspace-actions">
-                            <a href="/mindspace" class="btn-mindspace primary">
-                                <img src="/assets/icons/play.svg" alt="Launch" />
-                                "Launch MindSpace"
-                            </a>
-                            <a href="/docs/mindspace" class="btn-mindspace secondary">
-                                <img src="/assets/icons/book.svg" alt="Docs" />
-                                "Learn More"
-                            </a>
-                        </div>
                     </div>
                 </div>
             </section>
-            
-            // Documentation Categories
-            <section class="docs-section">
-                <div class="section-header-industrial">
-                    <img src="/assets/icons/book.svg" alt="Docs" class="section-icon" />
-                    <h2>"Documentation"</h2>
-                </div>
-                
-                <div class="docs-grid">
-                    <a href="/docs/getting-started" class="doc-card featured">
-                        <img src="/assets/icons/rocket.svg" alt="Getting Started" class="doc-icon" />
-                        <h3>"Getting Started"</h3>
-                        <p>"Set up your environment and create your first place"</p>
-                    </a>
-                    <a href="/docs/philosophy" class="doc-card featured">
-                        <img src="/assets/icons/brain.svg" alt="Philosophy" class="doc-icon" />
-                        <h3>"Philosophy"</h3>
-                        <p>"File-system-first, IDE agnostic, no vendor lock-in"</p>
-                    </a>
-                    <a href="/docs/universes" class="doc-card featured">
-                        <img src="/assets/icons/grid.svg" alt="Universes" class="doc-icon" />
-                        <h3>"Universes"</h3>
-                        <p>"The staging environment for reality — forkable worlds you branch, rehearse, and commit"</p>
-                    </a>
-                    <a href="/docs/scripting" class="doc-card">
-                        <img src="/assets/icons/code.svg" alt="Scripting" class="doc-icon" />
-                        <h3>"Scripting"</h3>
-                        <p>"Learn to code behavior with Soul and the Eustress API"</p>
-                    </a>
-                    <a href="/docs/ui" class="doc-card">
-                        <img src="/assets/icons/template.svg" alt="UI" class="doc-icon" />
-                        <h3>"UI Systems"</h3>
-                        <p>"TOML definitions, Slint components, Rune scripting API"</p>
-                    </a>
-                    <a href="/docs/services" class="doc-card">
-                        <img src="/assets/icons/network.svg" alt="Services" class="doc-icon" />
-                        <h3>"Services"</h3>
-                        <p>"Workspace, Lighting, Players, Teams, Storage, Scripting, Audio"</p>
-                    </a>
-                    <a href="/docs/simulation" class="doc-card featured">
-                        <img src="/assets/icons/physics.svg" alt="Simulation" class="doc-icon" />
-                        <h3>"Simulation"</h3>
-                        <p>"Time compression, watchpoints, breakpoints, data recording"</p>
-                    </a>
-                    <a href="/docs/realism" class="doc-card featured">
-                        <img src="/assets/icons/sparkles.svg" alt="Realism" class="doc-icon" />
-                        <h3>"Realism Platform"</h3>
-                        <p>"STEM, manufacturing, supply chain, business simulation"</p>
-                    </a>
-                    <a href="/docs/building" class="doc-card">
-                        <img src="/assets/icons/cube.svg" alt="Building" class="doc-icon" />
-                        <h3>"Building"</h3>
-                        <p>"Master 3D modeling, terrain, and level design"</p>
-                    </a>
-                    <a href="/docs/physics" class="doc-card">
-                        <img src="/assets/icons/physics.svg" alt="Physics" class="doc-icon" />
-                        <h3>"Physics"</h3>
-                        <p>"Implement realistic physics and collisions"</p>
-                    </a>
-                    <a href="/docs/networking" class="doc-card">
-                        <img src="/assets/icons/network.svg" alt="Networking" class="doc-icon" />
-                        <h3>"Networking"</h3>
-                        <p>"Build multiplayer experiences with real-time sync"</p>
-                    </a>
-                    <a href="/learn/ide" class="doc-card">
-                        <img src="/assets/icons/code.svg" alt="IDE" class="doc-icon" />
-                        <h3>"IDE Integration"</h3>
-                        <p>"VS Code, Windsurf, Cursor — Rune intelligence in your editor"</p>
-                    </a>
-                    <a href="/learn/mcp" class="doc-card">
-                        <img src="/assets/icons/sparkles.svg" alt="MCP" class="doc-icon" />
-                        <h3>"MCP Server"</h3>
-                        <p>"Expose the Universe to Claude, Cursor, Windsurf via Model Context Protocol"</p>
-                    </a>
-                    <a href="/learn/lsp" class="doc-card">
-                        <img src="/assets/icons/brain.svg" alt="LSP" class="doc-icon" />
-                        <h3>"Rune LSP"</h3>
-                        <p>"Language Server for Rune scripts — diagnostics, hover, go-to-def"</p>
-                    </a>
-                    <a href="/docs/audio" class="doc-card">
-                        <img src="/assets/icons/audio.svg" alt="Audio" class="doc-icon" />
-                        <h3>"Audio"</h3>
-                        <p>"Add music, sound effects, and spatial audio"</p>
-                    </a>
-                    <a href="/docs/publishing" class="doc-card">
-                        <img src="/assets/icons/upload.svg" alt="Publishing" class="doc-icon" />
-                        <h3>"Publishing"</h3>
-                        <p>"Deploy your place and reach players worldwide"</p>
-                    </a>
-                    <a href="/docs/website" class="doc-card">
-                        <img src="/assets/icons/web.svg" alt="Website Service" class="doc-icon" />
-                        <h3>"Website Service"</h3>
-                        <p>"Mark values as References, publish once, and every number on your site updates from one fetch"</p>
-                    </a>
-                    <a href="/docs/earning" class="doc-card">
-                        <img src="/assets/icons/trending.svg" alt="Earning" class="doc-icon" />
-                        <h3>"Earning"</h3>
-                        <p>"Monetize your creations and earn Bliss revenue"</p>
-                    </a>
-                </div>
-            </section>
-            
-            // Tutorials Section
-            <section class="tutorials-section">
-                <div class="section-header-industrial">
-                    <img src="/assets/icons/play.svg" alt="Tutorials" class="section-icon" />
-                    <h2>"Tutorials"</h2>
-                </div>
-                
-                <div class="tutorial-filters">
-                    <button 
-                        class="chip"
-                        class:active=move || selected_category.get() == "all"
-                        on:click=move |_| selected_category.set("all".to_string())
-                    >"All"</button>
-                    <button 
-                        class="chip"
-                        class:active=move || selected_category.get() == "getting-started"
-                        on:click=move |_| selected_category.set("getting-started".to_string())
-                    >"Getting Started"</button>
-                    <button 
-                        class="chip"
-                        class:active=move || selected_category.get() == "scripting"
-                        on:click=move |_| selected_category.set("scripting".to_string())
-                    >"Scripting"</button>
-                    <button 
-                        class="chip"
-                        class:active=move || selected_category.get() == "building"
-                        on:click=move |_| selected_category.set("building".to_string())
-                    >"Building"</button>
-                    <button 
-                        class="chip"
-                        class:active=move || selected_category.get() == "physics"
-                        on:click=move |_| selected_category.set("physics".to_string())
-                    >"Physics"</button>
-                </div>
-                
-                <div class="tutorials-grid">
-                    <For
-                        each=filtered_tutorials
-                        key=|t| t.id.clone()
-                        children=move |tutorial| {
-                            let url = format!("/learn/{}", tutorial.id);
-                            view! {
-                                <a href=url class="tutorial-card">
-                                    <div class="tutorial-thumbnail">
-                                        {if tutorial.is_video {
-                                            view! {
-                                                <img src="/assets/icons/play.svg" alt="Video" class="play-badge" />
-                                            }.into_any()
-                                        } else {
-                                            view! {
-                                                <img src="/assets/icons/book.svg" alt="Article" class="play-badge" />
-                                            }.into_any()
-                                        }}
-                                    </div>
-                                    <div class="tutorial-content">
-                                        <span class="tutorial-category">{tutorial.category.display_name()}</span>
-                                        <h3 class="tutorial-title">{tutorial.title}</h3>
-                                        <p class="tutorial-desc">{tutorial.description}</p>
-                                        <div class="tutorial-meta">
-                                            <span class="meta-item">
-                                                <img src="/assets/icons/clock.svg" alt="Duration" />
-                                                {tutorial.duration}
-                                            </span>
-                                            <span class="difficulty-badge">{tutorial.difficulty}</span>
-                                        </div>
-                                    </div>
-                                </a>
-                            }
-                        }
-                    />
-                </div>
-                
-                <div class="view-all-link">
-                    <a href="/tutorials" class="btn-view-all">
-                        "View All Tutorials"
-                        <img src="/assets/icons/arrow-right.svg" alt="Arrow" />
-                    </a>
-                </div>
-            </section>
-            
-            // Resources Section
+
+            // Resources
             <section class="resources-section">
                 <div class="section-header-industrial">
-                    <img src="/assets/icons/sparkles.svg" alt="Resources" class="section-icon" />
+                    <img src="/assets/icons/link.svg" alt="Resources" class="section-icon" />
                     <h2>"Resources"</h2>
                 </div>
-                
-                <div class="resources-grid">
-                    {resources.into_iter().map(|resource| {
-                        view! {
-                            <a href=resource.url class="resource-card">
-                                <img src=resource.icon alt="Resource" class="resource-icon" />
-                                <div class="resource-content">
-                                    <h3>{resource.title}</h3>
-                                    <p>{resource.description}</p>
-                                </div>
-                                <img src="/assets/icons/arrow-right.svg" alt="Go" class="resource-arrow" />
-                            </a>
-                        }
-                    }).collect::<Vec<_>>()}
+                <div class="resources-grid learn-resources">
+                    <a href="https://github.com/WeaveITMeta/EustressEngine" class="resource-card" target="_blank" rel="noopener">
+                        <img src="/assets/icons/github.svg" alt="" class="resource-icon" />
+                        <div class="resource-content">
+                            <h3>"Source Code"</h3>
+                            <p>"Read and build Eustress on GitHub, under PolyForm Shield 1.0.0."</p>
+                        </div>
+                        <img src="/assets/icons/arrow-right.svg" alt="" class="resource-arrow" />
+                    </a>
+                    <a href="/download" class="resource-card">
+                        <img src="/assets/icons/download.svg" alt="" class="resource-icon" />
+                        <div class="resource-content">
+                            <h3>"Download"</h3>
+                            <p>"Eustress Engine for Windows, macOS (Apple Silicon) and Linux."</p>
+                        </div>
+                        <img src="/assets/icons/arrow-right.svg" alt="" class="resource-arrow" />
+                    </a>
+                    <a href="/license" class="resource-card">
+                        <img src="/assets/icons/shield.svg" alt="" class="resource-icon" />
+                        <div class="resource-content">
+                            <h3>"License"</h3>
+                            <p>"Source-available: free to use for anything except a competing product."</p>
+                        </div>
+                        <img src="/assets/icons/arrow-right.svg" alt="" class="resource-arrow" />
+                    </a>
                 </div>
             </section>
-            
-            // Help CTA
+
+            // Help
             <section class="help-cta">
                 <div class="help-card">
                     <img src="/assets/icons/help.svg" alt="Help" class="help-icon" />
                     <div class="help-content">
-                        <h3>"Need Help?"</h3>
-                        <p>"Our community and support team are here to help you succeed"</p>
+                        <h3>"Stuck on something?"</h3>
+                        <p>"Ask other builders in the community, or reach the team through support."</p>
                     </div>
                     <div class="help-actions">
-                        <a href="/community" class="btn-help">
-                            "Join Discord"
-                        </a>
-                        <a href="/support" class="btn-help secondary">
-                            "Contact Support"
-                        </a>
+                        <a href="/community" class="btn-help">"Community"</a>
+                        <a href="/support" class="btn-help secondary">"Support"</a>
                     </div>
                 </div>
             </section>
-            
+
             <Footer />
         </div>
     }

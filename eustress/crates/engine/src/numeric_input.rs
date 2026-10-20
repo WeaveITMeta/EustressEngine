@@ -504,12 +504,14 @@ impl Plugin for NumericInputPlugin {
             .init_resource::<PropertyRefTable>()
             .add_message::<NumericInputCommittedEvent>()
             .add_message::<NumericInputCancelledEvent>()
+            // Editor input: idle during a Play session (digits and Tab are
+            // the game's keys then).
             .add_systems(Update, (
                 refresh_property_ref_table,
                 clear_numeric_input_on_drag_end,
                 detect_numeric_input_start,
                 handle_numeric_input_keys,
-            ).chain());
+            ).chain().run_if(crate::play_mode::editor_input_enabled));
     }
 }
 

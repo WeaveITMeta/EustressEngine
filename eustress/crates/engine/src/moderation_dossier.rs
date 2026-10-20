@@ -147,8 +147,8 @@ pub struct Dossier {
     pub dossier_version: u32,
     pub engine_semver: String,
     pub generated_at: String,
-    /// `blake3:<hex>` of the .pak. Filled by the upload thread once the package
-    /// exists; the World has no idea what the archive will hash to.
+    /// `blake3:<hex>` of the committed world manifest. Filled by the upload
+    /// thread once the world is baked; the World has no idea what it will hash to.
     pub content_root: Option<String>,
     pub listing: DossierListing,
     pub digest: Digest,

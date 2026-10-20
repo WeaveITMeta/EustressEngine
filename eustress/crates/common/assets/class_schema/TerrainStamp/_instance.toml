@@ -1,0 +1,27 @@
+# TerrainStamp: an analytic crater, mound, plateau or ridge baked over the
+# terrain. The terrain's own heights stay as they are. Lives under
+# Workspace/Terrain/Layers.
+#
+# The position is the stamp's centre. Blend "Add" raises or lowers the
+# ground by the shape; "Max", "Min" and "Replace" stand the shape on the
+# position's Y. Rotation about Y turns a Ridge. radius, height and falloff
+# are metres (falloff fades the stamp in from its radius); strength is 0 to 1.
+
+[transform]
+position = [0.0, 0.0, 0.0]
+rotation = [0.0, 0.0, 0.0, 1.0]
+scale = [1.0, 1.0, 1.0]
+
+[terrain_stamp]
+enabled = true
+order = 0
+shape = "Mound"
+radius = 20.0
+height = 6.0
+falloff = 8.0
+blend = "Add"
+strength = 1.0
+
+[metadata]
+class_name = "TerrainStamp"
+archivable = true

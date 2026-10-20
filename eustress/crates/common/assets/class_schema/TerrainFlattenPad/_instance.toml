@@ -1,0 +1,24 @@
+# TerrainFlattenPad: a flat pad baked over the terrain, blending back into
+# the ground beyond its edge. The terrain's own heights stay as they are.
+# Lives under Workspace/Terrain/Layers.
+#
+# The position's Y is the pad's height; rotation about Y turns it. Sizes and
+# falloff are metres. material is a built-in terrain material name painted
+# over the pad, or "None".
+
+[transform]
+position = [0.0, 0.0, 0.0]
+rotation = [0.0, 0.0, 0.0, 1.0]
+scale = [1.0, 1.0, 1.0]
+
+[terrain_flatten_pad]
+enabled = true
+order = 0
+size_x = 20.0
+size_z = 20.0
+falloff = 10.0
+material = "None"
+
+[metadata]
+class_name = "TerrainFlattenPad"
+archivable = true

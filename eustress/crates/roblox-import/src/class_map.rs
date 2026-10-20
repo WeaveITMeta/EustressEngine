@@ -32,6 +32,10 @@ use eustress_common::luau::compat::ClassMapping;
 ///
 /// Returns `None` only when both paths fail.
 pub fn roblox_to_eustress_class(rbx_class: &str) -> Option<ClassName> {
+    // Legacy names Roblox still loads as their modern class.
+    if rbx_class == "GuiMain" {
+        return Some(ClassName::ScreenGui);
+    }
     if let Some(s) = ClassMapping::map_class(rbx_class) {
         if let Ok(class) = ClassName::from_str(s) {
             return Some(class);
@@ -53,6 +57,13 @@ mod tests {
     /// Legacy surface joints are STRUCTURAL — a 36-place import dropped 7,091
     /// of them (4,556 ManualWeld + 2,328 Snap + 200 Rotate* + 7 Glue), which
     /// lets every welded assembly fall apart once physics runs.
+    /// `GuiMain` is ScreenGui's legacy name; Vehicle Simulator's car GUI
+    /// (with its client drive script) is one.
+    #[test]
+    fn guimain_is_a_screen_gui() {
+        assert_eq!(roblox_to_eustress_class("GuiMain"), Some(ClassName::ScreenGui));
+    }
+
     #[test]
     fn legacy_surface_joints_are_mapped() {
         for (rbx, expect) in [

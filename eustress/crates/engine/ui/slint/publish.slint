@@ -264,7 +264,7 @@ export component PublishDialog inherits Rectangle {
                                 padding-right: 10px;
 
                                 Text {
-                                    text: root.pak-size-estimate != "" ? "Estimated .pak: " + root.pak-size-estimate : ".git, node_modules excluded";
+                                    text: root.pak-size-estimate != "" ? "Estimated upload: " + root.pak-size-estimate : "Only changed chunks upload; hidden folders stay local";
                                     color: Theme.text-disabled;
                                     font-size: 9px;
                                     vertical-alignment: center;

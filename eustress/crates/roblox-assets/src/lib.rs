@@ -9,16 +9,18 @@
 //! (`fn fetch(&self, asset_id: u64) -> Result<Vec<u8>, String>`); this
 //! crate supplies three implementations plus an on-disk cache:
 //!
-//! - [`NetworkFetcher`] — GETs
-//!   `https://assetdelivery.roblox.com/v1/asset/?id=<id>` (following the
-//!   CDN redirect) and returns the raw bytes. Optional `.ROBLOSECURITY`
-//!   cookie support for authenticated assets — the cookie is NEVER logged.
-//! - [`LocalFolderFetcher`] — reads `<folder>/<id>.*` from a
+//! - [`NetworkFetcher`]: downloads from Roblox. With an Open Cloud API key
+//!   it asks `apis.roblox.com/asset-delivery-api` for a signed CDN location
+//!   and downloads that; otherwise it GETs
+//!   `https://assetdelivery.roblox.com/v1/asset/?id=<id>` (following the CDN
+//!   redirect), optionally with a `.ROBLOSECURITY` cookie. Neither secret is
+//!   ever logged.
+//! - [`LocalFolderFetcher`]: reads `<folder>/<id>.*` from a
 //!   user-pointed directory (fully offline; for a community mirror or a
 //!   prior export).
-//! - [`ChainFetcher`] — tries a sequence of fetchers in order (local
+//! - [`ChainFetcher`]: tries a sequence of fetchers in order (local
 //!   first, then network) and returns the first success.
-//! - [`CachingFetcher`] — wraps any fetcher with an on-disk byte cache
+//! - [`CachingFetcher`]: wraps any fetcher with an on-disk byte cache
 //!   keyed by asset id, so re-imports don't re-fetch.
 //!
 //! All blocking, no tokio, no Bevy — runs on the importer's worker
@@ -50,6 +52,25 @@ use eustress_roblox_import::AssetFetcher;
 /// the actual content host; `ureq` follows it by default.
 const ASSET_DELIVERY_BASE: &str = "https://assetdelivery.roblox.com/v1/asset/?id=";
 
+/// Open Cloud's asset delivery endpoint (`GetAssetById`). It takes an API key
+/// in `x-api-key` (scope `legacy-asset:manage`) and answers with JSON whose
+/// `location` is a signed CDN URL for the bytes.
+const OPEN_CLOUD_ASSET_DELIVERY: &str = "https://apis.roblox.com/asset-delivery-api/v1/assetId/";
+
+/// Environment variable holding an Open Cloud API key.
+pub const API_KEY_ENV: &str = "EUSTRESS_ROBLOX_API_KEY";
+
+/// Environment variable holding a `.ROBLOSECURITY` cookie.
+pub const COOKIE_ENV: &str = "EUSTRESS_ROBLOSECURITY";
+
+/// Attempts per request when Roblox answers 429 or 5xx, or the connection
+/// drops. A batch import makes thousands of requests; one rate-limit burst
+/// used to cost every asset it touched.
+const MAX_ATTEMPTS: u32 = 5;
+
+/// Longest wait between attempts, whatever `Retry-After` asks for.
+const MAX_BACKOFF_SECS: u64 = 30;
+
 /// Cap on a single fetched asset (defensive — a runaway download or a
 /// misrouted HTML error page should not exhaust memory). 256 MiB is far
 /// above any real mesh.
@@ -59,29 +80,41 @@ const MAX_ASSET_BYTES: usize = 256 * 1024 * 1024;
 // NetworkFetcher
 // ===========================================================================
 
-/// Fetches assets over HTTP(S) from the Roblox asset-delivery CDN.
+/// How a [`NetworkFetcher`] proves who it is to Roblox. Both secrets live in
+/// memory only and never reach a log line or an error string.
+enum Credential {
+    /// Anonymous: public assets only.
+    None,
+    /// A `.ROBLOSECURITY` session cookie, sent to the legacy endpoint.
+    Cookie(String),
+    /// An Open Cloud API key, sent to the Open Cloud endpoint. Never sent to
+    /// the CDN host the endpoint points at.
+    ApiKey(String),
+}
+
+/// Fetches assets over HTTP(S) from Roblox.
 ///
-/// `cookie` (a `.ROBLOSECURITY` token) is optional and only needed for
-/// assets gated behind authentication; it is sent as a `Cookie` header and
-/// is **never** logged.
+/// Roblox gates most asset downloads behind authentication. An Open Cloud API
+/// key (scope `legacy-asset:manage`) is the supported route; a `.ROBLOSECURITY`
+/// cookie also works on the legacy endpoint. Neither is ever logged.
 pub struct NetworkFetcher {
     agent: ureq::Agent,
-    /// `.ROBLOSECURITY` token, if the integrator supplied one. Treated as
-    /// a secret — never written to logs or errors.
-    cookie: Option<String>,
+    credential: Credential,
     /// Consecutive authentication rejections (HTTP 401/403) seen so far.
     /// Reset by any success.
     auth_failures: std::sync::atomic::AtomicU32,
 }
 
 impl NetworkFetcher {
-    /// A network fetcher with no authentication cookie (public assets).
+    /// A network fetcher with no credential (public assets only).
     pub fn new() -> Self {
         Self {
             agent: ureq::AgentBuilder::new()
                 .user_agent("Eustress-RobloxImport/0.1 (+https://eustress.dev)")
+                .timeout_connect(std::time::Duration::from_secs(15))
+                .timeout_read(std::time::Duration::from_secs(60))
                 .build(),
-            cookie: None,
+            credential: Credential::None,
             auth_failures: std::sync::atomic::AtomicU32::new(0),
         }
     }
@@ -90,14 +123,172 @@ impl NetworkFetcher {
     /// cookie. The token is stored in memory only and never logged.
     pub fn with_cookie(token: impl Into<String>) -> Self {
         let mut f = Self::new();
-        f.cookie = Some(token.into());
+        f.credential = Credential::Cookie(token.into());
         f
+    }
+
+    /// A network fetcher that authenticates with an Open Cloud API key
+    /// (scope `legacy-asset:manage`). The key is stored in memory only, never
+    /// logged, and only ever sent to `apis.roblox.com`.
+    pub fn with_api_key(key: impl Into<String>) -> Self {
+        let mut f = Self::new();
+        f.credential = Credential::ApiKey(key.into());
+        f
+    }
+
+    /// The fetcher the environment asks for: an API key from
+    /// [`API_KEY_ENV`] first, else a cookie from [`COOKIE_ENV`], else
+    /// anonymous. Every import entry point builds its fetcher here so they
+    /// cannot disagree about which credential wins.
+    pub fn from_env() -> Self {
+        let var = |name: &str| std::env::var(name).ok().filter(|v| !v.trim().is_empty());
+        if let Some(key) = var(API_KEY_ENV) {
+            Self::with_api_key(key.trim())
+        } else if let Some(tok) = var(COOKIE_ENV) {
+            Self::with_cookie(tok.trim())
+        } else {
+            Self::new()
+        }
+    }
+
+    /// Which credential this fetcher carries, for a startup line. Names the
+    /// kind only, never the value.
+    pub fn credential_kind(&self) -> &'static str {
+        match self.credential {
+            Credential::None => "none",
+            Credential::Cookie(_) => ".ROBLOSECURITY cookie",
+            Credential::ApiKey(_) => "Open Cloud API key",
+        }
+    }
+
+    /// Whether any credential is configured.
+    pub fn is_authenticated(&self) -> bool {
+        !matches!(self.credential, Credential::None)
     }
 
     /// Build the asset-delivery URL for an id.
     fn url_for(id: u64) -> String {
         format!("{ASSET_DELIVERY_BASE}{id}")
     }
+
+    /// Build the Open Cloud asset-delivery URL for an id.
+    fn open_cloud_url_for(id: u64) -> String {
+        format!("{OPEN_CLOUD_ASSET_DELIVERY}{id}")
+    }
+
+    /// Consecutive 401/403 answers that trip the breaker. Anonymous fetches
+    /// trip fast: every gated asset fails the same way. With a credential a
+    /// 403 usually means "this one asset is private to someone else", which
+    /// can repeat a few dozen times in a row inside a model built from third
+    /// party parts, so it takes a much longer streak to prove the credential
+    /// itself is bad.
+    fn auth_failure_trip(&self) -> u32 {
+        if self.is_authenticated() {
+            AUTH_FAILURE_TRIP_AUTHENTICATED
+        } else {
+            AUTH_FAILURE_TRIP
+        }
+    }
+
+    /// Send a request, retrying 429, 5xx and dropped connections with
+    /// exponential backoff (honouring `Retry-After`). `build` makes a fresh
+    /// request per attempt because `call` consumes a `ureq::Request`.
+    fn call_with_retry(
+        &self,
+        build: impl Fn() -> ureq::Request,
+    ) -> Result<ureq::Response, ureq::Error> {
+        let mut attempt = 1;
+        loop {
+            match build().call() {
+                Ok(resp) => return Ok(resp),
+                Err(e) => {
+                    let hint = match &e {
+                        ureq::Error::Status(code, resp) if is_retryable_status(*code) => {
+                            Some(resp.header("Retry-After").and_then(parse_retry_after))
+                        }
+                        ureq::Error::Transport(_) => Some(None),
+                        _ => None,
+                    };
+                    let Some(hint) = hint else { return Err(e) };
+                    if attempt >= MAX_ATTEMPTS {
+                        return Err(e);
+                    }
+                    let wait = backoff_secs(attempt, hint);
+                    tracing::debug!(attempt, wait, "roblox-assets: retrying after a transient failure");
+                    std::thread::sleep(std::time::Duration::from_secs(wait));
+                    attempt += 1;
+                }
+            }
+        }
+    }
+
+    /// Open Cloud route: ask for the asset's signed CDN location with the API
+    /// key, then download the location WITHOUT the key.
+    fn fetch_open_cloud(&self, asset_id: u64, key: &str) -> Result<ureq::Response, String> {
+        let url = Self::open_cloud_url_for(asset_id);
+        let resp = self
+            .call_with_retry(|| self.agent.get(&url).set("x-api-key", key))
+            .map_err(|e| self.note_failure(asset_id, e))?;
+        let body = resp
+            .into_string()
+            .map_err(|e| format!("reading rbxassetid://{asset_id} location failed: {e}"))?;
+        let location = parse_location(&body)
+            .map_err(|reason| format!("network fetch rbxassetid://{asset_id} failed: {reason}"))?;
+        self.call_with_retry(|| self.agent.get(&location))
+            .map_err(|e| self.note_failure(asset_id, e))
+    }
+
+    /// Turn a request failure into the error string, counting 401/403 toward
+    /// the breaker so a missing or bad credential stops the request storm
+    /// instead of repeating a guaranteed failure thousands of times.
+    fn note_failure(&self, asset_id: u64, e: ureq::Error) -> String {
+        use std::sync::atomic::Ordering;
+        if matches!(&e, ureq::Error::Status(401 | 403, _)) {
+            let trip = self.auth_failure_trip();
+            let n = self.auth_failures.fetch_add(1, Ordering::Relaxed) + 1;
+            if n == trip {
+                tracing::warn!(
+                    "roblox-assets: {trip} consecutive auth rejections, halting network asset fetches. Set {API_KEY_ENV} (an Open Cloud API key with legacy-asset:manage) or {COOKIE_ENV} and re-run to import meshes and textures."
+                );
+            }
+        }
+        format!("network fetch rbxassetid://{asset_id} failed: {}", describe_ureq(e))
+    }
+}
+
+/// 429 (rate limited) and 5xx (server trouble) are worth another try.
+fn is_retryable_status(code: u16) -> bool {
+    code == 429 || (500..=599).contains(&code)
+}
+
+/// `Retry-After` in whole seconds. The HTTP-date form is rare from Roblox and
+/// falls back to the exponential schedule.
+fn parse_retry_after(value: &str) -> Option<u64> {
+    value.trim().parse::<u64>().ok()
+}
+
+/// Seconds to wait before attempt `attempt + 1`: the server's hint when it
+/// gave one, else 1, 2, 4, 8 ... capped at [`MAX_BACKOFF_SECS`].
+fn backoff_secs(attempt: u32, hint: Option<u64>) -> u64 {
+    hint.unwrap_or_else(|| 1u64 << (attempt.saturating_sub(1)).min(5))
+        .min(MAX_BACKOFF_SECS)
+}
+
+/// Pull `location` out of an asset-delivery JSON answer, or the server's
+/// first error message when there is none.
+fn parse_location(body: &str) -> Result<String, String> {
+    let v: serde_json::Value =
+        serde_json::from_str(body).map_err(|e| format!("asset delivery answered non-JSON: {e}"))?;
+    if let Some(loc) = v.get("location").and_then(|l| l.as_str()).filter(|l| !l.is_empty()) {
+        return Ok(loc.to_string());
+    }
+    let msg = v
+        .get("errors")
+        .and_then(|e| e.get(0))
+        .and_then(|e| e.get("message"))
+        .and_then(|m| m.as_str())
+        .unwrap_or("no location in the answer");
+    Err(format!("asset delivery: {msg}"))
 }
 
 impl Default for NetworkFetcher {
@@ -116,36 +307,36 @@ impl Default for NetworkFetcher {
 /// missing cookie stays missing), so once it is unmistakable, stop asking.
 const AUTH_FAILURE_TRIP: u32 = 32;
 
+/// The breaker threshold when a credential IS configured; see
+/// [`NetworkFetcher::auth_failure_trip`].
+const AUTH_FAILURE_TRIP_AUTHENTICATED: u32 = 256;
+
 impl AssetFetcher for NetworkFetcher {
     fn fetch(&self, asset_id: u64) -> Result<Vec<u8>, String> {
         use std::sync::atomic::Ordering;
-        if self.auth_failures.load(Ordering::Relaxed) >= AUTH_FAILURE_TRIP {
+        let trip = self.auth_failure_trip();
+        if self.auth_failures.load(Ordering::Relaxed) >= trip {
             return Err(format!(
-                "rbxassetid://{asset_id} skipped — {AUTH_FAILURE_TRIP} consecutive auth rejections; Roblox requires a .ROBLOSECURITY cookie for these assets. Set EUSTRESS_ROBLOSECURITY and re-run to fetch them."
+                "rbxassetid://{asset_id} skipped: {trip} consecutive auth rejections. Roblox requires authentication for these assets; set {API_KEY_ENV} (an Open Cloud API key with legacy-asset:manage) or {COOKIE_ENV} and re-run to fetch them."
             ));
-        }
-        let url = Self::url_for(asset_id);
-        // Build the request. Attach the cookie only if present; the header
-        // value (the secret) is intentionally never logged.
-        let mut req = self.agent.get(&url);
-        if let Some(cookie) = &self.cookie {
-            req = req.set("Cookie", &format!(".ROBLOSECURITY={cookie}"));
         }
         tracing::debug!(asset_id, "roblox-assets: fetching asset over network");
 
-        let resp = req.call().map_err(|e| {
-            // Track auth rejections so a missing cookie trips the breaker
-            // instead of repeating a guaranteed failure thousands of times.
-            if matches!(&e, ureq::Error::Status(401 | 403, _)) {
-                let n = self.auth_failures.fetch_add(1, Ordering::Relaxed) + 1;
-                if n == AUTH_FAILURE_TRIP {
-                    tracing::warn!(
-                        "roblox-assets: {AUTH_FAILURE_TRIP} consecutive auth rejections — halting network asset fetches. Set EUSTRESS_ROBLOSECURITY (a .ROBLOSECURITY cookie) and re-run to import meshes/textures."
-                    );
-                }
+        // Secrets go into headers only, never into a log line or an error.
+        let resp = match &self.credential {
+            Credential::ApiKey(key) => self.fetch_open_cloud(asset_id, key)?,
+            Credential::Cookie(cookie) => {
+                let url = Self::url_for(asset_id);
+                let header = format!(".ROBLOSECURITY={cookie}");
+                self.call_with_retry(|| self.agent.get(&url).set("Cookie", &header))
+                    .map_err(|e| self.note_failure(asset_id, e))?
             }
-            format!("network fetch rbxassetid://{asset_id} failed: {}", describe_ureq(e))
-        })?;
+            Credential::None => {
+                let url = Self::url_for(asset_id);
+                self.call_with_retry(|| self.agent.get(&url))
+                    .map_err(|e| self.note_failure(asset_id, e))?
+            }
+        };
 
         // Read the body with a hard cap.
         let mut reader = resp.into_reader().take(MAX_ASSET_BYTES as u64 + 1);
@@ -167,14 +358,31 @@ impl AssetFetcher for NetworkFetcher {
     }
 }
 
-/// Render a `ureq::Error` WITHOUT leaking the request URL's query (which
-/// is just the id, but keep the discipline) or any header. We only surface
-/// the status / transport reason.
+/// Render a `ureq::Error` WITHOUT leaking the request URL or any header. It
+/// surfaces the status plus the server's own error message when the body is
+/// Roblox's `{"errors":[{"message":...}]}` shape, which is what tells "not
+/// signed in" apart from "this asset is private to another creator".
 fn describe_ureq(e: ureq::Error) -> String {
     match e {
-        ureq::Error::Status(code, _resp) => format!("HTTP {code}"),
+        ureq::Error::Status(code, resp) => {
+            let mut body = String::new();
+            let _ = resp.into_reader().take(4096).read_to_string(&mut body);
+            match server_error_message(&body) {
+                Some(msg) => format!("HTTP {code} ({msg})"),
+                None => format!("HTTP {code}"),
+            }
+        }
         ureq::Error::Transport(t) => format!("transport: {}", t.kind()),
     }
+}
+
+/// The first `errors[].message` of a Roblox error body, trimmed to one short
+/// line of printable text.
+fn server_error_message(body: &str) -> Option<String> {
+    let v: serde_json::Value = serde_json::from_str(body).ok()?;
+    let msg = v.get("errors")?.get(0)?.get("message")?.as_str()?;
+    let clean: String = msg.chars().filter(|c| !c.is_control()).take(160).collect();
+    (!clean.trim().is_empty()).then_some(clean)
 }
 
 // ===========================================================================
@@ -477,6 +685,68 @@ mod tests {
             NetworkFetcher::url_for(12345),
             "https://assetdelivery.roblox.com/v1/asset/?id=12345"
         );
+    }
+
+    #[test]
+    fn open_cloud_url_is_asset_delivery_api() {
+        assert_eq!(
+            NetworkFetcher::open_cloud_url_for(12345),
+            "https://apis.roblox.com/asset-delivery-api/v1/assetId/12345"
+        );
+    }
+
+    #[test]
+    fn location_is_read_from_the_json_answer() {
+        let body = r#"{"location":"https://sc1.rbxcdn.com/abc","requestId":"r","isArchived":false}"#;
+        assert_eq!(parse_location(body).unwrap(), "https://sc1.rbxcdn.com/abc");
+    }
+
+    #[test]
+    fn missing_location_reports_the_server_reason() {
+        let body = r#"{"errors":[{"code":0,"message":"Authentication required to access Asset."}]}"#;
+        let err = parse_location(body).unwrap_err();
+        assert!(err.contains("Authentication required"), "got {err}");
+        assert!(parse_location("<html>").is_err());
+    }
+
+    #[test]
+    fn server_error_message_is_one_clean_line() {
+        let body = "{\"errors\":[{\"message\":\"User is not authorized\\n to access Asset\"}]}";
+        assert_eq!(
+            server_error_message(body).unwrap(),
+            "User is not authorized to access Asset"
+        );
+        assert!(server_error_message("not json").is_none());
+    }
+
+    #[test]
+    fn backoff_follows_the_hint_then_doubles_and_caps() {
+        assert_eq!(backoff_secs(1, Some(7)), 7);
+        assert_eq!(backoff_secs(1, Some(600)), MAX_BACKOFF_SECS);
+        assert_eq!(backoff_secs(1, None), 1);
+        assert_eq!(backoff_secs(2, None), 2);
+        assert_eq!(backoff_secs(4, None), 8);
+        assert_eq!(backoff_secs(9, None), MAX_BACKOFF_SECS);
+        assert_eq!(parse_retry_after(" 12 "), Some(12));
+        assert_eq!(parse_retry_after("Wed, 21 Oct 2026 07:28:00 GMT"), None);
+    }
+
+    #[test]
+    fn only_rate_limits_and_server_errors_retry() {
+        assert!(is_retryable_status(429));
+        assert!(is_retryable_status(503));
+        assert!(!is_retryable_status(401));
+        assert!(!is_retryable_status(403));
+        assert!(!is_retryable_status(404));
+    }
+
+    #[test]
+    fn an_authenticated_fetcher_tolerates_a_longer_forbidden_streak() {
+        assert_eq!(NetworkFetcher::new().auth_failure_trip(), AUTH_FAILURE_TRIP);
+        let keyed = NetworkFetcher::with_api_key("k");
+        assert_eq!(keyed.auth_failure_trip(), AUTH_FAILURE_TRIP_AUTHENTICATED);
+        assert_eq!(keyed.credential_kind(), "Open Cloud API key");
+        assert_eq!(NetworkFetcher::with_cookie("c").credential_kind(), ".ROBLOSECURITY cookie");
     }
 
     #[test]

@@ -52,6 +52,10 @@ pub struct StartupArgs {
 
     /// Open the first Space found inside a Universe directory
     pub universe_dir: Option<PathBuf>,
+
+    /// `eustress://edit/<id>`: download that gallery listing's world and
+    /// open a copy of it (see `crate::space::gallery_edit`).
+    pub gallery_edit: Option<String>,
 }
 
 impl StartupArgs {
@@ -112,6 +116,13 @@ impl StartupArgs {
                     print_help();
                     std::process::exit(0);
                 }
+                _ if arg.starts_with("eustress://edit/") => {
+                    // The gallery's Edit button on an open-source listing.
+                    match crate::space::gallery_edit::edit_target(arg) {
+                        Some(id) => result.gallery_edit = Some(id),
+                        None => eprintln!("Warning: not a simulation id: {}", arg),
+                    }
+                }
                 _ => {
                     // Check if it's a file path
                     if !arg.starts_with('-') {
@@ -134,6 +145,18 @@ impl StartupArgs {
         
         result
     }
+
+    /// The Space these arguments open: `--space`, `--open` or a `.eustress`
+    /// launch file (all resolved into `space_dir`), else the first Space of
+    /// `--universe`. `None` when they name no Space.
+    pub fn launch_space_root(&self) -> Option<PathBuf> {
+        if let Some(ref space_dir) = self.space_dir {
+            return Some(space_dir.clone());
+        }
+        self.universe_dir
+            .as_deref()
+            .and_then(crate::space::first_space_root_in_universe)
+    }
 }
 
 /// Check if a path is a supported scene file
@@ -149,7 +172,7 @@ fn is_scene_file(path: &PathBuf) -> bool {
 /// Print help message
 fn print_help() {
     println!(r#"
-Eustress Engine - Game Development Studio
+Eustress Engine: the AI-native orchestrator for live, physically consistent worlds
 
 USAGE:
     eustress-engine.exe [OPTIONS] [SCENE_FILE]
@@ -173,8 +196,8 @@ EXAMPLES:
     eustress-engine.exe my_game.eustress                      # Open a scene file
     eustress-engine.exe --play level1.eustress                # Open and immediately play
     eustress-engine.exe --register                            # Register .eustress extension
-    eustress-engine.exe --space "~/Documents/Eustress/ARC-AGI-3/spaces/Puzzle01"
-    eustress-engine.exe --universe "~/Documents/Eustress/ARC-AGI-3"
+    eustress-engine.exe --space "~/Documents/Eustress/Universe1/Spaces/Space1"
+    eustress-engine.exe --universe "~/Documents/Eustress/Universe1"
 
 FILE EXTENSIONS:
     .eustress   Eustress scene file (recommended)
@@ -679,21 +702,18 @@ impl Plugin for StartupPlugin {
             }
         }
         
-        // Override SpaceRoot from --space / --universe flags
-        if let Some(ref space_dir) = args.space_dir {
-            info!("📁 --space override: {:?}", space_dir);
-            app.insert_resource(crate::space::SpaceRoot(space_dir.clone()));
+        // Override SpaceRoot from --space / --open / --universe. The editor's
+        // main has already inserted the same root before building the core
+        // plugins (so plugins that load Space files in `build` read it); this
+        // keeps the override for any shell that has not.
+        if let Some(space) = args.launch_space_root() {
+            info!("📁 Launch Space: {:?}", space);
+            app.insert_resource(crate::space::SpaceRoot(space.clone()));
             // Keep the `space://` asset root in step with the override so the
             // first load resolves meshes against the right Space.
-            crate::space::space_asset_source::set_space_asset_root(space_dir.clone());
+            crate::space::space_asset_source::set_space_asset_root(space);
         } else if let Some(ref universe_dir) = args.universe_dir {
-            if let Some(space) = crate::space::first_space_root_in_universe(universe_dir) {
-                info!("📁 --universe override → space: {:?}", space);
-                app.insert_resource(crate::space::SpaceRoot(space.clone()));
-                crate::space::space_asset_source::set_space_asset_root(space);
-            } else {
-                warn!("--universe {:?}: no Space found inside", universe_dir);
-            }
+            warn!("--universe {:?}: no Space found inside", universe_dir);
         }
 
         // Add startup system to load scene if specified

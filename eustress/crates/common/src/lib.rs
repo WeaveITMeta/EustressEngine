@@ -63,10 +63,16 @@ pub mod sim_record;
 #[cfg(feature = "streaming")]
 pub mod sim_stream;
 pub mod classes;
+// The live instance tree scripts read and write during Play: one tree shared
+// by the Luau and Rune bindings and synced with the ECS each frame.
+pub mod datamodel;
 // The sealed avatar runtime — one character implementation shared by Studio
 // Play Mode and the Client. See `avatar::AvatarRuntimePlugin` for why this
 // replaces the convention-based `plugins::SharedCharacterPlugin`.
 pub mod avatar;
+// Animation built from instances (Animator, AnimationTrack, KeyframeSequence):
+// the pose evaluator both shells add, and the local character both share.
+pub mod animation;
 // Authoritative per-class TOML schema — embedded templates + self-heal +
 // extra-section claimants. Single source of truth shared between engine,
 // client, and external tooling.
@@ -92,6 +98,26 @@ pub mod pointcloud;
 pub mod project_manifest;
 /// Reading a Space's geometry — the Part subset both shells share.
 pub mod space_read;
+/// Drawing a replicated DataModel tree on a shell that runs no scripts.
+pub mod tree_apply;
+/// Reading a world's records (or a Space on disk) into that tree.
+pub mod tree_read;
+pub mod pose_migration;
+/// A Play session's tree, frame sets and draw markers, shared by both apps.
+pub mod play_session;
+/// What a drawn part carries: its mesh file and the part it stands for.
+pub mod part_draw;
+/// Whether a Space is still loading, for work that waits until it settles.
+pub mod space_load;
+/// Property changes as undoable commands, shared by the editor and Play.
+pub mod property_command;
+/// Running a replicated DataModel tree's LocalScripts on a Player.
+#[cfg(feature = "luau")]
+pub mod tree_scripts;
+/// This machine's input, camera and cursor into a Play tree, the same on
+/// both apps.
+#[cfg(feature = "luau")]
+pub mod machine_input;
 pub mod properties;
 pub mod scene;
 pub mod scene_ops;
@@ -128,15 +154,29 @@ pub mod streaming;
 // consolidation.
 //
 // In dev builds `CARGO_MANIFEST_DIR` resolves to the common crate's path on
-// disk. In deployed builds (no source tree present) callers should ship the
-// `common/assets/` directory next to the binary; we'll add an exe-relative
-// fallback when ship time arrives.
+// disk. An installed copy has no source tree: the installer puts this
+// directory beside the executable as `common/assets/`, and `assets_dir`
+// prefers that copy whenever it is there.
 
 /// Path to the `common/assets/` directory — the single source of truth for
 /// bundled engine templates (class schemas, service templates, service
-/// properties). Resolves from this crate's manifest dir at compile time.
+/// properties) and the shared material and character assets.
+///
+/// Prefers `<exe dir>/common/assets`, where the installer puts it, and falls
+/// back to this crate's source tree for `cargo run`. `CARGO_MANIFEST_DIR` is
+/// the BUILD machine's path, baked in at compile time, so on its own it only
+/// ever worked on the machine that compiled the binary. Requiring
+/// `class_schema` inside keeps a stray empty folder from winning. Decided
+/// once per process.
 pub fn assets_dir() -> std::path::PathBuf {
-    std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("assets")
+    static DIR: std::sync::LazyLock<std::path::PathBuf> = std::sync::LazyLock::new(|| {
+        std::env::current_exe()
+            .ok()
+            .and_then(|exe| exe.parent().map(|dir| dir.join("common").join("assets")))
+            .filter(|dir| dir.join("class_schema").is_dir())
+            .unwrap_or_else(|| std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("assets"))
+    });
+    DIR.clone()
 }
 
 /// `common/assets/class_schema/` — per-class default TOMLs.

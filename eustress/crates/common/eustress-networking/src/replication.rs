@@ -108,7 +108,7 @@ impl ReplicationFilter {
 /// Spatial hash grid for efficient AOI queries.
 #[derive(Resource, Debug, Default)]
 pub struct SpatialGrid {
-    /// Cell size in studs
+    /// Cell size in meters
     pub cell_size: f32,
     /// Map of cell coords -> entities
     pub cells: HashMap<IVec3, Vec<Entity>>,

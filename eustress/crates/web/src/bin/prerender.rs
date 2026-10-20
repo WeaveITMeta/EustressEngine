@@ -29,6 +29,12 @@
 // 4. Main
 // =============================================================================
 
+// The same limit as the library, for the same reason: `App().to_html()` is
+// instantiated here, so the layout of every page's nested view type is
+// computed in this crate, and the login page with the nav inside it runs past
+// the default depth of 128.
+#![recursion_limit = "512"]
+
 use std::{
     cell::RefCell,
     fs,

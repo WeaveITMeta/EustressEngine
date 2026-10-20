@@ -70,6 +70,7 @@ const SERVICE_FOLDERS: &[ServiceFolder] = &[
     ServiceFolder { name: "SoulService",             class: "SoulService",            icon: "soulservice",        description: "Soul and Rune scripts (.soul, .rune files)" },
     ServiceFolder { name: "MaterialService",         class: "MaterialService",        icon: "materialservice",    description: "PBR material definitions (.mat.toml files)" },
     ServiceFolder { name: "SoundService",            class: "SoundService",           icon: "soundservice",       description: "Audio - Sound effects and music" },
+    ServiceFolder { name: "PhysicsService",          class: "PhysicsService",         icon: "physicsservice",     description: "Solver settings and which physics domains step" },
     ServiceFolder { name: "AdornmentService",        class: "AdornmentService",       icon: "adornmentservice",   description: "Beams, billboards, particles, highlights" },
     ServiceFolder { name: "DataService",             class: "DataService",            icon: "dataservice",        description: "Data Platform - datasets, series, columns, and runs" },
     ServiceFolder { name: "Website",                 class: "Website",                 icon: "website",            description: "Values a website reads - References baked into a published manifest" },
@@ -246,7 +247,7 @@ pub fn scaffold_new_space(
     // Copy templates from assets/lighting_templates/ to Lighting/ folder.
     // Files use .instance.toml extension so FileType::from_path returns Toml
     // and the file loader spawns them as ECS entities with Instance components.
-    let lighting_template_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+    let lighting_template_dir = crate::resource_root()
         .join("assets")
         .join("lighting_templates");
 
@@ -280,7 +281,7 @@ pub fn scaffold_new_space(
 /// Copy engine default part GLBs (block, ball, wedge, etc.) into a target directory.
 /// Skips files that already exist so user modifications are preserved.
 pub fn copy_engine_default_parts(target_parts_dir: &Path) {
-    let engine_parts_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+    let engine_parts_dir = crate::resource_root()
         .join("assets")
         .join("parts");
 
@@ -487,13 +488,16 @@ pub fn save_space(world: &mut World) {
                 let is_custom_mesh = d.asset.as_ref()
                     .map(|a| crate::space::representation::mesh_requires_filesystem(&a.mesh))
                     .unwrap_or(false);
-                if is_custom_mesh {
-                    d.transform.position = live_transform.position;
-                    d.transform.rotation = live_transform.rotation;
-                    // d.transform.scale preserved from disk (user multiplier)
-                } else {
-                    d.transform = live_transform;
-                }
+                // The live pose and, for a primitive, its size, in the
+                // file's own unit (`set_authored_transform`): a Space imported
+                // in feet stays in feet. A custom mesh keeps its scale, the
+                // user's multiplier.
+                crate::space::instance_loader::set_authored_transform(
+                    &mut d,
+                    t.translation,
+                    t.rotation,
+                    (!is_custom_mesh).then_some(authoritative_size),
+                );
                 d.properties.color = live_color;
                 d.properties.transparency = base_part.transparency;
                 d.properties.anchored = base_part.anchored;
@@ -524,7 +528,6 @@ pub fn save_space(world: &mut World) {
                     .trim_start_matches("ClassName::")
                     .to_string();
                 InstanceDefinition {
-                    nuclear: None,
                     plasma: None,
                     asset: Some(AssetReference {
                         mesh,
@@ -801,6 +804,32 @@ pub fn open_space(world: &mut World, space_path: &Path) {
     {
         *residency = crate::space::residency::ResidencyState::default();
     }
+    // Release the outgoing Space's database at the same instant `SpaceRoot`
+    // moves (below), not a frame later when the open decision runs. Anything
+    // that pairs a DB reference with `SpaceRoot` in between would otherwise
+    // key the incoming Space's paths into the outgoing Space's store. The
+    // entities that belong to that store were despawned above, so nothing
+    // legitimate still needs it; `finish_pending_open` installs the new
+    // Space's handle, subscription, source and funnel together.
+    #[cfg(feature = "world-db")]
+    {
+        crate::space::active_db::clear();
+        if let Some(mut h) =
+            world.get_resource_mut::<crate::space::world_db_plugin::WorldDbHandle>()
+        {
+            h.0 = None;
+        }
+        if let Some(mut s) =
+            world.get_resource_mut::<crate::space::world_db_plugin::WorldDbSubscription>()
+        {
+            s.0 = None;
+        }
+        if let Some(mut src) =
+            world.get_resource_mut::<crate::space::space_source::ActiveSpaceSource>()
+        {
+            *src = crate::space::space_source::ActiveSpaceSource::disk(space_path.to_path_buf());
+        }
+    }
     // Phase 4: clear the non-gated streaming flag + the Explorer's DB-section
     // cache so the virtual "Database (streamed)" section never shows the
     // outgoing Space's classes/rows before the new boot-load re-decides. The
@@ -815,6 +844,11 @@ pub fn open_space(world: &mut World, space_path: &Path) {
         es.db_class_id_cache.clear();
         es.expanded_db_classes.clear();
         es.db_cache_valid = false;
+        // The filesystem side too: the Terrain folder and the dynamic
+        // services are read from the open Space, so rescan them for it.
+        es.cached_dynamic_services.clear();
+        es.explorer_fs_stale = true;
+        es.dirty = true;
     }
 
     // Bump the load generation and clear any in-flight deferred queue.
@@ -838,6 +872,9 @@ pub fn open_space(world: &mut World, space_path: &Path) {
     }
 
     world.insert_resource(crate::space::SpaceRoot(space_path.to_path_buf()));
+    // Gravity is live state that no Space saves: the new one starts at the
+    // default, not at whatever the outgoing Space was set to.
+    crate::plugins::physics_plugin::reset_gravity_for_new_space(world);
     // Stamp the swappable `space://` asset root IMMEDIATELY (not just via the
     // `Changed<SpaceRoot>` system next frame): the rescan triggered below can
     // begin issuing `space://` mesh loads within this same world-command, and
@@ -888,7 +925,11 @@ pub struct SpaceRescanNeeded(pub bool);
 /// re-running the file loader system logic directly.
 pub fn apply_space_rescan(
     mut rescan: ResMut<SpaceRescanNeeded>,
-    pending_open: Res<crate::space::world_db_plugin::PendingWorldDbOpen>,
+    // One tuple param: Bevy systems take at most 16.
+    (pending_open, db_decision): (
+        Res<crate::space::world_db_plugin::PendingWorldDbOpen>,
+        Res<crate::space::world_db_plugin::WorldDbDecision>,
+    ),
     mut commands: Commands,
     asset_server: Res<AssetServer>,
     mut meshes: ResMut<Assets<Mesh>>,
@@ -909,6 +950,17 @@ pub fn apply_space_rescan(
     // that ran before it settled would read the previous (or disk) source
     // and load the wrong tree. Leave the request armed; it fires the first
     // frame the open is settled.
+    //
+    // "No open pending" alone does not mean settled: on the frame of a
+    // switch, before `open_world_db_on_space_change` has run for the new
+    // Space, nothing is pending YET while `ActiveSpaceSource` still serves
+    // the previous Space's tree. A rescan in that gap loads the previous
+    // Space's instances and registers them under the new Space's paths,
+    // where the first edit persists them. So also require that the open
+    // decision has been made for THIS Space.
+    if db_decision.0.as_deref() != Some(space_root.0.as_path()) {
+        return;
+    }
     if pending_open.0.as_ref().map(|p| !p.installed()).unwrap_or(false) {
         return;
     }
@@ -1312,7 +1364,7 @@ pub fn ensure_space_integrity(space_root: &Path) {
             repaired += 1;
         }
 
-        let lighting_template_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        let lighting_template_dir = crate::resource_root()
             .join("assets")
             .join("lighting_templates");
 
@@ -1688,4 +1740,68 @@ pub fn sanitize_filename(name: &str) -> String {
         .collect::<String>()
         .trim()
         .to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Save Space over a Space mixing a part imported in feet with one in
+    /// metres: each file keeps its own unit, and each reads back where its
+    /// part is.
+    #[test]
+    fn save_space_writes_each_file_in_its_own_unit() {
+        use eustress_common::classes::{BasePart, ClassName, Instance};
+        let root = std::env::temp_dir().join(format!("eustress_save_space_units_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let put = |name: &str, text: &str| {
+            let dir = root.join("Workspace").join(name);
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join("_instance.toml"), text).unwrap();
+            dir.join("_instance.toml")
+        };
+        let feet = put(
+            "Feet",
+            "[metadata]\nclass_name = \"Part\"\nunit = \"ft\"\n\n[transform]\nposition = [10.0, 0.0, 0.0]\nrotation = [0.0, 0.0, 0.0, 1.0]\nscale = [4.0, 1.0, 2.0]\n",
+        );
+        let metres = put(
+            "Metres",
+            "[metadata]\nclass_name = \"Part\"\n\n[transform]\nposition = [1.0, 0.0, 0.0]\nrotation = [0.0, 0.0, 0.0, 1.0]\nscale = [1.0, 1.0, 1.0]\n",
+        );
+        let mut world = World::new();
+        world.insert_resource(crate::space::SpaceRoot(root.clone()));
+        let spawn = |world: &mut World, name: &str, path: &std::path::Path, at: Vec3, size: Vec3| {
+            world.spawn((
+                Instance { name: name.to_string(), class_name: ClassName::Part, ..Default::default() },
+                BasePart { size, ..Default::default() },
+                Transform::from_translation(at),
+                crate::space::instance_loader::InstanceFile {
+                    toml_path: path.to_path_buf(),
+                    mesh_path: std::path::PathBuf::new(),
+                    name: name.to_string(),
+                },
+            ));
+        };
+        // Each moved 1 m along +X from where its file put it.
+        spawn(&mut world, "Feet", &feet, Vec3::new(3.048 + 1.0, 0.0, 0.0), Vec3::new(1.2192, 0.3048, 0.6096));
+        spawn(&mut world, "Metres", &metres, Vec3::new(2.0, 0.0, 0.0), Vec3::ONE);
+        save_space(&mut world);
+
+        let read = |path: &std::path::Path| -> toml::Value { std::fs::read_to_string(path).unwrap().parse().unwrap() };
+        let nums = |doc: &toml::Value, k: &str| -> Vec<f64> {
+            doc["transform"][k].as_array().unwrap().iter().map(|v| v.as_float().unwrap()).collect()
+        };
+        let f = read(&feet);
+        assert_eq!(f["metadata"]["unit"].as_str(), Some("ft"));
+        #[cfg(feature = "units_v1")]
+        {
+            assert!((nums(&f, "position")[0] - 4.048 / 0.3048).abs() < 1e-3, "{:?}", nums(&f, "position"));
+            let s = nums(&f, "scale");
+            assert!((s[0] - 4.0).abs() < 1e-3 && (s[1] - 1.0).abs() < 1e-3 && (s[2] - 2.0).abs() < 1e-3, "{s:?}");
+        }
+        let m = read(&metres);
+        assert!((nums(&m, "position")[0] - 2.0).abs() < 1e-5, "{:?}", nums(&m, "position"));
+        assert!((nums(&m, "scale")[0] - 1.0).abs() < 1e-5);
+        let _ = std::fs::remove_dir_all(&root);
+    }
 }

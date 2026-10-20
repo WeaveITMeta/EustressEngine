@@ -42,7 +42,7 @@ pub enum GoalStatus {
 ///
 /// A goal can have sub-goals (AND semantics: all must reach Achieved before
 /// the parent can complete). Partial completion is tracked as a float so
-/// graded tasks like ARC scoring produce meaningful salience signals
+/// graded tasks produce meaningful salience signals
 /// throughout the episode, not just at the end.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GoalNode {
@@ -59,9 +59,9 @@ pub struct GoalNode {
     pub salience_weight: f32,
     /// Current status.
     pub status: GoalStatus,
-    /// Final score if this node was closed (from ARC scorecard etc.).
+    /// Final score if this node was closed (from the task's scorer).
     pub final_score: Option<f32>,
-    /// ARC task identifier if this goal is episode-scoped.
+    /// Task identifier if this goal is episode-scoped.
     pub task_id: Option<String>,
 }
 
@@ -92,7 +92,7 @@ impl GoalNode {
         self
     }
 
-    /// Attach an ARC task id (builder pattern).
+    /// Attach a task id (builder pattern).
     pub fn for_task(mut self, task_id: impl Into<String>) -> Self {
         self.task_id = Some(task_id.into());
         self
@@ -143,11 +143,11 @@ impl GoalTree {
         self.nodes.get_mut(&id)
     }
 
-    /// Begin an episode: create and activate a root goal for the given ARC task.
+    /// Begin an episode: create and activate a root goal for the given task.
     /// Returns the new goal's ID.
     pub fn begin_episode(&mut self, task_id: &str, max_steps: u32) -> u128 {
         let mut root =
-            GoalNode::new(format!("Solve ARC task '{task_id}' in ≤{max_steps} steps"));
+            GoalNode::new(format!("Solve task '{task_id}' in ≤{max_steps} steps"));
         root.status = GoalStatus::Active;
         root.task_id = Some(task_id.to_string());
         let id = root.id;

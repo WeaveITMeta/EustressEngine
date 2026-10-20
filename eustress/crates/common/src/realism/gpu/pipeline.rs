@@ -16,8 +16,6 @@ pub struct SphGpuConfig {
     pub gas_constant: f32,
     /// Viscosity
     pub viscosity: f32,
-    /// Gravity
-    pub gravity: Vec3,
     /// Simulation bounds min
     pub bounds_min: Vec3,
     /// Simulation bounds max
@@ -39,7 +37,6 @@ impl Default for SphGpuConfig {
             rest_density: 1000.0,
             gas_constant: 2000.0,
             viscosity: 0.001,
-            gravity: Vec3::new(0.0, -9.81, 0.0),
             bounds_min: Vec3::new(-5.0, 0.0, -5.0),
             bounds_max: Vec3::new(5.0, 10.0, 5.0),
             boundary_damping: 0.3,
@@ -73,6 +70,8 @@ pub struct SphParams {
     pub viscosity: f32,
     pub dt: f32,
     pub particle_count: u32,
+    /// The Workspace gravity at dispatch (`services::workspace::live_gravity`),
+    /// so GPU fluid falls with everything else; there is no separate GPU value.
     pub gravity: [f32; 3],
     pub _padding: f32,
 }

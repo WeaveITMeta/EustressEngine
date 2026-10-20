@@ -9,6 +9,7 @@
 
 - **P3 (2026-05-14):** New doc; 12 features.
 - **P4 (2026-05-14):** State correction from secondary critique: Symbolica is **partially wired** — `use symbolica::atom::Atom` in `causal.rs` + feature flag in `ARCHITECTURE.md`. Feature 10 state 🔴 → **🟡** (scaffold exists; full solver impl pending). V-Cell `Nernst + Butler-Volmer` are **lumped 0-D models** (no spatial electrochemistry / ion transport) — validation gap vs. real cells now flagged. Particle ECS `ElectrochemicalState` + `ThermodynamicState` are **decoupled** (no thermal-effect-on-reaction-rate coupling). Fracture mechanics `fracture_mesh.rs` exists but **no integration path to Avian** — visualisation only today.
+- **P5 (2026-09-22):** Feature 6 🟠 → **✅**. SPH runs on the CPU as part of the `ParticleSimulation` class ([PARTICLE_SIMULATION.md](../architecture/PARTICLE_SIMULATION.md)), together with charged particles (Boris push), particle-in-cell electrostatics and Drude conduction, each tested against an analytic result. The per-entity SPH systems in `fluids/sph.rs` apply gravity once and convert force densities to forces. GPU compute is still a placeholder.
 
 ---
 
@@ -41,10 +42,11 @@ This subsystem is what makes Eustress an *engineering* engine — battery cells,
 - Particle ECS (`ElectrochemicalState`, `ThermodynamicState`)
 - V-Cell electrochemistry tick system
 - Basic material properties (density, Young's modulus, yield stress)
+- Particle simulations (`ParticleSimulation` class): incompressible (DFSPH) or weakly compressible SPH fluids with Akinci boundaries and two-way part coupling, charged particles in E and B fields, direct and particle-in-cell electrostatics, Drude conduction with Joule heating; they run only while the world does and within a per-frame solver budget
 
 **Stubbed / missing:**
 - Symbolica integration (concept only; no crate dependency wired)
-- SPH GPU compute (buffers ready, no compute pass)
+- SPH GPU compute (buffers ready, no compute pass; the CPU solver serves the class)
 - Fracture mechanics (Griffith, Paris) — design only
 - Quantum statistics (Bose-Einstein, Fermi-Dirac) — out of scope today
 - AI prompt grounding via KernelLawRegistry (07 Feature 11)
@@ -60,7 +62,7 @@ This subsystem is what makes Eustress an *engineering* engine — battery cells,
 | 3 | Thermal conduction + diffusion | 🟡 |
 | 4 | Material properties (density, modulus, yield) | ✅ |
 | 5 | V-Cell electrochemistry (Nernst, Butler-Volmer) | ✅ |
-| 6 | SPH fluid dynamics (GPU compute) | 🟠 |
+| 6 | SPH fluid dynamics (CPU; GPU compute placeholder) | ✅ |
 | 7 | Stress / strain tensor field | 🟠 |
 | 8 | Fracture mechanics (Griffith, Paris) | 🔴 |
 | 9 | Buoyancy + aerodynamic drag | 🟡 |
@@ -121,8 +123,10 @@ This subsystem is what makes Eustress an *engineering* engine — battery cells,
 
 ### Feature 6 — SPH fluid dynamics (GPU compute)
 
-**State:** 🟠 · **Effort:** L · **Risk:** Med · **Touches:** [11_SIMULATION], [13_TERRAIN], [19]
-**Sub-features:** SPH particle ECS · WGPU compute kernels (density / pressure / viscosity) · spatial hashing on GPU · Tait equation of state · free-surface tracking
+**State:** ✅ (CPU) · **Effort:** L · **Risk:** Med · **Touches:** [11_SIMULATION], [13_TERRAIN], [19]
+**Sub-features:** SPH particle state · density / pressure / viscosity kernels · uniform-grid neighbour search · Tait equation of state · boundary particles for walls and parts · free-surface tracking
+
+**Implementation.** `realism::particle_sim` (the `ParticleSimulation` class): structure-of-arrays state stepped with rayon, DFSPH pressure (divergence-free and constant-density solves, warm-started) or explicit WCSPH, adaptive substeps from the flow CFL, force and viscous limits, Akinci boundary particles, relaxation of fresh fluid to rest density, two-way coupling to Avian bodies, instanced sphere-impostor rendering, real-time stepping within `FrameBudget`. Verified by `water_column_settles_hydrostatically` (both solvers), `dfsph_dam_break_stays_incompressible` and `obstacle_supports_fluid_and_reports_impulse`. The WGPU path in `realism::gpu` is not used.
 
 **Concept.** Smoothed Particle Hydrodynamics — water as particles, not mesh. GPU compute does per-particle density + pressure + viscosity. Free surface tracked via density gradient. Rendering as point sprites or marching cubes.
 
@@ -203,10 +207,10 @@ This subsystem is what makes Eustress an *engineering* engine — battery cells,
 ## Wiring / import gaps (top 8)
 
 1. Symbolica crate dependency (or HTTP service wrapper)
-2. SPH compute shader pass + spatial-hash kernel
+2. SPH compute shader pass + spatial-hash kernel (a GPU path past ~100k particles; the CPU solver covers smaller runs)
 3. Fracture mechanics (Griffith + Paris)
 4. AI prompt-grounding bridge (Workshop ↔ KernelLawRegistry)
-5. CPU fallback for SPH on mobile / no-GPU systems
+5. Particle simulations in the Player (the client loads only Part instances today)
 6. Stress / strain tensor visualisation overlay
 7. Per-material physics-property TOML extension ([04_ASSETS] tie-in)
 8. Quantum statistics module (out of P3, P4+ scope)

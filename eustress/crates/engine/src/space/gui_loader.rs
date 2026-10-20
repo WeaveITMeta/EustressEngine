@@ -351,7 +351,11 @@ fn default_viewport_light_color() -> [f32; 4] { [1.0, 1.0, 1.0, 1.0] }
 /// uses the weight to pick the right variant when multiple are registered.
 pub fn font_weight_from_name(name: &str) -> i32 {
     let lower = name.to_lowercase();
-    if lower.contains("bold") { 700 }
+    // Black / Heavy faces, and the single-weight display faces (Fredoka One,
+    // Luckiest Guy, Bangers) are heavy type: bold is the nearest the
+    // overlay's default font can draw.
+    let heavy = ["bold", "black", "heavy", "fredoka", "luckiest", "bangers"];
+    if heavy.iter().any(|w| lower.contains(w)) { 700 }
     else if lower.contains("light") || lower.contains("thin") { 300 }
     else { 400 }
 }
@@ -789,6 +793,49 @@ pub fn gui_display_name(path: &Path) -> String {
         .to_string()
 }
 
+/// Convert a BillboardGui's 3D length fields from the file's authored unit to
+/// engine-native meters (when `units_v1` is on): the stud offsets and the
+/// distance limits (`max_distance`, `distance_lower_limit`,
+/// `distance_upper_limit`, `distance_step`). Pixel-space UDim2 fields
+/// (`position`, `size`, `anchor_point`, `size_offset`) are 2D canvas
+/// coordinates and are not converted; `extents_offset` /
+/// `extents_offset_world_space` are part-size multipliers (a ratio, not a
+/// length) and are not converted either.
+///
+/// Every path that turns a BillboardGui definition into a marker calls this:
+/// [`spawn_gui_element`], the folder-form spawn in `file_loader`, and the
+/// hot-create in `file_watcher`. A Space imported from Roblox is authored in
+/// feet, so a path that skipped it revealed each label 3.28 times farther
+/// than authored.
+pub fn billboard_lengths_to_native(g: &mut GuiTomlProperties, authored_unit: Option<&str>) {
+    #[cfg(feature = "units_v1")]
+    {
+        let from = authored_unit
+            .and_then(eustress_common::units::Unit::from_symbol)
+            .unwrap_or(eustress_common::units::ENGINE_NATIVE_UNIT);
+        let to = eustress_common::units::ENGINE_NATIVE_UNIT;
+        if from == to {
+            return;
+        }
+        if let Some(v) = g.units_offset {
+            g.units_offset = Some(eustress_common::units::convert_vec3_f32(v, from, to));
+        }
+        if let Some(v) = g.units_offset_world_space {
+            g.units_offset_world_space = Some(eustress_common::units::convert_vec3_f32(v, from, to));
+        }
+        for f in [&mut g.max_distance, &mut g.distance_lower_limit,
+                  &mut g.distance_upper_limit, &mut g.distance_step] {
+            if let Some(v) = *f {
+                *f = Some(eustress_common::units::convert_f32(v, from, to));
+            }
+        }
+    }
+    #[cfg(not(feature = "units_v1"))]
+    {
+        let _ = (g, authored_unit);
+    }
+}
+
 // ============================================================================
 // 3. spawn_gui_element — create Bevy UI entity with rendering components
 // ============================================================================
@@ -809,40 +856,16 @@ pub fn spawn_gui_element(
         gui_display_name(path)
     };
 
-    // Parse the authored unit now so it can drive both the
-    // Stage 3 dimensional conversion below (when `units_v1` is on)
-    // AND the MeasureUnit component attached after spawn.
+    // Parse the authored unit now so it can drive the MeasureUnit
+    // component attached after spawn.
     let parsed_unit = gui_def.metadata.unit.as_deref()
         .and_then(eustress_common::units::Unit::from_symbol)
         .unwrap_or(eustress_common::units::ENGINE_NATIVE_UNIT);
 
-    // Stage 3: convert BillboardGui's 3D dimensional fields from the
-    // authored unit to meters. Pixel-space UDim2 fields (`position`,
-    // `size`, `anchor_point`, `size_offset`) are 2D canvas coordinates
-    // and are intentionally NOT converted. `extents_offset` /
-    // `extents_offset_world_space` are in part-size multipliers (ratio,
-    // not length) so they're also skipped.
     let gui_owned: GuiTomlProperties = {
         let mut g = gui_def.gui.clone();
         g.size = g.resolved_size();
-        #[cfg(feature = "units_v1")]
-        {
-            let to_unit = eustress_common::units::ENGINE_NATIVE_UNIT;
-            if parsed_unit != to_unit {
-                if let Some(v) = g.units_offset {
-                    g.units_offset = Some(eustress_common::units::convert_vec3_f32(v, parsed_unit, to_unit));
-                }
-                if let Some(v) = g.units_offset_world_space {
-                    g.units_offset_world_space = Some(eustress_common::units::convert_vec3_f32(v, parsed_unit, to_unit));
-                }
-                for f in [&mut g.max_distance, &mut g.distance_lower_limit,
-                          &mut g.distance_upper_limit, &mut g.distance_step] {
-                    if let Some(v) = *f {
-                        *f = Some(eustress_common::units::convert_f32(v, parsed_unit, to_unit));
-                    }
-                }
-            }
-        }
+        billboard_lengths_to_native(&mut g, gui_def.metadata.unit.as_deref());
         g
     };
     let gui = &gui_owned;
@@ -875,7 +898,7 @@ pub fn spawn_gui_element(
     };
 
     let entity = match gui_type {
-        "ScreenGui" => spawn_screen_gui_element(commands, instance, loaded_from, &display_name),
+        "ScreenGui" => spawn_screen_gui_element(commands, instance, loaded_from, &display_name, gui.visible),
         "TextLabel" => spawn_text_label_element(commands, instance, loaded_from, &display_name, gui, gui_def.text.as_ref()),
         "TextButton" => spawn_text_button_element(commands, instance, loaded_from, &display_name, gui, gui_def.text.as_ref()),
         "Frame" => spawn_frame_element(commands, instance, loaded_from, &display_name, gui),
@@ -971,9 +994,7 @@ pub fn spawn_gui_element(
 ///
 /// This is the same defect (and the same fix) already applied to
 /// `spawn_text_label_element` — see its doc comment: a stray `Node` "confused
-/// Bevy's UI layout when the parent was a 3D BillboardGui". It also mirrors
-/// the service gate `runtime_ui::spawn_bevy_gui_from_loaded_entities` applies
-/// to GUI *leaf* elements; gating the ROOT here is what that gate was missing.
+/// Bevy's UI layout when the parent was a 3D BillboardGui".
 ///
 /// Non-overlay ScreenGuis still spawn as real entities (Explorer, Properties,
 /// scripts and `Clone()` all see them) — they just don't get a UI root.
@@ -982,6 +1003,7 @@ fn spawn_screen_gui_element(
     instance: eustress_common::classes::Instance,
     loaded_from: super::file_loader::LoadedFromFile,
     display_name: &str,
+    visible: bool,
 ) -> Entity {
     // Read the service before `loaded_from` moves into the spawn bundle.
     let is_screen_overlay = loaded_from.service == "StarterGui";
@@ -1005,6 +1027,29 @@ fn spawn_screen_gui_element(
             BackgroundColor(Color::NONE),
         ));
     }
+    // The overlay draws a GUI element only under an entity carrying a
+    // "screengui" GuiElementDisplay, and hides the subtree when it is not
+    // visible (Enabled = false). The cold-load path attaches this in
+    // file_loader.rs; without it here, a ScreenGui made by Insert, the file
+    // watcher or the UI Builder painted nothing until the Space reopened.
+    ec.insert(GuiElementDisplay {
+        x: 0.0, y: 0.0, width: 0.0, height: 0.0,
+        position_udim2: [0.0; 4], size_udim2: [0.0; 4],
+        anchor_point: [0.0, 0.0],
+        z_order: 0, visible, clip_children: false,
+        scroll_x: 0.0, scroll_y: 0.0,
+        bg_color: [0.0; 4], border_size: 0.0, border_color: [0.0; 4],
+        corner_radius: 0.0,
+        text: String::new(), text_color: [1.0; 4],
+        font: String::new(),
+        font_size: 14.0, font_weight: 400,
+        text_align: "Center".to_string(), text_y_align: "Center".to_string(),
+        text_stroke_color: [0.0, 0.0, 0.0, 0.0],
+        text_scaled: false,
+        image_path: String::new(),
+        class_type: "screengui".to_string(),
+        mouse_filter: "ignore".to_string(),
+    });
     ec.id()
 }
 
@@ -1148,8 +1193,7 @@ fn spawn_frame_element(
         // ui_layout_system / update_clipping / ui_stack EVERY frame even at
         // Display::None (bevy_ui 0.18 only skips taffy compute, not the
         // per-entity sync + recursion) — ~8K imported GUI elements cost
-        // ~9 ms/frame in the editor. runtime_ui attaches a real Node lazily
-        // when ShowDevelopmentUI renders ScreenGui elements through bevy_ui.
+        // ~9 ms/frame in the editor.
         gui_display_from_props(gui, None, "Frame"),
     )).id();
     commands.entity(entity).insert(loaded_from);
@@ -1335,10 +1379,9 @@ fn spawn_image_element(
 ///      `[text]` and `[gui]` TOML sections so Properties panel and
 ///      anything that queries by class component see real data.
 ///   2. Drop the `Node` entirely — the billboard renderer reads
-///      `GuiElementDisplay` directly. ScreenGui-parented TextLabels
-///      get their Bevy UI Node added later by the runtime UI system
-///      (`runtime_ui::sync_screen_gui_layout`), so a hardcoded Node
-///      here just stomps on that.
+///      `GuiElementDisplay` directly, and ScreenGui-parented TextLabels
+///      render through the Slint overlay from the same component, so
+///      neither needs a Bevy UI Node.
 fn spawn_text_label_element(
     commands: &mut Commands,
     instance: eustress_common::classes::Instance,

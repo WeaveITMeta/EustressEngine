@@ -89,6 +89,14 @@ pub struct FractureCooldown(pub f32);
 #[derive(Component, Clone, Copy, Debug)]
 pub struct FracturedOriginal;
 
+/// Marks a joint that fracture switched off because one of its bodies broke.
+///
+/// Without this, a welded structure never loses a member: the hidden original
+/// keeps its body and its welds, so an invisible part goes on holding the
+/// neighbours up while its fragments fall away. Re-enabled on play-stop.
+#[derive(Component, Clone, Copy, Debug)]
+pub struct JointReleasedByFracture;
+
 /// Marks a piece this module spawned, so it can be cleaned up on Stop.
 ///
 /// Fragments also carry [`SpawnedDuringPlayMode`], and the engine's
@@ -180,6 +188,7 @@ pub fn apply_fracture(
         Option<&AvAngularVelocity>,
     )>,
     mut meshes: ResMut<Assets<Mesh>>,
+    joint_graph: Option<Res<avian3d::dynamics::solver::joint_graph::JointGraph>>,
 ) {
     let mut budget = MAX_FRACTURES_PER_FRAME;
 
@@ -362,9 +371,25 @@ pub fn apply_fracture(
 
         // Neutralise the original WITHOUT destroying it — it is authored data
         // and must survive to Stop.
-        commands
-            .entity(ev.entity)
-            .insert((Visibility::Hidden, ColliderDisabled, FracturedOriginal));
+        commands.entity(ev.entity).insert((
+            Visibility::Hidden,
+            ColliderDisabled,
+            RigidBodyDisabled,
+            FracturedOriginal,
+        ));
+
+        // The part is gone from the structure, so are its joints: release
+        // every joint on its body, or the hidden original goes on holding the
+        // neighbours it was welded to.
+        let released: Vec<Entity> = joint_graph
+            .as_ref()
+            .map(|graph| graph.joints_of(ev.entity).map(|edge| edge.entity).collect())
+            .unwrap_or_default();
+        for joint in released {
+            if let Ok(mut ec) = commands.get_entity(joint) {
+                ec.insert((JointDisabled, JointReleasedByFracture));
+            }
+        }
 
         budget -= 1;
         info!(
@@ -385,6 +410,7 @@ pub fn restore_fractured_originals(
     mut commands: Commands,
     query: Query<Entity, With<FracturedOriginal>>,
     fragments: Query<Entity, With<FractureFragment>>,
+    released_joints: Query<Entity, With<JointReleasedByFracture>>,
 ) {
     let mut restored = 0usize;
     for entity in query.iter() {
@@ -392,8 +418,18 @@ pub fn restore_fractured_originals(
             .entity(entity)
             .insert(Visibility::Inherited)
             .remove::<ColliderDisabled>()
+            .remove::<RigidBodyDisabled>()
             .remove::<FracturedOriginal>();
         restored += 1;
+    }
+
+    // Joints fracture switched off come back with their parts. Only the ones
+    // it marked: a joint authored `enabled = false` keeps its JointDisabled.
+    for joint in released_joints.iter() {
+        commands
+            .entity(joint)
+            .remove::<JointDisabled>()
+            .remove::<JointReleasedByFracture>();
     }
 
     // Despawn our own fragments rather than trusting the engine's

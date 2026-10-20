@@ -3,7 +3,7 @@
 // Search and replace in scene
 // ============================================================================
 
-import { VerticalBox, HorizontalBox, LineEdit, CheckBox, Button } from "std-widgets.slint";
+import { VerticalBox, HorizontalBox, LineEdit, CheckBox, Button, ScrollView } from "std-widgets.slint";
 import { Theme } from "theme.slint";
 
 // Search result data
@@ -102,7 +102,9 @@ export component FindDialog inherits Rectangle {
                     
                     LineEdit {
                         text <=> root.search-text;
-                        // placeholder-text: "Search...";
+                        placeholder-text: "Find by name";
+                        edited(t) => { root.on-search(); }
+                        accepted(t) => { root.on-find-next(); }
                     }
                 }
                 
@@ -157,7 +159,8 @@ export component FindDialog inherits Rectangle {
                     
                     LineEdit {
                         text <=> root.replace-text;
-                        // placeholder-text: "Replace with...";
+                        placeholder-text: "Replace with";
+                        accepted(t) => { root.on-replace(); }
                     }
                 }
                 
@@ -207,16 +210,19 @@ export component FindDialog inherits Rectangle {
                 CheckBox {
                     text: "Aa";
                     checked <=> root.case-sensitive;
+                    toggled => { root.on-search(); }
                 }
-                
+
                 CheckBox {
                     text: "Word";
                     checked <=> root.whole-word;
+                    toggled => { root.on-search(); }
                 }
-                
+
                 CheckBox {
                     text: ".*";
                     checked <=> root.use-regex;
+                    toggled => { root.on-search(); }
                 }
                 
                 Rectangle { horizontal-stretch: 1; }
@@ -231,42 +237,47 @@ export component FindDialog inherits Rectangle {
                 }
             }
             
-            // Results list
+            // Results list (scrolls past about five rows)
             if root.results.length > 0: Rectangle {
                 vertical-stretch: 1;
                 background: Theme.background-secondary;
                 border-radius: 4px;
-                
-                VerticalBox {
-                    padding: 4px;
-                    spacing: 2px;
-                    
-                    for result[idx] in root.results: Rectangle {
-                        height: 32px;
-                        background: idx == root.current-result ? Theme.selection-background :
-                                    result-touch.has-hover ? Theme.explorer-item-hover : transparent;
-                        border-radius: 4px;
-                        
-                        result-touch := TouchArea {
-                            clicked => { root.on-select-result(result.entity-id); }
-                        }
-                        
-                        HorizontalBox {
-                            padding: 8px;
-                            spacing: 8px;
-                            
-                            Text {
-                                text: result.name;
-                                color: Theme.text-primary;
-                                vertical-alignment: center;
+
+                ScrollView {
+                    VerticalLayout {
+                        padding: 4px;
+                        spacing: 2px;
+
+                        for result[idx] in root.results: Rectangle {
+                            height: 32px;
+                            background: idx == root.current-result ? Theme.selection-background :
+                                        result-touch.has-hover ? Theme.explorer-item-hover : transparent;
+                            border-radius: 4px;
+
+                            result-touch := TouchArea {
+                                // The row index: the host keeps the matches in list order.
+                                clicked => { root.on-select-result(idx); }
                             }
-                            
-                            Text {
-                                horizontal-stretch: 1;
-                                text: result.class-name;
-                                color: Theme.text-secondary;
-                                font-size: 11px;
-                                vertical-alignment: center;
+
+                            HorizontalLayout {
+                                padding-left: 8px;
+                                padding-right: 8px;
+                                spacing: 8px;
+
+                                Text {
+                                    text: result.name;
+                                    color: Theme.text-primary;
+                                    vertical-alignment: center;
+                                }
+
+                                Text {
+                                    horizontal-stretch: 1;
+                                    text: result.path != "" ? result.class-name + " in " + result.path : result.class-name;
+                                    color: Theme.text-secondary;
+                                    font-size: 11px;
+                                    vertical-alignment: center;
+                                    overflow: elide;
+                                }
                             }
                         }
                     }

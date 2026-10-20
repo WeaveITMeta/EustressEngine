@@ -49,7 +49,11 @@ impl TabRegistry {
     
     pub fn add_button(&mut self, tab_id: &str, section_name: &str, button: TabButton) {
         if let Some(tab) = self.tabs.iter_mut().find(|t| t.id == tab_id) {
-            if let Some(section) = tab.sections.iter_mut().find(|s| s.name == section_name) {
+            // By id, as a plugin registered it, or by name. Native plugins
+            // get `name = label` from `sync_plugin_tabs`, so matching the name
+            // alone never attached a native plugin's buttons ("road" vs
+            // "Road Builder") and its empty section was then filtered out.
+            if let Some(section) = tab.sections.iter_mut().find(|s| s.id == section_name || s.name == section_name) {
                 section.buttons.push(button);
             }
         }

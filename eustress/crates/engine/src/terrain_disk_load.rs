@@ -6,7 +6,8 @@
 //! inert until the user re-imported. This module mirrors
 //! [`crate::terrain_voxel_load`] one-for-one — once-per-Space latch keyed on
 //! the Space path, gated behind `LoadInProgress`, reset on Space switch —
-//! but reads the legacy/disk R16 + toml format instead of Fjall voxels.
+//! but reads the legacy/disk R16 + toml format instead of Fjall voxels, plus
+//! the volumetric edits in `volume/*.vbk`.
 //!
 //! ## Guards (do-not-fight rules)
 //!
@@ -24,11 +25,15 @@
 //! — no new render wiring.
 
 use bevy::prelude::*;
-use std::path::Path;
 
-use eustress_common::terrain::{
-    spawn_terrain, toml_loader, TerrainConfig, TerrainData, TerrainRoot,
-};
+use eustress_common::terrain::{reload_terrain_material_slots, TerrainMaterialSource, TerrainRoot};
+
+/// The reader every disk terrain in the engine hydrates through: the
+/// Space-open auto-loader below, the worldgen, flat-plate and
+/// heightmap-import systems (`ui/spawn_events.rs`) and the class-sync guard
+/// (`terrain_plugin.rs`). It lives in `eustress-common` so the Player reads a
+/// Space's terrain the same way.
+pub use eustress_common::terrain::disk::{hydrate_terrain_from_disk, HydratedTerrain};
 
 use crate::space::file_loader::LoadInProgress;
 use crate::space::space_ops::space_is_migrated;
@@ -40,32 +45,10 @@ use crate::space::SpaceRoot;
 #[derive(Resource, Default)]
 pub struct TerrainDiskLoadLatch(pub Option<std::path::PathBuf>);
 
-/// Marker on the `TerrainRoot` this loader spawns, so a Space switch can
-/// despawn exactly the disk-sourced terrain (and not a procedural one).
+/// Marker on a `TerrainRoot` hydrated from a Space's `Workspace/Terrain`,
+/// by this loader, the Terrain class sync or a panel import.
 #[derive(Component, Debug, Default)]
 pub struct DiskSourcedTerrain;
-
-/// Hydrate `(TerrainConfig, TerrainData)` from a `Workspace/Terrain/`
-/// directory — the exact recipe from `worldgen/export.rs` (INTEGRATOR NOTE):
-/// `_terrain.toml` → `to_terrain_config()` → `resize_cache` →
-/// `load_chunks_from_disk` (SIGNED centered `[-N, +N]` chunk coords — never
-/// the importer's unsigned math). Shared by the Space-open auto-loader, the
-/// worldgen poll system (`ui/spawn_events.rs`), and the class-sync guard
-/// (`terrain_plugin.rs`).
-///
-/// Returns `Err` when `_terrain.toml` is missing/unparseable; a toml with
-/// zero readable chunks still returns `Ok` (flat terrain — the config is
-/// valid, chunks may stream in later or simply not exist yet).
-pub fn hydrate_terrain_from_disk(
-    terrain_dir: &Path,
-) -> Result<(TerrainConfig, TerrainData, usize), String> {
-    let toml = toml_loader::load_terrain_toml(&terrain_dir.join("_terrain.toml"))?;
-    let config = toml.to_terrain_config();
-    let mut data = TerrainData::procedural();
-    data.resize_cache(&config);
-    let loaded = toml_loader::load_chunks_from_disk(terrain_dir, &config, &mut data);
-    Ok((config, data, loaded.len()))
-}
 
 /// Boot-load a legacy/disk Space's `Workspace/Terrain/` (R16 + toml) into the
 /// runtime heightfield, once per Space. See the module docs for the guards.
@@ -112,15 +95,18 @@ fn load_disk_terrain_on_space_open(
     }
 
     match hydrate_terrain_from_disk(&terrain_dir) {
-        Ok((config, data, chunk_files)) => {
-            let entity = spawn_terrain(&mut commands, &mut meshes, &mut materials, config, data);
+        Ok(terrain) => {
+            let chunk_files = terrain.chunk_files;
+            let volume_bricks = terrain.volume.brick_count();
+            let entity = terrain.spawn(&mut commands, &mut meshes, &mut materials);
             commands.entity(entity).insert(DiskSourcedTerrain);
             info!(
                 target: "eustress_engine::terrain_disk",
                 chunk_files,
+                volume_bricks,
                 space = %space_root.0.display(),
                 "disk-terrain load: TerrainRoot spawned from Workspace/Terrain \
-                 (R16 + toml); chunk_spawn_system will mesh it"
+                 (R16 + toml + volume bricks); chunk_spawn_system will mesh it"
             );
         }
         Err(e) => {
@@ -135,23 +121,56 @@ fn load_disk_terrain_on_space_open(
 }
 
 /// Reset the load latch on a Space switch so the next Space reloads its disk
-/// terrain, and despawn the previous Space's disk-sourced terrain so it never
-/// bleeds into the new Space. Mirrors `terrain_voxel_load`.
+/// terrain, and clear every terrain root of the previous Space (hydrated
+/// from disk, procedural, generated from the panel or loaded from voxels) so
+/// none bleeds into the new Space: GATE 3 above needs a clean slate, and
+/// Save and autosave would otherwise write the old terrain into the new
+/// Space's `Workspace/Terrain`. The new Space's class sync or voxel loader
+/// spawns its own root afterwards.
 fn reset_latch_on_space_switch(
     mut commands: Commands,
     space_root: Res<SpaceRoot>,
     mut latch: ResMut<TerrainDiskLoadLatch>,
-    disk_terrain: Query<Entity, (With<TerrainRoot>, With<DiskSourcedTerrain>)>,
+    all_terrain: Query<(Entity, Ref<TerrainRoot>)>,
+    studio: Option<ResMut<crate::ui::StudioState>>,
 ) {
     if space_root.is_changed() && latch.0.as_deref() != Some(space_root.0.as_path()) {
-        // A different Space is now active — re-arm, and clear the stale
-        // disk-sourced terrain so GATE 3 above sees a clean slate.
+        // A different Space is now active: re-arm, and clear the stale
+        // terrain. A root added since this system last ran already belongs
+        // to the new Space (its class sync can land in the switch frame).
         if latch.0.is_some() {
-            for e in disk_terrain.iter() {
-                commands.entity(e).despawn();
+            for (e, root) in all_terrain.iter() {
+                if !root.is_added() {
+                    commands.entity(e).try_despawn();
+                }
             }
         }
         latch.0 = None;
+        // The unsaved-terrain warning was about the previous Space.
+        if let Some(mut studio) = studio {
+            studio.terrain_unsaved_warned = false;
+        }
+    }
+}
+
+/// Point the terrain material slot table at the open Space's
+/// `Workspace/Terrain` whenever the Space changes, so its custom slots
+/// (`_terrain.toml` palette, `materials/*.mat.toml`) load with the Space,
+/// before any terrain spawns and whichever path spawns it, and reload
+/// through the file watcher's `FileChanged` broadcast. A Space without the
+/// directory (most, and migrated Spaces whose files live in Fjall) gets the
+/// built-in slots.
+fn point_terrain_materials_at_space(
+    space_root: Res<SpaceRoot>,
+    mut source: ResMut<TerrainMaterialSource>,
+) {
+    if !space_root.is_changed() {
+        return;
+    }
+    let terrain_dir = space_root.0.join("Workspace").join("Terrain");
+    // Compared through `Deref`, since taking the source mutably reloads it.
+    if source.terrain_dir() != Some(terrain_dir.as_path()) {
+        source.set_terrain_dir(Some(terrain_dir));
     }
 }
 
@@ -160,8 +179,18 @@ fn reset_latch_on_space_switch(
 /// default engine capability (the migrated-Space stand-down happens at
 /// runtime via `space_is_migrated`, not at compile time).
 pub fn register(app: &mut App) {
-    app.init_resource::<TerrainDiskLoadLatch>().add_systems(
-        Update,
-        (reset_latch_on_space_switch, load_disk_terrain_on_space_open).chain(),
-    );
+    app.init_resource::<TerrainDiskLoadLatch>()
+        // Ahead of the streaming chain, as the voxel loader is: the Terrain
+        // class sync runs after that chain, so a root spawned here this frame
+        // is already there when it looks, and is never doubled.
+        .add_systems(
+            Update,
+            (reset_latch_on_space_switch, load_disk_terrain_on_space_open)
+                .chain()
+                .before(eustress_common::terrain::process_terrain_generation_queue),
+        )
+        .add_systems(
+            Update,
+            point_terrain_materials_at_space.before(reload_terrain_material_slots),
+        );
 }
