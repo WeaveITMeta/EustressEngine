@@ -55,9 +55,6 @@ serde_json = { workspace = true }
 # the one this page runs.
 eustress-common = { path = "../common", default-features = false, features = ["physics", "units_v1"] }
 eustress-play-runtime = { path = "../play-runtime" }
-# Named directly so Bevy's derive macros (Resource, Component) emit
-# `bevy_ecs::` paths that resolve here; same as crates/engine/Cargo.toml.
-bevy_ecs = { version = "0.19", default-features = false, features = ["trace"] }
 avian3d = { workspace = true }
 bevy = { workspace = true, features = [
     # The browser's event loop, canvas and input.
@@ -87,7 +84,7 @@ bevy = { workspace = true, features = [
 ] }
 # Bevy's Resource/Component derives emit `bevy_ecs::` paths. Those resolve
 # only when this crate names bevy_ecs itself (see the engine crate's note).
-bevy_ecs = { version = "0.19", default-features = false }
+bevy_ecs = { version = "0.19", default-features = false, features = ["trace"] }
 # The render crates the graphics features name; bevy already brings each (its
 # bevy_pbr feature), so these add no crate, only the features' names.
 bevy_render = { version = "0.19", default-features = false }
