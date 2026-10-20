@@ -11,8 +11,12 @@ use eustress_networking::session::NetNotice;
 
 /// The Player is joining: the link was read and the session is opening.
 pub const JOINING: &str = "joining";
+/// A published world is downloading. No host is involved.
+pub const LOADING_WORLD: &str = "loading-world";
 /// The world is open and drawn.
 pub const IN_WORLD: &str = "in-world";
+/// A published world could not be downloaded or opened.
+pub const WORLD_FAILED: &str = "world-failed";
 /// The join failed before the world opened, for a reason that is not a refusal.
 pub const JOIN_FAILED: &str = "join-failed";
 /// The session ended after the world opened.
@@ -34,7 +38,10 @@ const REFUSALS: &[(&str, Match)] = &[
     ("refused:full", Match::Prefix("This session is full (")),
     // eustress-networking session.rs `host_message` on a Hello of another
     // protocol: "This host speaks protocol N and your Player speaks M. ..."
-    ("refused:protocol", Match::Prefix("This host speaks protocol ")),
+    (
+        "refused:protocol",
+        Match::Prefix("This host speaks protocol "),
+    ),
     // The gallery's admit (infrastructure/cloudflare/api/src/live.mjs, code `used`).
     (
         "refused:ticket-used",
@@ -48,12 +55,16 @@ const REFUSALS: &[(&str, Match)] = &[
     // The Worker's ADULT_CONTENT_OFF (infrastructure/cloudflare/api/src/adult_content.mjs).
     (
         "refused:adult-content-off",
-        Match::Exact("This listing is adult content. Turn on Adult content in your Profile to see it."),
+        Match::Exact(
+            "This listing is adult content. Turn on Adult content in your Profile to see it.",
+        ),
     ),
     // The Worker's AGE_21_REQUIRED (adult_content.mjs).
     (
         "refused:age-21",
-        Match::Exact("This listing is for adults 21 and over. It opens once your verified age is 21."),
+        Match::Exact(
+            "This listing is for adults 21 and over. It opens once your verified age is 21.",
+        ),
     ),
 ];
 
@@ -124,7 +135,10 @@ mod tests {
                 "This ticket was already used. Join again from the gallery for a new one.",
                 "refused:ticket-used",
             ),
-            ("This session is not available right now.", "refused:not-available"),
+            (
+                "This session is not available right now.",
+                "refused:not-available",
+            ),
             (
                 "This listing is adult content. Turn on Adult content in your Profile to see it.",
                 "refused:adult-content-off",
@@ -183,7 +197,13 @@ mod tests {
         assert_eq!(state_for(&ended, false), Some("disconnected"));
         assert_eq!(state_for(&ended, true), Some("disconnected"));
         assert_eq!(
-            state_for(&NetNotice::Downloading { received: 1, total: 2 }, false),
+            state_for(
+                &NetNotice::Downloading {
+                    received: 1,
+                    total: 2
+                },
+                false
+            ),
             None
         );
     }

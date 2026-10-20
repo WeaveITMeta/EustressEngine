@@ -234,8 +234,8 @@ fn ReleaseCard(product: Product, release: RwSignal<ReleaseState>, me: Option<Des
                     </dl>
                     {(product == Product::Player).then(|| view! {
                         <div class="dl-release-side">
-                            <span class="g-chip"><i class="g-dot off"></i>"Play in browser: coming soon"</span>
-                            <p class="g-hint">"Until then, Spaces open in Eustress Player once it is released."</p>
+                            <span class="g-chip"><i class="g-dot"></i>"Play in browser: from a Space's Play button"</span>
+                            <p class="g-hint">"Open a Space and choose In your browser. Nothing to install."</p>
                         </div>
                     })}
                 }.into_any(),
@@ -298,7 +298,7 @@ fn Released(product: Product, manifest: ReleaseManifest, me: Option<DesktopPlatf
             {gated.then(|| view! { <p class="g-hint">"Studio's downloads need a free account: your identity is verified for platform safety."</p> })}
         </div>
         <ul class="dl-plats">{rows}</ul>
-        {(product == Product::Player).then(|| view! { <div class="dl-release-side"><span class="g-chip"><i class="g-dot off"></i>"Play in browser: coming soon"</span></div> })}
+        {(product == Product::Player).then(|| view! { <div class="dl-release-side"><span class="g-chip"><i class="g-dot"></i>"Play in browser: from a Space's Play button"</span></div> })}
     }
 }
 

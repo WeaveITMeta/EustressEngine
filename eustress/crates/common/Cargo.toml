@@ -200,8 +200,11 @@ keyring = { version = "=3.6.3", default-features = false, features = ["windows-n
 # Native-only. zstd builds C code, and reqwest and ureq reach TLS through ring,
 # which builds C and assembly; none of them compiles for the browser
 # (wasm32-unknown-unknown). The features that turn reqwest and ureq on
-# (async-assets, avatar-profile, generation, luau) turn them on for native
-# targets only.
+# (async-assets, avatar-profile, generation, mlua) name `ureq`, and that
+# dependency exists only on native targets. HttpService's blocking calls are
+# cfg-gated off wasm32 for the same reason. mlua's Luau itself is C++
+# (mlua-sys); clang has no C++ standard library for wasm32-unknown-unknown,
+# so the browser Player does not enable the feature.
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 zstd = "0.13"
 # HTTP client for mesh generation server
