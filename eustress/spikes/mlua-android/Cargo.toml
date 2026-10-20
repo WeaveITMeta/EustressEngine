@@ -1,0 +1,15 @@
+# Detached from the Eustress workspace on purpose. This probe only builds
+# mlua 0.10 with the Luau features the engine uses.
+[workspace]
+
+[package]
+name = "mlua-android-probe"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+mlua = { version = "=0.10.5", features = ["luau", "serialize", "send"] }
