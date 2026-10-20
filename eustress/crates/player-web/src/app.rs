@@ -1,8 +1,14 @@
-//! The browser Player's Bevy app: what the desktop Player runs for a joined
-//! world (client `main.rs` `build_app`), less what a browser cannot run or
-//! has no use for: files on disk, Luau (mlua builds C++), the avatar runtime,
-//! the window icon, frame capture, agent control, enhancement, Rune, and the
-//! shop, which waits for a browser purchase flow.
+//! The browser Player's Bevy app: the desktop Player's play path (client
+//! `main.rs` `build_app`) for a world that arrives in memory. The shared Play
+//! runtime draws the tree. The avatar runtime spawns the local character and
+//! follows it.
+//!
+//! LocalScripts do not run. The desktop Player's VM is mlua's C++ Luau, and
+//! that library does not build for `wasm32-unknown-unknown` (no C++ standard
+//! library for the target). A `Script` stays on the host in both Players.
+//!
+//! Left out, because a page has no use for them: files on disk, the window
+//! icon, frame capture, agent control, enhancement, Rune, and the shop.
 
 use std::cell::Cell;
 use std::rc::Rc;
@@ -68,6 +74,10 @@ pub(crate) fn build(start: Start) -> App {
         "bundled",
         AssetSourceBuilder::platform_default(&asset_base, None),
     );
+    // The avatar runtime refuses to boot until `bundled://` is registered.
+    // This page serves that source over HTTP, so the disk registrar must not
+    // run and register it a second time.
+    eustress_common::avatar::boot::note_asset_sources_registered_externally();
 
     app.add_plugins(
         DefaultPlugins
@@ -119,23 +129,46 @@ pub(crate) fn build(start: Start) -> App {
         role: eustress_common::play_session::PlayRole::Replica,
     })
     .add_plugins(eustress_common::data_mesh::DataMeshPlugin)
+    // The sealed avatar runtime: the same plugin, descriptor and physics body
+    // as the desktop Player. It spawns the follow camera; the fly camera
+    // stands down while that camera exists.
+    .add_plugins(eustress_common::avatar::AvatarRuntimePlugin::new(
+        eustress_common::avatar::AvatarHost::Client,
+    ))
+    .add_plugins(eustress_common::plugins::SkinnedCharacterPlugin)
+    .add_plugins(eustress_common::plugins::SharedAnimationPlugin)
+    .add_plugins(eustress_common::animation::AnimatorPlugin)
+    // LocalScripts are the desktop Player's `TreeScriptsPlugin`. That plugin
+    // is the mlua VM, which does not build for this target (see the module
+    // doc). A `Script` does not run in either Player: the host owns it.
+    .add_systems(
+        Update,
+        eustress_common::animation::character::sync_local_character
+            .after(eustress_common::avatar::AvatarSystems::Locomotion)
+            .before(eustress_common::play_session::PlayScriptSet::Scripts),
+    )
+    .add_plugins(|app: &mut App| {
+        eustress_common::avatar::boot::register_gltf_scene_types(app);
+    })
     // This page's own.
     .insert_non_send_resource(PageState::new(on_state))
     .insert_non_send_resource(StopSwitch(stop))
     .insert_resource(crate::explore::Explore)
     .add_systems(Last, stop_when_asked)
-    // After the Play runtime has copied the tree camera onto the view, so a
-    // look or a step this frame is what gets drawn.
+    // After the Play runtime has copied the tree camera onto the view. While
+    // an avatar camera exists this system returns immediately, so WASD belongs
+    // to the character controller.
     .add_systems(
         Update,
         crate::explore::drive.after(eustress_common::play_session::PlayScriptSet::Apply),
     );
+    let joined = plan.is_some();
     if let Some(plan) = plan {
         crate::link::add(&mut app, plan, name.clone());
     } else if let Some(sim_id) = sim_id {
         crate::fetch::add(&mut app, api_base, sim_id);
     }
-    crate::world::add(&mut app, space, name);
+    crate::world::add(&mut app, space, name, joined);
     // WebGL2 panics where `texStorage2DMultisample` is missing, and this
     // engine's WebGPU cameras are MSAA-off. Turn it off as each camera arrives,
     // before the first frame prepares its targets.

@@ -1,11 +1,14 @@
-//! Look and move while a browser has no avatar.
+//! Look and move while this page has no avatar.
 //!
-//! The browser Player does not run the avatar runtime or Luau, so a Space
-//! opens on its own camera and nothing walks a character. This drives that
-//! camera from the keyboard and the mouse, and writes the pose back onto the
-//! tree camera so the Play runtime's camera step (which copies the tree onto
-//! the view each frame) keeps it. Cameras are not replicated, so a joined
-//! session is not moved on the host by looking around here.
+//! A Space with `Players.CharacterAutoLoads` off (a paddle game) has no body,
+//! and the Play runtime shows the Space's camera. This drives that camera
+//! from the keyboard and the mouse, and writes the pose back onto the tree
+//! camera so the Play runtime's camera step (which copies the tree onto the
+//! view each frame) keeps it. Cameras are not replicated, so a joined session
+//! is not moved on the host by looking around here.
+//!
+//! While an avatar camera exists, the character controller and its follow
+//! camera own the keys and the mouse, and this system does nothing.
 //!
 //! Click locks the mouse. Esc releases it. WASD moves on the look direction,
 //! Space up, Ctrl down, Shift faster.
@@ -13,6 +16,7 @@
 use bevy::input::mouse::AccumulatedMouseMotion;
 use bevy::prelude::*;
 use bevy::window::{CursorGrabMode, CursorOptions, PrimaryWindow};
+use eustress_common::avatar::control::AvatarCamera;
 use eustress_common::datamodel::DmValue;
 use eustress_common::play_session::{PlayDataModel, ScriptedPlayCamera};
 use eustress_common::CFrame;
@@ -34,10 +38,11 @@ pub(crate) fn drive(
     motion: Option<Res<AccumulatedMouseMotion>>,
     mut cursor: Query<&mut CursorOptions, With<PrimaryWindow>>,
     mut cams: Query<&mut Transform, With<ScriptedPlayCamera>>,
+    avatar: Query<(), With<AvatarCamera>>,
     dm: Option<Res<PlayDataModel>>,
     _explore: Option<Res<Explore>>,
 ) {
-    if _explore.is_none() {
+    if _explore.is_none() || !avatar.is_empty() {
         return;
     }
     if mouse.just_pressed(MouseButton::Left) {

@@ -11,6 +11,8 @@
 //   <out>/webgpu/eustress_player.js and _bg.wasm, and the snippets/ folder
 //                                  holding net.js (wasm-bindgen --target web)
 //   <out>/webgl2/...               the same, for the WebGL2 build
+//   <out>/assets/parts/*.glb       the part meshes a Space draws
+//   <out>/assets/characters/*.glb  the avatar bodies and their clips
 //   <out>/assets/materials/...     with --materials: the bundled material
 //                                  library (about 136 MB) that bundled://
 //                                  textures load from
@@ -63,6 +65,13 @@ fs.mkdirSync(partsOut, { recursive: true });
 for (const name of fs.readdirSync(path.join(root, 'crates', 'common', 'assets', 'parts'))) {
   if (name.endsWith('.glb')) fs.copyFileSync(path.join(root, 'crates', 'common', 'assets', 'parts', name), path.join(partsOut, name));
 }
+// Character bodies and clips. The avatar runtime loads them through
+// bundled://. Scripts and the source FBX files are not assets.
+copyGlbs(path.join(root, 'crates', 'common', 'assets', 'characters'), path.join(out, 'assets', 'characters'));
+copyGlbs(
+  path.join(root, 'crates', 'common', 'assets', 'characters', 'animations'),
+  path.join(out, 'assets', 'characters', 'animations'),
+);
 if (args.materials) {
   fs.cpSync(path.join(root, 'crates', 'common', 'assets', 'materials'), path.join(out, 'assets', 'materials'), {
     recursive: true,
@@ -91,6 +100,13 @@ function parse(list) {
 function need(value, flag) {
   if (!value) fail(`missing ${flag}`);
   return value;
+}
+
+function copyGlbs(from, to) {
+  fs.mkdirSync(to, { recursive: true });
+  for (const name of fs.readdirSync(from)) {
+    if (name.endsWith('.glb')) fs.copyFileSync(path.join(from, name), path.join(to, name));
+  }
 }
 
 function fail(message) {

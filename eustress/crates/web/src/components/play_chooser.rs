@@ -1358,7 +1358,7 @@ pub fn PlayStatePanel(
                 {busy_review.then(|| view! { <p class="lp-note"><span class="lp-spinner small" aria-hidden="true"></span>"This updates by itself."</p> })}
                 {decided.then(|| view! { <ReviewReasons reasons=reasons.clone() suggested=suggested.clone() note=note.clone() /> })}
                 <div class="lp-actions">{actions}</div>
-                {in_browser.then(|| view! { <p class="lp-note">"This opens in the page. Click the view, then WASD moves and the mouse looks."</p> })}
+                {in_browser.then(|| view! { <p class="lp-note">"This opens in the page. WASD moves your character, and the right mouse button looks around."</p> })}
                 {(!in_browser && matches!(panel, Panel::Solo { .. } | Panel::Join { .. } | Panel::SignInToJoin { .. } | Panel::MacCannotJoin { .. })).then(|| view! { <PlayerHelp /> })}
             </div>
         </div>
