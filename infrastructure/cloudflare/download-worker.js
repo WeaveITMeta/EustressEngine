@@ -36,15 +36,15 @@ export default {
       // itself. The other two spellings are kept because downloads.eustress.dev
       // has served them since 2025-12.
       if (path === '/latest.json' || path === '/api/releases/latest' || path === '/api/latest') {
-        return handleLatest(env, cors, '');
+        return handleLatest(request, env, cors, '');
       }
       if (path === '/player/latest.json') {
-        return handleLatest(env, cors, 'player/');
+        return handleLatest(request, env, cors, 'player/');
       }
       // Staging Player. Same manifest, a different key, so a staging publish
       // cannot replace the production one.
       if (path === '/staging/player/latest.json') {
-        return handleLatest(env, cors, 'staging/player/');
+        return handleLatest(request, env, cors, 'staging/player/');
       }
 
       // Public: a permanent URL per platform, redirecting to the current
@@ -52,19 +52,19 @@ export default {
       // correct across releases, which is what stops a version number being
       // retyped into a curl command that goes stale the next time we ship.
       //
-      // Platform names are the keys of latest.json, so this cannot drift from
-      // what the build actually produced.
+      // Platform names are the keys of latest.json, plus the short aliases
+      // (windows, macos, mac, linux). The full names keep working.
       // player/ and staging/player/. The optional group is the R2 prefix,
-      // empty for Studio.
+      // empty for Studio. HEAD answers with the same 302 as GET.
       const latest = path.match(/^\/((?:staging\/)?player\/)?latest\/([a-z0-9-]+)$/);
-      if (latest) {
+      if (latest && (request.method === 'GET' || request.method === 'HEAD')) {
         const prefix = latest[1] || '';
         const manifestObj = await env.DOWNLOADS.get(`${prefix}latest.json`);
         if (!manifestObj) {
           return jsonResponse({ error: 'No releases available' }, 404, cors);
         }
         const manifest = await manifestObj.json();
-        const entry = manifest.platforms?.[latest[2]];
+        const entry = lookupPlatform(manifest.platforms, latest[2]);
         if (!entry) {
           return jsonResponse({
             error: `Platform '${latest[2]}' not found`,
@@ -94,20 +94,14 @@ export default {
       // player/vX.Y.Z/filename and staging/player/vX.Y.Z/filename, so no other
       // key in the bucket is reachable through this route.
       const artifact = path.match(/^\/((?:staging\/)?player\/)?(v\d+\.\d+\.\d+)\/([A-Za-z0-9._-]+)$/);
-      if (artifact && request.method === 'GET') {
-        const object = await env.DOWNLOADS.get(`${artifact[1] || ''}${artifact[2]}/${artifact[3]}`);
-        if (!object) return jsonResponse({ error: 'Not found' }, 404, cors);
-        return new Response(object.body, {
-          headers: {
-            'Content-Type': 'application/octet-stream',
-            'Content-Disposition': `attachment; filename="${artifact[3]}"`,
-            // A version path never changes content, so this is cacheable
-            // forever and a repeat download costs the origin nothing.
-            'Cache-Control': 'public, max-age=31536000, immutable',
-            'ETag': object.httpEtag,
-            ...cors,
-          },
-        });
+      if (artifact && (request.method === 'GET' || request.method === 'HEAD')) {
+        return serveR2Object(request, env.DOWNLOADS, `${artifact[1] || ''}${artifact[2]}/${artifact[3]}`, {
+          'Content-Type': 'application/octet-stream',
+          'Content-Disposition': `attachment; filename="${artifact[3]}"`,
+          // A version path never changes content, so this is cacheable
+          // forever and a repeat download costs the origin nothing.
+          'Cache-Control': 'public, max-age=31536000, immutable',
+        }, cors);
       }
 
       // Auth-gated: the website's download flow.
@@ -129,18 +123,141 @@ export default {
 
 // ── Latest manifest (public) ────────────────────────────────────────────────
 
-async function handleLatest(env, cors, prefix) {
-  const object = await env.DOWNLOADS.get(`${prefix}latest.json`);
-  if (!object) {
-    return jsonResponse({ error: 'No releases available' }, 404, cors);
+async function handleLatest(request, env, cors, prefix) {
+  if (request.method !== 'GET' && request.method !== 'HEAD') {
+    return jsonResponse({ error: 'Method not allowed' }, 405, cors);
   }
-  return new Response(object.body, {
-    headers: {
-      'Content-Type': 'application/json',
-      'Cache-Control': 'public, max-age=300',
-      ...cors,
-    },
+  return serveR2Object(request, env.DOWNLOADS, `${prefix}latest.json`, {
+    'Content-Type': 'application/json',
+    'Cache-Control': 'public, max-age=300',
+  }, cors, {
+    missing: () => jsonResponse({ error: 'No releases available' }, 404, cors),
   });
+}
+
+// Short names on /latest/<platform>. An exact manifest key always wins, so
+// `windows` is the zip (windows-x64) and never the installer.
+const PLATFORM_ALIASES = {
+  windows: 'windows-x64',
+  macos: 'macos-arm64',
+  mac: 'macos-arm64',
+  linux: 'linux-x64',
+};
+
+function lookupPlatform(platforms, name) {
+  if (!platforms || typeof platforms !== 'object') return null;
+  if (Object.prototype.hasOwnProperty.call(platforms, name)) return platforms[name];
+  const alias = PLATFORM_ALIASES[name];
+  if (alias && Object.prototype.hasOwnProperty.call(platforms, alias)) return platforms[alias];
+  return null;
+}
+
+// One R2 object as an HTTP response. GET returns the bytes. HEAD returns
+// Content-Length, Content-Type and ETag and no body. A single `Range:
+// bytes=` returns 206, or 416 when the range cannot be satisfied. Every
+// file response advertises `Accept-Ranges: bytes`.
+async function serveR2Object(request, bucket, key, baseHeaders, cors, options = {}) {
+  const missing = options.missing || (() => jsonResponse({ error: 'Not found' }, 404, cors));
+  const rangeHeader = request.headers.get('Range');
+  const singleRange = request.method === 'GET' ? classifyRange(rangeHeader) : null;
+  const needsSize = request.method === 'HEAD' || singleRange;
+
+  let stat = null;
+  if (needsSize) {
+    stat = await objectStat(bucket, key);
+    if (!stat) return missing();
+  }
+
+  if (request.method === 'HEAD') {
+    return new Response(null, { status: 200, headers: fileHeaders(stat, stat.size, baseHeaders, cors) });
+  }
+
+  if (singleRange) {
+    const decided = decideRange(singleRange, stat.size);
+    if (decided === 'unsatisfiable') {
+      return new Response(null, {
+        status: 416,
+        headers: fileHeaders(stat, 0, {
+          ...baseHeaders,
+          'Content-Range': `bytes */${stat.size}`,
+        }, cors),
+      });
+    }
+    const object = await bucket.get(key, { range: { offset: decided.offset, length: decided.length } });
+    if (!object) return missing();
+    const end = decided.offset + decided.length - 1;
+    return new Response(object.body, {
+      status: 206,
+      headers: fileHeaders(object, decided.length, {
+        ...baseHeaders,
+        'Content-Range': `bytes ${decided.offset}-${end}/${stat.size}`,
+      }, cors),
+    });
+  }
+
+  const object = await bucket.get(key);
+  if (!object) return missing();
+  return new Response(object.body, { status: 200, headers: fileHeaders(object, object.size, baseHeaders, cors) });
+}
+
+async function objectStat(bucket, key) {
+  if (typeof bucket.head === 'function') return bucket.head(key);
+  return bucket.get(key);
+}
+
+function fileHeaders(object, length, baseHeaders, cors) {
+  const headers = {
+    ...baseHeaders,
+    'Accept-Ranges': 'bytes',
+    'Content-Length': String(length),
+    ...cors,
+  };
+  const etag = object.httpEtag || (object.etag ? `"${object.etag}"` : '');
+  if (etag) headers.ETag = etag;
+  return headers;
+}
+
+// `null` means "not a single byte range" (absent, a different unit, or more
+// than one range): the caller serves the whole object. A parsed spec is
+// decided against the object size by decideRange.
+function classifyRange(header) {
+  if (header == null || header === '') return null;
+  const trimmed = header.trim();
+  if (!/^bytes=/i.test(trimmed) || trimmed.includes(',')) return null;
+  const spec = trimmed.slice(trimmed.indexOf('=') + 1).trim();
+  if (/^-\d+$/.test(spec) || /^\d+-$/.test(spec) || /^\d+-\d+$/.test(spec)) return spec;
+  return 'unsatisfiable';
+}
+
+function decideRange(spec, size) {
+  const total = Number(size);
+  if (!Number.isFinite(total) || total < 0) return 'unsatisfiable';
+  if (spec === 'unsatisfiable') return 'unsatisfiable';
+
+  let offset;
+  let length;
+  if (/^-\d+$/.test(spec)) {
+    const n = Number(spec.slice(1));
+    if (!Number.isSafeInteger(n) || n <= 0 || total === 0) return 'unsatisfiable';
+    length = Math.min(n, total);
+    offset = total - length;
+  } else if (/^\d+-$/.test(spec)) {
+    offset = Number(spec.slice(0, -1));
+    if (!Number.isSafeInteger(offset) || offset >= total) return 'unsatisfiable';
+    length = total - offset;
+  } else if (/^\d+-\d+$/.test(spec)) {
+    const [start, endRaw] = spec.split('-').map(Number);
+    if (!Number.isSafeInteger(start) || !Number.isSafeInteger(endRaw) || start > endRaw || start >= total) {
+      return 'unsatisfiable';
+    }
+    const end = Math.min(endRaw, total - 1);
+    offset = start;
+    length = end - start + 1;
+  } else {
+    return 'unsatisfiable';
+  }
+  if (length <= 0) return 'unsatisfiable';
+  return { offset, length };
 }
 
 // ── Auth-gated download ─────────────────────────────────────────────────────
@@ -205,14 +322,23 @@ async function handleDownload(request, env, ctx, cors) {
     return jsonResponse({ error: 'Release artifact not found in storage' }, 404, cors);
   }
 
-  // Fetch from R2
-  const object = await env.DOWNLOADS.get(r2Key);
-  if (!object) {
-    return jsonResponse({ error: 'Release artifact not found in storage' }, 404, cors);
+  if (request.method !== 'GET' && request.method !== 'HEAD') {
+    return jsonResponse({ error: 'Method not allowed' }, 405, cors);
   }
 
-  // Log download analytics
-  if (env.ANALYTICS) {
+  const filename = r2Key.split('/').pop();
+  const response = await serveR2Object(request, env.DOWNLOADS, r2Key, {
+    'Content-Type': 'application/octet-stream',
+    'Content-Disposition': `attachment; filename="${filename}"`,
+    'X-Version': manifest.version || '',
+    'X-Platform': platform,
+  }, cors, {
+    missing: () => jsonResponse({ error: 'Release artifact not found in storage' }, 404, cors),
+  });
+
+  // A ranged or full GET is a download. HEAD is not: it returns no bytes.
+  if (env.ANALYTICS && request.method === 'GET' && (response.status === 200 || response.status === 206)) {
+    const bytes = Number(response.headers.get('Content-Range')?.split('/')[1] || response.headers.get('Content-Length') || 0);
     ctx.waitUntil(
       env.ANALYTICS.writeDataPoint({
         blobs: [
@@ -222,23 +348,13 @@ async function handleDownload(request, env, ctx, cors) {
           manifest.version || 'unknown',
           product,
         ],
-        doubles: [1, object.size],
+        doubles: [1, bytes],
         indexes: [platform],
       })
     );
   }
 
-  const filename = r2Key.split('/').pop();
-  return new Response(object.body, {
-    headers: {
-      'Content-Type': 'application/octet-stream',
-      'Content-Disposition': `attachment; filename="${filename}"`,
-      'Content-Length': object.size.toString(),
-      'X-Version': manifest.version || '',
-      'X-Platform': platform,
-      ...cors,
-    },
-  });
+  return response;
 }
 
 // ── Stats (public) ──────────────────────────────────────────────────────────
