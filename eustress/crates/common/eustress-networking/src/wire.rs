@@ -17,6 +17,18 @@
 //!   datagrams (a WebSocket fallback), the same payloads ride the stream
 //!   instead ([`ToHost::Avatar`], [`ToPlayer::Motion`], ...).
 //!
+//! ## Version, before any message
+//!
+//! Every reliable frame and every datagram starts with an 8-byte handshake
+//! ([`HANDSHAKE_LEN`]): the magic `EUST`, then the protocol version, then
+//! two reserved bytes. Both sides read that prefix **before** bincode runs.
+//! A peer on another version, or one from before the handshake (stable
+//! 0.3.7, whose frames are bare bincode), is a version mismatch. The
+//! bincode error `Slice had bytes remaining after deserialization` is what
+//! that older host produced when a newer Player's `Hello` no longer matched
+//! its struct, and it logged nothing because the version lives inside the
+//! body it could not read.
+//!
 //! ## Session, in order
 //!
 //! ```text
@@ -260,6 +272,82 @@ pub enum WireError {
     TooLarge(usize),
     #[error("malformed message: {0}")]
     Malformed(String),
+    /// The peer's protocol is not ours. `remote` is 0 when the frame has no
+    /// handshake (a build from before it, such as stable 0.3.7).
+    #[error("{message}")]
+    VersionMismatch { local: u16, remote: u16, message: String },
+}
+
+/// Little-endian magic at the start of every frame body and datagram.
+/// ASCII `EUST`. Chosen so a bare bincode enum tag (a small integer) never
+/// collides with it.
+pub const HANDSHAKE_MAGIC: u32 = u32::from_le_bytes(*b"EUST");
+/// `magic: u32`, `protocol: u16`, `reserved: u16`.
+pub const HANDSHAKE_LEN: usize = 8;
+
+/// What both sides show when the versions differ. `remote` 0 is a peer that
+/// sent no handshake.
+pub fn version_mismatch_reason(local: u16, remote: u16) -> String {
+    if remote == 0 {
+        format!(
+            "protocol mismatch: this side speaks protocol {local} and the other side has no version handshake (an older build, such as stable 0.3.7). Update whichever is older."
+        )
+    } else {
+        format!(
+            "protocol mismatch: this side speaks protocol {local} and the other side speaks protocol {remote}. Update whichever is older."
+        )
+    }
+}
+
+fn version_mismatch(remote: u16) -> WireError {
+    WireError::VersionMismatch {
+        local: PROTOCOL_VERSION,
+        remote,
+        message: version_mismatch_reason(PROTOCOL_VERSION, remote),
+    }
+}
+
+/// A close reason or decode error that is really a version skew: the bincode
+/// failure an older peer raises (`Slice had bytes remaining after
+/// deserialization`) instead of naming the protocol.
+pub fn looks_like_version_skew(reason: &str) -> bool {
+    !reason.contains("protocol mismatch") && reason.contains("Slice had bytes remaining")
+}
+
+/// The sentence a person should see. A bincode trailing-bytes failure from an
+/// older peer becomes the version-mismatch error; anything else is unchanged.
+pub fn explain_transport_failure(reason: &str) -> String {
+    if looks_like_version_skew(reason) {
+        version_mismatch_reason(PROTOCOL_VERSION, 0)
+    } else {
+        reason.to_string()
+    }
+}
+
+fn write_handshake(out: &mut Vec<u8>, protocol: u16) {
+    out.extend_from_slice(&HANDSHAKE_MAGIC.to_le_bytes());
+    out.extend_from_slice(&protocol.to_le_bytes());
+    out.extend_from_slice(&0u16.to_le_bytes());
+}
+
+/// The handshake, then the bincode payload. A mismatch returns before the
+/// payload is deserialized.
+fn split_handshake(bytes: &[u8]) -> Result<&[u8], WireError> {
+    if bytes.len() < 4 {
+        return Err(WireError::Malformed("frame is shorter than the version handshake".into()));
+    }
+    let magic = u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
+    if magic != HANDSHAKE_MAGIC {
+        return Err(version_mismatch(0));
+    }
+    if bytes.len() < HANDSHAKE_LEN {
+        return Err(WireError::Malformed("frame is shorter than the version handshake".into()));
+    }
+    let remote = u16::from_le_bytes([bytes[4], bytes[5]]);
+    if remote != PROTOCOL_VERSION {
+        return Err(version_mismatch(remote));
+    }
+    Ok(&bytes[HANDSHAKE_LEN..])
 }
 
 fn options() -> impl Options {
@@ -270,9 +358,12 @@ fn options() -> impl Options {
 }
 
 /// Encode a message as one stream frame: `u32` little-endian length, then
-/// the bincode body.
+/// the version handshake, then the bincode body.
 pub fn encode_frame<T: Serialize>(msg: &T) -> Result<Vec<u8>, WireError> {
-    let body = options().serialize(msg).map_err(|e| WireError::Malformed(e.to_string()))?;
+    let payload = options().serialize(msg).map_err(|e| WireError::Malformed(e.to_string()))?;
+    let mut body = Vec::with_capacity(HANDSHAKE_LEN + payload.len());
+    write_handshake(&mut body, PROTOCOL_VERSION);
+    body.extend_from_slice(&payload);
     if body.len() > MAX_FRAME_BYTES {
         return Err(WireError::TooLarge(body.len()));
     }
@@ -282,19 +373,26 @@ pub fn encode_frame<T: Serialize>(msg: &T) -> Result<Vec<u8>, WireError> {
     Ok(out)
 }
 
-/// Decode a frame body (the bytes after the length prefix).
+/// Decode a frame body (the bytes after the length prefix). The handshake is
+/// read first; a different protocol never reaches bincode.
 pub fn decode_body<T: DeserializeOwned>(body: &[u8]) -> Result<T, WireError> {
     if body.len() > MAX_FRAME_BYTES {
         return Err(WireError::TooLarge(body.len()));
     }
-    options().deserialize(body).map_err(|e| WireError::Malformed(e.to_string()))
+    let payload = split_handshake(body)?;
+    options().deserialize(payload).map_err(|e| WireError::Malformed(e.to_string()))
 }
 
 /// Encode one datagram (no length prefix; a datagram is already delimited).
 /// Empty when the payload cannot encode; the caller splits motion to fit
-/// (see [`crate::repl::motion::split_motion`]).
+/// (see [`crate::repl::motion::split_motion`]). The same handshake as a
+/// frame precedes the payload.
 pub fn encode_datagram(d: &Datagram) -> Vec<u8> {
-    options().serialize(d).unwrap_or_default()
+    let Ok(payload) = options().serialize(d) else { return Vec::new() };
+    let mut out = Vec::with_capacity(HANDSHAKE_LEN + payload.len());
+    write_handshake(&mut out, PROTOCOL_VERSION);
+    out.extend_from_slice(&payload);
+    out
 }
 
 /// Decode one datagram.
@@ -531,10 +629,58 @@ mod tests {
         assert!(matches!(asm.next_body(), Err(WireError::TooLarge(_))));
 
         // A body whose inner Vec length claims far more than the frame holds.
-        let mut body = options().serialize(&ToHost::RequestChunks { hashes: vec![] }).unwrap();
-        let n = body.len();
-        body[n - 8..].copy_from_slice(&(u64::MAX / 2).to_le_bytes());
-        assert!(decode_body::<ToHost>(&body).is_err());
+        // The handshake is intact, so this is a malformed payload, not a
+        // version mismatch.
+        let mut payload = options().serialize(&ToHost::RequestChunks { hashes: vec![] }).unwrap();
+        let n = payload.len();
+        payload[n - 8..].copy_from_slice(&(u64::MAX / 2).to_le_bytes());
+        let mut body = Vec::new();
+        write_handshake(&mut body, PROTOCOL_VERSION);
+        body.extend_from_slice(&payload);
+        assert!(matches!(decode_body::<ToHost>(&body), Err(WireError::Malformed(_))));
+    }
+
+    /// A newer Player's Hello used to die inside bincode (`Slice had bytes
+    /// remaining after deserialization`) before either side could read the
+    /// protocol. The handshake is decided first, and a bare 0.3.7 frame is
+    /// the same kind of mismatch.
+    #[test]
+    fn a_different_protocol_is_refused_before_the_body_is_read() {
+        let mut newer = Vec::new();
+        write_handshake(&mut newer, PROTOCOL_VERSION.saturating_add(1));
+        newer.extend_from_slice(&[0xff; 64]);
+        let err = decode_body::<ToHost>(&newer).expect_err("a newer protocol is refused");
+        let text = err.to_string();
+        assert!(text.contains("protocol mismatch"), "{text}");
+        assert!(text.contains(&format!("protocol {}", PROTOCOL_VERSION.saturating_add(1))), "{text}");
+        assert!(!text.contains("Slice had bytes remaining"), "{text}");
+        match err {
+            WireError::VersionMismatch { local, remote, .. } => {
+                assert_eq!((local, remote), (PROTOCOL_VERSION, PROTOCOL_VERSION.saturating_add(1)));
+            }
+            other => panic!("expected a version mismatch, got {other:?}"),
+        }
+
+        // Stable 0.3.7: a bare bincode body, no handshake. Not deserialized.
+        let legacy = options()
+            .serialize(&ToHost::Hello(Hello {
+                protocol: 1,
+                name: "p".into(),
+                engine_version: "eustress-client 0.3.7".into(),
+                identity: None,
+            }))
+            .unwrap();
+        let legacy_err = decode_body::<ToHost>(&legacy).expect_err("a pre-handshake frame is a mismatch");
+        let legacy_text = legacy_err.to_string();
+        assert!(legacy_text.contains("no version handshake"), "{legacy_text}");
+        assert!(legacy_text.contains("0.3.7"), "{legacy_text}");
+        assert!(!legacy_text.contains("Slice had bytes remaining"), "{legacy_text}");
+
+        let skewed = "unreadable message: malformed message: Slice had bytes remaining after deserialization";
+        let explained = explain_transport_failure(skewed);
+        assert!(explained.contains("protocol mismatch"), "{explained}");
+        assert!(!explained.contains("Slice had bytes remaining"), "{explained}");
+        assert_eq!(explain_transport_failure("the host is full"), "the host is full");
     }
 
     #[test]

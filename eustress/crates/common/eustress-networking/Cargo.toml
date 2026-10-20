@@ -66,7 +66,10 @@ default = ["native"]
 native = ["dep:wtransport", "dep:tokio"]
 
 [dev-dependencies]
-bevy = { workspace = true, features = ["bevy_winit", "bevy_pbr", "bevy_gizmos"] }
+# `x11` so winit has a platform on Linux. The workspace Bevy turns default
+# features off, and this crate's own tests never otherwise enable a window
+# backend, which makes winit refuse to compile.
+bevy = { workspace = true, features = ["bevy_winit", "bevy_pbr", "bevy_gizmos", "x11"] }
 
 [[bench]]
 name = "stress_test"

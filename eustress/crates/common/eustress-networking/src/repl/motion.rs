@@ -19,8 +19,9 @@ use super::id::NetId;
 pub const MAX_MOTION_DATAGRAM: usize = 1100;
 /// Encoded size of one [`BodyState`].
 pub const BODY_BYTES: usize = 40;
-/// A frame's fixed cost: its enum tag, tick and vector length.
-const FRAME_OVERHEAD: usize = 32;
+/// A frame's fixed cost: the version handshake, the enum tag, the tick and
+/// the vector length.
+const FRAME_OVERHEAD: usize = 32 + crate::wire::HANDSHAKE_LEN;
 /// Host ticks per second.
 pub const TICK_HZ: f64 = 60.0;
 /// Ticks a body keeps moving along its last velocity when samples stop.

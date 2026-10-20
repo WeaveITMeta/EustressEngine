@@ -87,11 +87,14 @@ impl std::fmt::Debug for JoinPlan {
 /// reads its own link, and require the host's pin.
 pub fn plan_join(join: &str, api_base: &str) -> Result<JoinPlan, JoinRefusal> {
     let join = join.trim();
-    let rest = join
-        .get(..PLAYER_SCHEME.len())
-        .filter(|head| head.eq_ignore_ascii_case(PLAYER_SCHEME))
-        .map(|_| &join[PLAYER_SCHEME.len()..])
-        .ok_or(JoinRefusal::NotAJoinLink)?;
+    // `eustress-player://` is the link the page writes. `eustress://join/` is
+    // the older spelling; it opens the same session.
+    let rest = [PLAYER_SCHEME, STUDIO_SCHEME].into_iter().find_map(|scheme| {
+        join.get(..scheme.len())
+            .filter(|head| head.eq_ignore_ascii_case(scheme))
+            .map(|_| &join[scheme.len()..])
+    });
+    let Some(rest) = rest else { return Err(JoinRefusal::NotAJoinLink) };
     let (link_text, extras): (String, LinkExtras) =
         split_link_extras(&format!("{STUDIO_SCHEME}{rest}")).map_err(|_| JoinRefusal::Malformed)?;
     if link_text.starts_with("eustress://play/") {
@@ -148,6 +151,15 @@ mod tests {
         );
     }
 
+    /// An older `eustress://join/` link is the same join as `eustress-player://join/`.
+    #[test]
+    fn a_legacy_studio_join_link_still_opens() {
+        let legacy = format!("eustress://join/192.168.1.20:7777?key={KEY}&pin={}", pin());
+        let plan = plan_join(&legacy, PRODUCTION).expect("the legacy scheme still parses");
+        assert_eq!(plan.remote, "192.168.1.20:7777");
+        assert_eq!(plan.pin, [0xab; 32]);
+    }
+
     /// A link without a ticket or an API is a direct join, for this page's
     /// API, with no identity.
     #[test]
@@ -172,7 +184,7 @@ mod tests {
                 JoinRefusal::NotAJoinLink,
             ),
             (
-                format!("eustress://join/192.168.1.20:7777?key={KEY}&pin={}", pin()),
+                format!("eustress://play/07d084d8-9098?api=staging"),
                 JoinRefusal::NotAJoinLink,
             ),
             (
