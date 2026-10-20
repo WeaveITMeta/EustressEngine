@@ -7,7 +7,8 @@ name: Player Release
 # A manual run can publish to staging first. channel=staging (the default)
 # writes the bucket prefix staging/player, served at
 # downloads.eustress.dev/staging/player, puts "channel": "staging" in
-# latest.json, and does not create a GitHub Release. It does not touch
+# latest.json, points changelog_url at this workflow run (there is no
+# player-v* tag), and does not create a GitHub Release. It does not touch
 # player/latest.json. A player-v* tag, or channel=production, writes the
 # production player/ paths below.
 #
@@ -609,12 +610,20 @@ jobs:
 
           BASE="${DOWNLOAD_BASE}/v${VERSION}"
 
+          # Production names the GitHub Release for this tag. Staging has no
+          # tag, so changelog_url is the workflow run that built the files.
+          if [ "$RELEASE_CHANNEL" = "staging" ]; then
+            CHANGELOG_URL="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+          else
+            CHANGELOG_URL="https://github.com/WeaveITMeta/EustressEngine/releases/tag/player-v${VERSION}"
+          fi
+
           cat > latest.json <<JSON
           {
             "version": "${VERSION}",
             "date": "$(date -u +%Y-%m-%d)",
             "channel": "${RELEASE_CHANNEL}",
-            "changelog_url": "https://github.com/WeaveITMeta/EustressEngine/releases/tag/player-v${VERSION}",
+            "changelog_url": "${CHANGELOG_URL}",
             "platforms": {
               "windows-x64":           { "file": "${WIN}",   "url": "${BASE}/${WIN}",   "sha256": "$(sha "$WIN")",   "size_bytes": $(size "$WIN"),   "installer": false },
               "windows-x64-installer": { "file": "${SETUP}", "url": "${BASE}/${SETUP}", "sha256": "$(sha "$SETUP")", "size_bytes": $(size "$SETUP"), "installer": true },
@@ -636,7 +645,20 @@ jobs:
                 process.exit(1);
               }
             }
-            console.log("manifest complete:", Object.keys(m.platforms).join(", "));
+            if (process.env.RELEASE_CHANNEL === "staging") {
+              if (!m.changelog_url || /\/releases\/tag\/player-v/.test(m.changelog_url)) {
+                console.error("::error::staging changelog_url must not point at a player-v tag; there is no tag");
+                process.exit(1);
+              }
+              if (!/\/actions\/runs\/\d+$/.test(m.changelog_url)) {
+                console.error("::error::staging changelog_url must be the workflow run that built this publish");
+                process.exit(1);
+              }
+            } else if (!new RegExp("/releases/tag/player-v" + process.env.VERSION + "$").test(m.changelog_url)) {
+              console.error("::error::production changelog_url must be the player-v tag release");
+              process.exit(1);
+            }
+            console.log("manifest complete:", Object.keys(m.platforms).join(", "), "changelog:", m.changelog_url);
           '
 
       - name: Upload to R2
