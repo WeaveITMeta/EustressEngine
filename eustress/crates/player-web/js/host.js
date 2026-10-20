@@ -10,8 +10,9 @@
 // `start_player`), which runs the same split_link_extras, JoinLink parsing
 // and check_api the desktop does, and requires the host's pin. This file
 // never keeps it, and never puts it in an event, status text, URL, history,
-// storage or the console. A published world played alone (`simId` without
-// `join`) is not in this build yet, and reads as unavailable.
+// storage or the console. A published world played alone is `simId` with no
+// `join`: the entry downloads that world from `apiBase` and opens it with no
+// host.
 //
 // A page runs one session: start() runs once, and joining again reloads the
 // page.
@@ -21,7 +22,9 @@
 // wasm module reports a state name only, so nothing it says can carry link
 // text.
 //
-// NOT RUN against a host yet: the builds come from crates/player-web.
+// A published world played alone has been opened from the staging API.
+// A hosted join has not completed a handshake: see
+// docs/launch/BROWSER_PLAYER_STAGING.md.
 
 // The two builds sit beside this file (/player/webgpu/ and /player/webgl2/ on
 // the site), so the bundle can move to another host, such as R2 when a
@@ -31,6 +34,7 @@ const BUILDS = { webgpu: new URL("webgpu/", import.meta.url), webgl2: new URL("w
 // bundled library (`bundled://`) a Space can name.
 const ASSETS = new URL("assets/", import.meta.url);
 const GLUE = "eustress_player.js"; // wasm-bindgen glue module
+const WASM = "eustress_player_bg.wasm";
 const ENTRY = "start_player";
 const SIM_ID = /^[0-9a-f-]{8,64}$/; // the same rule the commerce contract uses
 const API_ORIGINS = new Set(["https://api.eustress.dev", "https://api-staging.eustress.dev"]);
@@ -42,7 +46,9 @@ const MESSAGES = {
   "unsupported-browser": "This browser cannot run the browser Player yet. Use a browser with WebGPU, or the desktop Player.",
   starting: "Starting.",
   joining: "Joining the session.",
+  "loading-world": "Loading the Space.",
   "in-world": "Playing.",
+  "world-failed": "This Space could not be opened in the browser.",
   stopped: "Stopped.",
   "load-failed": "The browser Player could not load.",
   "join-failed": "Could not join the session.",
@@ -68,7 +74,9 @@ const MESSAGES = {
 const ENTRY_STATES = new Set([
   "starting",
   "joining",
+  "loading-world",
   "in-world",
+  "world-failed",
   "stopped",
   "join-failed",
   "disconnected",
@@ -84,8 +92,27 @@ function accepted(state, current) {
   return state;
 }
 
-export function chooseBuild(nav = globalThis.navigator) {
-  return nav && nav.gpu ? "webgpu" : "webgl2";
+// WebGPU when this browser can actually create an adapter. `navigator.gpu`
+// alone is not enough: some browsers expose the object and then refuse
+// every adapter, and a WebGPU build cannot draw there.
+export async function chooseBuild(nav = globalThis.navigator) {
+  if (nav && nav.gpu && typeof nav.gpu.requestAdapter === "function") {
+    try {
+      if (await nav.gpu.requestAdapter()) return "webgpu";
+    } catch {
+      // No adapter. The WebGL2 build is the one that can draw.
+    }
+  }
+  return "webgl2";
+}
+
+// The build to load. A browser that can use WebGPU still runs the WebGL2
+// build when that is the one the site published. The other way around stays
+// a refusal: a WebGPU-only site cannot draw without an adapter.
+export function selectBuild(preferred, present) {
+  if (present[preferred]) return preferred;
+  if (preferred === "webgpu" && present.webgl2) return "webgl2";
+  return preferred;
 }
 
 function report(container, controller, state) {
@@ -109,6 +136,28 @@ async function deployed(base) {
 
 let started = false;
 
+// The module bytes. A Pages file cannot pass 25 MiB, so a build over that cap
+// is stored as eustress_player_bg.wasm.part0, part1, ... and put back together
+// here. A single .wasm is used when it is there.
+async function wasmModule(base) {
+  const single = await fetch(new URL(WASM, base), { cache: "no-cache" });
+  if (single.ok) return new Uint8Array(await single.arrayBuffer());
+  const parts = [];
+  for (let i = 0; i < 8; i++) {
+    const part = await fetch(new URL(`${WASM}.part${i}`, base), { cache: "no-cache" });
+    if (!part.ok) break;
+    parts.push(new Uint8Array(await part.arrayBuffer()));
+  }
+  if (parts.length === 0) return undefined;
+  const bytes = new Uint8Array(parts.reduce((sum, part) => sum + part.length, 0));
+  let offset = 0;
+  for (const part of parts) {
+    bytes.set(part, offset);
+    offset += part.length;
+  }
+  return bytes;
+}
+
 export async function start({ container, simId, apiBase, join } = {}) {
   if (started) throw new TypeError("start() runs once per page; reload the page to join again");
   if (!(container instanceof HTMLElement)) throw new TypeError("start() needs a container element");
@@ -122,7 +171,12 @@ export async function start({ container, simId, apiBase, join } = {}) {
   if (!API_ORIGINS.has(new URL(apiBase).origin)) throw new TypeError("apiBase must be one of the Eustress API origins");
   started = true;
 
-  const build = chooseBuild();
+  const preferred = await chooseBuild();
+  const present = {
+    webgpu: await deployed(BUILDS.webgpu),
+    webgl2: await deployed(BUILDS.webgl2),
+  };
+  const build = selectBuild(preferred, present);
   const base = BUILDS[build];
   report(container, null, "loading");
 
@@ -135,13 +189,18 @@ export async function start({ container, simId, apiBase, join } = {}) {
   let mod;
   try {
     mod = await import(new URL(GLUE, base).href);
-    if (typeof mod.default === "function") await mod.default(); // wasm-bindgen init
+    if (typeof mod.default === "function") {
+      const wasm = await wasmModule(base);
+      // No bytes: the glue fetches the .wasm beside itself (the tests' fake
+      // build, and a package that was not split).
+      if (wasm) await mod.default({ module_or_path: wasm });
+      else await mod.default();
+    }
   } catch {
     report(container, null, "load-failed");
     return inert("load-failed");
   }
-  // A published world alone (simId, no join) is not in this build yet.
-  if (typeof mod[ENTRY] !== "function" || join === undefined) {
+  if (typeof mod[ENTRY] !== "function") {
     report(container, null, "unavailable");
     return inert("unavailable");
   }
@@ -161,7 +220,11 @@ export async function start({ container, simId, apiBase, join } = {}) {
 
   let handle;
   try {
-    handle = await mod[ENTRY]({ canvasParent: container, simId: simId ?? null, apiBase, assetBase: ASSETS.href, join, onState });
+    const args = { canvasParent: container, simId: simId ?? null, apiBase, assetBase: ASSETS.href, onState };
+    // Omit `join` entirely when this is a published world alone, so the entry
+    // cannot mistake an empty string for a link.
+    if (join !== undefined) args.join = join;
+    handle = await mod[ENTRY](args);
   } catch {
     report(container, controller, "join-failed");
     return inert("join-failed");

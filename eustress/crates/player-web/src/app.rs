@@ -23,7 +23,13 @@ pub(crate) struct Start {
     /// Where the Player's own assets are served: the default source and
     /// `bundled://` (the library a Space can name).
     pub asset_base: String,
-    pub plan: JoinPlan,
+    /// The API a published world is downloaded from. Ignored when `plan` is
+    /// set: a join plays the host's world.
+    pub api_base: String,
+    /// The hosted session, when this page is joining one.
+    pub plan: Option<JoinPlan>,
+    /// The Gallery id of a published world played alone.
+    pub sim_id: Option<String>,
     /// The name this player joins as.
     pub name: String,
     pub on_state: js_sys::Function,
@@ -34,7 +40,9 @@ pub(crate) fn build(start: Start) -> App {
     let Start {
         canvas,
         asset_base,
+        api_base,
         plan,
+        sim_id,
         name,
         on_state,
         stop,
@@ -50,11 +58,16 @@ pub(crate) fn build(start: Start) -> App {
         app.register_asset_source(
             "space",
             AssetSourceBuilder::new(move || -> Box<dyn ErasedAssetReader> {
-                Box::new(MemoryAssetReader { root: space.clone() })
+                Box::new(MemoryAssetReader {
+                    root: space.clone(),
+                })
             }),
         );
     }
-    app.register_asset_source("bundled", AssetSourceBuilder::platform_default(&asset_base, None));
+    app.register_asset_source(
+        "bundled",
+        AssetSourceBuilder::platform_default(&asset_base, None),
+    );
 
     app.add_plugins(
         DefaultPlugins
@@ -109,8 +122,35 @@ pub(crate) fn build(start: Start) -> App {
     // This page's own.
     .insert_non_send_resource(PageState::new(on_state))
     .insert_non_send_resource(StopSwitch(stop))
-    .add_systems(Last, stop_when_asked);
-    crate::link::add(&mut app, plan, name.clone());
+    .insert_resource(crate::explore::Explore)
+    .add_systems(Last, stop_when_asked)
+    // After the Play runtime has copied the tree camera onto the view, so a
+    // look or a step this frame is what gets drawn.
+    .add_systems(
+        Update,
+        crate::explore::drive.after(eustress_common::play_session::PlayScriptSet::Apply),
+    );
+    if let Some(plan) = plan {
+        crate::link::add(&mut app, plan, name.clone());
+    } else if let Some(sim_id) = sim_id {
+        crate::fetch::add(&mut app, api_base, sim_id);
+    }
     crate::world::add(&mut app, space, name);
+    // WebGL2 panics where `texStorage2DMultisample` is missing, and this
+    // engine's WebGPU cameras are MSAA-off. Turn it off as each camera arrives,
+    // before the first frame prepares its targets.
+    app.add_observer(msaa_off);
     app
+}
+
+fn msaa_off(
+    add: On<bevy::ecs::lifecycle::Add, bevy::render::view::Msaa>,
+    mut cameras: Query<&mut bevy::render::view::Msaa>,
+) {
+    let Ok(mut msaa) = cameras.get_mut(add.event().entity) else {
+        return;
+    };
+    if *msaa != bevy::render::view::Msaa::Off {
+        *msaa = bevy::render::view::Msaa::Off;
+    }
 }

@@ -30,6 +30,9 @@ webgl2 = ["bevy_render/webgl", "bevy_core_pipeline/webgl", "bevy_pbr/webgl"]
 # Reading the join link, and the fixed states the page is told: compiled on
 # every target, so their tests run natively without the browser's graph.
 eustress-networking = { path = "../common/eustress-networking", default-features = false }
+# The published-world manifest. Pure Rust, so the solo path's tests run natively.
+eustress-echk = { path = "../echk" }
+serde_json = { workspace = true }
 
 # Everything else is the browser's alone, so a native build of the workspace
 # compiles none of it and nothing here joins a desktop build's features.
@@ -68,6 +71,9 @@ bevy = { workspace = true, features = [
     "tonemapping_luts",
     "zstd_rust",
 ] }
+# Bevy's Resource/Component derives emit `bevy_ecs::` paths. Those resolve
+# only when this crate names bevy_ecs itself (see the engine crate's note).
+bevy_ecs = { version = "0.19", default-features = false }
 # The render crates the graphics features name; bevy already brings each (its
 # bevy_pbr feature), so these add no crate, only the features' names.
 bevy_render = { version = "0.19", default-features = false }
@@ -87,9 +93,15 @@ web-sys = { version = "=0.3.105", features = [
     "Element",
     "Event",
     "EventTarget",
+    "Headers",
     "HtmlCanvasElement",
     "HtmlElement",
     "Node",
+    "Request",
+    "RequestInit",
+    "RequestRedirect",
+    "Response",
+    "Storage",
     "Window",
 ] }
 console_error_panic_hook = "0.1"

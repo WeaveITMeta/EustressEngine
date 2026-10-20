@@ -32,7 +32,9 @@ impl PageState {
             return;
         }
         self.current = state;
-        let _ = self.on_state.call1(&JsValue::NULL, &JsValue::from_str(state));
+        let _ = self
+            .on_state
+            .call1(&JsValue::NULL, &JsValue::from_str(state));
     }
 
     /// Whether the world has opened and the session not ended since.

@@ -7,6 +7,7 @@ use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
 
 use crate::join::plan_join;
+use crate::solo::{api_origin, classify_launch, Launch};
 
 /// The canvas the Player draws into, made inside the page's `canvasParent`.
 const CANVAS_ID: &str = "eustress-player-canvas";
@@ -38,13 +39,11 @@ impl PlayerHandle {
     }
 }
 
-/// `start_player({ canvasParent, apiBase, assetBase, join, onState, name? })`:
-/// join the session `join` names and draw it inside `canvasParent`.
-/// `onState` hears every state by name ([`crate::states`]). Every error is a
-/// fixed code; none quotes an argument.
-///
-/// A published world played alone (`simId`, with no `join`) is not in this
-/// build: a page starts a session with a join link.
+/// `start_player({ canvasParent, apiBase, assetBase, onState, join?, simId?, name? })`:
+/// draw inside `canvasParent`. `join` opens that hosted session. With no
+/// `join`, `simId` is a published world played alone, downloaded from
+/// `apiBase`. `onState` hears every state by name ([`crate::states`]).
+/// Every error is a fixed code; none quotes an argument.
 #[wasm_bindgen]
 pub fn start_player(args: JsValue) -> Result<PlayerHandle, JsValue> {
     console_error_panic_hook::set_once();
@@ -52,18 +51,43 @@ pub fn start_player(args: JsValue) -> Result<PlayerHandle, JsValue> {
     if STARTED.with(Cell::get) {
         return Err(fail("already-started"));
     }
-    let field = |name: &str| js_sys::Reflect::get(&args, &JsValue::from_str(name)).unwrap_or(JsValue::UNDEFINED);
-    let parent: web_sys::HtmlElement = field("canvasParent").dyn_into().map_err(|_| fail("bad-arguments"))?;
-    let api_base = field("apiBase").as_string().ok_or_else(|| fail("bad-arguments"))?;
-    let asset_base = field("assetBase").as_string().ok_or_else(|| fail("bad-arguments"))?;
-    let on_state: js_sys::Function = field("onState").dyn_into().map_err(|_| fail("bad-arguments"))?;
+    let field = |name: &str| {
+        js_sys::Reflect::get(&args, &JsValue::from_str(name)).unwrap_or(JsValue::UNDEFINED)
+    };
+    let parent: web_sys::HtmlElement = field("canvasParent")
+        .dyn_into()
+        .map_err(|_| fail("bad-arguments"))?;
+    let api_base = field("apiBase")
+        .as_string()
+        .ok_or_else(|| fail("bad-arguments"))?;
+    let asset_base = field("assetBase")
+        .as_string()
+        .ok_or_else(|| fail("bad-arguments"))?;
+    let on_state: js_sys::Function = field("onState")
+        .dyn_into()
+        .map_err(|_| fail("bad-arguments"))?;
     let name = field("name")
         .as_string()
         .filter(|n| !n.trim().is_empty())
         .unwrap_or_else(|| DEFAULT_NAME.to_string());
-    let join = field("join").as_string().ok_or_else(|| fail("no-join-link"))?;
-    let plan = plan_join(&join, &api_base).map_err(|refusal| fail(refusal.code()))?;
-    drop(join);
+    if api_origin(&api_base).is_none() {
+        return Err(fail("bad-api"));
+    }
+    let join = field("join").as_string();
+    let sim_id = field("simId").as_string();
+    let launch = classify_launch(join.as_deref(), sim_id.as_deref()).map_err(fail)?;
+    let (plan, solo) = match launch {
+        Launch::Join => {
+            let join = join.ok_or_else(|| fail("no-join-link"))?;
+            let plan = plan_join(&join, &api_base).map_err(|refusal| fail(refusal.code()))?;
+            drop(join);
+            (Some(plan), None)
+        }
+        Launch::Solo => {
+            let sim_id = sim_id.ok_or_else(|| fail("no-world"))?;
+            (None, Some(sim_id))
+        }
+    };
 
     let document = web_sys::window()
         .and_then(|w| w.document())
@@ -86,7 +110,9 @@ pub fn start_player(args: JsValue) -> Result<PlayerHandle, JsValue> {
     // Keys reach the canvas only while it has the focus: it can take it, it
     // takes it now, and a click gives it back.
     canvas.set_tab_index(0);
-    parent.append_child(&canvas).map_err(|_| fail("no-canvas"))?;
+    parent
+        .append_child(&canvas)
+        .map_err(|_| fail("no-canvas"))?;
     let focus = {
         let canvas = canvas.clone();
         Closure::<dyn FnMut(web_sys::Event)>::new(move |_: web_sys::Event| {
@@ -101,7 +127,9 @@ pub fn start_player(args: JsValue) -> Result<PlayerHandle, JsValue> {
     let mut app = crate::app::build(crate::app::Start {
         canvas: format!("#{CANVAS_ID}"),
         asset_base,
+        api_base,
         plan,
+        sim_id: solo,
         name,
         on_state,
         stop: stop.clone(),

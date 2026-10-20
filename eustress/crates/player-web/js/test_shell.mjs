@@ -26,7 +26,17 @@ const win = new EventTarget();
 globalThis.addEventListener = win.addEventListener.bind(win);
 globalThis.removeEventListener = win.removeEventListener.bind(win);
 globalThis.HTMLElement = class extends EventTarget {};
-globalThis.fetch = async (url) => ({ ok: url instanceof URL && fs.existsSync(fileURLToPath(url)) });
+globalThis.fetch = async (url) => {
+  const file = url instanceof URL ? fileURLToPath(url) : '';
+  const ok = file !== '' && fs.existsSync(file);
+  const body = ok ? fs.readFileSync(file) : Buffer.alloc(0);
+  return {
+    ok,
+    status: ok ? 200 : 404,
+    arrayBuffer: async () =>
+      body.buffer.slice(body.byteOffset, body.byteOffset + body.byteLength),
+  };
+};
 
 function container() {
   const c = new HTMLElement();
@@ -58,6 +68,21 @@ const reporting = (states) => `
     for (const s of ${JSON.stringify(states)}) args.onState(s);
     return { stop() { globalThis.__stops = (globalThis.__stops || 0) + 1; } };
   }`;
+
+await test('a WebGPU browser uses the WebGL2 build when that is the one published', async () => {
+  const { selectBuild } = await host();
+  assert.equal(selectBuild('webgpu', { webgpu: false, webgl2: true }), 'webgl2');
+  assert.equal(selectBuild('webgpu', { webgpu: true, webgl2: true }), 'webgpu');
+  assert.equal(selectBuild('webgl2', { webgpu: true, webgl2: false }), 'webgl2');
+});
+
+await test('a navigator.gpu that cannot make an adapter uses the WebGL2 build', async () => {
+  const { chooseBuild } = await host();
+  assert.equal(await chooseBuild({ gpu: { requestAdapter: async () => null } }), 'webgl2');
+  assert.equal(await chooseBuild({ gpu: { requestAdapter: async () => { throw new Error('no'); } } }), 'webgl2');
+  assert.equal(await chooseBuild({}), 'webgl2');
+  assert.equal(await chooseBuild({ gpu: { requestAdapter: async () => ({}) } }), 'webgpu');
+});
 
 await test('host.js reports unavailable when no build is deployed', async () => {
   const { start } = await host();
@@ -104,13 +129,47 @@ await test('a page runs one session', async () => {
   ctl.stop();
 });
 
-await test('a published world alone is unavailable in this build', async () => {
+await test('a wasm split into parts is handed to the build as one module', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'eustress-player-'));
+  fs.copyFileSync(HOST_JS, path.join(dir, 'host.js'));
+  const folder = path.join(dir, 'webgl2');
+  fs.mkdirSync(folder);
+  const part0 = Buffer.from([1, 2, 3, 4]);
+  const part1 = Buffer.from([5, 6, 7]);
+  fs.writeFileSync(path.join(folder, 'eustress_player_bg.wasm.part0'), part0);
+  fs.writeFileSync(path.join(folder, 'eustress_player_bg.wasm.part1'), part1);
+  fs.writeFileSync(
+    path.join(folder, 'eustress_player.js'),
+    `export default async function init(arg) { globalThis.__wasm = arg && arg.module_or_path; }
+     export async function start_player(args) { args.onState('in-world'); return { stop() {} }; }`,
+  );
+  const { start } = await import(pathToFileURL(path.join(dir, 'host.js')).href);
+  const ctl = await start({ container: container(), simId: SIM, apiBase: API });
+  assert.equal(ctl.state, 'in-world');
+  assert.deepEqual([...globalThis.__wasm], [1, 2, 3, 4, 5, 6, 7]);
+  ctl.stop();
+});
+
+await test('a published world is handed to the entry with no join link', async () => {
   globalThis.__args = undefined;
-  const { start } = await host(reporting(['joining']));
+  const { start } = await host(reporting(['loading-world', 'in-world']));
   const c = container();
   const ctl = await start({ container: c, simId: SIM, apiBase: API });
-  assert.equal(ctl.state, 'unavailable');
-  assert.equal(globalThis.__args, undefined, 'the entry is never called');
+  assert.equal(globalThis.__args.simId, SIM);
+  assert.equal(globalThis.__args.join, undefined, 'a solo open carries no join link');
+  assert.equal(ctl.state, 'in-world');
+  assert.equal(c.events.at(-1).message, 'Playing.');
+  assert.ok(!leaked(c.events));
+  ctl.stop();
+});
+
+await test('a world that cannot open says so in fixed text', async () => {
+  const { start } = await host(reporting(['loading-world', 'world-failed']));
+  const c = container();
+  const ctl = await start({ container: c, simId: SIM, apiBase: API });
+  assert.equal(ctl.state, 'world-failed');
+  assert.equal(c.events.at(-1).message, 'This Space could not be opened in the browser.');
+  ctl.stop();
 });
 
 await test('a session lost after the world opened says so, not "could not join"', async () => {
