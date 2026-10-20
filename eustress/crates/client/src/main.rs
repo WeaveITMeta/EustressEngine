@@ -49,10 +49,17 @@ usage:
   eustress-client eustress-player://join/<host:port>?key=...&pin=...
   eustress-client --sim <simulation id>    play a published simulation
   eustress-client eustress-player://play/<simulation id>
+  eustress-client <Space directory>       open that Space (a directory that contains Workspace/)
+  eustress-client --help                   print this usage and exit
   eustress-client --version                print the version and exit
   --api-url <url>                          use this Eustress API (as EUSTRESS_API_URL does); the
                                            eustress-player:// link a staging Player registers carries it
-links written with eustress:// in place of eustress-player:// open the same way";
+links written with eustress:// in place of eustress-player:// open the same way
+a path that is not a scene file or a Space directory is an error";
+
+/// `from_args` returns this, and nothing else, when the player asked for
+/// usage. `main` prints [`USAGE`] and exits 0.
+const USAGE_REQUEST: &str = "usage";
 
 /// The Player's own URL scheme. On Windows one application owns a scheme, and
 /// `eustress://` belongs to Studio, so a Player installer registers this one;
@@ -81,6 +88,35 @@ fn option_name(arg: &str) -> String {
     arg.chars().take_while(|c| c.is_ascii_alphanumeric() || *c == '-').take(40).collect()
 }
 
+/// A positional argument that names something on disk.
+enum LocalPath {
+    Scene(PathBuf),
+    Space(PathBuf),
+}
+
+fn is_scene_file(path: &std::path::Path) -> bool {
+    matches!(
+        path.extension().and_then(|e| e.to_str()).map(|e| e.to_ascii_lowercase()).as_deref(),
+        Some("eustress" | "eustressengine" | "ron" | "escene" | "json")
+    )
+}
+
+/// A scene file, or a Space directory (`Workspace/` inside it). Anything
+/// else is an error, so a typo does not open the movement course.
+fn local_path(raw: &str) -> Result<LocalPath, String> {
+    let path = PathBuf::from(raw);
+    if path.is_dir() && path.join("Workspace").is_dir() {
+        return Ok(LocalPath::Space(path));
+    }
+    if path.is_file() && is_scene_file(&path) {
+        return Ok(LocalPath::Scene(path));
+    }
+    if !path.exists() {
+        return Err(format!("no such scene file or Space directory: {raw}"));
+    }
+    Err(format!("not a scene file or a Space directory (a Space contains Workspace/): {raw}"))
+}
+
 /// How the Player was launched. Not `Clone`: a join can carry the ticket a
 /// gallery's Play page put in its link, which is never copied
 /// (`docs/networking/PLAYER_JOIN_TICKET.md`). Its `Debug` prints no ticket
@@ -88,7 +124,11 @@ fn option_name(arg: &str) -> String {
 #[derive(Debug)]
 pub enum Launch {
     /// A Space from this computer, or a legacy scene file.
-    Local { scene_path: Option<PathBuf> },
+    ///
+    /// `space_dir` is a Space directory the argument named (it contains
+    /// `Workspace/`). `main` points `EUSTRESS_SPACE` at it, so the movement
+    /// course is not opened instead. `scene_path` is a legacy scene file.
+    Local { scene_path: Option<PathBuf>, space_dir: Option<PathBuf> },
     /// Join a Studio host. `extras`: the ticket and API an
     /// `eustress-player://` link carries; none for `--connect`.
     Join { link: JoinLink, name: String, extras: LinkExtras },
@@ -98,10 +138,15 @@ pub enum Launch {
 
 impl Launch {
     fn from_args(args: &[String]) -> Result<Self, String> {
+        // `--help` and `-h` before anything else, so a bad path on the same
+        // command still prints usage, and `-h` is never a scene path.
+        if args.iter().skip(1).any(|a| matches!(a.as_str(), "--help" | "-h" | "-?")) {
+            return Err(USAGE_REQUEST.into());
+        }
         // Each kind of launch keeps the extras of the link that named it.
         let mut link: Option<(JoinLink, LinkExtras)> = None;
         let mut sim: Option<(String, LinkExtras)> = None;
-        let (mut key, mut pin, mut name, mut scene) = (None, None, None, None);
+        let (mut key, mut pin, mut name, mut scene, mut space_dir) = (None, None, None, None, None);
         let mut it = args.iter().skip(1);
         while let Some(raw) = it.next() {
             let mut value = |flag: &str| it.next().cloned().ok_or_else(|| format!("{flag} needs a value"));
@@ -135,8 +180,16 @@ impl Launch {
                 other if other.starts_with(STUDIO_SCHEME) || other.starts_with("https://") => {
                     link = Some((parse_join_link(other)?, extras));
                 }
-                other if other.starts_with("--") => return Err(format!("unknown option {}", option_name(other))),
-                other => scene = Some(PathBuf::from(other)),
+                other if other.starts_with('-') => return Err(format!("unknown option {}", option_name(other))),
+                other => {
+                    if scene.is_some() || space_dir.is_some() {
+                        return Err("only one scene file or Space directory".into());
+                    }
+                    match local_path(other)? {
+                        LocalPath::Scene(path) => scene = Some(path),
+                        LocalPath::Space(path) => space_dir = Some(path),
+                    }
+                }
             }
         }
 
@@ -175,7 +228,7 @@ impl Launch {
                 .unwrap_or_else(|| "Player".to_string());
             return Ok(Launch::Join { link, name, extras });
         }
-        Ok(Launch::Local { scene_path: scene })
+        Ok(Launch::Local { scene_path: scene, space_dir })
     }
 
     fn is_network(&self) -> bool {
@@ -279,7 +332,7 @@ pub fn build_app(launch: Launch) -> App {
         live.prepare();
     }
     let scene_path = match &launch {
-        Launch::Local { scene_path } => scene_path.clone(),
+        Launch::Local { scene_path, .. } => scene_path.clone(),
         _ => None,
     };
 
@@ -540,6 +593,10 @@ fn main() {
     }
     let launch = match Launch::from_args(&args) {
         Ok(launch) => launch,
+        Err(e) if e == USAGE_REQUEST => {
+            say(false, USAGE);
+            return;
+        }
         Err(e) => {
             say(true, &format!("eustress-client: {e}\n\n{USAGE}"));
             // A release Player has no console, so the reason would go nowhere:
@@ -563,6 +620,11 @@ fn main() {
             show_message("Eustress Player could not open this link", &why);
         }
         std::process::exit(2);
+    }
+    if let Launch::Local { space_dir: Some(dir), .. } = &launch {
+        // `resolve_space` reads this before the movement course, so the
+        // directory on the command line is the one that opens.
+        std::env::set_var("EUSTRESS_SPACE", dir);
     }
     // A panic is written to this run's log and shown once, instead of ending
     // the window silently: a release Player has no console to show it.
@@ -924,5 +986,64 @@ mod launch_link_tests {
             let launch = from_link(&format!(" {link} ")).expect("parses");
             assert!(matches!(&launch, Launch::Join { extras, .. } if extras.ticket.is_some()), "{written} was not read as a link");
         }
+    }
+
+    /// `--help` and `-h` ask for usage. They are not a scene path, so they
+    /// cannot fall through to the movement course. `main` exits 0 for this.
+    #[test]
+    fn help_asks_for_usage_instead_of_opening_a_space() {
+        for flag in ["--help", "-h", "-?"] {
+            let e = Launch::from_args(&args(&["eustress-client", flag])).expect_err(flag);
+            assert_eq!(e, USAGE_REQUEST, "{flag} must be usage, not a path");
+        }
+        let with_junk = Launch::from_args(&args(&["eustress-client", "no-such-space", "--help"])).expect_err("help wins");
+        assert_eq!(with_junk, USAGE_REQUEST);
+    }
+
+    /// A positional argument that is not a scene file or a Space directory
+    /// is refused. It must not become a launch that opens the movement course.
+    #[test]
+    fn a_bad_positional_argument_is_refused() {
+        let missing = Launch::from_args(&args(&["eustress-client", "no-such-space"])).expect_err("missing");
+        assert!(missing.contains("no such"), "{missing}");
+        assert_ne!(missing, USAGE_REQUEST);
+
+        let dir = std::env::temp_dir().join(format!("eustress-not-a-space-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let not_space = Launch::from_args(&args(&["eustress-client", dir.to_str().unwrap()])).expect_err("not a space");
+        assert!(not_space.contains("not a scene file"), "{not_space}");
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let file = std::env::temp_dir().join(format!("eustress-notes-{}.txt", std::process::id()));
+        std::fs::write(&file, "hello").unwrap();
+        let not_scene = Launch::from_args(&args(&["eustress-client", file.to_str().unwrap()])).expect_err("not a scene");
+        assert!(not_scene.contains("not a scene file"), "{not_scene}");
+        let _ = std::fs::remove_file(&file);
+    }
+
+    /// A directory with `Workspace/` is that Space, not a scene file.
+    #[test]
+    fn a_space_directory_is_the_space_that_opens() {
+        let root = std::env::temp_dir().join(format!("eustress-space-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("Workspace")).unwrap();
+        let launch = Launch::from_args(&args(&["eustress-client", root.to_str().unwrap()])).expect("a space");
+        match launch {
+            Launch::Local { scene_path, space_dir } => {
+                assert!(scene_path.is_none());
+                assert_eq!(space_dir.as_deref(), Some(root.as_path()));
+            }
+            other => panic!("expected a local space, got {other:?}"),
+        }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// No positional argument still opens whatever Space the environment
+    /// names, which is the movement course when that variable is unset.
+    #[test]
+    fn no_positional_argument_stays_the_default_space() {
+        let launch = Launch::from_args(&args(&["eustress-client"])).expect("default");
+        assert!(matches!(launch, Launch::Local { scene_path: None, space_dir: None }));
     }
 }
