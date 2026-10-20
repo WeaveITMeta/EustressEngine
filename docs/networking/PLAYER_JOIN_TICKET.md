@@ -31,7 +31,7 @@ eustress-player://play/<simulation id>?api=<name>
   - Use: the gallery admits it once and refuses it after that ("This ticket was already used").
 - `api`: which Eustress API the link belongs to, as a name: `production` or `staging`.
   - These are the only APIs a Player knows. Any other name refuses the link and says so.
-  - It must equal the API the Player is set up for (its link registration's `--api-url`, else production).
+  - It must equal the API the Player is set up for. For one run that is `--api-url` (which wins) or `--env staging` or `--env production`. Otherwise it is `EUSTRESS_API_URL` when that is set, else the API compiled in from `EUSTRESS_DEFAULT_API_URL` (a staging-channel build), else production. On Windows the registered command carries `--api-url` when that API is not production.
     A link for the other refuses with "This link is for the staging server; this Player is set up for
     production.", and nothing is fetched, minted or connected. So no web page can point a production Player
     at staging, whose listings production moderation never saw. A ticket from the other API would be useless

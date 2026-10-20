@@ -68,7 +68,7 @@ pub fn BrowserStage(launch: BrowserLaunch, on_close: Callback<()>) -> impl IntoV
             </div>
             <div class="bp-canvas" node_ref=container></div>
             {move || playing.get().then(|| view! {
-                <p class="bp-hint">"Click the view to look around. WASD moves, Shift is faster, Space and Ctrl go up and down. Esc releases the mouse."</p>
+                <p class="bp-hint">"WASD moves your character. Shift sprints, Space jumps, and Ctrl crouches. Hold the right mouse button to look around. A Space that does not load a character flies the camera instead: click to look, Space and Ctrl go up and down, and Esc releases the mouse."</p>
             })}
         </div>
     }

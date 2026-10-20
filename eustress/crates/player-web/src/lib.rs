@@ -12,8 +12,9 @@
 //! - [`solo`]: a published world played with no host, from its Gallery id.
 //! - Browser builds only: `entry` (the export host.js calls), `app` (the
 //!   Bevy app), `link` (the session's transport over `js/net.js`), `fetch`
-//!   (downloading a published world), `explore` (looking around with no
-//!   avatar), `world` (opening the world that arrives, from its records)
+//!   (downloading a published world), `explore` (the camera when a Space
+//!   loads no character), `world` (opening the world that arrives, from its
+//!   records, and spawning the local character)
 //!   and `page` (the page's state and stop switch).
 //!
 //! Nothing here logs, keeps or reports a join link, its key, its ticket or

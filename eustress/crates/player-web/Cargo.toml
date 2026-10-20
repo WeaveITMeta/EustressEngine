@@ -46,6 +46,13 @@ serde_json = { workspace = true }
 # (space_read.rs:416-424, datamodel/record.rs:1492-1521). Without it this
 # Player's tree holds authored studs where the host's holds metres, every
 # replicated write lands in a different world, and nothing fails to compile.
+# `model-import` arrives through play-runtime, which the avatar's clip retarget
+# needs. `mlua` stays off: its Luau is C++ (mlua-sys / luau0-src) and clang has
+# no C++ standard library for wasm32-unknown-unknown, so the VM cannot be
+# built for this target. `avatar-profile` stays off too: it fetches an account
+# body with ureq on a thread, and a public gallery page has no token, so the
+# desktop's no-token path (the default descriptor, dressed by the Space) is
+# the one this page runs.
 eustress-common = { path = "../common", default-features = false, features = ["physics", "units_v1"] }
 eustress-play-runtime = { path = "../play-runtime" }
 avian3d = { workspace = true }
@@ -65,6 +72,10 @@ bevy = { workspace = true, features = [
     # The Space's sounds, as the desktop Player decodes them.
     "bevy_audio",
     "audio-all-formats",
+    # The local character is a glTF scene with a skinned mesh and clips.
+    "bevy_scene",
+    "bevy_animation",
+    "bevy_gltf",
     "png",
     # Camera3d's default tonemapping (TonyMcMapface) needs its LUT, or the
     # view is magenta; the LUT is KTX2 with zstd, decoded in pure Rust.

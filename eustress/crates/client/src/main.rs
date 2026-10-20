@@ -50,8 +50,11 @@ usage:
   eustress-client --sim <simulation id>    play a published simulation
   eustress-client eustress-player://play/<simulation id>
   eustress-client --version                print the version and exit
-  --api-url <url>                          use this Eustress API (as EUSTRESS_API_URL does); the
-                                           eustress-player:// link a staging Player registers carries it
+  --env <staging|production>               use that named server for this run
+  --api-url <url>                          use this Eustress API (as EUSTRESS_API_URL does); either
+                                           wins over the server this build was compiled for, and
+                                           --api-url wins over --env. The eustress-player:// link a
+                                           staging Player registers carries --api-url
 links written with eustress:// in place of eustress-player:// open the same way";
 
 /// The Player's own URL scheme. On Windows one application owns a scheme, and
@@ -125,6 +128,12 @@ impl Launch {
                 "--name" => name = Some(value("--name")?),
                 "--sim" => sim = Some((value("--sim")?, LinkExtras::default())),
                 // Taken by `main` before anything reads the API.
+                "--env" => {
+                    let name = value("--env")?;
+                    if eustress_common::api_base::api_for_name(&name).is_none() {
+                        return Err("--env must be staging or production".into());
+                    }
+                }
                 "--api-url" => drop(value("--api-url")?),
                 // `play/<id>`, or `play/<id>?api=<name>`: the id is the path
                 // alone.
@@ -183,8 +192,9 @@ impl Launch {
     }
 
     /// A link names the API it belongs to, and this Player opens it only on
-    /// `player_api`, the API it is set up for: its `--api-url`, else
-    /// production. A link that names none takes the Player's own.
+    /// `player_api`, the API it is set up for: `--api-url` or `--env` for
+    /// this run, else `EUSTRESS_API_URL`, else the API compiled into this
+    /// build, else production. A link that names none takes the Player's own.
     fn check_api(&self, player_api: &str) -> Result<(), String> {
         match self {
             Launch::Join { extras, .. } | Launch::Published { extras, .. } => extras.check_api(player_api),
@@ -526,6 +536,29 @@ fn attach_parent_console() {
 #[cfg(not(all(windows, not(debug_assertions))))]
 fn attach_parent_console() {}
 
+/// The value after `flag`, when `flag` is present and a value follows it.
+fn flag_value<'a>(args: &'a [String], flag: &str) -> Option<&'a str> {
+    args.iter().position(|a| a == flag).and_then(|i| args.get(i + 1)).map(String::as_str)
+}
+
+/// The API this run asks for, before [`eustress_common::api_base::api_base`]
+/// is read. `--api-url` wins over `--env`. `Ok(None)` when neither is set, so
+/// `EUSTRESS_API_URL` or the compiled default stands. `--env` accepts only
+/// `staging` and `production`.
+fn api_override(args: &[String]) -> Result<Option<String>, String> {
+    let named = match flag_value(args, "--env") {
+        Some(name) => match eustress_common::api_base::api_for_name(name) {
+            Some(url) => Some(url.to_string()),
+            None => return Err("--env must be staging or production".into()),
+        },
+        None => None,
+    };
+    if let Some(url) = flag_value(args, "--api-url") {
+        return Ok(Some(url.to_string()));
+    }
+    Ok(named)
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     // Not a way to launch, so it never reaches `Launch`. The release pipeline
@@ -534,11 +567,16 @@ fn main() {
         say(false, &format!("eustress-client {}", env!("CARGO_PKG_VERSION")));
         return;
     }
-    // `--api-url`: before anything reads the API base, which is read once.
-    if let Some(url) = args.iter().position(|a| a == "--api-url").and_then(|i| args.get(i + 1)) {
-        std::env::set_var(eustress_common::api_base::API_URL_VAR, url);
-    }
-    let launch = match Launch::from_args(&args) {
+    // `--env` then `--api-url`, before anything reads the API base, which is
+    // read once. Both set `EUSTRESS_API_URL`, so they win over the server
+    // compiled into this build. `--api-url` wins when both are present.
+    let launch = (|| {
+        if let Some(url) = api_override(&args)? {
+            std::env::set_var(eustress_common::api_base::API_URL_VAR, url);
+        }
+        Launch::from_args(&args)
+    })();
+    let launch = match launch {
         Ok(launch) => launch,
         Err(e) => {
             say(true, &format!("eustress-client: {e}\n\n{USAGE}"));
@@ -555,8 +593,9 @@ fn main() {
     };
     // A link names the API it belongs to, and this Player opens only its
     // own: a link for the other is refused here, before anything is fetched,
-    // minted or connected. A link never sets the API; only `--api-url` above
-    // does (docs/networking/PLAYER_JOIN_TICKET.md).
+    // minted or connected. A link never sets the API. `--api-url`, `--env`
+    // and `EUSTRESS_API_URL` do, ahead of the server compiled into this
+    // build (docs/networking/PLAYER_JOIN_TICKET.md).
     if let Err(why) = launch.check_api(eustress_common::api_base::api_base()) {
         say(true, &format!("eustress-client: {why}"));
         if !cfg!(debug_assertions) {
@@ -770,6 +809,47 @@ mod launch_link_tests {
         let launch = Launch::from_args(&args(&["eustress-client", &format!("eustress-player://play/{SIM}/")]))
             .expect("the link parses");
         assert!(matches!(launch, Launch::Published { sim_id, .. } if sim_id == SIM));
+    }
+
+    /// `--env staging` is a launch, and the play link still opens.
+    #[test]
+    fn env_staging_keeps_the_play_link() {
+        let launch = Launch::from_args(&args(&[
+            "eustress-client",
+            "--env",
+            "staging",
+            &format!("eustress-player://play/{SIM}"),
+        ]))
+        .expect("--env staging parses");
+        assert!(matches!(launch, Launch::Published { sim_id, .. } if sim_id == SIM));
+        assert_eq!(
+            api_override(&args(&["eustress-client", "--env", "staging"])).unwrap().as_deref(),
+            Some(STAGING)
+        );
+        assert_eq!(
+            api_override(&args(&["eustress-client", "--env", "production"])).unwrap().as_deref(),
+            Some(PRODUCTION)
+        );
+    }
+
+    /// `--env` accepts only the two named servers. `--api-url` wins when both
+    /// are set. Neither flag leaves the override unset.
+    #[test]
+    fn env_must_name_staging_or_production_and_api_url_wins() {
+        let bad = Launch::from_args(&args(&["eustress-client", "--env", "nightly"]))
+            .expect_err("nightly is not a server");
+        assert_eq!(bad, "--env must be staging or production");
+        assert_eq!(api_override(&args(&["eustress-client", "--env", "nightly"])).unwrap_err(), bad);
+        assert!(Launch::from_args(&args(&["eustress-client", "--env"])).is_err());
+        let both = args(&[
+            "eustress-client",
+            "--env",
+            "production",
+            "--api-url",
+            "http://localhost:8787",
+        ]);
+        assert_eq!(api_override(&both).unwrap().as_deref(), Some("http://localhost:8787"));
+        assert_eq!(api_override(&args(&["eustress-client"])).unwrap(), None);
     }
 
     /// The command the link handler registers passes the API before the link,
