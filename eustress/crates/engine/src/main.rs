@@ -212,10 +212,20 @@ fn engine_log_fmt_layer(_app: &mut App) -> Option<bevy::log::BoxedFmtLayer> {
 }
 
 fn main() {
-    println!("Starting Eustress Engine...");
-    
-    // Parse command-line arguments first (may exit for --help, --register, etc.)
+    // Before any println. A release build is a GUI subsystem, so writing to
+    // a missing console panics (exit 1) and `--help` never gets to exit 0.
     let args = StartupArgs::parse();
+    if args.show_help {
+        startup::attach_parent_console();
+        startup::write_help(&mut std::io::stdout());
+        std::process::exit(0);
+    }
+    if args.server_mode {
+        eustress_engine::server_mode::run(args);
+        return;
+    }
+
+    println!("Starting Eustress Engine...");
     
     // Generate window title - include scene name if opening a file
     let instance_id = std::process::id();
@@ -375,6 +385,13 @@ fn main() {
             wait_duration: std::time::Duration::from_secs(2),
             ..default()
         });
+
+    // A lost GPU device stops drawing and leaves the simulation up. Bevy's
+    // default handler quits the process, which takes a hosted session with it.
+    app.insert_resource(bevy::render::error_handler::RenderErrorHandler(
+        eustress_engine::crash::on_render_error,
+    ));
+    app.add_systems(Update, eustress_engine::crash::prefer_cpu_clustering_in_play);
 
     // The GPU's capabilities, logged once; the guards and Bevy Solari when
     // ray tracing is on; the AI camera's sky either way. After
@@ -829,52 +846,44 @@ fn main() {
         Err(payload) => {
             let msg = panic_payload_str(&*payload);
 
-            // Resource exhaustion PRESENTS as a graphics error, and the old
-            // heuristic swallowed it: `unrecoverable` and `Buffer`+`invalid`
-            // both match a failed allocation or a device lost to VRAM
-            // pressure. Loading a large imported place is exactly when that
-            // happens, so a real failure exited 0 and looked like a clean
-            // quit. Check for it FIRST and make it loud.
-            let exhaustion = msg.contains("Out of memory")
-                || msg.contains("OutOfMemory")
-                || msg.contains("out of device memory")
-                || msg.contains("OutOfDeviceMemory")
-                || msg.contains("Device is lost")
-                || msg.contains("device is lost")
-                || msg.contains("DeviceLost");
-
-            // Only a TRANSIENT surface loss is safe to swallow: minimizing the
-            // window, a display-mode change, or a driver TDR invalidates the
-            // swap chain for a frame. Deliberately narrow — anything that
-            // merely SOUNDS graphics-y must reach the developer instead.
-            let transient_surface = msg.contains("swap chain")
-                || msg.contains("Acquiring a texture")
-                || msg.contains("Surface timed out")
-                || msg.contains("Outdated");
-
-            if exhaustion {
-                error!(
-                    target: "eustress_engine::crash",
-                    panic = %msg,
-                    "OUT OF GPU/SYSTEM MEMORY — a real failure, not a surface loss"
-                );
-                eprintln!("❌ Eustress ran out of GPU/system memory — this is a crash, not a clean exit.");
-                eprintln!("   {msg}");
-                std::process::exit(1);
+            // Device-lost is not an allocation failure. The old check folded
+            // `DeviceLost` into the out-of-memory path, so a driver reset
+            // was reported as running out of memory.
+            match eustress_engine::crash::classify_panic(&msg) {
+                eustress_engine::crash::PanicKind::OutOfMemory => {
+                    error!(
+                        target: "eustress_engine::crash",
+                        panic = %msg,
+                        "OUT OF GPU/SYSTEM MEMORY — a real failure, not a surface loss"
+                    );
+                    eprintln!("❌ Eustress ran out of GPU/system memory — this is a crash, not a clean exit.");
+                    eprintln!("   {msg}");
+                    std::process::exit(1);
+                }
+                eustress_engine::crash::PanicKind::GpuDeviceLost => {
+                    error!(
+                        target: "eustress_engine::crash",
+                        panic = %msg,
+                        "GPU device lost — the renderer aborted. A --server host has no renderer and keeps the session."
+                    );
+                    eprintln!("❌ The GPU device was lost. Drawing cannot continue.");
+                    eprintln!("   {msg}");
+                    eprintln!("   Host with --server to run the session without a GPU renderer.");
+                    std::process::exit(1);
+                }
+                // Minimizing the window or a display-mode change invalidates
+                // the swap chain for a frame. That is not a crash.
+                eustress_engine::crash::PanicKind::TransientSurface => {
+                    warn!(
+                        target: "eustress_engine::crash",
+                        panic = %msg,
+                        "GPU surface lost (transient) — exiting cleanly"
+                    );
+                    eprintln!("⚠️  GPU surface lost — exiting cleanly (not a crash).");
+                    std::process::exit(0);
+                }
+                eustress_engine::crash::PanicKind::Other => std::panic::resume_unwind(payload),
             }
-
-            if transient_surface {
-                warn!(
-                    target: "eustress_engine::crash",
-                    panic = %msg,
-                    "GPU surface lost (transient) — exiting cleanly"
-                );
-                eprintln!("⚠️  GPU surface lost — exiting cleanly (not a crash).");
-                std::process::exit(0);
-            }
-
-            // Real panic — re-raise so dev gets a proper backtrace.
-            std::panic::resume_unwind(payload);
         }
     }
 }

@@ -56,14 +56,26 @@ pub struct StartupArgs {
     /// `eustress://edit/<id>`: download that gallery listing's world and
     /// open a copy of it (see `crate::space::gallery_edit`).
     pub gallery_edit: Option<String>,
+
+    /// `--help` / `-h`. `main` prints usage and exits 0. Parsing does not
+    /// exit, so a test can see the flag.
+    pub show_help: bool,
+
+    /// `--bliss-bind <ip>`. Overrides `EUSTRESS_BLISS_BIND`. The Bliss
+    /// listener uses this address, and the log line prints the same one.
+    pub bliss_bind: Option<String>,
 }
 
 impl StartupArgs {
-    /// Parse command-line arguments
+    /// Parse the process's command-line arguments.
     pub fn parse() -> Self {
-        let args: Vec<String> = std::env::args().collect();
+        Self::parse_from(&std::env::args().collect::<Vec<_>>())
+    }
+
+    /// Parse `args`, whose first entry is the program name.
+    pub fn parse_from(args: &[String]) -> Self {
         let mut result = Self::default();
-        
+
         let mut i = 1; // Skip program name
         while i < args.len() {
             let arg = &args[i];
@@ -113,8 +125,13 @@ impl StartupArgs {
                     }
                 }
                 "--help" | "-h" => {
-                    print_help();
-                    std::process::exit(0);
+                    result.show_help = true;
+                }
+                "--bliss-bind" => {
+                    i += 1;
+                    if i < args.len() {
+                        result.bliss_bind = Some(args[i].clone());
+                    }
                 }
                 _ if arg.starts_with("eustress://edit/") => {
                     // The gallery's Edit button on an open-source listing.
@@ -169,9 +186,12 @@ fn is_scene_file(path: &PathBuf) -> bool {
     }
 }
 
-/// Print help message
-fn print_help() {
-    println!(r#"
+/// Usage text. `main` writes it and exits 0 for `--help`.
+pub fn help_text() -> &'static str {
+    HELP
+}
+
+const HELP: &str = r#"
 Eustress Engine: the AI-native orchestrator for live, physically consistent worlds
 
 USAGE:
@@ -185,8 +205,10 @@ OPTIONS:
     -r, --register          Register file associations (Windows, requires admin)
     -u, --unregister        Unregister file associations (Windows, requires admin)
     -p, --play              Start in play mode immediately
-    -s, --server            Start as headless server
+    -s, --server            Run a headless server (no window, no GPU renderer)
     -v, --verbose           Enable verbose logging
+        --bliss-bind <IP>   Address the Bliss node listens on (default 127.0.0.1;
+                            also EUSTRESS_BLISS_BIND). The log prints this address.
         --open <FILE>       Open a `.eustress` launch pointer (or a Space directory)
         --space <PATH>      Open a specific Space directory directly
         --universe <PATH>   Open the first Space found inside a Universe directory
@@ -203,7 +225,30 @@ FILE EXTENSIONS:
     .eustress   Eustress scene file (recommended)
     .ron        RON format scene file
     .escene     Eustress scene (alternative)
-"#);
+"#;
+
+/// Write usage to `out`. A missing console (a Windows GUI-subsystem
+/// build whose parent has no console) is not an error: `--help` still
+/// exits 0.
+pub fn write_help(out: &mut impl std::io::Write) {
+    let _ = writeln!(out, "{HELP}");
+}
+
+/// Windows release builds have no console of their own. Attach the
+/// parent's so `--help` is visible in the terminal that launched Studio.
+pub fn attach_parent_console() {
+    #[cfg(all(windows, not(debug_assertions)))]
+    {
+        #[link(name = "kernel32")]
+        extern "system" {
+            fn AttachConsole(process_id: u32) -> i32;
+        }
+        const PARENT: u32 = u32::MAX;
+        // SAFETY: AttachConsole takes a process id and only changes this
+        // process's console attachment. Failure means there is no parent
+        // console, which is fine.
+        unsafe { AttachConsole(PARENT); }
+    }
 }
 
 // ============================================================================
@@ -967,5 +1012,40 @@ impl CurrentSceneFile {
     pub fn window_title(&self) -> String {
         let dirty_marker = if self.dirty { "*" } else { "" };
         format!("{}{} - Eustress Engine", dirty_marker, self.name)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn argv(list: &[&str]) -> Vec<String> {
+        list.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn help_is_a_flag_and_does_not_exit() {
+        let args = StartupArgs::parse_from(&argv(&["eustress-engine", "--help"]));
+        assert!(args.show_help);
+        let short = StartupArgs::parse_from(&argv(&["eustress-engine", "-h"]));
+        assert!(short.show_help);
+        let mut buf = Vec::new();
+        write_help(&mut buf);
+        let text = String::from_utf8(buf).unwrap();
+        assert!(text.contains("--server"));
+        assert!(text.contains("--bliss-bind"));
+    }
+
+    #[test]
+    fn server_and_bliss_bind_parse() {
+        let args = StartupArgs::parse_from(&argv(&[
+            "eustress-engine",
+            "--server",
+            "--bliss-bind",
+            "127.0.0.1",
+        ]));
+        assert!(args.server_mode);
+        assert_eq!(args.bliss_bind.as_deref(), Some("127.0.0.1"));
+        assert!(!args.show_help);
     }
 }

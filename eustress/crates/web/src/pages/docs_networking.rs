@@ -430,7 +430,7 @@ pub fn DocsNetworkingPage() -> impl IntoView {
                                     </tr>
                                     <tr>
                                         <td>"Bliss node"</td>
-                                        <td>"TCP 7777 on every network interface"</td>
+                                        <td>"TCP 7777 on 127.0.0.1, unless "<code>"--bliss-bind"</code>" or "<code>"EUSTRESS_BLISS_BIND"</code>" names another address"</td>
                                         <td>"At launch, while Bliss is enabled (the default)"</td>
                                         <td>"Bliss co-signing and identity checks, see "<a href="/docs/earning">"Earning"</a></td>
                                     </tr>
@@ -445,13 +445,16 @@ pub fn DocsNetworkingPage() -> impl IntoView {
                             <div class="callout callout-advanced">
                                 <img src="/assets/icons/settings.svg" alt="Advanced" />
                                 <div>
-                                    <strong>"The Bliss node listens on every interface"</strong>
+                                    <strong>"The Bliss node listens on this machine"</strong>
                                     <p>
-                                        "It binds 0.0.0.0, so other machines on your network can reach port
-                                        7777. Studio reads the setting only at startup: set "
-                                        <code>"bliss_enabled"</code>" to "<code>"false"</code>" in "
+                                        "It binds 127.0.0.1, and the log line is that socket's address.
+                                        To listen elsewhere, pass "
+                                        <code>"--bliss-bind"</code>" or set "
+                                        <code>"EUSTRESS_BLISS_BIND"</code>" to an IP address before startup.
+                                        Set "<code>"bliss_enabled"</code>" to "<code>"false"</code>" in "
                                         <code>"~/.eustress_engine/settings.json"</code>" and restart to keep the
-                                        node off."
+                                        node off. "<code>"--server"</code>" does not start Bliss: that
+                                        process is a headless game host and keeps port 7777 for players."
                                     </p>
                                 </div>
                             </div>

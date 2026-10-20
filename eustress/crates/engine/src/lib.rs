@@ -146,6 +146,8 @@ pub mod video;
 pub mod transform_space;
 pub mod default_scene;
 pub mod startup;
+pub mod crash;
+pub mod server_mode;
 pub mod terrain_plugin;
 /// The terrain tools' cursor (ring, strength disc, Draw volume, locked
 /// plane, grid, contours, mirror ghosts) and the readout beside it.
