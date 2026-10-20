@@ -3089,6 +3089,17 @@ Enum = setmetatable({}, {
             }
             let mut args = without_service(lua, args);
             let url = string_arg(lua, &mut args, "HttpService:GetAsync", "a URL")?;
+            // ureq builds C and assembly for TLS, so it is not a wasm32
+            // dependency. JSON, GUID and URL encoding below stay; a script
+            // that fetches learns that this Player cannot.
+            #[cfg(target_arch = "wasm32")]
+            {
+                let _ = url;
+                return Err(mlua::Error::RuntimeError(
+                    "HttpService:GetAsync is not available in the browser Player".into(),
+                ));
+            }
+            #[cfg(not(target_arch = "wasm32"))]
             match ureq::get(&url).call() {
                 Ok(response) => Ok(response.into_string().ok()),
                 Err(_) => Ok(None),
@@ -3105,6 +3116,14 @@ Enum = setmetatable({}, {
             let mut args = without_service(lua, args);
             let url = string_arg(lua, &mut args, "HttpService:PostAsync", "a URL")?;
             let body = string_arg(lua, &mut args, "HttpService:PostAsync", "a body")?;
+            #[cfg(target_arch = "wasm32")]
+            {
+                let _ = (url, body);
+                return Err(mlua::Error::RuntimeError(
+                    "HttpService:PostAsync is not available in the browser Player".into(),
+                ));
+            }
+            #[cfg(not(target_arch = "wasm32"))]
             match ureq::post(&url)
                 .set("Content-Type", "application/json")
                 .send_string(&body)
@@ -3130,7 +3149,17 @@ Enum = setmetatable({}, {
             let method: String = options.get::<Option<String>>("Method")?.unwrap_or_else(|| "GET".to_string());
             let body: Option<String> = options.get("Body")?;
             let headers: Option<mlua::Table> = options.get("Headers")?;
-            
+
+            #[cfg(target_arch = "wasm32")]
+            {
+                let _ = (url, method, body, headers);
+                return Err(mlua::Error::RuntimeError(
+                    "HttpService:RequestAsync is not available in the browser Player".into(),
+                ));
+            }
+
+            #[cfg(not(target_arch = "wasm32"))]
+            {
             let mut request = match method.to_uppercase().as_str() {
                 "GET" => ureq::get(&url),
                 "POST" => ureq::post(&url),
@@ -3193,8 +3222,9 @@ Enum = setmetatable({}, {
                     response_table.set("Body", "")?;
                 }
             }
-            
+
             Ok(response_table)
+            }
         }).map_err(|error| format!("Failed to create RequestAsync: {}", error))?;
         http_service_table.set("RequestAsync", http_request)
             .map_err(|error| format!("Failed to set RequestAsync: {}", error))?;

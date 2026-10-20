@@ -4,6 +4,19 @@ name: Player Release
 # -> installers that register eustress-player:// -> SHA-256 checksums
 # -> player/latest.json -> R2 -> GitHub Release.
 #
+# A manual run can publish to staging first. channel=staging (the default)
+# writes the bucket prefix staging/player, served at
+# downloads.eustress.dev/staging/player, puts "channel": "staging" in
+# latest.json, points changelog_url at this workflow run (there is no
+# player-v* tag), and does not create a GitHub Release. It does not touch
+# player/latest.json. A staging build is compiled for
+# https://api-staging.eustress.dev (EUSTRESS_DEFAULT_API_URL on the three
+# cargo builds only). A production build leaves that variable unset, so the
+# Player stays on https://api.eustress.dev. The Gallery site follows the API
+# (site_base in eustress-common); there is no separate gallery URL to set.
+# A player-v* tag, or channel=production, writes the production player/
+# paths below.
+#
 # The Player's counterpart to release.yml, which ships Studio. Same bucket,
 # same Worker, same credentials. The Player publishes under the bucket's
 # player/ prefix, so neither release can overwrite the other's manifest, and
@@ -11,7 +24,8 @@ name: Player Release
 #   /player/latest.json                 the manifest, same shape as Studio's
 #   /player/latest/<platform>           302 to the current release's file
 #   /player/vX.Y.Z/<file>               the artifacts
-# Those routes live in infrastructure/cloudflare/download-worker.js.
+# Staging mirrors those three under /staging/player/. The routes live in
+# infrastructure/cloudflare/download-worker.js.
 #
 # The Player versions independently of Studio: the tag player-vX.Y.Z must
 # match eustress/crates/client/Cargo.toml.
@@ -31,14 +45,21 @@ on:
         description: "Player version to build (X.Y.Z, without the leading player-v)"
         required: true
       publish:
-        description: "Publish to R2 and create a GitHub release. Off: build and test only; the installers stay as run artifacts."
+        description: "Upload to R2. Off: build and test only; the installers stay as run artifacts. A GitHub Release is created only for a player-v* tag, never for staging."
         type: boolean
         default: false
+      channel:
+        description: "staging writes staging/player and leaves player/latest.json alone. production writes the player/ paths a tag push uses. Ignored on a tag push, which is always production."
+        type: choice
+        default: staging
+        options:
+          - staging
+          - production
 
 permissions:
   contents: write
 
-# Two Player releases never race each other to player/latest.json.
+# One Player publish at a time, staging or production.
 concurrency:
   group: player-release
   cancel-in-progress: false
@@ -48,11 +69,10 @@ env:
   CARGO_INCREMENTAL: 0
   CARGO_PROFILE_RELEASE_CODEGEN_UNITS: 16
   CARGO_PROFILE_RELEASE_LTO: thin
-  # The destination, in one place. Changing where Player releases live is
-  # these two edits and the Worker's routes.
+  # The bucket. The prefix and the public base are chosen once, in the
+  # version job: player/ for a tag or channel=production, staging/player
+  # otherwise. The Worker's routes have to match.
   R2_BUCKET: eustress-downloads
-  R2_PREFIX: player
-  DOWNLOAD_BASE: https://downloads.eustress.dev/player
 
 jobs:
   # ─────────────────────────────────────────────────────────────────────
@@ -66,6 +86,10 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.v.outputs.version }}
+      r2_prefix: ${{ steps.channel.outputs.r2_prefix }}
+      download_base: ${{ steps.channel.outputs.download_base }}
+      release_channel: ${{ steps.channel.outputs.release_channel }}
+      default_api_url: ${{ steps.channel.outputs.default_api_url }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -80,14 +104,38 @@ jobs:
           else
             VERSION="${GITHUB_REF_NAME#player-v}"
           fi
-          # The Worker serves only player/vX.Y.Z/ paths, so any other shape
-          # would build for half an hour and then publish something no
-          # link can reach.
+          # The Worker serves only vX.Y.Z paths under player/ and
+          # staging/player/, so any other shape would build for half an
+          # hour and then publish something no link can reach.
           if ! printf '%s' "$VERSION" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
-            echo "::error::'${VERSION}' is not X.Y.Z. downloads.eustress.dev serves Player releases only at player/vX.Y.Z/."
+            echo "::error::'${VERSION}' is not X.Y.Z. downloads.eustress.dev serves Player releases only at player/vX.Y.Z/ and staging/player/vX.Y.Z/."
             exit 1
           fi
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+
+      # A player-v* tag is production. A manual run is staging unless it
+      # asks for production, so a staging publish cannot overwrite
+      # player/latest.json. The input arrives as an environment variable:
+      # it is a choice of two words, and it is not interpolated into the
+      # shell.
+      - id: channel
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          INPUT_CHANNEL: ${{ inputs.channel }}
+        run: |
+          if [ "$EVENT_NAME" = "push" ] || [ "$INPUT_CHANNEL" = "production" ]; then
+            echo "r2_prefix=player" >> "$GITHUB_OUTPUT"
+            echo "download_base=https://downloads.eustress.dev/player" >> "$GITHUB_OUTPUT"
+            echo "release_channel=stable" >> "$GITHUB_OUTPUT"
+            echo "default_api_url=" >> "$GITHUB_OUTPUT"
+            echo "Production: R2 prefix player/ (${EVENT_NAME}). EUSTRESS_DEFAULT_API_URL is unset."
+          else
+            echo "r2_prefix=staging/player" >> "$GITHUB_OUTPUT"
+            echo "download_base=https://downloads.eustress.dev/staging/player" >> "$GITHUB_OUTPUT"
+            echo "release_channel=staging" >> "$GITHUB_OUTPUT"
+            echo "default_api_url=https://api-staging.eustress.dev" >> "$GITHUB_OUTPUT"
+            echo "Staging: R2 prefix staging/player/. The Player is compiled for https://api-staging.eustress.dev. player/latest.json is not written, and no GitHub Release is created."
+          fi
 
       # RELEASE.md's promotion model applies to the Player as it does to
       # Studio: releases ship from Core only.
@@ -143,7 +191,13 @@ jobs:
       - name: Build
         working-directory: eustress
         shell: pwsh
+        env:
+          # Empty on a production build. Drop it so option_env! is None.
+          EUSTRESS_DEFAULT_API_URL: ${{ needs.version.outputs.default_api_url }}
         run: |
+          if ([string]::IsNullOrWhiteSpace($env:EUSTRESS_DEFAULT_API_URL)) {
+            Remove-Item Env:\EUSTRESS_DEFAULT_API_URL -ErrorAction SilentlyContinue
+          }
           cargo build --release --locked --package eustress-client --bin eustress-client `
             --target x86_64-pc-windows-msvc `
             --config "target.x86_64-pc-windows-msvc.rustflags=['-C','target-feature=+crt-static']"
@@ -267,7 +321,14 @@ jobs:
 
       - name: Build
         working-directory: eustress
-        run: cargo build --release --locked --package eustress-client --bin eustress-client --target aarch64-apple-darwin
+        env:
+          # Empty on a production build. Drop it so option_env! is None.
+          EUSTRESS_DEFAULT_API_URL: ${{ needs.version.outputs.default_api_url }}
+        run: |
+          if [ -z "${EUSTRESS_DEFAULT_API_URL:-}" ]; then
+            unset EUSTRESS_DEFAULT_API_URL
+          fi
+          cargo build --release --locked --package eustress-client --bin eustress-client --target aarch64-apple-darwin
 
       - name: Check the reported version
         run: |
@@ -446,12 +507,18 @@ jobs:
 
       - name: Build
         working-directory: eustress
-        run: cargo build --release --locked --package eustress-client --bin eustress-client
+        run: |
+          # Empty on a production build. Drop it so option_env! is None.
+          if [ -z "${EUSTRESS_DEFAULT_API_URL:-}" ]; then
+            unset EUSTRESS_DEFAULT_API_URL
+          fi
+          cargo build --release --locked --package eustress-client --bin eustress-client
         # The system linker, not mold: under mold the Player started with
         # Luau's C++ static initializers unrun (kSizeClassConfig all zero), and
         # lua_newstate divided by a zero block size (SIGFPE) at startup.
         env:
           CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER: clang
+          EUSTRESS_DEFAULT_API_URL: ${{ needs.version.outputs.default_api_url }}
 
       # A linker that drops a C++ static initializer passes every Rust check
       # and fails only at run time, so the binary is checked for Luau's.
@@ -541,6 +608,9 @@ jobs:
     runs-on: ubuntu-latest
     env:
       VERSION: ${{ needs.version.outputs.version }}
+      R2_PREFIX: ${{ needs.version.outputs.r2_prefix }}
+      DOWNLOAD_BASE: ${{ needs.version.outputs.download_base }}
+      RELEASE_CHANNEL: ${{ needs.version.outputs.release_channel }}
     steps:
       - uses: actions/download-artifact@v4
         with:
@@ -567,12 +637,20 @@ jobs:
 
           BASE="${DOWNLOAD_BASE}/v${VERSION}"
 
+          # Production names the GitHub Release for this tag. Staging has no
+          # tag, so changelog_url is the workflow run that built the files.
+          if [ "$RELEASE_CHANNEL" = "staging" ]; then
+            CHANGELOG_URL="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+          else
+            CHANGELOG_URL="https://github.com/WeaveITMeta/EustressEngine/releases/tag/player-v${VERSION}"
+          fi
+
           cat > latest.json <<JSON
           {
             "version": "${VERSION}",
             "date": "$(date -u +%Y-%m-%d)",
-            "channel": "stable",
-            "changelog_url": "https://github.com/WeaveITMeta/EustressEngine/releases/tag/player-v${VERSION}",
+            "channel": "${RELEASE_CHANNEL}",
+            "changelog_url": "${CHANGELOG_URL}",
             "platforms": {
               "windows-x64":           { "file": "${WIN}",   "url": "${BASE}/${WIN}",   "sha256": "$(sha "$WIN")",   "size_bytes": $(size "$WIN"),   "installer": false },
               "windows-x64-installer": { "file": "${SETUP}", "url": "${BASE}/${SETUP}", "sha256": "$(sha "$SETUP")", "size_bytes": $(size "$SETUP"), "installer": true },
@@ -594,7 +672,20 @@ jobs:
                 process.exit(1);
               }
             }
-            console.log("manifest complete:", Object.keys(m.platforms).join(", "));
+            if (process.env.RELEASE_CHANNEL === "staging") {
+              if (!m.changelog_url || /\/releases\/tag\/player-v/.test(m.changelog_url)) {
+                console.error("::error::staging changelog_url must not point at a player-v tag; there is no tag");
+                process.exit(1);
+              }
+              if (!/\/actions\/runs\/\d+$/.test(m.changelog_url)) {
+                console.error("::error::staging changelog_url must be the workflow run that built this publish");
+                process.exit(1);
+              }
+            } else if (!new RegExp("/releases/tag/player-v" + process.env.VERSION + "$").test(m.changelog_url)) {
+              console.error("::error::production changelog_url must be the player-v tag release");
+              process.exit(1);
+            }
+            console.log("manifest complete:", Object.keys(m.platforms).join(", "), "changelog:", m.changelog_url);
           '
 
       - name: Upload to R2
@@ -613,16 +704,35 @@ jobs:
           # wrangler, not the S3 API, as in release.yml: one credential shape
           # for every Cloudflare interaction, and --remote so a typo cannot
           # quietly write to local simulated storage instead.
+          # A 403 is the token, not the file. The step says so in the log.
+          r2_put() {
+            local log status
+            log=$(mktemp)
+            npx --yes wrangler@4 r2 object put "$@" >"$log" 2>&1 && status=0 || status=$?
+            cat "$log"
+            if [ "$status" -ne 0 ]; then
+              if grep -q '403' "$log"; then
+                echo "::error::Upload to R2 was refused (HTTP 403). CLOUDFLARE_API_TOKEN needs R2 Object Read & Write on the eustress-downloads bucket."
+              fi
+              rm -f "$log"
+              exit "$status"
+            fi
+            rm -f "$log"
+          }
+
           for f in *; do
             [ "$f" = "latest.json" ] && continue
-            echo "uploading $f"
-            npx --yes wrangler@4 r2 object put "${BUCKET}/${PREFIX}/v${VERSION}/${f}" \
+            echo "uploading $f -> ${BUCKET}/${PREFIX}/v${VERSION}/${f}"
+            r2_put "${BUCKET}/${PREFIX}/v${VERSION}/${f}" \
               --file "$f" --remote
           done
 
-          # The stable path the website polls. Short cache: a release must be
-          # visible in minutes, not in an hour.
-          npx --yes wrangler@4 r2 object put "${BUCKET}/${PREFIX}/latest.json" \
+          # The path the website polls (player/latest.json, or
+          # staging/player/latest.json). Short cache: a release must be
+          # visible in minutes, not in an hour. This is the only latest.json
+          # this run writes.
+          echo "uploading latest.json -> ${BUCKET}/${PREFIX}/latest.json"
+          r2_put "${BUCKET}/${PREFIX}/latest.json" \
             --file latest.json --remote \
             --content-type application/json \
             --cache-control "public, max-age=60"
@@ -642,7 +752,7 @@ jobs:
             sleep 10
           done
           if [ "$SERVED" != "$VERSION" ]; then
-            echo "::error::${URL} is not serving ${VERSION}. The upload reported success, so check that the deployed Worker has the player/ routes and the bucket binding."
+            echo "::error::${URL} is not serving ${VERSION}. The upload reported success, so check that the deployed Worker has the ${R2_PREFIX}/ routes and the bucket binding."
             exit 1
           fi
           echo "OK: ${URL} serves ${SERVED}"
@@ -650,7 +760,7 @@ jobs:
           # 2. The artifact route returns the uploaded bytes: the checksums
           #    file comes back identical to the one computed above.
           if ! curl -fsS "${DOWNLOAD_BASE}/v${VERSION}/checksums.txt" -o served-checksums.txt; then
-            echo "::error::${DOWNLOAD_BASE}/v${VERSION}/checksums.txt is not served. The manifest is, so check the Worker's player/vX.Y.Z/ route."
+            echo "::error::${DOWNLOAD_BASE}/v${VERSION}/checksums.txt is not served. The manifest is, so check the Worker's ${R2_PREFIX}/vX.Y.Z/ route."
             exit 1
           fi
           if ! cmp -s served-checksums.txt dist/checksums.txt; then
@@ -673,11 +783,12 @@ jobs:
           done
           exit "$FAILED"
 
-      # A tag push only: a dispatched run republishes to R2 from a branch,
-      # which has no tag to attach a release to. Never marked Latest, which
-      # stays Studio's.
+      # A tag push only, and never staging. A dispatched run republishes to
+      # R2 from a branch, which has no tag to attach a release to. Staging
+      # writes staging/player and stops. Never marked Latest, which stays
+      # Studio's.
       - uses: softprops/action-gh-release@v2
-        if: github.event_name == 'push'
+        if: github.event_name == 'push' && needs.version.outputs.release_channel != 'staging'
         with:
           name: Eustress Player v${{ needs.version.outputs.version }}
           files: dist/*

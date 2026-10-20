@@ -4,7 +4,8 @@
 // What the program is, whether there is a build to download today, and which of the two programs a visitor needs. One page, drawn
 // for either product. Every line is something that exists:
 //
-//   * The release card follows the product's release manifest (player/latest.json, latest.json). With none, it says "Public
+//   * The release card follows the product's release manifest (player/latest.json, latest.json). The staging website
+//     reads staging/player/latest.json for the Player. With none, it says "Public
 //     Alpha: first release coming soon" and offers the email sign-up (components/notify_me.rs); it never shows a download button
 //     that goes nowhere.
 //   * The visitor's own computer leads: its row in the table is marked, and with a release its button comes first.
@@ -234,8 +235,8 @@ fn ReleaseCard(product: Product, release: RwSignal<ReleaseState>, me: Option<Des
                     </dl>
                     {(product == Product::Player).then(|| view! {
                         <div class="dl-release-side">
-                            <span class="g-chip"><i class="g-dot off"></i>"Play in browser: coming soon"</span>
-                            <p class="g-hint">"Until then, Spaces open in Eustress Player once it is released."</p>
+                            <span class="g-chip"><i class="g-dot"></i>"Play in browser: from a Space's Play button"</span>
+                            <p class="g-hint">"Open a Space and choose In your browser. Nothing to install."</p>
                         </div>
                     })}
                 }.into_any(),
@@ -298,7 +299,7 @@ fn Released(product: Product, manifest: ReleaseManifest, me: Option<DesktopPlatf
             {gated.then(|| view! { <p class="g-hint">"Studio's downloads need a free account: your identity is verified for platform safety."</p> })}
         </div>
         <ul class="dl-plats">{rows}</ul>
-        {(product == Product::Player).then(|| view! { <div class="dl-release-side"><span class="g-chip"><i class="g-dot off"></i>"Play in browser: coming soon"</span></div> })}
+        {(product == Product::Player).then(|| view! { <div class="dl-release-side"><span class="g-chip"><i class="g-dot"></i>"Play in browser: from a Space's Play button"</span></div> })}
     }
 }
 

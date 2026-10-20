@@ -25,7 +25,9 @@ use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 use bevy::prelude::*;
-use eustress_networking::session::{begin_join, link_pair, LinkCommand, LinkEnds, LinkEvent, HOST_CONN};
+use eustress_networking::session::{
+    begin_join, link_pair, LinkCommand, LinkEnds, LinkEvent, HOST_CONN,
+};
 use eustress_networking::wire::FrameAssembler;
 use wasm_bindgen::prelude::*;
 use wasm_bindgen::JsCast;
@@ -39,7 +41,11 @@ extern "C" {
     /// net.js `openLink(url, pin, handlers)`: the open session, or a
     /// rejection carrying one of [`NET_FAILURES`].
     #[wasm_bindgen(js_name = openLink, catch)]
-    async fn open_link(url: &str, pin: js_sys::Uint8Array, handlers: &JsValue) -> Result<JsValue, JsValue>;
+    async fn open_link(
+        url: &str,
+        pin: js_sys::Uint8Array,
+        handlers: &JsValue,
+    ) -> Result<JsValue, JsValue>;
 }
 
 #[wasm_bindgen]
@@ -171,7 +177,9 @@ fn begin(world: &mut World) {
         }
     });
 
-    world.non_send_resource_mut::<PageState>().report(states::JOINING);
+    world
+        .non_send_resource_mut::<PageState>()
+        .report(states::JOINING);
     world.insert_non_send_resource(WebLink {
         ends,
         bridge,
@@ -189,7 +197,10 @@ fn handlers(send: impl Fn(LinkEvent) + Clone + 'static, bridge: Rc<Bridge>) -> J
             assembler.push(&chunk.to_vec());
             loop {
                 match assembler.next_body() {
-                    Ok(Some(body)) => send(LinkEvent::Frame { conn: HOST_CONN, body }),
+                    Ok(Some(body)) => send(LinkEvent::Frame {
+                        conn: HOST_CONN,
+                        body,
+                    }),
                     Ok(None) => break,
                     // Once open, every end is Closed, as on the desktop
                     // (native.rs ends pump_connection on a frame it cannot

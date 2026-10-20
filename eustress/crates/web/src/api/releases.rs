@@ -4,7 +4,8 @@
 // Reads the latest.json a release pipeline publishes to downloads.eustress.dev,
 // so download buttons follow each release instead of naming files by hand.
 // The Player's manifest lives at /player/latest.json and has the shape
-// .github/workflows/release.yml writes for Eustress Engine:
+// .github/workflows/release.yml writes for Eustress Engine. The staging
+// website reads /staging/player/latest.json; production does not.
 //
 //     { "version", "date", "channel", "changelog_url",
 //       "platforms": { "<key>": { "file", "url", "sha256", "size_bytes", "installer" } } }
@@ -22,6 +23,10 @@ use serde::Deserialize;
 /// Where the Player's release pipeline publishes its manifest.
 pub const PLAYER_MANIFEST_URL: &str = "https://downloads.eustress.dev/player/latest.json";
 
+/// The staging Player manifest. A staging publish writes this and leaves
+/// [`PLAYER_MANIFEST_URL`] alone.
+pub const PLAYER_STAGING_MANIFEST_URL: &str = "https://downloads.eustress.dev/staging/player/latest.json";
+
 /// Where Studio's release pipeline publishes its manifest.
 pub const STUDIO_MANIFEST_URL: &str = "https://downloads.eustress.dev/latest.json";
 
@@ -30,6 +35,49 @@ pub const STUDIO_MANIFEST_URL: &str = "https://downloads.eustress.dev/latest.jso
 /// the versioned URLs in the manifest, so a page left open across a release
 /// still downloads the build that is current when it is clicked.
 const PLAYER_LATEST_BASE: &str = "https://downloads.eustress.dev/player/latest";
+
+/// The same links for a staging publish.
+const PLAYER_STAGING_LATEST_BASE: &str = "https://downloads.eustress.dev/staging/player/latest";
+
+/// True when `api` is the staging API (`api-staging.eustress.dev`). That is the
+/// API the staging website talks to, and the API a Player link names with
+/// `?api=staging`. A trailing slash is the same API.
+fn is_staging_api(api: &str) -> bool {
+    api.trim().trim_end_matches('/') == crate::state::STAGING_API
+}
+
+/// The Player manifest for the API `api`. Staging reads the staging manifest.
+/// Production, a local server, and anything else keep the production manifest.
+pub fn player_manifest_url_for_api(api: &str) -> &'static str {
+    if is_staging_api(api) {
+        PLAYER_STAGING_MANIFEST_URL
+    } else {
+        PLAYER_MANIFEST_URL
+    }
+}
+
+/// The permanent-link base that goes with [`player_manifest_url_for_api`].
+pub fn player_latest_base_for_api(api: &str) -> &'static str {
+    if is_staging_api(api) {
+        PLAYER_STAGING_LATEST_BASE
+    } else {
+        PLAYER_LATEST_BASE
+    }
+}
+
+/// The API the page in front of the visitor talks to. Outside a browser
+/// (this crate's native tests, and the prerender) that is production, so a
+/// check never points a download at staging.
+fn site_api() -> &'static str {
+    #[cfg(all(not(feature = "ssr"), target_arch = "wasm32"))]
+    {
+        let api = crate::state::api_base();
+        if is_staging_api(&api) {
+            return crate::state::STAGING_API;
+        }
+    }
+    crate::state::PRODUCTION_API
+}
 
 /// Studio's permanent download links, the same way.
 const STUDIO_LATEST_BASE: &str = "https://downloads.eustress.dev/latest";
@@ -176,7 +224,7 @@ impl ReleaseManifest {
     /// entry without an https URL is skipped, so a half-written manifest shows
     /// the platform as coming soon instead of linking nowhere.
     pub fn player_download(&self, platform: DesktopPlatform) -> Option<PlayerDownload> {
-        self.file_for(PLAYER_LATEST_BASE, platform)
+        self.file_for(player_latest_base_for_api(site_api()), platform)
     }
 
     /// The Studio file to offer for a platform, the same way.
@@ -216,9 +264,10 @@ pub enum ReleaseState {
 // 3. Fetching
 // -----------------------------------------------------------------------------
 
-/// The Player's latest release.
+/// The Player's latest release. The staging website reads the staging manifest;
+/// every other site reads the production one.
 pub async fn fetch_player_release() -> ReleaseState {
-    fetch_release(PLAYER_MANIFEST_URL).await
+    fetch_release(player_manifest_url_for_api(site_api())).await
 }
 
 /// Studio's latest release.
@@ -271,11 +320,28 @@ mod tests {
         let mut m = ReleaseManifest { version: "0.1.0".to_string(), date: String::new(), changelog_url: String::new(), platforms: BTreeMap::new() };
         m.platforms.insert("windows-x64-installer".to_string(), ReleaseAsset { url: "https://downloads.eustress.dev/v0.1.0/Setup.exe".to_string(), sha256: String::new(), size_bytes: 1 });
         assert_eq!(m.download(Product::Player, DesktopPlatform::Windows).map(|d| d.url), Some("https://downloads.eustress.dev/player/latest/windows-x64-installer".to_string()));
+        assert_eq!(
+            m.file_for(player_latest_base_for_api(crate::state::STAGING_API), DesktopPlatform::Windows).map(|d| d.url),
+            Some("https://downloads.eustress.dev/staging/player/latest/windows-x64-installer".to_string()),
+            "the staging site's button follows staging/player, not player/",
+        );
         assert_eq!(m.download(Product::Studio, DesktopPlatform::Windows).map(|d| d.url), Some("https://downloads.eustress.dev/latest/windows-x64-installer".to_string()));
         assert!(m.download(Product::Studio, DesktopPlatform::MacOS).is_none(), "no build, no link");
         // A plain-http address is not a build.
         m.platforms.insert("macos-arm64".to_string(), ReleaseAsset { url: "http://insecure.example/x.dmg".to_string(), sha256: String::new(), size_bytes: 1 });
         assert!(m.download(Product::Player, DesktopPlatform::MacOS).is_none());
+    }
+
+    #[test]
+    fn the_staging_api_reads_the_staging_player_manifest_and_production_does_not() {
+        use crate::state::{LOCAL_API, PRODUCTION_API, STAGING_API};
+        assert_eq!(player_manifest_url_for_api(STAGING_API), PLAYER_STAGING_MANIFEST_URL);
+        assert_eq!(player_manifest_url_for_api("https://api-staging.eustress.dev/"), PLAYER_STAGING_MANIFEST_URL);
+        assert_eq!(player_latest_base_for_api(STAGING_API), "https://downloads.eustress.dev/staging/player/latest");
+        assert_eq!(player_manifest_url_for_api(PRODUCTION_API), PLAYER_MANIFEST_URL);
+        assert_eq!(player_latest_base_for_api(PRODUCTION_API), "https://downloads.eustress.dev/player/latest");
+        assert_eq!(player_manifest_url_for_api(LOCAL_API), PLAYER_MANIFEST_URL, "a local server is not the staging website");
+        assert_eq!(player_manifest_url_for_api("https://api-staging.eustress.dev.evil.example"), PLAYER_MANIFEST_URL);
     }
 
     #[test]

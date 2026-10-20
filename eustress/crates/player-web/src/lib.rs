@@ -9,22 +9,32 @@
 //!
 //! - [`join`]: the join link, read as the desktop Player reads its own.
 //! - [`states`]: what the page is told, by fixed state names only.
+//! - [`solo`]: a published world played with no host, from its Gallery id.
 //! - Browser builds only: `entry` (the export host.js calls), `app` (the
-//!   Bevy app), `link` (the session's transport over `js/net.js`), `world`
-//!   (opening the world that arrives, from its records) and `page` (the
-//!   page's state and stop switch).
+//!   Bevy app), `link` (the session's transport over `js/net.js`), `fetch`
+//!   (downloading a published world), `explore` (the camera when a Space
+//!   loads no character), `world` (opening the world that arrives, from its
+//!   records, and spawning the local character)
+//!   and `page` (the page's state and stop switch).
 //!
 //! Nothing here logs, keeps or reports a join link, its key, its ticket or
 //! its pin. A page runs one session; joining again reloads the page, so
 //! nothing of the last session's app is left behind.
 
 pub mod join;
+/// A published world played alone: the Gallery id, the API, and assembling
+/// its chunks. The browser download is [`fetch`], compiled for wasm32 only.
+pub mod solo;
 pub mod states;
 
 #[cfg(target_arch = "wasm32")]
 mod app;
 #[cfg(target_arch = "wasm32")]
 mod entry;
+#[cfg(target_arch = "wasm32")]
+mod explore;
+#[cfg(target_arch = "wasm32")]
+mod fetch;
 #[cfg(target_arch = "wasm32")]
 mod link;
 #[cfg(target_arch = "wasm32")]

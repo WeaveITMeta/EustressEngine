@@ -77,7 +77,14 @@ impl std::fmt::Debug for JoinPlan {
             .field("remote", &self.remote)
             .field(
                 "identity",
-                &format_args!("{}", if self.identity.is_some() { "<set>" } else { "<none>" }),
+                &format_args!(
+                    "{}",
+                    if self.identity.is_some() {
+                        "<set>"
+                    } else {
+                        "<none>"
+                    }
+                ),
             )
             .finish_non_exhaustive()
     }
@@ -98,7 +105,9 @@ pub fn plan_join(join: &str, api_base: &str) -> Result<JoinPlan, JoinRefusal> {
         return Err(JoinRefusal::NotAJoinLink);
     }
     let link = parse_join_link(&link_text).map_err(|_| JoinRefusal::Malformed)?;
-    extras.check_api(api_base).map_err(|_| JoinRefusal::OtherApi)?;
+    extras
+        .check_api(api_base)
+        .map_err(|_| JoinRefusal::OtherApi)?;
     let pin = link.pin.ok_or(JoinRefusal::Unpinned)?;
     Ok(JoinPlan {
         url: link.webtransport_url(),
@@ -136,7 +145,8 @@ mod tests {
     /// URL with its key, the pin, and the ticket for the one Hello.
     #[test]
     fn a_pinned_gallery_link_is_planned_as_the_desktop_reads_it() {
-        let plan = plan_join(&link(&format!("&ticket={TICKET}&api=staging")), STAGING).expect("a good link");
+        let plan = plan_join(&link(&format!("&ticket={TICKET}&api=staging")), STAGING)
+            .expect("a good link");
         assert_eq!(plan.url, format!("https://192.168.1.20:7777/join/{KEY}"));
         assert_eq!(plan.remote, "192.168.1.20:7777");
         assert_eq!(plan.pin, [0xab; 32]);
@@ -165,7 +175,8 @@ mod tests {
     /// Every refusal is its own fixed code, and none quotes the link.
     #[test]
     fn a_link_is_refused_by_fixed_codes_only() {
-        let unpinned = format!("eustress-player://join/192.168.1.20:7777?key={KEY}&ticket={TICKET}");
+        let unpinned =
+            format!("eustress-player://join/192.168.1.20:7777?key={KEY}&ticket={TICKET}");
         let cases = [
             (
                 format!("https://192.168.1.20:7777/join/{KEY}"),
@@ -190,7 +201,10 @@ mod tests {
                 JoinRefusal::Malformed,
             ),
             (
-                format!("eustress-player://join/192.168.1.20?key={KEY}&pin={}", pin()),
+                format!(
+                    "eustress-player://join/192.168.1.20?key={KEY}&pin={}",
+                    pin()
+                ),
                 JoinRefusal::Malformed,
             ),
             (link("&api=production"), JoinRefusal::OtherApi),

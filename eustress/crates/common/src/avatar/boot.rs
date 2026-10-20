@@ -44,6 +44,7 @@ pub(crate) fn avatar_asset_sources_registered() -> bool {
 }
 
 /// Candidate roots for the bundled common assets, best first.
+#[cfg(not(target_arch = "wasm32"))]
 fn bundled_asset_candidates() -> Vec<PathBuf> {
     // 0. The shipped common assets, wherever the one rule finds them (beside
     //    the executable, a macOS bundle's Resources, or the source tree).
@@ -75,6 +76,14 @@ fn bundled_asset_candidates() -> Vec<PathBuf> {
 /// Resolve the bundled asset root, preferring a directory that actually
 /// contains the character assets over one that merely exists.
 fn resolve_bundled_root() -> PathBuf {
+    // The browser serves `bundled://` over HTTP. There is no asset folder to
+    // find, and a missing one is not a failure of the character mesh.
+    #[cfg(target_arch = "wasm32")]
+    {
+        return PathBuf::from("assets");
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
     let candidates = bundled_asset_candidates();
 
     // A directory is only the right one if the avatar assets are in it.
@@ -103,6 +112,7 @@ fn resolve_bundled_root() -> PathBuf {
         candidates
     );
     candidates.into_iter().next().unwrap_or_else(|| PathBuf::from("assets"))
+    }
 }
 
 /// Register every asset source the avatar runtime needs.

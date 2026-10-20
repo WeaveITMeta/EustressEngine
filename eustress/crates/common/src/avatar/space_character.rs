@@ -257,9 +257,18 @@ impl SpaceCharacterPolicy {
     /// validate is skipped and named in the warnings, so one typo costs that
     /// file rather than the whole Space.
     pub fn load(space_root: &Path) -> (Self, Vec<String>) {
+        Self::load_source(&crate::space_source::DiskSource::new(space_root), space_root)
+    }
+
+    /// The same read as [`Self::load`], from whatever holds the Space. The
+    /// desktop Player reads the folder; the browser Player reads the
+    /// downloaded records and has no disk. `space_root` is the folder a
+    /// `space://` path is checked against, and the one a shell that retargets
+    /// clips from disk reads them from.
+    pub fn load_source(source: &dyn crate::space_source::SpaceSource, space_root: &Path) -> (Self, Vec<String>) {
         let mut policy = Self { space_root: Some(space_root.to_path_buf()), ..Default::default() };
         let mut warnings = Vec::new();
-        if let Ok(text) = std::fs::read_to_string(starter_player_file(space_root)) {
+        if let Ok(text) = source.read_to_string("StarterPlayer/_service.toml") {
             match text.parse::<toml::Table>() {
                 Ok(doc) => {
                     let unit = doc
@@ -288,28 +297,34 @@ impl SpaceCharacterPolicy {
                 Err(e) => warnings.push(format!("StarterPlayer/_service.toml: {e}")),
             }
         }
-        let dir = space_root.join("StarterPlayer").join("Characters");
-        let Ok(entries) = std::fs::read_dir(&dir) else {
+        let Ok(entries) = source.list("StarterPlayer/Characters") else {
             return (policy, warnings);
         };
-        let mut files: Vec<PathBuf> = entries.flatten().map(|e| e.path()).collect();
-        files.sort();
-        for path in files {
-            let Some(name) = path.file_name().and_then(|n| n.to_str()).map(str::to_string) else { continue };
+        let mut files: Vec<_> = entries.into_iter().filter(|e| !e.is_dir).collect();
+        files.sort_by(|a, b| a.name.cmp(&b.name));
+        for entry in files {
+            let name = entry.name;
             let Some(stem) = name.strip_suffix(".rig.toml") else { continue };
             let Some(option) = option_of(stem) else {
                 warnings.push(format!("StarterPlayer/Characters/{name}: name it Masculine, Feminine, Robot or Default"));
                 continue;
             };
-            match read_rig(&path, stem, option.unwrap_or(AvatarIdentity::Male), space_root) {
+            let text = match source.read_to_string(&entry.rel_path) {
+                Ok(text) => text,
+                Err(e) => {
+                    warnings.push(format!("StarterPlayer/Characters/{name}: {e}"));
+                    continue;
+                }
+            };
+            match read_rig_text(&text, stem, option.unwrap_or(AvatarIdentity::Male), space_root) {
                 Ok((rig, height)) => {
                     if let Some(h) = height {
                         policy.heights.insert(rig.id.clone(), h);
                     }
                     match option {
-                    Some(identity) => {
-                        policy.rigs.insert(identity, rig);
-                    }
+                        Some(identity) => {
+                            policy.rigs.insert(identity, rig);
+                        }
                         None => policy.fallback = Some(rig),
                     }
                 }
@@ -410,14 +425,13 @@ fn standard_morphs(descriptor: &AvatarDescriptor) -> BodyMorphs {
     }
 }
 
-fn read_rig(
-    path: &Path,
+fn read_rig_text(
+    text: &str,
     stem: &str,
     identity: AvatarIdentity,
     space_root: &Path,
 ) -> Result<(RigDefinition, Option<f32>), String> {
-    let text = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
-    let file: CharacterFile = toml::from_str(&text).map_err(|e| e.to_string())?;
+    let file: CharacterFile = toml::from_str(text).map_err(|e| e.to_string())?;
     let clip = |c: &Option<String>| -> Result<String, String> {
         c.as_deref().map(|p| asset_path(p, space_root)).unwrap_or_else(|| Ok(String::new()))
     };
@@ -648,5 +662,33 @@ mod tests {
         robot.select_identity(AvatarIdentity::Robot);
         let out = standard.apply(robot);
         assert!(out.morphs.is_robot_body() && out.validate().is_ok());
+    }
+
+    /// The browser Player has the Space as records, not a folder. The same
+    /// files dress the character the same way.
+    #[test]
+    fn records_dress_a_character_the_same_way_a_folder_does() {
+        use crate::space_source::RecordsSource;
+        let root = std::env::temp_dir().join(format!("eustress-space-records-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let dir = root.join("StarterPlayer").join("Characters");
+        std::fs::create_dir_all(&dir).unwrap();
+        let rig = "label = \"Hero\"\nbody = \"StarterPlayer/Characters/Hero.glb\"\n";
+        let service = "[metadata]\nunit = \"stud\"\n\n[properties]\ncharacter_walk_speed = 20\n";
+        std::fs::write(dir.join("Masculine.rig.toml"), rig).unwrap();
+        std::fs::write(starter_player_file(&root), service).unwrap();
+        let records = RecordsSource::new([
+            ("StarterPlayer/_service.toml".to_string(), service.as_bytes().to_vec()),
+            ("StarterPlayer/Characters/Masculine.rig.toml".to_string(), rig.as_bytes().to_vec()),
+        ]);
+        let (from_disk, disk_warnings) = SpaceCharacterPolicy::load(&root);
+        let (from_records, record_warnings) = SpaceCharacterPolicy::load_source(&records, &root);
+        assert!(disk_warnings.is_empty() && record_warnings.is_empty(), "{disk_warnings:?} {record_warnings:?}");
+        let disk = from_disk.apply(AvatarDescriptor::default());
+        let recorded = from_records.apply(AvatarDescriptor::default());
+        assert_eq!(recorded.resolved_rig().body_asset, disk.resolved_rig().body_asset);
+        assert_eq!(recorded.motion.walk_speed_mps, disk.motion.walk_speed_mps);
+        assert!(recorded.motion.walk_speed_mps.is_some());
+        let _ = std::fs::remove_dir_all(root);
     }
 }
