@@ -17,6 +17,36 @@ Each release is also served directly:
 | `/player/latest/linux-x64` | The current Linux archive |
 | `/player/vX.Y.Z/<file>` | A given release's files, with `checksums.txt` |
 
+## Publishing a build to staging
+
+A Player build can be published where the staging website can download it, without replacing the public `player/latest.json` and without a GitHub Release.
+
+On GitHub: Actions → **Player Release** → **Run workflow**. The workflow file is [`.github/workflows/player-release.yml`](../../.github/workflows/player-release.yml).
+
+| Input | Staging | Production |
+|---|---|---|
+| `version` | `X.Y.Z`, the same as `version` in `eustress/crates/client/Cargo.toml`, without a leading `player-v` | the same |
+| `channel` | `staging` (the default) | `production` |
+| `publish` | on, to upload. Off builds the installers and keeps them as run artifacts | the same |
+
+`channel=staging` uploads into the `eustress-downloads` bucket under the prefix `staging/player`. The manifest's `channel` field is `staging`. The verify step then fetches that channel:
+
+| Path on `https://downloads.eustress.dev` | What it is |
+|---|---|
+| `/staging/player/latest.json` | The staging manifest |
+| `/staging/player/latest/<platform>` | Redirects to the current staging file |
+| `/staging/player/vX.Y.Z/<file>` | That staging build's files, with `checksums.txt` |
+
+`<platform>` is a key of the manifest: `windows-x64-installer`, `windows-x64`, `macos-arm64` or `linux-x64`.
+
+A push of a `player-vX.Y.Z` tag is always production: it writes `player/` and creates the GitHub Release. A manual run with `channel=production` writes those same `player/` paths and does not create a GitHub Release, because a dispatched run has no tag to attach one to. Anything else that is dispatched, including a run that leaves `channel` at its default, writes `staging/player` only.
+
+The staging website (`staging.eustress-cbb.pages.dev`, which talks to `api-staging.eustress.dev`, the API a Player link names with `?api=staging`) reads `/staging/player/latest.json`. [eustress.dev/downloads/player](https://eustress.dev/downloads/player) keeps reading `/player/latest.json`.
+
+Those staging paths answer only after the download Worker that serves them is deployed. The routes are in `infrastructure/cloudflare/download-worker.js`. This workflow does not deploy the Worker.
+
+If the upload fails with HTTP 403, `CLOUDFLARE_API_TOKEN` needs **R2 Object Read & Write** on the `eustress-downloads` bucket. The upload step says so in the log.
+
 ## Computers it runs on
 
 | Computer | File | Installs to | Opens `eustress-player://` links |

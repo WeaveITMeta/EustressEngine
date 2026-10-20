@@ -9,9 +9,12 @@
 //
 // Two products publish into the one bucket, each under its own key prefix:
 // Studio at the root, where every updater already in the field looks, and the
-// Player under player/ (.github/workflows/player-release.yml). Every public
-// route below takes the same optional player/ segment, so the Player's
-// manifest, permanent links and artifacts mirror Studio's one for one.
+// Player under player/ (.github/workflows/player-release.yml). A staging
+// Player publish uses staging/player/ and does not replace player/latest.json.
+// Every public route below takes the same optional player/ segment, and the
+// same three routes again under staging/player/, so the Player's manifest,
+// permanent links and artifacts mirror Studio's one for one. Staging is that
+// prefix only: no other key under staging/ is reachable.
 // =============================================================================
 
 export default {
@@ -38,6 +41,11 @@ export default {
       if (path === '/player/latest.json') {
         return handleLatest(env, cors, 'player/');
       }
+      // Staging Player. Same manifest, a different key, so a staging publish
+      // cannot replace the production one.
+      if (path === '/staging/player/latest.json') {
+        return handleLatest(env, cors, 'staging/player/');
+      }
 
       // Public: a permanent URL per platform, redirecting to the current
       // version. Docs and the download page can hardcode these and stay
@@ -46,7 +54,9 @@ export default {
       //
       // Platform names are the keys of latest.json, so this cannot drift from
       // what the build actually produced.
-      const latest = path.match(/^\/(player\/)?latest\/([a-z0-9-]+)$/);
+      // player/ and staging/player/. The optional group is the R2 prefix,
+      // empty for Studio.
+      const latest = path.match(/^\/((?:staging\/)?player\/)?latest\/([a-z0-9-]+)$/);
       if (latest) {
         const prefix = latest[1] || '';
         const manifestObj = await env.DOWNLOADS.get(`${prefix}latest.json`);
@@ -80,10 +90,10 @@ export default {
       // sign-in-to-download flow, which buys attribution and per-user
       // analytics rather than secrecy: the build is free either way.
       //
-      // The pattern is the whole boundary. It admits only vX.Y.Z/filename and
-      // player/vX.Y.Z/filename, so no other key in the bucket is reachable
-      // through this route.
-      const artifact = path.match(/^\/(player\/)?(v\d+\.\d+\.\d+)\/([A-Za-z0-9._-]+)$/);
+      // The pattern is the whole boundary. It admits only vX.Y.Z/filename,
+      // player/vX.Y.Z/filename and staging/player/vX.Y.Z/filename, so no other
+      // key in the bucket is reachable through this route.
+      const artifact = path.match(/^\/((?:staging\/)?player\/)?(v\d+\.\d+\.\d+)\/([A-Za-z0-9._-]+)$/);
       if (artifact && request.method === 'GET') {
         const object = await env.DOWNLOADS.get(`${artifact[1] || ''}${artifact[2]}/${artifact[3]}`);
         if (!object) return jsonResponse({ error: 'Not found' }, 404, cors);
