@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { checkJoinLink, LiveHost, handleLive, HEARTBEAT_TTL_MS } from '../src/live.mjs';
+import { checkJoinLink, LiveHost, handleLive, handleServerCredential, HEARTBEAT_TTL_MS, rankServers, pingScore } from '../src/live.mjs';
 import { fakeDoNamespace, JWT_SECRET } from './helpers/load_worker.mjs';
 
 const SIM = 'aaaaaaaa-1111-4111-8111-aaaaaaaaaaaa';
@@ -13,7 +13,12 @@ const namespace = () => fakeDoNamespace(LiveHost, { JWT_SECRET });
 
 function kv() {
   const store = new Map();
-  return { store, get: async (k) => store.get(k) ?? null, put: async (k, v) => store.set(k, v) };
+  return {
+    store,
+    get: async (k) => store.get(k) ?? null,
+    put: async (k, v) => store.set(k, v),
+    delete: async (k) => store.delete(k),
+  };
 }
 
 function environment({ listed = true, binding = true } = {}) {
@@ -200,6 +205,166 @@ test('a listing that is not approved keeps its host private to the author and ad
   assert.deepEqual((await call(env, 'GET', { token: 'someone-else' })).body, { live: false });
   assert.equal((await call(env, 'GET', { token: 'mckale' })).body.live, true, 'the author can check the host');
   assert.equal((await call(env, 'GET', { token: 'admin' })).body.live, true, 'an admin can too');
+});
+
+test('a server credential tied to the author can mark the listing live, and publishes the certificate hash', async () => {
+  const env = environment();
+  const minted = await handleServerCredential(
+    new Request(`https://api.eustress.dev/api/simulations/${SIM}/server-credential`, {
+      method: 'POST', headers: { Authorization: 'Bearer mckale' },
+    }),
+    env, {}, SIM, deps,
+  );
+  assert.equal(minted.status, 200);
+  const token = (await minted.json()).token;
+  assert.match(token, /^esrv_[0-9a-f]{64}$/);
+
+  const stranger = await handleServerCredential(
+    new Request(`https://api.eustress.dev/api/simulations/${SIM}/server-credential`, {
+      method: 'POST', headers: { Authorization: 'Bearer someone-else' },
+    }),
+    env, {}, SIM, deps,
+  );
+  assert.equal(stranger.status, 403);
+
+  const wrong = 'esrv_' + 'ab'.repeat(32);
+  assert.equal((await call(env, 'POST', { token: wrong, body: beat() })).status, 401);
+
+  const beatBody = beat(LINK, { cert_sha256: PIN });
+  const posted = await call(env, 'POST', { token, body: beatBody });
+  assert.equal(posted.status, 200, JSON.stringify(posted.body));
+
+  const seen = await call(env, 'GET', { token: 'someone-else' });
+  assert.equal(seen.body.link, LINK);
+  assert.equal(seen.body.cert_sha256, PIN);
+
+  const mismatch = await call(env, 'POST', { token, body: beat(LINK, { cert_sha256: 'cd'.repeat(32) }) });
+  assert.equal(mismatch.status, 400);
+  assert.equal(mismatch.body.code, 'bad_cert');
+
+  assert.equal((await call(env, 'DELETE', { token })).status, 200);
+  assert.deepEqual((await call(env, 'GET')).body, { live: false });
+
+  const replaced = await handleServerCredential(
+    new Request(`https://api.eustress.dev/api/simulations/${SIM}/server-credential`, {
+      method: 'POST', headers: { Authorization: 'Bearer mckale' },
+    }),
+    env, {}, SIM, deps,
+  );
+  const next = (await replaced.json()).token;
+  assert.notEqual(next, token);
+  assert.equal((await call(env, 'POST', { token, body: beat() })).status, 401, 'a replaced credential is refused');
+  assert.equal((await call(env, 'POST', { token: next, body: beat() })).status, 200);
+});
+
+test('servers are listed with free slots, and Quick Join is the busiest one that is not full', async () => {
+  const env = environment();
+  const link = (port, pin) => `eustress-player://join/203.0.113.7:${port}?key=${KEY}&pin=${pin}`;
+  const pinA = '11'.repeat(32);
+  const pinB = '22'.repeat(32);
+  const pinC = '33'.repeat(32);
+  const hardware = (tier) => ({ gpu: tier === 'high' ? 'RTX 4090' : 'UHD', cpu: 'Intel i7', tier });
+  assert.equal((await call(env, 'POST', { token: 'mckale', body: beat(link(7778, pinA), {
+    server_id: 'close', players: 1, max_players: 10, region: 'us-east-1', latency_ms: 20, hardware: hardware('high'),
+  }) })).status, 200);
+  assert.equal((await call(env, 'POST', { token: 'mckale', body: beat(link(7779, pinB), {
+    server_id: 'busy', players: 8, max_players: 10, region: 'us-west-2', latency_ms: 200, hardware: hardware('low'),
+  }) })).status, 200);
+  assert.equal((await call(env, 'POST', { token: 'mckale', body: beat(link(7780, pinC), {
+    server_id: 'packed', players: 10, max_players: 10, region: 'eu-west-1', latency_ms: 5, hardware: hardware('high'),
+  }) })).status, 200);
+  assert.equal((await call(env, 'POST', { token: 'mckale', body: beat(link(7781, '44'.repeat(32)), {
+    server_id: 'quiet', players: 1, max_players: 10, latency_ms: 0, hardware: hardware('high'),
+  }) })).status, 200, '0 ms is omitted, not stored as a measurement');
+
+  const seen = (await call(env, 'GET', { token: 'someone-else' })).body;
+  assert.deepEqual(seen.servers.map((s) => s.id), ['busy', 'close', 'quiet', 'packed']);
+  assert.equal(seen.link, link(7779, pinB), 'Quick Join is the busiest server that is not full');
+  assert.equal(seen.players, 8);
+  assert.equal(seen.max_players, 10);
+  const busy = seen.servers[0];
+  assert.equal(busy.free, 2);
+  assert.equal(busy.full, false);
+  assert.equal(busy.region, 'us-west-2');
+  assert.equal(busy.latency_ms, 200);
+  assert.equal(busy.hardware.tier, 'low');
+  assert.equal(seen.servers[2].latency_ms, undefined, 'a missing ping is not 0 ms');
+  assert.equal(seen.servers[3].full, true);
+  assert.equal(seen.servers[3].free, 0);
+  assert.deepEqual(Object.keys(seen.region ?? {}), seen.region ? ['country'] : [], 'the top-level region stays the country object');
+  assert.equal(seen.all_full, undefined);
+
+  const anon = (await call(env, 'GET')).body;
+  assert.equal(anon.link, undefined);
+  assert.equal(anon.servers[0].link, undefined, 'an anonymous visitor is not given a server link');
+  assert.equal(anon.link_hidden, true);
+});
+
+test('when every server is full the listing stays live and does not offer a join link', async () => {
+  const env = environment();
+  const link = (port) => `eustress-player://join/203.0.113.7:${port}?key=${KEY}&pin=${'ab'.repeat(32)}`;
+  await call(env, 'POST', { token: 'mckale', body: beat(link(7777), { server_id: 'a', players: 4, max_players: 4 }) });
+  await call(env, 'POST', { token: 'mckale', body: beat(link(7778), { server_id: 'b', players: 4, max_players: 4 }) });
+  const seen = (await call(env, 'GET', { token: 'someone-else' })).body;
+  assert.equal(seen.live, true);
+  assert.equal(seen.all_full, true);
+  assert.equal(seen.link, undefined);
+  assert.equal(seen.link_hidden, undefined);
+  assert.equal(seen.servers.every((s) => s.full), true);
+});
+
+test('a server that stops beating is dropped on its own and the other stays', async () => {
+  const env = environment();
+  const realNow = Date.now;
+  let t = Date.UTC(2026, 8, 24, 12, 0, 0);
+  Date.now = () => t;
+  try {
+    const link = (port) => `eustress-player://join/203.0.113.7:${port}?key=${KEY}&pin=${'cd'.repeat(32)}`;
+    await call(env, 'POST', { token: 'mckale', body: beat(link(7777), { server_id: 'early', players: 1, max_players: 4 }) });
+    t += 10_000;
+    await call(env, 'POST', { token: 'mckale', body: beat(link(7778), { server_id: 'later', players: 2, max_players: 4 }) });
+    // Past the first server's deadline, still inside the second server's.
+    t += HEARTBEAT_TTL_MS + 1 - 10_000;
+    const obj = env.LIVE_HOSTS.instances.get(SIM);
+    await obj.alarm();
+    const mid = (await call(env, 'GET', { token: 'someone-else' })).body;
+    assert.equal(mid.live, true);
+    assert.deepEqual(mid.servers.map((s) => s.id), ['later']);
+    t += 10_000;
+    assert.deepEqual((await call(env, 'GET')).body, { live: false });
+    await obj.alarm();
+    assert.equal(obj.storage.map.has('host'), false);
+  } finally {
+    Date.now = realNow;
+  }
+});
+
+test('deleting one server leaves the others, and deleting without an id clears the listing', async () => {
+  const env = environment();
+  const link = (port) => `eustress-player://join/203.0.113.7:${port}?key=${KEY}&pin=${'ef'.repeat(32)}`;
+  await call(env, 'POST', { token: 'mckale', body: beat(link(7777), { server_id: 'one', players: 1, max_players: 4 }) });
+  await call(env, 'POST', { token: 'mckale', body: beat(link(7778), { server_id: 'two', players: 1, max_players: 4 }) });
+  const drop = await handleLive(
+    new Request(`https://api.eustress.dev/api/simulations/${SIM}/live?server_id=one`, { method: 'DELETE', headers: { Authorization: 'Bearer mckale' } }),
+    env, {}, SIM, deps,
+  );
+  assert.equal(drop.status, 200);
+  const left = (await call(env, 'GET', { token: 'someone-else' })).body;
+  assert.deepEqual(left.servers.map((s) => s.id), ['two']);
+  assert.equal((await call(env, 'DELETE', { token: 'mckale' })).status, 200);
+  assert.deepEqual((await call(env, 'GET')).body, { live: false });
+});
+
+test('rank puts a measured ping ahead of a missing one and does not treat 0 ms as closest', () => {
+  assert.equal(pingScore(undefined), 0);
+  assert.equal(pingScore(0), 0);
+  assert.ok(pingScore(1) > pingScore(300));
+  const ranked = rankServers([
+    { id: 'measured', players: 1, max_players: 10, full: false, hardware: { tier: 'high' }, latency_ms: 20 },
+    { id: 'missing', players: 1, max_players: 10, full: false, hardware: { tier: 'high' } },
+    { id: 'full', players: 10, max_players: 10, full: true, hardware: { tier: 'high' }, latency_ms: 1 },
+  ]);
+  assert.deepEqual(ranked.map((s) => s.id), ['measured', 'missing', 'full']);
 });
 
 test('a deployment without the binding says so, and an unknown simulation is 404', async () => {

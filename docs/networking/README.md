@@ -109,5 +109,6 @@ listing under legal review to administrators alone.
 - Physics objects in a hosted session: only avatars are synchronised.
 - A chat box: chat travels in the protocol, and neither shell shows it.
 - The browser Player, and joining a hosted session from a browser.
-- Multiplayer for published simulations: a listing plays solo, and no server
-  registers itself with the API.
+- A self-hosted server registers with the staging API only after the Worker
+  that accepts its credential is deployed. The program and the steps are in
+  [DEDICATED_SERVER.md](DEDICATED_SERVER.md). That Worker is not deployed from this branch.

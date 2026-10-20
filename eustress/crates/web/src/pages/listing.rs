@@ -23,6 +23,7 @@ use leptos::task::spawn_local;
 
 use crate::api::catalog::{self, art_of, card_tags, is_multiplayer, published_words, rating_words, size_words, suggested_tags_label, ArtKind, Listing};
 use crate::api::ApiClient;
+use crate::api::live::{latency_label, LiveServer};
 use crate::components::play_chooser::{now_ms, status_of, watch, Facts, Live, Load, PlayChooserSlot, PlayStatePanel, Status, Viewer};
 use crate::components::{CentralNav, Footer};
 use crate::components::adult_content::{Age21ListingNotice, AdultListingNotice};
@@ -33,6 +34,18 @@ use crate::tags::gallery_href;
 // -----------------------------------------------------------------------------
 // 1. Wording
 // -----------------------------------------------------------------------------
+
+/// One server row: seats, region, the API round trip, and the hardware class.
+fn server_caption(server: &LiveServer) -> String {
+    let hardware = server.hardware.as_ref().map(|h| h.tier.as_str()).filter(|t| !t.is_empty()).unwrap_or("unknown");
+    let region = server.region.as_deref().filter(|r| !r.is_empty()).unwrap_or("region not set");
+    let seats = if server.full {
+        format!("{} of {} players, full", server.players, server.max_players)
+    } else {
+        format!("{} of {} players, {} free", server.players, server.max_players, server.free)
+    };
+    format!("{seats} · {region} · {} · {hardware}", latency_label(server.latency_ms.filter(|ms| *ms >= 1)))
+}
 
 /// The pictures of a listing in the order the page shows them: the capture Studio took at publish, then the review captures, then
 /// the cover when there is nothing else. An address that is not https or a path is never used, and one picture is never shown twice.
@@ -367,17 +380,29 @@ fn ListingBody(listing: Listing, live: RwSignal<Live>) -> impl IntoView {
                     {move || {
                         let listed = matches!(status, Status::Listed | Status::Private);
                         match live.get() {
-                            Live::Hosted { players, max_players, .. } if listed => {
+                            Live::Hosted { players, max_players, servers, full, .. } if listed => {
                                 let join_id = join_id.clone();
                                 let pct = if max_players == 0 { 0 } else { (players.min(max_players) * 100 / max_players).min(100) };
+                                let rows = servers.clone();
                                 view! {
                                     <section class="g-csec"><h2>"Live status"</h2>
                                         <div class="g-glass g-session">
                                             <span class="g-dot" aria-hidden="true"></span>
                                             <div><b>"Hosted by the author"</b><small>{format!("{players} of {max_players} players")}</small></div>
                                             <div class="g-meter" aria-hidden="true"><i style=format!("width:{pct}%")></i></div>
-                                            {(viewer != Viewer::Phone).then(|| { let join_id = join_id.clone(); view! { <button type="button" class="g-btn g-btn-primary g-btn-sm" on:click=move |_| chooser.open(&join_id)>"Join"</button> } })}
+                                            {(viewer != Viewer::Phone && !full).then(|| { let join_id = join_id.clone(); view! { <button type="button" class="g-btn g-btn-primary g-btn-sm" on:click=move |_| chooser.open(&join_id)>"Join"</button> } })}
                                         </div>
+                                        {rows.into_iter().map(|server| {
+                                            let caption = server_caption(&server);
+                                            let dot = if server.full { "g-dot off" } else { "g-dot" };
+                                            let name = if server.id.is_empty() { "Server".to_string() } else { server.id.clone() };
+                                            view! {
+                                                <div class="g-glass g-session">
+                                                    <span class=dot aria-hidden="true"></span>
+                                                    <div><b>{name}</b><small>{caption}</small></div>
+                                                </div>
+                                            }
+                                        }).collect_view()}
                                     </section>
                                 }.into_any()
                             }

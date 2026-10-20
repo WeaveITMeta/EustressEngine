@@ -148,6 +148,8 @@ pub mod default_scene;
 pub mod startup;
 pub mod crash;
 pub mod server_mode;
+/// The process `--server` runs, and the files Studio uses to stop it.
+pub mod dedicated;
 pub mod terrain_plugin;
 /// The terrain tools' cursor (ring, strength disc, Draw volume, locked
 /// plane, grid, contours, mirror ghosts) and the readout beside it.

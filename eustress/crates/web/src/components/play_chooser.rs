@@ -94,7 +94,8 @@ pub enum Live {
     Unknown,
     Offline,
     /// `joinable`: the Worker gave this visitor the host's link (signed in, or a guest with a lease).
-    Hosted { players: u32, max_players: u32, joinable: bool },
+    /// `full`: every server is full, so the page does not ask the visitor to sign in.
+    Hosted { players: u32, max_players: u32, joinable: bool, full: bool, servers: Vec<crate::api::live::LiveServer> },
 }
 
 impl From<LiveHost> for Live {
@@ -102,9 +103,13 @@ impl From<LiveHost> for Live {
         if !host.live {
             return Live::Offline;
         }
+        let servers = crate::api::live::rank_servers(host.servers.clone());
+        if host.all_full {
+            return Live::Hosted { players: host.players, max_players: host.max_players, joinable: false, full: true, servers };
+        }
         match host.join_link() {
-            Some(_) => Live::Hosted { players: host.players, max_players: host.max_players, joinable: true },
-            None if host.link_hidden && host.link.is_none() => Live::Hosted { players: host.players, max_players: host.max_players, joinable: false },
+            Some(_) => Live::Hosted { players: host.players, max_players: host.max_players, joinable: true, full: false, servers },
+            None if host.link_hidden && host.link.is_none() => Live::Hosted { players: host.players, max_players: host.max_players, joinable: false, full: false, servers },
             // Live, with a link this page will not open: say nothing.
             None => Live::Unknown,
         }
@@ -161,6 +166,8 @@ pub struct Facts {
 pub enum Panel {
     /// A session is hosted and this visitor may join it.
     Join { players: u32, max_players: u32 },
+    /// Every server is full. Play alone is still offered. Signing in would not open a seat.
+    Full { players: u32, max_players: u32 },
     /// A session is hosted; joining needs an account.
     SignInToJoin { players: u32, max_players: u32 },
     /// A session is hosted, and this visitor's computer cannot join from the Gallery yet.
@@ -187,9 +194,10 @@ pub fn panel_for(facts: &Facts) -> Panel {
                 return Panel::NeedsComputer;
             }
             match facts.live {
-                Live::Hosted { players, max_players, joinable: true } if facts.viewer == Viewer::Mac => Panel::MacCannotJoin { players, max_players },
-                Live::Hosted { players, max_players, joinable: true } => Panel::Join { players, max_players },
-                Live::Hosted { players, max_players, joinable: false } => Panel::SignInToJoin { players, max_players },
+                Live::Hosted { players, max_players, full: true, .. } => Panel::Full { players, max_players },
+                Live::Hosted { players, max_players, joinable: true, .. } if facts.viewer == Viewer::Mac => Panel::MacCannotJoin { players, max_players },
+                Live::Hosted { players, max_players, joinable: true, .. } => Panel::Join { players, max_players },
+                Live::Hosted { players, max_players, joinable: false, .. } => Panel::SignInToJoin { players, max_players },
                 Live::Offline => Panel::Solo { offline: true, private: facts.status == Status::Private },
                 Live::Unknown => Panel::Solo { offline: false, private: facts.status == Status::Private },
             }
@@ -205,6 +213,7 @@ pub fn panel_text(panel: &Panel, author: bool, headline: &str) -> (String, Strin
     let headline = |fallback: &str| if headline.is_empty() { fallback.to_string() } else { headline.to_string() };
     match panel {
         Panel::Join { players, max_players } => ("Live now".to_string(), format!("{} are in a session hosted by the author. Join them in Eustress Player.", player_count(*players, *max_players))),
+        Panel::Full { players, max_players } => ("Live now: every server is full".to_string(), format!("{} are in a session hosted by the author. There is no open seat. You can play on your own.", player_count(*players, *max_players))),
         Panel::SignInToJoin { players, max_players } => (
             "Live now: sign in to join".to_string(),
             format!("{} are in a session hosted by the author. Joining a live session needs an Eustress account. You can also play on your own, without one.", player_count(*players, *max_players)),
@@ -660,7 +669,7 @@ pub fn icon(name: &str) -> AnyView {
 
 pub fn panel_icon(panel: &Panel) -> (&'static str, &'static str) {
     match panel {
-        Panel::Join { .. } | Panel::SignInToJoin { .. } | Panel::MacCannotJoin { .. } => ("lp-icon live", "users"),
+        Panel::Join { .. } | Panel::SignInToJoin { .. } | Panel::MacCannotJoin { .. } | Panel::Full { .. } => ("lp-icon live", "users"),
         Panel::Solo { .. } => ("lp-icon ok", "play"),
         Panel::NeedsComputer => ("lp-icon", "monitor"),
         Panel::InReview { person: false } => ("lp-icon info", "hourglass"),
@@ -1099,6 +1108,9 @@ pub fn PlayStatePanel(
     let busy_review = matches!(panel, Panel::InReview { .. } | Panel::AppealInReview);
     let decided = matches!(panel, Panel::ChangesRequested | Panel::NotListed);
     let actions = match panel.clone() {
+        Panel::Full { .. } => view! {
+            <button class="btn btn-primary btn-lg" on:click=move |_| on_play.run(Kind::Solo)>"Play on your own"</button>
+        }.into_any(),
         Panel::Join { .. } => view! {
             <button class="btn btn-primary btn-lg" on:click=move |_| on_play.run(Kind::Join)>"Join live session"</button>
             <button class="btn btn-secondary" on:click=move |_| on_play.run(Kind::Solo)>"Play on your own"</button>
@@ -1125,7 +1137,7 @@ pub fn PlayStatePanel(
                 {busy_review.then(|| view! { <p class="lp-note"><span class="lp-spinner small" aria-hidden="true"></span>"This updates by itself."</p> })}
                 {decided.then(|| view! { <ReviewReasons reasons=reasons.clone() suggested=suggested.clone() note=note.clone() /> })}
                 <div class="lp-actions">{actions}</div>
-                {matches!(panel, Panel::Solo { .. } | Panel::Join { .. } | Panel::SignInToJoin { .. } | Panel::MacCannotJoin { .. }).then(|| view! { <PlayerHelp /> })}
+                {matches!(panel, Panel::Solo { .. } | Panel::Join { .. } | Panel::SignInToJoin { .. } | Panel::MacCannotJoin { .. } | Panel::Full { .. }).then(|| view! { <PlayerHelp /> })}
             </div>
         </div>
     }
@@ -1247,7 +1259,7 @@ mod tests {
     }
 
     fn hosted(joinable: bool) -> Live {
-        Live::Hosted { players: 2, max_players: 8, joinable }
+        Live::Hosted { players: 2, max_players: 8, joinable, full: false, servers: Vec::new() }
     }
 
     fn listing(listable: Option<bool>, status: &str) -> Listing {

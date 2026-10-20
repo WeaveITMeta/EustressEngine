@@ -58,18 +58,18 @@ no promise of zero loss on a kill.
 
 ## Hooks this design wants
 
-Specified here. **Not in the tree.** There is no
-`eustress/crates/forge/src/handoff.rs`, and nothing passes
-`EUSTRESS_SERVER_ID` or a `server_id` on the heartbeat. A later branch adds
-the records. They do not start a migration.
+The local launcher mints a UUID job id and passes it to the process as
+`EUSTRESS_SERVER_ID`. The heartbeat sends that string as `server_id`.
+There is still no `eustress/crates/forge/src/handoff.rs`, and no
+`JobId` / `SessionHandoff` / `SnapshotDelta` record. Those do not start a
+migration.
 
 **Job identity is not the host.** A Forge job id is its own string. It is
-not a process id, not a UDP port, and not an IP address. A later launcher
-would mint that id when the job is created and pass it to the game process
-as `EUSTRESS_SERVER_ID`. The heartbeat would send it as `server_id`.
-Replacing the process would not rename the job.
+not a process id, not a UDP port, and not an IP address. `eustress-forge`
+mints that id when the job is created. Replacing the process would not
+rename the job. Nothing yet replaces the process.
 
-**Snapshot and session shape.** The same later file would name three records
+**Snapshot and session shape.** A later file would name three records
 and would not fill them from a running game:
 
 - `JobId` — the stable id.

@@ -64,6 +64,25 @@ pub struct StartupArgs {
     /// `--bliss-bind <ip>`. Overrides `EUSTRESS_BLISS_BIND`. The Bliss
     /// listener uses this address, and the log line prints the same one.
     pub bliss_bind: Option<String>,
+
+    /// `--sim <id>`. The staging listing a dedicated server downloads and hosts.
+    pub sim_id: Option<String>,
+
+    /// `--env staging` or `--env production`. `--api-url` wins over this.
+    pub api_env: Option<String>,
+
+    /// `--api-url <url>`. Wins over `--env` and over a URL already in the environment.
+    pub api_url: Option<String>,
+
+    /// `--public <host>`. The address players use. Loopback is refused later.
+    pub public_host: Option<String>,
+
+    /// `--port <udp>`. Defaults to 7777 when `--server` does not set one.
+    pub port: Option<u16>,
+
+    /// `--status-file <path>`. The child writes its status here. Stop is the
+    /// file beside it.
+    pub status_file: Option<PathBuf>,
 }
 
 impl StartupArgs {
@@ -131,6 +150,42 @@ impl StartupArgs {
                     i += 1;
                     if i < args.len() {
                         result.bliss_bind = Some(args[i].clone());
+                    }
+                }
+                "--sim" => {
+                    i += 1;
+                    if i < args.len() {
+                        result.sim_id = Some(args[i].clone());
+                    }
+                }
+                "--env" => {
+                    i += 1;
+                    if i < args.len() {
+                        result.api_env = Some(args[i].clone());
+                    }
+                }
+                "--api-url" => {
+                    i += 1;
+                    if i < args.len() {
+                        result.api_url = Some(args[i].clone());
+                    }
+                }
+                "--public" => {
+                    i += 1;
+                    if i < args.len() {
+                        result.public_host = Some(args[i].clone());
+                    }
+                }
+                "--port" => {
+                    i += 1;
+                    if i < args.len() {
+                        result.port = args.get(i).and_then(|p| p.parse().ok());
+                    }
+                }
+                "--status-file" => {
+                    i += 1;
+                    if i < args.len() {
+                        result.status_file = Some(PathBuf::from(&args[i]));
                     }
                 }
                 _ if arg.starts_with("eustress://edit/") => {
@@ -212,6 +267,12 @@ OPTIONS:
         --open <FILE>       Open a `.eustress` launch pointer (or a Space directory)
         --space <PATH>      Open a specific Space directory directly
         --universe <PATH>   Open the first Space found inside a Universe directory
+        --sim <ID>          Dedicated server: download and host this listing
+        --env <NAME>        staging (the default) or production. --api-url wins
+        --api-url <URL>     API the dedicated server heartbeats
+        --public <HOST>     Public IPv4 or name players use to join
+        --port <UDP>        UDP port (default 7777)
+        --status-file <P>   Where the dedicated server writes its status
 
 EXAMPLES:
     eustress-engine.exe                                        # Start with auto-discovered space
@@ -1047,5 +1108,32 @@ mod tests {
         assert!(args.server_mode);
         assert_eq!(args.bliss_bind.as_deref(), Some("127.0.0.1"));
         assert!(!args.show_help);
+    }
+
+    #[test]
+    fn a_dedicated_server_names_its_listing_its_api_and_its_port() {
+        let args = StartupArgs::parse_from(&argv(&[
+            "eustress-engine",
+            "--server",
+            "--sim",
+            "07d084d8-9098-4192-bb48-84d2c428db36",
+            "--env",
+            "staging",
+            "--api-url",
+            "https://api-staging.eustress.dev",
+            "--public",
+            "203.0.113.7",
+            "--port",
+            "7777",
+            "--status-file",
+            "/tmp/dedicated-server.json",
+        ]));
+        assert!(args.server_mode);
+        assert_eq!(args.sim_id.as_deref(), Some("07d084d8-9098-4192-bb48-84d2c428db36"));
+        assert_eq!(args.api_env.as_deref(), Some("staging"));
+        assert_eq!(args.api_url.as_deref(), Some("https://api-staging.eustress.dev"));
+        assert_eq!(args.public_host.as_deref(), Some("203.0.113.7"));
+        assert_eq!(args.port, Some(7777));
+        assert_eq!(args.status_file.as_deref(), Some(std::path::Path::new("/tmp/dedicated-server.json")));
     }
 }

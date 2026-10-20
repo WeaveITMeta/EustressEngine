@@ -110,6 +110,24 @@ impl HostRequest {
     pub fn is_hosting(&self) -> bool {
         self.active.is_some()
     }
+
+    /// The certificate pin, once the host is listening.
+    pub fn certificate_pin(&self) -> Option<[u8; 32]> {
+        self.active.as_ref().and_then(|host| host.pin)
+    }
+
+    /// The UDP port the host bound.
+    pub fn listen_port(&self) -> Option<u16> {
+        self.active.as_ref().map(|host| host.port)
+    }
+}
+
+/// The author's session, or the dedicated server's `esrv_` credential.
+fn gallery_bearer(auth: Option<&crate::auth::AuthState>) -> Option<String> {
+    auth.and_then(|auth| auth.get_token())
+        .map(str::to_string)
+        .filter(|token| !token.is_empty())
+        .or_else(|| std::env::var("EUSTRESS_SERVER_TOKEN").ok().filter(|token| !token.trim().is_empty()))
 }
 
 /// Adds hosting. Registered in `app_core`, so the headless engine can host
@@ -399,7 +417,8 @@ fn gallery_heartbeat(
         }
     }
 
-    let token = auth.as_deref().and_then(|a| a.get_token()).map(str::to_string);
+    crate::dedicated::start_api_latency_probe();
+    let token = gallery_bearer(auth.as_deref());
     let mut unlisted: Option<String> = None;
     let live = host.as_deref().zip(request.active.as_ref()).and_then(|(host, active)| {
         active.pin?;
@@ -440,13 +459,19 @@ fn gallery_heartbeat(
                             }
                             None => Vec::new(),
                         };
-                        let body = serde_json::json!({
+                        let mut body = serde_json::json!({
                             "link": link,
                             "players": players,
                             "max_players": max_players,
                             "protocol": eustress_networking::wire::PROTOCOL_VERSION,
                             "admitted": admitted,
                         });
+                        let extra = crate::dedicated::heartbeat_extra(request.active.as_ref().and_then(|host| host.pin));
+                        if let Some(extra) = extra.as_object() {
+                            for (key, value) in extra {
+                                body[key] = value.clone();
+                            }
+                        }
                         beat.sent += 1;
                         let number = beat.sent;
                         beat.unanswered.insert(number);
@@ -542,7 +567,7 @@ fn stop_listing_on_exit(
     if exits.read().next().is_none() {
         return;
     }
-    let Some((sim, token)) = listing_to_stop(&beat, auth.as_deref().and_then(|a| a.get_token())) else { return };
+    let Some((sim, token)) = listing_to_stop(&beat, gallery_bearer(auth.as_deref()).as_deref()) else { return };
     match ureq::delete(&live_url(&sim))
         .timeout(std::time::Duration::from_secs(3))
         .set("Authorization", &format!("Bearer {token}"))
@@ -570,7 +595,7 @@ fn admit_gallery_joins(
 ) {
     for notice in notices.read() {
         let NetNotice::Admit { peer, ticket } = notice else { continue };
-        let token = auth.as_deref().and_then(|a| a.get_token()).map(str::to_string);
+        let token = gallery_bearer(auth.as_deref());
         let session = host.as_deref().and_then(|h| Some((h.sim_id()?.to_string(), h.pin()?)));
         let (Some(token), Some((sim, pin))) = (token, session) else {
             warn!("multiplayer: a join waits for the gallery, but this session cannot ask it (signed out, or not listed)");
