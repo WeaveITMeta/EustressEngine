@@ -18,6 +18,7 @@ pub mod identity_file_picker;
 pub mod action_menu;
 pub mod command_palette;
 pub mod listing_art;
+pub mod browser_player;
 pub mod play_chooser;
 pub mod key_prompt;
 pub mod result_card;

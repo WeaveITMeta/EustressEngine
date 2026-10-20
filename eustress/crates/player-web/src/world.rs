@@ -27,8 +27,12 @@ use std::sync::Arc;
 use bevy::asset::io::memory::{Dir, Value};
 use bevy::prelude::*;
 use eustress_common::play_session::{PlayAssetRoot, PlayDataModel, PlaySpaceSource};
-use eustress_common::plugins::celestial_sections::{read_space_celestials_from, spawn_space_celestials};
-use eustress_common::plugins::light_classes::{read_space_lights_from, spawn_space_lights, LightComponent};
+use eustress_common::plugins::celestial_sections::{
+    read_space_celestials_from, spawn_space_celestials,
+};
+use eustress_common::plugins::light_classes::{
+    read_space_lights_from, spawn_space_lights, LightComponent,
+};
 use eustress_common::services::lighting::LightingService;
 use eustress_common::services::lighting_properties::read_space_lighting_from;
 use eustress_common::space_source::RecordsSource;
@@ -88,7 +92,11 @@ fn open_arrived_world(
     mut page: NonSendMut<PageState>,
 ) {
     for WorldDownloaded(world) in arrivals.read() {
-        let Some((_, records)) = world.spaces.iter().find(|(name, _)| *name == world.start_space) else {
+        let Some((_, records)) = world
+            .spaces
+            .iter()
+            .find(|(name, _)| *name == world.start_space)
+        else {
             error!(
                 "net: the world names {} to open and does not carry it",
                 world.start_space
@@ -113,7 +121,9 @@ fn open_arrived_world(
         }
         let source = Arc::new(RecordsSource::new(records.iter().cloned()));
         for (key, bytes) in source.files() {
-            files.0.insert_asset(Path::new(key), Value::Vec(bytes.clone()));
+            files
+                .0
+                .insert_asset(Path::new(key), Value::Vec(bytes.clone()));
         }
         let shared = eustress_common::datamodel::new_shared();
         *shared.lock() = opened.dm;
@@ -145,7 +155,10 @@ fn open_arrived_world(
             warn!("space: sky {problem}");
         }
         let sky_count = spawn_space_celestials(&mut commands, &sky_objects, &lighting);
-        info!("space: {sky_count} sky object(s), Lighting at {}", lighting.clock_time);
+        info!(
+            "space: {sky_count} sky object(s), Lighting at {}",
+            lighting.clock_time
+        );
         commands.insert_resource(lighting);
 
         commands.insert_resource(PlaySpaceSource(source));
@@ -204,7 +217,9 @@ fn ready_after_settling(
 fn report_notices(mut notices: MessageReader<NetNotice>, mut page: NonSendMut<PageState>) {
     for notice in notices.read() {
         match notice {
-            NetNotice::Joined { peer, host_name } => info!("net: joined {host_name}'s session as player {peer}"),
+            NetNotice::Joined { peer, host_name } => {
+                info!("net: joined {host_name}'s session as player {peer}")
+            }
             NetNotice::JoinFailed { reason } => error!("net: could not join: {reason}"),
             NetNotice::Disconnected { reason } => warn!("net: disconnected: {reason}"),
             _ => {}

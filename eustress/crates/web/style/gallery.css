@@ -383,6 +383,13 @@ a.g-chip:hover, button.g-chip:hover { border-color: var(--g-line-strong); color:
 .pc-opt p { margin: 0 0 10px; color: var(--g-text-2); font-size: 14px; }
 .pc-opt .lp-actions { margin-top: 8px; }
 .pc-modeline { margin: 0 0 12px; color: var(--g-muted); font-size: 13.5px; }
+
+/* The browser Player, portaled to the page so the chooser's blur does not clip it. */
+.bp-stage { position: fixed; inset: 0; z-index: 1200; display: flex; flex-direction: column; background: #07070c; color: #e8e8ee; }
+.bp-bar { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 10px 14px; background: rgba(0, 0, 0, 0.55); }
+.bp-bar p { margin: 0; font-size: 14px; }
+.bp-canvas { flex: 1; min-height: 0; position: relative; }
+.bp-hint { margin: 0; padding: 8px 14px 12px; color: #c9d1d9; font-size: 13px; }
 .pc-link { border: 0; background: none; padding: 0; color: var(--g-blue); font: inherit; cursor: pointer; text-decoration: underline; }
 .pc-close { position: absolute; top: 12px; right: 12px; width: 36px; height: 36px; border-radius: 50%; border: 1px solid var(--g-line); background: rgba(143, 160, 182, 0.08); color: var(--g-text-2); display: grid; place-items: center; cursor: pointer; padding: 0; }
 .pc-close:hover { color: var(--g-text); border-color: var(--g-line-strong); }
