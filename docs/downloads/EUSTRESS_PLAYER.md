@@ -17,6 +17,44 @@ Each release is also served directly:
 | `/player/latest/linux-x64` | The current Linux archive |
 | `/player/vX.Y.Z/<file>` | A given release's files, with `checksums.txt` |
 
+Short names work on every `/latest/<platform>` link, for the Player, for Studio (`/latest/…`), and for staging (`/staging/player/latest/…`). `windows` is the zip `windows-x64`, not the installer. `macos` and `mac` are `macos-arm64`. `linux` is `linux-x64`. The long names keep working, including `windows-x64-installer`.
+
+`HEAD` on a file returns `Content-Length`, `Content-Type`, `ETag` and `Accept-Ranges: bytes`, and no body. `HEAD` on a `/latest/<platform>` link is the same 302 as GET. A single `Range: bytes=start-end` (also `start-` or `-suffix`) returns 206 with `Content-Range`. A range that starts past the end of the file returns 416.
+
+## Publishing a build to staging
+
+A Player build can be published where the staging website can download it, without replacing the public `player/latest.json` and without a GitHub Release.
+
+On GitHub: Actions → **Player Release** → **Run workflow**. The workflow file is [`.github/workflows/player-release.yml`](../../.github/workflows/player-release.yml).
+
+| Input | Staging | Production |
+|---|---|---|
+| `version` | `X.Y.Z`, the same as `version` in `eustress/crates/client/Cargo.toml`, without a leading `player-v` | the same |
+| `channel` | `staging` (the default) | `production` |
+| `publish` | on, to upload. Off builds the installers and keeps them as run artifacts | the same |
+
+`channel=staging` uploads into the `eustress-downloads` bucket under the prefix `staging/player`. The manifest's `channel` field is `staging`. Its `changelog_url` is the GitHub Actions run that built it (`/actions/runs/<id>`), not `releases/tag/player-vX.Y.Z`, because a staging publish does not create that tag. A production publish still points `changelog_url` at the tag release.
+
+A staging build is compiled for `https://api-staging.eustress.dev`. The Windows, macOS and Linux cargo builds set `EUSTRESS_DEFAULT_API_URL` to that address, and only when the channel is staging. A production build leaves the variable unset, so the Player stays on `https://api.eustress.dev`. Gallery pages follow that API (`https://staging.eustress-cbb.pages.dev` for staging, through `site_base`); there is no separate gallery address to set. Run the workflow from the branch that contains this compile-time default. Install the new build: a Player from an earlier staging publish still uses production until it is replaced.
+
+The verify step then fetches that channel:
+
+| Path on `https://downloads.eustress.dev` | What it is |
+|---|---|
+| `/staging/player/latest.json` | The staging manifest |
+| `/staging/player/latest/<platform>` | Redirects to the current staging file |
+| `/staging/player/vX.Y.Z/<file>` | That staging build's files, with `checksums.txt` |
+
+`<platform>` is a key of the manifest (`windows-x64-installer`, `windows-x64`, `macos-arm64` or `linux-x64`) or one of the short names above (`windows`, `macos`, `mac`, `linux`).
+
+A push of a `player-vX.Y.Z` tag is always production: it writes `player/` and creates the GitHub Release. A manual run with `channel=production` writes those same `player/` paths and does not create a GitHub Release, because a dispatched run has no tag to attach one to. Anything else that is dispatched, including a run that leaves `channel` at its default, writes `staging/player` only.
+
+The staging website (`staging.eustress-cbb.pages.dev`, which talks to `api-staging.eustress.dev`, the API a Player link names with `?api=staging`) reads `/staging/player/latest.json`. [eustress.dev/downloads/player](https://eustress.dev/downloads/player) keeps reading `/player/latest.json`.
+
+The routes are in `infrastructure/cloudflare/download-worker.js`. This workflow does not deploy the Worker; the paths answer from the Worker that is already deployed.
+
+If the upload fails with HTTP 403, `CLOUDFLARE_API_TOKEN` needs **R2 Object Read & Write** on the `eustress-downloads` bucket. The upload step says so in the log.
+
 ## Computers it runs on
 
 | Computer | File | Installs to | Opens `eustress-player://` links |
@@ -89,14 +127,15 @@ On Windows the installed Player is `%LOCALAPPDATA%\Programs\Eustress Player\eust
 | `eustress-client "eustress-player://join/<host:port>?key=...&pin=..."` | Join a host by its link |
 | `eustress-client --sim <simulation id>` | Play a published simulation |
 | `eustress-client "eustress-player://play/<simulation id>"` | The same, by its link |
-| `eustress-client --api-url <url>` | Use this Eustress server, for testing (see below) |
+| `eustress-client --env staging` or `--env production` | Use that named server for this run |
+| `eustress-client --api-url <url>` | Use this Eustress server. Wins over `--env` |
 | `eustress-client --version` | Print the version and exit |
 
 Links written with `eustress://` in place of `eustress-player://` open the same way.
 
 | Environment variable | What it does |
 |---|---|
-| `EUSTRESS_API_URL` | The Eustress server, as `--api-url` sets it |
+| `EUSTRESS_API_URL` | The Eustress server for this run. Wins over the server compiled into the build (`EUSTRESS_DEFAULT_API_URL`). `--api-url` sets the same variable. `--env` selects `staging` or `production` and is overridden by `--api-url` |
 | `EUSTRESS_SPACE` | An absolute path to a Space folder to open when the Player starts with no link |
 | `EUSTRESS_WORKSPACE` | Your Eustress folder; the default is `Documents/Eustress` in your home folder |
 | `EUSTRESS_PLAYER_NAME` | Your display name when joining; otherwise your computer's user name |
@@ -108,15 +147,22 @@ Setup registers the installed Player for `eustress-player://` links, for your ac
 
 ## Production and staging
 
-A Gallery link names the Eustress server it belongs to (`api=production` or `api=staging`), and a Player opens only links for its own server. A link for the other server shows "This link is for the staging server; this Player is set up for the production server." and nothing is downloaded or joined.
+A Gallery link names the Eustress server it belongs to (`api=production` or `api=staging`). The Player opens a link only when that name is the server the Player is using. A link for the other server shows "This link is for the staging server; this Player is set up for production." and nothing is downloaded or joined.
 
-To test against staging on Windows, start the installed Player once with the staging server:
+The server for a run is the first of these that is set:
+
+1. `--api-url <url>` on the command line.
+2. `--env staging` or `--env production` on the command line.
+3. `EUSTRESS_API_URL` in the environment.
+4. The server compiled into that build (`EUSTRESS_DEFAULT_API_URL`). A Player from the staging download channel is compiled for `https://api-staging.eustress.dev`. A production Player has no compiled default and uses `https://api.eustress.dev`.
+
+Play on the staging Gallery works with a staging-channel Player and no extra flag. To point that copy at production for one run:
 
 ```powershell
-& "$env:LOCALAPPDATA\Programs\Eustress Player\eustress-client.exe" --api-url https://api-staging.eustress.dev
+& "$env:LOCALAPPDATA\Programs\Eustress Player\eustress-client.exe" --env production
 ```
 
-It registers itself with that server, so links from the staging Gallery open it. Start the Player normally to return links to production. On Linux the desktop entry always starts the production Player; run it from a terminal with `--api-url` and the link instead.
+On Windows the Player registers itself each time it starts. When its server is not production, the registered command includes `--api-url` for that server, so later links from the staging Gallery keep opening the staging Player. Start a production Player to hand links back to production. `EUSTRESS_PLAYER_REGISTER=0` leaves the registration as it is. On Linux the desktop entry starts the installed Player with no flag; a staging-channel install is already compiled for staging. To open one link against the other server, run `eustress-client --env production` (or `--env staging`) and the link from a terminal.
 
 ## Logs and problems
 

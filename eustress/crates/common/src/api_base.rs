@@ -1,11 +1,12 @@
 //! # Where the Eustress API is
 //!
 //! Every call Studio and the Player make to the Eustress API goes through
-//! [`api_base`], so one setting points them all somewhere else:
-//! `EUSTRESS_API_URL`, for a local `wrangler dev` or a staging Worker. Only
-//! `https://`, or `http://` to this machine, is taken; anything else is
-//! refused with a warning and production stays in use, so a typo never sends
-//! a login in the clear.
+//! [`api_base`], so one setting points them all somewhere else. A running
+//! program uses `EUSTRESS_API_URL`. When that is unset, a build may carry
+//! `EUSTRESS_DEFAULT_API_URL` from compile time (the staging Player). When
+//! both are absent, production is used. Only `https://`, or `http://` to
+//! this machine, is taken; anything else is refused with a warning and
+//! production stays in use, so a typo never sends a login in the clear.
 //!
 //! A login belongs to the API that issued it. [`credential_scope`] names the
 //! API in use, and [`login_file`] the saved login's file for it, so Studio
@@ -38,12 +39,22 @@ pub fn server_name(base: &str) -> String {
     label_for(base).map_or_else(|| "production".to_string(), |(name, _)| name)
 }
 
-/// The API every call goes to: `EUSTRESS_API_URL` when it holds an accepted
-/// base ([`validate_api_base`]), else production. Read once; a base other
-/// than production is logged as a warning the first time.
+/// Compiled in when the build set `EUSTRESS_DEFAULT_API_URL`. A production
+/// build leaves the variable unset, so this is `None` and [`api_base`] stays
+/// on [`PRODUCTION_API`]. An empty value is treated as unset.
+const COMPILED_DEFAULT_API: Option<&str> = option_env!("EUSTRESS_DEFAULT_API_URL");
+
+/// The API every call goes to. [`API_URL_VAR`] when it holds an accepted
+/// base ([`validate_api_base`]), else the base compiled in from
+/// `EUSTRESS_DEFAULT_API_URL` when that holds one, else production. The
+/// runtime variable wins, including when it is refused (production stays in
+/// use). Read once; a base other than production is logged as a warning the
+/// first time.
 pub fn api_base() -> &'static str {
     static BASE: OnceLock<String> = OnceLock::new();
-    BASE.get_or_init(|| resolve(std::env::var(API_URL_VAR).ok().as_deref()))
+    BASE.get_or_init(|| {
+        resolve(std::env::var(API_URL_VAR).ok().as_deref(), COMPILED_DEFAULT_API)
+    })
 }
 
 /// `path` (starting with `/`) on the API in use.
@@ -215,20 +226,35 @@ pub fn validate_api_base(raw: &str) -> Result<String, String> {
     }
 }
 
-fn resolve(var: Option<&str>) -> String {
-    let Some(raw) = var.map(str::trim).filter(|v| !v.is_empty()) else {
-        return PRODUCTION_API.to_string();
-    };
+/// `runtime` is [`API_URL_VAR`]. `compiled` is `EUSTRESS_DEFAULT_API_URL`
+/// from [`option_env!`]. A set runtime is taken even when it is refused,
+/// which leaves production in use; the compiled base is used only when the
+/// runtime variable is unset or blank.
+fn resolve(runtime: Option<&str>, compiled: Option<&str>) -> String {
+    if let Some(raw) = nonempty(runtime) {
+        return accept(raw, API_URL_VAR);
+    }
+    if let Some(raw) = nonempty(compiled) {
+        return accept(raw, "EUSTRESS_DEFAULT_API_URL");
+    }
+    PRODUCTION_API.to_string()
+}
+
+fn nonempty(var: Option<&str>) -> Option<&str> {
+    var.map(str::trim).filter(|v| !v.is_empty())
+}
+
+fn accept(raw: &str, source: &str) -> String {
     match validate_api_base(raw) {
         Ok(base) if base == PRODUCTION_API => base,
         Ok(base) => {
             tracing::warn!(
-                "Eustress API: {base} ({API_URL_VAR}), NOT production. Logins and saved tokens are kept apart from production's."
+                "Eustress API: {base} ({source}), NOT production. Logins and saved tokens are kept apart from production's."
             );
             base
         }
         Err(e) => {
-            tracing::warn!("{API_URL_VAR} ignored: {e}. Using {PRODUCTION_API}.");
+            tracing::warn!("{source} ignored: {e}. Using {PRODUCTION_API}.");
             PRODUCTION_API.to_string()
         }
     }
@@ -266,12 +292,40 @@ mod tests {
         ] {
             assert!(validate_api_base(bad).is_err(), "{bad} was taken");
         }
-        assert_eq!(resolve(None), PRODUCTION_API);
-        assert_eq!(resolve(Some("  ")), PRODUCTION_API);
-        assert_eq!(resolve(Some("http://10.0.0.1")), PRODUCTION_API, "a refused value leaves production in use");
-        assert_eq!(resolve(Some("http://localhost:8787/")), "http://localhost:8787");
+        assert_eq!(resolve(None, None), PRODUCTION_API);
+        assert_eq!(resolve(Some("  "), None), PRODUCTION_API);
+        assert_eq!(
+            resolve(Some("http://10.0.0.1"), None),
+            PRODUCTION_API,
+            "a refused value leaves production in use"
+        );
+        assert_eq!(resolve(Some("http://localhost:8787/"), None), "http://localhost:8787");
         assert_ne!(scope_of("http://localhost:8787"), scope_of("http://127.0.0.1:8787"));
         assert_eq!(scope_of("http://localhost:8787").len(), 16);
+    }
+
+    /// A staging Player is compiled with `EUSTRESS_DEFAULT_API_URL`. That
+    /// base is used only when `EUSTRESS_API_URL` is unset. A blank or refused
+    /// compiled value leaves production in use, as a production build does.
+    #[test]
+    fn a_compiled_default_applies_only_when_the_runtime_url_is_unset() {
+        assert_eq!(resolve(None, Some(STAGING_API)), STAGING_API);
+        assert_eq!(resolve(Some(""), Some(STAGING_API)), STAGING_API);
+        assert_eq!(resolve(Some("  "), Some(STAGING_API)), STAGING_API);
+        assert_eq!(
+            resolve(Some("http://localhost:8787"), Some(STAGING_API)),
+            "http://localhost:8787"
+        );
+        assert_eq!(
+            resolve(Some("http://10.0.0.1"), Some(STAGING_API)),
+            PRODUCTION_API,
+            "a refused runtime value leaves production in use"
+        );
+        assert_eq!(resolve(None, Some("")), PRODUCTION_API);
+        assert_eq!(resolve(None, Some("   ")), PRODUCTION_API);
+        assert_eq!(resolve(None, Some("http://10.0.0.1")), PRODUCTION_API);
+        assert_eq!(resolve(None, Some(PRODUCTION_API)), PRODUCTION_API);
+        assert_eq!(resolve(None, None), PRODUCTION_API);
     }
 
     /// Production's login keeps its file; every other API gets its own, the

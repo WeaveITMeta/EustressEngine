@@ -4,7 +4,8 @@
 // What the program is, whether there is a build to download today, and which of the two programs a visitor needs. One page, drawn
 // for either product. Every line is something that exists:
 //
-//   * The release card follows the product's release manifest (player/latest.json, latest.json). With none, it says "Public
+//   * The release card follows the product's release manifest (player/latest.json, latest.json). The staging website
+//     reads staging/player/latest.json for the Player. With none, it says "Public
 //     Alpha: first release coming soon" and offers the email sign-up (components/notify_me.rs); it never shows a download button
 //     that goes nowhere.
 //   * The visitor's own computer leads: its row in the table is marked, and with a release its button comes first.

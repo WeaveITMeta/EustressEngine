@@ -6,10 +6,9 @@
 //! unpacked would never be found. So the Player registers itself each time it
 //! starts, for the current user only (`HKEY_CURRENT_USER\Software\Classes`, no
 //! administrator rights), pointing at the exe that is running: the Player you
-//! ran last is the one a link opens. When the Player talks to an API other
-//! than production (`EUSTRESS_API_URL`), the link carries it on with
-//! `--api-url`, so a staging Player opened from the staging site stays on
-//! staging.
+//! ran last is the one a link opens. When that Player's API is not production
+//! (a staging build, `EUSTRESS_API_URL`, or `--env`), the registered command
+//! carries `--api-url`, so a link opened afterwards stays on that server.
 //!
 //! Each value is read first and written only when it differs, so a second
 //! start changes nothing. `EUSTRESS_PLAYER_REGISTER=0` skips it. Linux
