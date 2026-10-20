@@ -199,6 +199,9 @@ export function fakeEnv() {
     SCREENING: fakeKv(),
     TELEMETRY: fakeKv(),
     SCENES: fakeBucket(),
+    // Bound on every deployment (deploy_bindings.test.mjs), and the guest routes refuse without it. This one never limits; a
+    // test about limits binds its own.
+    AUTH_RATE_LIMITER: { limit: async () => ({ success: true }) },
   };
 }
 

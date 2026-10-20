@@ -534,6 +534,19 @@ fn not_registered(server: Option<&(String, String)>, site: Option<&str>) -> Stri
     }
 }
 
+/// The words for a signature the API refused. Studio checked that the file's
+/// keys belong together before sending anything (`IdentityKey::parse`), so a
+/// refusal means the server did not take the message Studio signs
+/// (`eustress-login-v1`, bound to the server's address): a server older than
+/// this Studio, or an address other than the one it answers on.
+fn signature_refused(server: Option<&(String, String)>) -> String {
+    let at = server.map_or_else(|| "api.eustress.dev".to_string(), |(_, host)| host.clone());
+    format!(
+        "Eustress ({at}) did not accept this identity's signature. The keys in the file belong together, \
+         so the server does not take this version of Studio's sign-in yet."
+    )
+}
+
 /// The sign-in dialog's two server lines: which server it signs in to, when
 /// that is not production (empty for production), and where an identity file
 /// for it comes from. The API is chosen as Studio starts, so they hold for the
@@ -562,7 +575,7 @@ fn site_name(site: &str) -> &str {
 fn api_error(error: ureq::Error) -> SignInError {
     match error {
         ureq::Error::Status(404, _) => SignInError::refused(not_registered(api_label().as_ref(), site_base().as_deref())),
-        ureq::Error::Status(401, _) => SignInError::refused("Eustress did not accept this identity's signature."),
+        ureq::Error::Status(401, _) => SignInError::refused(signature_refused(api_label().as_ref())),
         ureq::Error::Status(code, _) if code >= 500 => {
             SignInError { message: NOT_ANSWERING.to_string(), unreachable: true }
         }
@@ -1078,6 +1091,21 @@ mod tests {
         let (note, hint) = sign_in_texts_for(Some(&local), None);
         assert_eq!(note, "Signing in to the local server (localhost:8787).");
         assert!(hint.contains("where you signed up for this server") && !hint.contains("eustress.dev"), "{hint}");
+    }
+
+    /// A refused signature names the server and says the file is not the
+    /// cause: Studio checks the keys belong together before it sends anything.
+    #[test]
+    fn a_refused_signature_names_the_server_not_the_file() {
+        let production = signature_refused(None);
+        assert!(production.starts_with("Eustress (api.eustress.dev) did not accept"), "{production}");
+        assert!(production.contains("keys in the file belong together"), "{production}");
+        let staging = ("staging".to_string(), "api-staging.eustress.dev".to_string());
+        assert!(signature_refused(Some(&staging)).starts_with("Eustress (api-staging.eustress.dev) did not accept"));
+        // Studio's own check is what lets these words say the file is not the cause.
+        let v = vectors();
+        let mismatched = identity_file(v["public_key"].as_str().unwrap(), &"1".repeat(64));
+        assert!(IdentityKey::parse(&mismatched).is_err(), "a file whose keys do not belong together never reaches the API");
     }
 
     /// A saved login is private: only this user (and, on Windows, SYSTEM)

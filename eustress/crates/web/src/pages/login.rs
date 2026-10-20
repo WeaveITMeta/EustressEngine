@@ -584,7 +584,7 @@ pub fn LoginPage() -> impl IntoView {
                                             Ok(c) => c,
                                             Err(e) => {
                                                 loading.set(false);
-                                                error.set(Some(format!("Challenge failed: {}", e)));
+                                                error.set(Some(crate::identity_file::sign_in_refusal(&e, &api::api_origin(&api_url))));
                                                 identity_status.set("Challenge failed".to_string());
                                                 return;
                                             }
@@ -617,7 +617,7 @@ pub fn LoginPage() -> impl IntoView {
                                             }
                                             Err(e) => {
                                                 loading.set(false);
-                                                error.set(Some(format!("Verification failed: {}", e)));
+                                                error.set(Some(crate::identity_file::sign_in_refusal(&e, &api::api_origin(&api_url))));
                                                 identity_status.set("Verification failed".to_string());
                                             }
                                         }

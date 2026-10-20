@@ -25,6 +25,7 @@ use eustress_common::mlua::play::terrain::terrain_instance;
 use eustress_common::mlua::play::{RayHit, RayQuery};
 use eustress_common::machine_input::{write_camera, write_input, write_mouse, DeviceFrame, Taken, ViewRect};
 use eustress_common::scripting::{CFrame, Vector3};
+use eustress_common::terrain::road_surface::RoadMaterial;
 use eustress_common::terrain::TerrainChunkCollider;
 use eustress_play_runtime::assemblies::{drawn_pose, AssemblyMember};
 
@@ -607,7 +608,7 @@ pub fn pull_mouse_hit(
 /// have no instance: the filter takes or skips them together, as the Terrain.
 pub fn cast_ray(
     spatial: &SpatialQuery,
-    colliders: &Query<(Option<&BasePart>, Has<Sensor>, Has<TerrainChunkCollider>)>,
+    colliders: &Query<(Option<&BasePart>, Has<Sensor>, Has<TerrainChunkCollider>, Option<&RoadMaterial>)>,
     q: &RayQuery,
 ) -> Option<RayHit> {
     let origin = q.origin.to_vec3();
@@ -623,7 +624,7 @@ pub fn cast_ray(
         filter = filter.with_excluded_entities(listed.iter().map(|b| Entity::from_bits(*b)));
     }
     let hit = spatial.cast_ray_predicate(origin, direction, len, true, &filter, &|e| {
-        let (part, sensor, terrain) = colliders.get(e).unwrap_or((None, false, false));
+        let (part, sensor, terrain, _) = colliders.get(e).unwrap_or((None, false, false, None));
         if terrain {
             // Include lists take the Terrain only when they name it; exclude
             // lists skip it only when they do.
@@ -638,11 +639,15 @@ pub fn cast_ray(
         true
     })?;
     let p = origin + *direction * hit.distance;
+    let (terrain, material) = colliders
+        .get(hit.entity)
+        .map_or((false, None), |(_, _, terrain, road)| (terrain, road.map(|r| r.0)));
     Some(RayHit {
         entity: hit.entity.to_bits(),
         position: Vector3::from_vec3(p),
         normal: Vector3::from_vec3(hit.normal),
         distance: hit.distance as f64,
-        terrain: colliders.get(hit.entity).map_or(false, |(_, _, terrain)| terrain),
+        terrain,
+        material,
     })
 }

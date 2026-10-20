@@ -143,6 +143,30 @@ pub fn check_against_account(file: &IdentityFile, account_key: &str, account_id:
     ))
 }
 
+/// The sentence for a sign-in with an identity file that the API refused, from its answer to
+/// `/api/auth/challenge` or `/api/auth/verify-challenge`. `origin` is the API in use: a file
+/// from the other environment is the usual reason a good file is "not registered".
+pub fn sign_in_refusal(error: &crate::api::ApiError, origin: &str) -> String {
+    use crate::api::ApiError;
+    match error {
+        ApiError::NotFound if is_production(origin) => "This identity file is not registered with Eustress. A file from the Eustress test site (staging) works only there. Pick the file from your sign-up, or register.".to_string(),
+        ApiError::NotFound => "This identity file is not registered on the Eustress test site (staging). Staging has its own accounts: an identity file from the real site, eustress.dev, does not work here. Pick the file from your staging sign-up, or register here.".to_string(),
+        ApiError::Unauthorized => "Eustress did not accept this file's signature. Pick the identity file exactly as it was downloaded; an edited file signs with the wrong key.".to_string(),
+        ApiError::Server { status, message } => {
+            // The Worker's own words: `error`, and a `reason` when it gives one (a replaced key, a suspension).
+            let body = serde_json::from_str::<serde_json::Value>(message).unwrap_or_default();
+            let said = |key: &str| body.get(key).and_then(|v| v.as_str()).map(str::trim).filter(|s| !s.is_empty()).map(|s| s.trim_end_matches('.').to_string());
+            match (said("error"), said("reason")) {
+                (Some(error), Some(reason)) => format!("{error}. {reason}."),
+                (Some(error), None) => format!("{error}."),
+                _ => format!("Eustress could not sign you in (error {status}). Try again in a minute."),
+            }
+        }
+        ApiError::Network(_) => "Could not reach Eustress. Check your connection and try again.".to_string(),
+        ApiError::Deserialize(_) => "Eustress answered in a way this page could not read. Reload the page and sign in again.".to_string(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -259,6 +283,44 @@ mod tests {
         let unknown = check_against_account(&top, &other, "99999999-9999-4999-8999-999999999999", STAGING).unwrap_err();
         assert!(unknown.starts_with("This is not the identity file your account signs in with now"), "{unknown}");
         assert!(unknown.contains("test site (staging)"), "{unknown}");
+    }
+
+    #[test]
+    fn sign_in_refusal_names_the_cause_not_the_status() {
+        use crate::api::ApiError;
+        // "Identity not registered": on staging, a file from the real site is the usual cause.
+        let staging = sign_in_refusal(&ApiError::NotFound, STAGING);
+        assert!(staging.starts_with("This identity file is not registered on the Eustress test site (staging)"), "{staging}");
+        assert!(staging.contains("eustress.dev"), "{staging}");
+        let production = sign_in_refusal(&ApiError::NotFound, PRODUCTION);
+        assert!(production.starts_with("This identity file is not registered with Eustress"), "{production}");
+        assert!(sign_in_refusal(&ApiError::Unauthorized, STAGING).contains("did not accept this file's signature"));
+        // The Worker's own words, with its reason: a replaced key, a suspension.
+        let replaced = r#"{"error":"This identity file was replaced on 2026-10-01","reason":"Sign in with your newer identity file, or recover your account from the sign-in page.","code":"key_retired"}"#;
+        assert_eq!(
+            sign_in_refusal(&ApiError::Server { status: 403, message: replaced.into() }, STAGING),
+            "This identity file was replaced on 2026-10-01. Sign in with your newer identity file, or recover your account from the sign-in page."
+        );
+        let expired = r#"{"error":"Challenge expired"}"#;
+        assert_eq!(sign_in_refusal(&ApiError::Server { status: 400, message: expired.into() }, STAGING), "Challenge expired.");
+        assert_eq!(
+            sign_in_refusal(&ApiError::Server { status: 502, message: "<html>".into() }, STAGING),
+            "Eustress could not sign you in (error 502). Try again in a minute."
+        );
+        for e in [ApiError::NotFound, ApiError::Unauthorized, ApiError::Network("x".into()), ApiError::Deserialize("x".into())] {
+            let s = sign_in_refusal(&e, STAGING);
+            assert!(!s.contains("Not found") && !s.contains("Unauthorized") && !s.contains("error:"), "a status word, not a cause: {s}");
+            assert!(s.ends_with('.'), "{s}");
+        }
+    }
+
+    #[test]
+    fn the_sign_in_page_says_why_a_file_sign_in_was_refused() {
+        let page = include_str!("pages/login.rs").replace("\r\n", "\n");
+        let page = page.split("#[cfg(test)]").next().unwrap();
+        assert!(page.contains("sign_in_refusal(&e, &api::api_origin(&api_url))"), "the page shows the cause");
+        assert!(!page.contains("format!(\"Verification failed: {}\", e)"), "not the bare status");
+        assert!(!page.contains("format!(\"Challenge failed: {}\", e)"), "not the bare status");
     }
 
     #[test]

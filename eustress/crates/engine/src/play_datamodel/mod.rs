@@ -271,6 +271,7 @@ pub(crate) fn drive_mlua(
         Option<&eustress_common::classes::BasePart>,
         Has<avian3d::prelude::Sensor>,
         Has<TerrainChunkCollider>,
+        Option<&eustress_common::terrain::road_surface::RoadMaterial>,
     )>,
     terrain: Query<
         (&TerrainConfig, &TerrainData, Option<&TerrainVolume>, Option<&TerrainBaked>, Option<&TerrainVoxelWater>),

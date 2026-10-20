@@ -192,6 +192,17 @@ pub struct GuiTomlProperties {
     // Adornee — instance name reference; resolved to entity at load time.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub adornee: Option<String>,
+
+    // ── SurfaceGui-specific properties ────────────────────────────────────
+    // Face of the parent part the GUI draws on, a `NormalId` name ("Front").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub face: Option<String>,
+    // Virtual canvas `[width, height]` in pixels.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub canvas_size: Option<[f32; 2]>,
+    // Canvas pixels per unit of the face (the importer writes per metre).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pixels_per_unit: Option<f32>,
 }
 
 impl GuiTomlProperties {
@@ -784,8 +795,14 @@ pub fn gui_class_name_from_type(gui_type: &str) -> eustress_common::classes::Cla
     }
 }
 
-/// Extract display name from filename (everything before first dot)
+/// Extract display name from filename (everything before first dot). A
+/// folder-form element's `_instance.toml` takes its folder's name instead.
 pub fn gui_display_name(path: &Path) -> String {
+    if path.file_name().is_some_and(|n| n == "_instance.toml") {
+        if let Some(folder) = path.parent().and_then(|p| p.file_name()).and_then(|n| n.to_str()) {
+            return folder.to_string();
+        }
+    }
     path.file_name()
         .and_then(|n| n.to_str())
         .and_then(|n| n.splitn(2, '.').next())
@@ -1176,6 +1193,47 @@ pub fn billboard_class_from_props(
     bb.z_index = g.z_index;
 
     bb
+}
+
+/// Build a `SurfaceGui` class component from parsed `[gui]` TOML
+/// properties, as [`billboard_class_from_props`] does for a BillboardGui:
+/// the one mapping from the on-disk schema to the class, used by the
+/// cold-load path (`file_loader.rs`) and by the file watcher's hot create
+/// and hot modify. It reads the `[gui]` keys the SurfaceGui spawner reads
+/// (`spawners::gui_containers::surface_gui`) except the two alignments,
+/// which `GuiTomlProperties` does not carry. Absent fields keep the class
+/// default, so an older TOML loads cleanly. `size` is not read: a SurfaceGui
+/// file has none, and the `[gui]` default is a 100x30 pixel box where the
+/// class default covers the whole face. Nothing is unit-converted; the
+/// canvas is in pixels.
+pub fn surface_class_from_props(
+    g: &GuiTomlProperties,
+) -> eustress_common::classes::SurfaceGui {
+    let mut sg = eustress_common::classes::SurfaceGui::default();
+
+    // Face and canvas
+    if let Some(ref s) = g.face {
+        // The spawner's `normal_id_from_str`: any case, an `Enum.NormalId.`
+        // prefix or Roblox's number; an unknown name is Front.
+        sg.face = eustress_common::classes::NormalId::parse(s).unwrap_or_default();
+    }
+    if let Some(v) = g.canvas_size { sg.canvas_size = v; }
+    if let Some(v) = g.pixels_per_unit { sg.pixels_per_unit = v; }
+
+    // Distance
+    if let Some(v) = g.max_distance { sg.max_distance = v; }
+
+    // Behaviour flags
+    if let Some(v) = g.active { sg.active = v; }
+    if let Some(v) = g.enabled { sg.enabled = v; }
+    if let Some(v) = g.always_on_top { sg.always_on_top = v; }
+    if let Some(v) = g.clips_descendants { sg.clips_descendants = v; }
+
+    // Appearance
+    if let Some(v) = g.brightness { sg.brightness = v; }
+    if let Some(v) = g.light_influence { sg.light_influence = v; }
+
+    sg
 }
 
 fn spawn_frame_element(

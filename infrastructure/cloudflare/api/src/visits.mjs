@@ -11,9 +11,13 @@
 //
 // At most once per person or device per listing per UTC day, so retries, reloads and a Player that restarts do not inflate it:
 //
-//   - a signed-in person is one `u:<account id>`; a guest is one `g:<ticket id>`;
+//   - a signed-in person is one `u:<account id>`; a guest joining a hosted session is one `g:<hash>` (guestVisitKey: an HMAC of
+//     its guest id under this purpose's key for the day, so one address counts once a day however many leases it opens or
+//     tickets it mints, and the marker cannot be matched to the guest's allowance);
 //   - anyone else is one ADDRESS (not address plus browser: a browser string costs nothing to vary), keyed by an HMAC under a key
-//     derived for this purpose from the Worker's secret, so no address is stored and the secret itself signs nothing here;
+//     derived for this purpose AND THIS UTC DAY from the Worker's secret, so no address is stored, the secret itself signs nothing
+//     here, and one address's markers on two days cannot be matched (a signed-out visitor is often a guest: GUEST_PLAY.md section 12);
+//   - every marker is deleted 25 hours after it is written, which is past the end of the day it names;
 //   - new anonymous markers for one listing are capped per minute by the platform limiter (VISIT_RATE_LIMITER), so an unauthenticated
 //     flood cannot turn into unbounded writes.
 //
@@ -23,8 +27,11 @@
 // Counting never makes a launch fail: any error here is logged and the launch goes on.
 
 const DAY_MS = 24 * 3600 * 1000;
-const KEY_TTL_SECONDS = 2 * 24 * 3600;
-const PURPOSE = 'eustress-visit-v1';
+/// A marker names its own UTC day, so it is needed only until that day ends: kept at most 25 hours, as a guest's records are.
+export const KEY_TTL_SECONDS = 25 * 3600;
+const PURPOSE = 'eustress-visit-v2';
+
+const dayOf = (now) => new Date(now - (now % DAY_MS)).toISOString().slice(0, 10);
 
 const hex = (bytes) => [...new Uint8Array(bytes)].map((b) => b.toString(16).padStart(2, '0')).join('');
 const encode = (text) => new TextEncoder().encode(text);
@@ -34,21 +41,35 @@ async function hmac(keyBytes, message) {
   return new Uint8Array(await crypto.subtle.sign('HMAC', key, encode(message)));
 }
 
-/// The key a device is known by: an HMAC of its address under a key derived from the Worker's secret for this one purpose.
-export async function deviceKey(env, address) {
+/// The key a device is known by on the UTC day of `now`: an HMAC of its address under a key derived from the Worker's secret
+/// for this one purpose and that day. The same address has another key the next day.
+export async function deviceKey(env, address, now = Date.now()) {
   if (!env?.JWT_SECRET || !address) return 'd:unknown';
   try {
-    const subkey = await hmac(encode(String(env.JWT_SECRET)), PURPOSE);
+    const subkey = await hmac(encode(String(env.JWT_SECRET)), `${PURPOSE}:${dayOf(now)}`);
     return `d:${hex(await hmac(subkey, String(address))).slice(0, 32)}`;
   } catch {
     return 'd:unknown';
   }
 }
 
+/// The key a guest joining a hosted session is known by on the UTC day of `now`: an HMAC of its guest id (guest.mjs, itself a
+/// day-keyed hash of the address) under this purpose's key for that day, so one address counts one visit a day however many
+/// leases it opens, and the marker cannot be matched to the guest's allowance or to another day.
+export async function guestVisitKey(env, guestId, now = Date.now()) {
+  if (!env?.JWT_SECRET || typeof guestId !== 'string' || !guestId) return null;
+  try {
+    const subkey = await hmac(encode(String(env.JWT_SECRET)), `${PURPOSE}:${dayOf(now)}`);
+    return `g:${hex(await hmac(subkey, `guest:${guestId}`)).slice(0, 32)}`;
+  } catch {
+    return null;
+  }
+}
+
 /// Who is launching, as a short key: the account when signed in, otherwise the address.
-export async function viewerKey(env, request, accountId) {
+export async function viewerKey(env, request, accountId, now = Date.now()) {
   if (accountId) return `u:${accountId}`;
-  return deviceKey(env, request?.headers?.get?.('CF-Connecting-IP') || '');
+  return deviceKey(env, request?.headers?.get?.('CF-Connecting-IP') || '', now);
 }
 
 /// The visits counted for a listing, apart from the count its record carries.
@@ -70,7 +91,7 @@ export async function playCountOf(env, sim) {
 export async function countVisit(env, sim, who, now = Date.now()) {
   try {
     if (!env?.SOCIAL || !sim?.id || !who) return false;
-    const day = new Date(now - (now % DAY_MS)).toISOString().slice(0, 10);
+    const day = dayOf(now);
     const marker = `visit:${sim.id}:${day}:${who}`;
     if (await env.SOCIAL.get(marker)) return false;
     // A flood of new anonymous markers for one listing is held to the limiter's allowance; people and guests are not limited here.

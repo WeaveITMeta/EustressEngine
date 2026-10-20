@@ -5152,6 +5152,7 @@ export component StudioWindow inherits Window {
             root.show-settings-dialog = false;
             root.show-keybindings-dialog = true;
         }
+        open-url(url) => { root.open-url(url); }
         on-save => {
             // Commit the typed Anthropic, xAI and OpenAI keys to Bevy
             // so Soul/Workshop panels stop showing the Configure banner.

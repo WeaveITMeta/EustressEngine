@@ -20,7 +20,7 @@ use leptos::prelude::*;
 use crate::components::{CentralNav, Footer};
 
 /// The date of the text on every act page.
-pub const UPDATED: &str = "October 8, 2026";
+pub const UPDATED: &str = "October 16, 2026";
 
 /// True while the legal text waits for McKale's review (and counsel's). Every
 /// page shows a "Draft for legal review" chip while it is true.
@@ -173,6 +173,11 @@ pub const DATA_HELD: &[Held] = &[
         detail: "Daily totals of page views and visitors. A visitor is counted once a day by a one-way hash of the network address, the browser and the date.",
         kept: "The hash for 2 days; the daily totals for about 13 months.",
     },
+    Held {
+        what: "Guest play",
+        detail: "Play without an account. No name, email address or age is asked. A guest session keeps a one-way fingerprint of the network address, made with a key that changes every day, and how many Spaces were started and how many minutes were played that day. A download by the Player without an account is counted once a day by a one-way fingerprint of the network address.",
+        kept: "The guest session's fingerprint and counts for at most 25 hours; the download fingerprint for 2 days.",
+    },
 ];
 
 const PROCESSORS: &str = "Services that handle this data for us: Cloudflare (hosting, storage and email), Stripe (payments and payouts), xAI (reads uploaded ID documents to verify them, runs the signup screening, and helps review published Spaces) and TypeSafe (classifies the text summary of a published Space). Eustress does not sell personal information and does not share it for advertising. The site carries no advertising trackers.";
@@ -189,7 +194,7 @@ pub const CCPA: Act = Act {
         "Eustress honors these rights for every California resident, whether or not the law's size thresholds apply to us.",
     ],
     on_eustress: &[
-        "This is everything Eustress holds about an account, and how long we keep it.",
+        "This is everything Eustress holds about an account, and about guest play, and how long we keep it.",
         PROCESSORS,
     ],
     held: DATA_HELD,
@@ -255,7 +260,7 @@ pub const COPPA: Act = Act {
     slug: "coppa",
     short: "COPPA",
     name: "Children's Online Privacy Protection Act",
-    card: "Eustress is for adults. No one under 18 can open an account.",
+    card: "Accounts are for adults: no one under 18 can open one. Anyone can play as a guest, and is never asked who they are.",
     applies: "Children under 13 and their parents",
     law: &[
         "The Children's Online Privacy Protection Act is a US law that protects children under 13. A website or app aimed at children, or one that knowingly collects personal information from a child under 13, must first get a parent's verifiable consent, and must let parents see and delete what it collected.",
@@ -264,6 +269,7 @@ pub const COPPA: Act = Act {
         "Eustress accounts are for adults only. Signing up on eustress.dev asks for your date of birth and a government ID, and the account is refused unless the ID shows you are at least 18, or the age of majority where you live if that is higher.",
         "Eustress is not aimed at children, and we do not knowingly collect personal information from anyone under 13. Because no one under 18 can open an account, Eustress has no parental consent process.",
         "If we learn that an account belongs to someone under 18, we close it and delete its data.",
+        "Anyone can play approved Spaces as a guest, without an account. A guest is never asked for a name, email address, age or anything else about themselves. Guests never see or play adult content, join live sessions only in Spaces rated for all ages, cannot buy anything, publish or post, and their chat in a live session is not delivered to other players. To count a guest's daily play, Eustress keeps a one-way fingerprint of the network address under a key that changes every day, and deletes it within 25 hours.",
     ],
     held: &[],
     rights: &[
@@ -413,7 +419,7 @@ pub const GDPR: Act = Act {
         "You can also complain to the data protection authority where you live.",
     ],
     on_eustress: &[
-        "This is everything Eustress holds about an account, and how long we keep it.",
+        "This is everything Eustress holds about an account, and about guest play, and how long we keep it.",
         "Why we use it: to run your account and what you buy (the contract with you); to verify identity and age and screen signups (our legal duties around payouts, and keeping the platform safe); and Studio usage counts and website visits (improving Eustress, with an off switch for Studio).",
         "Signup runs an automated background screening. If it refuses an account, a person reviews the refusal when you ask.",
         "Cloudflare stores and serves data from its network around the world, so your data may be processed outside the EU and the UK.",

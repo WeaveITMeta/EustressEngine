@@ -58,9 +58,9 @@ import { handleReleaseNotify } from './release_notify.mjs';
 import { isAdmin } from './admin_check.mjs';
 import { readAccountEmail } from './email_ops.mjs';
 import { freshGate, verifyFreshAuth, payoutPinnedUntil } from './fresh_auth.mjs';
-import { handleGuest } from './guest.mjs';
-import { handleLive, livePlayInfo } from './live.mjs';
-import { handleLiveNow } from './live_index.mjs';
+import { addressKey, guestPlayOn, handleGuest, isGuestRating } from './guest.mjs';
+import { END_ALL_GUESTS, guestSession, handleLive, holdGuestTicket, isLiveHeartbeat, livePin, livePlayInfo } from './live.mjs';
+import { GUEST_LIVE_INDEX_NAME, handleLiveNow } from './live_index.mjs';
 import { handleCoverRoute, coverFields } from './cover.mjs';
 import { handleChangelogRoute } from './changelogs.mjs';
 import { handleMakers } from './makers.mjs';
@@ -70,7 +70,7 @@ import {
   handleAdultContentRoute, viewerOf, ratingCap, ratingOf, isAdultListing, refuseAdult, viewerHeaders,
   refuseUnsignedImage, imageCacheControl, withSignedImages, resolveDob, ageAt,
 } from './adult_content.mjs';
-import { countVisit, viewerKey, playCountOf } from './visits.mjs';
+import { countVisit, guestVisitKey, viewerKey, playCountOf } from './visits.mjs';
 import { leaseIsLive } from './guest.mjs';
 import { corsHeaders, siteOrigin } from './cors.mjs';
 import { imagePart, textPart, userMessage } from './xai.mjs';
@@ -720,8 +720,9 @@ export default {
     try {
       // The routes that take no token are limited per address, so a loop cannot
       // mint accounts, fill the challenge store, or fill the KYC bucket.
-      if (request.method === 'POST' && UNAUTHENTICATED_AUTH_PATHS.has(url.pathname)) {
-        const limited = await authRateLimited(request, env, cors);
+      if ((request.method === 'POST' && UNAUTHENTICATED_AUTH_PATHS.has(url.pathname))
+        || (request.method === 'GET' && GUEST_LIMITED_PATHS.has(url.pathname))) {
+        const limited = await authRateLimited(request, env, cors, url.pathname);
         if (limited) return limited;
       }
 
@@ -729,6 +730,12 @@ export default {
       // A fresh or value route asks the account's object whether this session is
       // still current, and a value route refuses a frozen account.
       const gated = await freshGate(request, env, cors, { json, verifyJwt });
+      // A gallery heartbeat refused here (the session revoked or banned) tells the host to let every guest go
+      // (GUEST_PLAY.md section 13), as the route's own refusals do.
+      if (gated && (gated.status === 401 || gated.status === 403) && isLiveHeartbeat(request, url.pathname)) {
+        const refused = await gated.json().catch(() => ({}));
+        return json({ ...refused, ...END_ALL_GUESTS }, gated.status, cors);
+      }
       if (gated) return gated;
 
       // Every admin route needs an identity-file session (McKale, 2026-10-08). An
@@ -744,9 +751,16 @@ export default {
       const kycGated = await kycGate(request, env, cors, { json, verifyJwt });
       if (kycGated) return kycGated;
 
-      // Guest play: the Gallery without an account (src/guest.mjs).
+      // The guest-only sessions live now, for a guest's Play chooser (src/live.mjs, src/live_index.mjs). Read signed out,
+      // whoever asks: a guest's cap (G to PG) is the signed-out one, and no adult or account session is ever in this index.
+      if (url.pathname === '/api/guest/live' && request.method === 'GET') {
+        if (!guestPlayOn(env)) return json({ error: 'Guest sessions are not available yet', code: 'guest_join_unavailable' }, 503, { ...cors, 'Cache-Control': 'no-store' });
+        const viewer = { accountId: null, signedIn: false, adult: false, age21: false };
+        return handleLiveNow(url, env, cors, { json, isListable, viewer, index: GUEST_LIVE_INDEX_NAME, keep: isGuestRating, view: (sim) => galleryView(sim, url.origin) });
+      }
+      // Guest play: the Gallery without an account (src/guest.mjs). Awaited, so a failure inside is this try's 500.
       if (url.pathname.startsWith('/api/guest/'))
-        return handleGuest(request, env, cors, { verifyAuth, json, isListable });
+        return await handleGuest(request, env, cors, { verifyAuth, json, isListable, livePin, holdGuestTicket, bannedBearer, guestSession });
 
       // Auth
       if (url.pathname === '/api/auth/register' && request.method === 'POST')
@@ -1111,8 +1125,14 @@ export default {
       if (url.pathname.match(/^\/api\/simulations\/[a-f0-9-]+\/live(\/admit)?$/) && ['GET', 'POST', 'DELETE'].includes(request.method))
         return handleLive(request, env, cors, url.pathname.split('/')[3], {
           verifyAuth, requireAdmin, json, isListable,
-          // The host admitting a joining player is a visit by that player.
-          onJoin: async (sim, who) => { await countVisit(env, sim, who.guest ? `g:${who.id}` : `u:${who.accountId}`); },
+          // The host admitting a joining player is a visit by that player: an account once a day, a guest once a day per
+          // address however many leases and tickets it uses (`visit` is the guest id, held by the session, reduced to a
+          // visit key that cannot be matched to it: visits.mjs guestVisitKey).
+          onJoin: async (sim, who) => {
+            const key = who.guest ? await guestVisitKey(env, who.visit) : `u:${who.accountId}`;
+            if (!key) return;
+            await countVisit(env, sim, key);
+          },
         });
       // Website manifest upload. Its own object and its own route, so a publish
       // can never overwrite the listing record the marketplace reads.
@@ -1139,9 +1159,10 @@ export default {
       // Gallery (frontend-facing aliases for simulations)
       // Featured is the judge's optional upside flag on an approved listing;
       // it never gates listing, it only feeds this shelf.
-      // The shelf never carries adult content, so it is the same for every viewer and reads no session.
+      // The shelf never carries adult content. Below that it is at the viewer's own cap: G to PG signed out, the
+      // account's own (mature_17 with Adult content off) signed in.
       if (url.pathname === '/api/gallery/featured' && request.method === 'GET')
-        return handleListSimulations(url, env, cors, { featuredOnly: true });
+        return handleListSimulations(url, env, cors, { featuredOnly: true, viewer: await viewerOf(request, env, verifyAuth) });
       if (url.pathname === '/api/gallery' && request.method === 'GET')
         return handleListSimulations(url, env, cors, { viewer: await viewerOf(request, env, verifyAuth) });
 
@@ -2851,6 +2872,22 @@ async function verifyJwt(token, secret) {
     return payload;
   } catch {
     return null;
+  }
+}
+
+/// Whether the request carries a genuine, unexpired token of an account that is banned. verifyAuth refuses such a token
+/// (the ban moves the account's floor), so a route that treats "not signed in" as anonymous asks this first: a banned
+/// account sending its own token is not turned into a guest.
+async function bannedBearer(request, env) {
+  const auth = request.headers.get('Authorization');
+  if (!auth || !auth.startsWith('Bearer ') || !env.USERS) return false;
+  const claims = await verifyJwt(auth.slice(7), env.JWT_SECRET);
+  if (!claims?.sub) return false;
+  try {
+    const raw = await env.USERS.get(`user:${claims.sub}`);
+    return !!raw && JSON.parse(raw)?.banned === true;
+  } catch {
+    return false;
   }
 }
 
@@ -5723,8 +5760,8 @@ function galleryView(sim, origin) {
 // whatever `?rating_max=` says (ratingCap). `opts.cap` is the highest rating,
 // for a caller that has already worked the slice out (makers, tags).
 async function handleListSimulations(url, env, cors, opts = {}) {
-  // The featured shelf is the same for everyone; every other list depends on who asked.
-  const headers = opts.featuredOnly ? cors : viewerHeaders(cors, opts.viewer, null);
+  // Every list depends on who asked, the featured shelf included (its cap is the viewer's).
+  const headers = viewerHeaders(cors, opts.viewer, null);
   try {
     const cap = RATINGS.includes(opts.cap) ? opts.cap : ratingCap(url?.searchParams?.get('rating_max'), opts.viewer);
     const maxIdx = RATINGS.indexOf(cap);
@@ -5925,7 +5962,9 @@ async function handlePlaySimulation(request, simId, env, cors) {
   const echk = sim.format === WORLD_FORMAT;
   const now = Date.now();
   const viewer = await verifyAuth(request, env);
-  const lease = viewer ? false : await leaseIsLive(env, request.headers.get('X-Eustress-Lease'), now);
+  // A guest's lease must be on this listing: a lease on one listing never hands out another's host link.
+  // With hosted guest play off, a lease reads nothing about the guest-only session (GUEST_PLAY.md section 13).
+  const lease = viewer || !guestPlayOn(env) ? false : await leaseIsLive(env, request.headers.get('X-Eustress-Lease'), now, simId);
   const host = await livePlayInfo(env, simId, { signedIn: !!viewer, lease, now });
   const solo = `eustress-player://play/${simId}`;
   const launch = {
@@ -7294,8 +7333,9 @@ const UNAUTHENTICATED_AUTH_PATHS = new Set([
   '/api/account/email/confirm',
   '/api/account/email/cancel',
   '/api/account/key-restore',
-  // Opening a guest session takes no token either.
+  // Opening a guest session, and minting a guest join ticket, take no token either.
   '/api/guest/play',
+  '/api/guest/ticket',
   // Registration-time identity verification takes no token. Upload writes to
   // the KYC bucket and submit runs a paid model call.
   '/api/kyc/upload',
@@ -7304,15 +7344,50 @@ const UNAUTHENTICATED_AUTH_PATHS = new Set([
   '/api/kyc/start',
 ]);
 
+/// The guest routes limited per address (src/guest.mjs). Unlike the other routes above they fail closed: with no limiter
+/// bound, or no address to key on, they answer an error rather than run unlimited.
+const GUEST_LIMITED_PATHS = new Set([
+  '/api/guest/play',
+  '/api/guest/ticket',
+  // Reads only, but answers anyone who asks, so they are limited too.
+  '/api/guest/allowance',
+  '/api/guest/live',
+]);
+
+/// Each guest route family counts on its own key in the per-address limiter (`<family>:<address>`), so guests reading
+/// the guest index or their allowance never use up the address's minute for sign-in, sign-up or KYC, nor the other way
+/// round.
+const GUEST_LIMIT_FAMILY = Object.freeze({
+  '/api/guest/play': 'guest-play',
+  '/api/guest/ticket': 'guest-ticket',
+  '/api/guest/allowance': 'guest-read',
+  '/api/guest/live': 'guest-read',
+});
+
+/// The guest routes that answer 503 while hosted guest play is off (GUEST_PLAY not "on"): they are not limited then, and
+/// the route says it is off.
+const GUEST_PLAY_ONLY_PATHS = new Set(['/api/guest/ticket', '/api/guest/live']);
+
 /// A 429 when this caller's address has used up its minute on the auth routes,
-/// otherwise null. Off when AUTH_RATE_LIMITER is unbound, and when the request
-/// carries no CF-Connecting-IP (a local `wrangler dev`, where every caller
-/// would share one key).
-async function authRateLimited(request, env, cors) {
-  if (!env.AUTH_RATE_LIMITER) return null;
-  const ip = request.headers.get('CF-Connecting-IP');
-  if (!ip) return null;
-  const { success } = await env.AUTH_RATE_LIMITER.limit({ key: ip });
+/// otherwise null. The address is keyed as one guest is (guest.mjs addressKey:
+/// an IPv4 address, or the /64 of an IPv6 one), so a device cannot step through
+/// the addresses of its own network for a fresh budget. Off when
+/// AUTH_RATE_LIMITER is unbound or the request carries no CF-Connecting-IP (a
+/// local `wrangler dev`, where every caller would share one key), except on the
+/// guest routes, which refuse instead.
+async function authRateLimited(request, env, cors, path) {
+  if (GUEST_PLAY_ONLY_PATHS.has(path) && !guestPlayOn(env)) return null;
+  const failClosed = GUEST_LIMITED_PATHS.has(path);
+  if (!env.AUTH_RATE_LIMITER) {
+    return failClosed ? json({ error: 'Guest play is not available on this deployment', code: 'guest_unavailable' }, 503, cors) : null;
+  }
+  const raw = request.headers.get('CF-Connecting-IP');
+  const key = addressKey(raw) || (failClosed ? null : raw);
+  if (!key) {
+    return failClosed ? json({ error: 'Your network address could not be read', code: 'address_unavailable' }, 400, cors) : null;
+  }
+  const family = GUEST_LIMIT_FAMILY[path];
+  const { success } = await env.AUTH_RATE_LIMITER.limit({ key: family ? `${family}:${key}` : key });
   if (success) return null;
   return json({ error: 'Too many attempts. Try again in a minute.', code: 'rate_limited' }, 429, { ...cors, 'Retry-After': '60' });
 }

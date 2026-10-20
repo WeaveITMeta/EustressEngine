@@ -200,6 +200,31 @@ pub struct EditorSettings {
     /// both. Saved as "auto", "on" or "off".
     #[serde(default)]
     pub ray_tracing: crate::raytracing::RayTracingMode,
+
+    // Settings > Hosting, read by `crate::multiplayer` each time a server
+    // starts. Each `EUSTRESS_HOST_*` variable still wins while it is set
+    // (`multiplayer::resolve_hosting`).
+
+    /// Players on other computers may join: listen on every network
+    /// interface, not only this computer's loopback.
+    #[serde(default)]
+    pub host_lan: bool,
+    /// The UDP port a server listens on.
+    #[serde(default = "default_host_port")]
+    pub host_port: u16,
+    /// The address players on the internet reach this computer at, as
+    /// `host` or `host:port`. Empty: Studio asks a public echo for it.
+    #[serde(default)]
+    pub host_public_address: String,
+    /// Show a hosted session of a published simulation live in the Gallery.
+    /// Off by default: a listed session shows this computer's public address
+    /// to signed-in visitors.
+    #[serde(default)]
+    pub host_list_in_gallery: bool,
+}
+
+fn default_host_port() -> u16 {
+    7777
 }
 
 fn default_true() -> bool {
@@ -319,6 +344,10 @@ impl Default for EditorSettings {
             effects_volume: default_volume(),
             music_volume: default_volume(),
             ray_tracing: crate::raytracing::RayTracingMode::Auto,
+            host_lan: false,
+            host_port: default_host_port(),
+            host_public_address: String::new(),
+            host_list_in_gallery: false,
         }
     }
 }

@@ -183,9 +183,13 @@ test('the viewer\'s age slice is honoured the way the list route honours it: a m
     { name: 'adults', listings: [{ rating: 'adult_18' }] },
     { name: 'both', listings: [{ rating: 'all_ages' }, { rating: 'adult_18' }] },
   ]);
-  // Signed out, Adult content is off: a maker whose only Spaces are adult content is not named (src/adult_content.mjs).
-  assert.deepEqual(names(await read(env)).sort(), ['both', 'kids', 'teens']);
-  assert.deepEqual(names(await read(env, '?rating_max=adult_18')).sort(), ['both', 'kids', 'teens'], 'rating_max cannot widen past the setting');
+  // Signed out sees G to PG only (src/adult_content.mjs, McKale 2026-10-16): a maker whose only Spaces are teen or adult
+  // content is not named. Signed in with Adult content off, only the adult-only maker is left out.
+  assert.deepEqual(names(await read(env)).sort(), ['both', 'kids']);
+  assert.deepEqual(names(await read(env, '?rating_max=adult_18')).sort(), ['both', 'kids'], 'rating_max cannot widen past the cap');
+  const off = { token: mintToken('44444444-4444-4444-8444-444444444444') };
+  assert.deepEqual(names(await read(env, '', off)).sort(), ['both', 'kids', 'teens']);
+  assert.deepEqual(names(await read(env, '?rating_max=adult_18', off)).sort(), ['both', 'kids', 'teens'], 'rating_max cannot widen past the setting');
   await adultOn(env);
   const on = { token: ADULT_TOKEN };
   assert.deepEqual((await read(env, '', on)).body.makers.map((m) => m.username).sort(), ['adults', 'both', 'kids', 'teens']);
@@ -321,8 +325,12 @@ test('the scan is done once a window: a hammered URL, with any q and limit, cost
 
     // One entry per age slice, and no more slices than there are. Signed out, Adult content is off, so asking for the adult
     // slice is the mature_17 one (src/adult_content.mjs); a viewer who turned it on has the fourth.
+    // Signed out is capped at ages_10 (McKale, 2026-10-16), so it has two slices; a signed-in viewer with the setting off
+    // has the mature_17 one.
     for (const slice of ['all_ages', 'teen_13', 'mature_17', 'adult_18', 'nonsense', '', 'ALL_AGES']) await read(env, `?rating_max=${slice}`);
-    assert.equal(cache.store.size, 3, 'three slices signed out');
+    assert.equal(cache.store.size, 2, 'two slices signed out');
+    await read(env, '', { token: mintToken('44444444-4444-4444-8444-444444444444') });
+    assert.equal(cache.store.size, 3, 'and the setting-off slice');
     await adultOn(env);
     for (const slice of ['adult_18', 'nonsense', '']) await read(env, `?rating_max=${slice}`, { token: ADULT_TOKEN });
     assert.equal(cache.store.size, 4, 'the four slices');

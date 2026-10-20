@@ -9,7 +9,7 @@
 //
 // `active-tab` numbering, stored by main.slint in `settings-active-tab`:
 // 0 General, 1 Graphics, 2 Audio, 3 AI keys (Soul), 4 Notifications,
-// 5 Appearance (themes).
+// 5 Appearance (themes), 6 Hosting.
 
 import { ScrollView, LineEdit, Slider } from "std-widgets.slint";
 import { Theme } from "theme.slint";
@@ -44,6 +44,14 @@ export global Preferences {
     // Auto-save
     in property <bool> auto-save: true;
     in property <int> auto-save-minutes: 5;
+    // Hosting (engine/src/multiplayer.rs reads these when a server starts;
+    // EUSTRESS_HOST_* variables win while they are set).
+    in property <bool> host-lan: false;
+    in property <string> host-port: "7777";
+    in property <string> host-public-address: "";
+    in property <bool> host-list-in-gallery: false;
+    // What hosting is doing now, in plain words.
+    in property <string> host-status: "";
 
     callback set(string, string);
     callback preview(string, string);
@@ -323,9 +331,11 @@ export component SettingsDialog inherits Rectangle {
     callback on-test-soul-connection();
     // Keyboard: the shortcut editor is its own dialog.
     callback open-keybindings();
+    // Hosting's guide link, opened by main.slint's open-url.
+    callback open-url(string);
 
     // The page to draw; anything out of range shows General.
-    property <int> page: root.active-tab >= 0 && root.active-tab <= 5 ? root.active-tab : 0;
+    property <int> page: root.active-tab >= 0 && root.active-tab <= 6 ? root.active-tab : 0;
 
     // Max FPS choices, and the one showing (-1 when the cap is another
     // number, set by EUSTRESS_MAX_FPS).
@@ -415,6 +425,12 @@ export component SettingsDialog inherits Rectangle {
                             icon: @image-url("../../assets/icons/ui/bell.svg");
                             selected: root.page == 4;
                             clicked => { root.active-tab = 4; }
+                        }
+                        NavItem {
+                            text: "Hosting";
+                            icon: @image-url("../../assets/icons/ui/settings.svg");
+                            selected: root.page == 6;
+                            clicked => { root.active-tab = 6; }
                         }
 
                         Rectangle { height: 6px; }
@@ -786,6 +802,85 @@ export component SettingsDialog inherits Rectangle {
                             if root.soul-test-status != "": KitNotice {
                                 kind: "info";
                                 text: root.soul-test-status;
+                            }
+                        }
+
+                        if root.page == 6: VerticalLayout {
+                            spacing: 18px;
+
+                            PageTitle {
+                                title: "Hosting";
+                                subtitle: "Host the open Space from this computer, like a game server. Changes apply the next time a server starts.";
+                            }
+
+                            KitNotice {
+                                text: Preferences.host-status;
+                                kind: "info";
+                            }
+
+                            SettingsGroup {
+                                title: "WHO CAN JOIN";
+                                SettingRow {
+                                    divider: false;
+                                    label: "Players on other computers can join";
+                                    description: "Listen on every network connection, not only this computer. Players on the internet also need the port forwarded on your router.";
+                                    KitSwitch {
+                                        checked: Preferences.host-lan;
+                                        toggled(on) => { Preferences.set("host_lan", on ? "1" : "0"); }
+                                    }
+                                }
+                                SettingRow {
+                                    label: "Port (UDP)";
+                                    description: "The port players connect to. 7777 unless another program uses it.";
+                                    LineEdit {
+                                        width: 110px;
+                                        text: Preferences.host-port;
+                                        input-type: number;
+                                        font-size: 12px;
+                                        edited(typed) => { Preferences.set("host_port", typed); }
+                                    }
+                                }
+                                SettingRow {
+                                    label: "Public address";
+                                    description: "Where players on the internet reach you, as an address or name, with :port when your router forwards a different one. Leave it empty and Studio finds it when the server starts.";
+                                    LineEdit {
+                                        width: 220px;
+                                        text: Preferences.host-public-address;
+                                        placeholder-text: "Found automatically";
+                                        font-size: 12px;
+                                        edited(typed) => { Preferences.set("host_public_address", typed); }
+                                    }
+                                }
+                            }
+
+                            SettingsGroup {
+                                title: "GALLERY";
+                                note: "Only a published simulation, hosted while you are signed in as its author, is listed. Players still need the port forwarded.";
+                                SettingRow {
+                                    divider: false;
+                                    label: "List in Gallery";
+                                    description: "Show the session live on its Gallery page. Signed-in visitors see this computer's public address. Every join is checked with the Gallery first.";
+                                    KitSwitch {
+                                        checked: Preferences.host-list-in-gallery;
+                                        toggled(on) => { Preferences.set("host_list_in_gallery", on ? "1" : "0"); }
+                                    }
+                                }
+                            }
+
+                            HorizontalLayout {
+                                spacing: 10px;
+                                Text {
+                                    horizontal-stretch: 1;
+                                    vertical-alignment: center;
+                                    text: "New to port forwarding? The guide covers the firewall and the router, step by step.";
+                                    color: Theme.text-secondary;
+                                    font-size: Theme.font-sm;
+                                    wrap: word-wrap;
+                                }
+                                KitButton {
+                                    text: "Port forwarding guide";
+                                    clicked => { root.open-url("https://eustress.dev/docs/hosting"); }
+                                }
                             }
                         }
 

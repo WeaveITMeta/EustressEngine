@@ -69,6 +69,7 @@ pub const DESCRIPTIONS: &[(&str, &str)] = &[
     ("/docs/realism", "The physical-law libraries in Eustress (materials, thermodynamics, electrochemistry) with a worked battery case study."),
     ("/docs/universes", "How a Eustress Space is stored: files, the WorldDb and git history, branching, the op-log, and several engines on one Universe."),
     ("/docs/networking", "Networking in Eustress: what runs in one process today, the authority rules in code, and the multiplayer plan."),
+    ("/docs/hosting", "Host a Space from your own computer: Studio's Hosting settings, the Windows firewall, a router port forward, and joining by link."),
     ("/docs/publishing", "Publish a Universe from Studio: the package, review, the Gallery and listing pages."),
     ("/docs/website", "Let a website read live values out of a published Eustress Space with the Website Service."),
     ("/docs/earning", "How Eustress scores contributions, the daily Bliss (BLS) emission, the USD treasury drip, and Tickets (TKT)."),

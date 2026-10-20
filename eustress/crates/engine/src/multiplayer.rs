@@ -21,6 +21,11 @@
 //!
 //! ## Settings
 //!
+//! Settings > Hosting (the settings file, read at each start; see
+//! [`resolve_hosting`]) chooses who can join, the port, the public address
+//! (found through a public echo when left empty) and whether the Gallery lists
+//! the session. Each variable below wins over it while the variable is set.
+//!
 //! | Variable | Default | Meaning |
 //! |---|---|---|
 //! | `EUSTRESS_HOST_PORT` | 7777 | Port to listen on (0 picks any free port) |
@@ -32,10 +37,12 @@
 //! ## The gallery
 //!
 //! Hosting a published simulation, signed in as the listing's author, with
-//! `EUSTRESS_HOST_LAN=1` and `EUSTRESS_HOST_PUBLIC` set, tells the gallery
+//! "List in Gallery" and "Players on other computers can join" on (or
+//! `EUSTRESS_HOST_LAN=1` and `EUSTRESS_HOST_PUBLIC` set), tells the gallery
 //! every 30 seconds that the session is live, with its join link, and tells it
-//! again when the session ends. The address is only ever the one configured:
-//! guessing this computer's own can pick a VPN or tunnel adapter instead.
+//! again when the session ends. The address is the one typed, else the public
+//! echo's answer; never a guess at this computer's adapters, which can be a
+//! VPN's or a tunnel's.
 
 use std::collections::{BTreeSet, HashMap};
 use std::sync::{mpsc, Arc, Mutex};
@@ -87,6 +94,8 @@ struct PendingExport {
     sim_id: Option<String>,
     /// The hosted Space's `Players.MaxPlayers`.
     max_players: eustress_common::play_session::SpaceMaxPlayers,
+    /// Settings > Hosting as this start read it; `options` came from it.
+    choice: HostingChoice,
 }
 
 struct ActiveHost {
@@ -125,6 +134,7 @@ impl Plugin for MultiplayerPlugin {
             .init_resource::<HostRequest>()
             .init_resource::<GalleryBeat>()
             .init_resource::<GalleryAdmissions>()
+            .init_resource::<HostingReach>()
             .init_resource::<OpenSpaceMaxPlayers>()
             .add_systems(Update, track_space_max_players)
             .init_resource::<MyListings>()
@@ -146,6 +156,7 @@ impl Plugin for MultiplayerPlugin {
                     report_movement_check,
                     track_host_character,
                     refresh_host_file,
+                    refresh_hosting_status,
                     gallery_heartbeat,
                     admit_gallery_joins,
                 )
@@ -316,12 +327,19 @@ fn unlisted_because(published: bool, public_host: Option<&str>, lan: bool) -> Op
             eustress_common::api_base::api_base()
         ));
     }
-    // Only an address someone chose: guessing this machine's network address
-    // can pick a VPN or tunnel adapter's instead.
+    if !lan {
+        return Some(
+            "this session listens on this computer only; turn on \"Players on other computers can join\" in \
+             Settings > Hosting (or set EUSTRESS_HOST_LAN=1), then start the server again"
+                .to_string(),
+        );
+    }
+    // Only an address someone chose, or the public echo's answer: guessing
+    // this machine's network address can pick a VPN or tunnel adapter's.
     let Some(public_host) = public_host else {
         return Some(
-            "set EUSTRESS_HOST_PUBLIC to the address players reach (this computer's local network address when they \
-             come in through the tunnel) and start Studio again"
+            "Studio does not know the address players reach; type it in Settings > Hosting (or set \
+             EUSTRESS_HOST_PUBLIC), then start the server again"
                 .to_string(),
         );
     };
@@ -329,12 +347,9 @@ fn unlisted_because(published: bool, public_host: Option<&str>, lan: bool) -> Op
     // IPv6 address would list a session no Player can reach.
     if is_ipv6_literal(public_host) {
         return Some(format!(
-            "EUSTRESS_HOST_PUBLIC names an IPv6 address ({public_host}), and a host listens on IPv4 only; set it to \
-             this computer's IPv4 address and start Studio again"
+            "the public address is an IPv6 address ({public_host}), and a host listens on IPv4 only; type this \
+             computer's public IPv4 address in Settings > Hosting, then start the server again"
         ));
-    }
-    if !lan {
-        return Some("this session listens on this computer only; set EUSTRESS_HOST_LAN=1 and start Studio again".to_string());
     }
     None
 }
@@ -344,10 +359,10 @@ fn is_ipv6_literal(host: &str) -> bool {
     host.trim_start_matches('[').trim_end_matches(']').parse::<std::net::Ipv6Addr>().is_ok()
 }
 
-/// `EUSTRESS_HOST_PUBLIC`: where players on the internet reach this host,
-/// as a host and, when a port forward or tunnel maps a different one, a port.
-fn public_address() -> Option<(String, Option<u16>)> {
-    let raw = std::env::var("EUSTRESS_HOST_PUBLIC").ok()?;
+/// Where players on the internet reach this host, as Settings > Hosting or
+/// `EUSTRESS_HOST_PUBLIC` names it: a host and, when a port forward or tunnel
+/// maps a different one, a port. `None` for an empty address.
+fn parse_public_address(raw: &str) -> Option<(String, Option<u16>)> {
     let raw = raw.trim();
     if raw.is_empty() {
         return None;
@@ -375,6 +390,7 @@ fn gallery_heartbeat(
     auth: Option<Res<crate::auth::AuthState>>,
     mut beat: ResMut<GalleryBeat>,
     mut output: Option<ResMut<OutputConsole>>,
+    reach: Option<Res<HostingReach>>,
 ) {
     let finished = beat.answers.lock().map(|mut a| std::mem::take(&mut *a)).unwrap_or_default();
     for (number, outcome) in finished {
@@ -401,9 +417,23 @@ fn gallery_heartbeat(
 
     let token = auth.as_deref().and_then(|a| a.get_token()).map(str::to_string);
     let mut unlisted: Option<String> = None;
+    let reach = reach.as_deref();
     let live = host.as_deref().zip(request.active.as_ref()).and_then(|(host, active)| {
         active.pin?;
-        let address = public_address();
+        // The session's own choice; without one (a test app), the variables.
+        let choice = reach
+            .and_then(|r| r.choice.clone())
+            .unwrap_or_else(|| resolve_hosting(None, |name| std::env::var(name).ok()));
+        // Listing is the creator's choice: off, the gallery hears nothing.
+        if !choice.list_in_gallery {
+            return None;
+        }
+        let address = match listing_address(&choice, reach.map(|r| &r.detected)) {
+            ListingAddress::At(address, port) => Some((address, port)),
+            // The echo has not answered yet; the next frame asks again.
+            ListingAddress::Waiting => return None,
+            ListingAddress::Unknown => None,
+        };
         unlisted = unlisted_because(host.sim_id().is_some(), address.as_ref().map(|(h, _)| h.as_str()), active.lan);
         let sim = host.sim_id().filter(|_| unlisted.is_none())?.to_string();
         let (address, port) = address?;
@@ -636,25 +666,337 @@ fn ask_gallery(sim: &str, token: &str, ticket: &str, audience: &str) -> Result<A
 }
 
 fn env_flag(name: &str) -> bool {
-    std::env::var(name)
-        .map(|v| v == "1" || v.eq_ignore_ascii_case("true") || v.eq_ignore_ascii_case("yes"))
-        .unwrap_or(false)
+    std::env::var(name).map(|v| is_yes(&v)).unwrap_or(false)
 }
 
-fn env_number<T: std::str::FromStr>(name: &str, default: T) -> T {
-    std::env::var(name).ok().and_then(|v| v.trim().parse().ok()).unwrap_or(default)
+/// A variable's "on": `1`, `true` or `yes`, in any case.
+fn is_yes(value: &str) -> bool {
+    let v = value.trim();
+    v == "1" || v.eq_ignore_ascii_case("true") || v.eq_ignore_ascii_case("yes")
 }
 
-/// How a host will listen, read once per start, before its bake: the port,
-/// whether it listens beyond this machine (`EUSTRESS_HOST_LAN`), and a fresh
-/// join key. The same value binds the listener and chooses the export's
-/// destination ([`export_destination`]).
+// ─────────────────────────────────────────────────────────────────────────────
+// Settings > Hosting
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// How one server start hosts: Settings > Hosting (the settings file), with
+/// each `EUSTRESS_HOST_*` variable winning while it is set. Read once per
+/// start, so a change in Settings applies at the next start.
+#[derive(Debug, Clone, PartialEq)]
+pub struct HostingChoice {
+    /// Listen on every network interface, not only this computer.
+    pub lan: bool,
+    /// The UDP port to listen on (0, from `EUSTRESS_HOST_PORT`, picks any).
+    pub port: u16,
+    /// The address players on the internet reach this computer at, when one
+    /// is typed or set: a host, and the router's port when it differs.
+    pub public: Option<(String, Option<u16>)>,
+    /// Show the session live in the Gallery (a published simulation, its
+    /// author signed in).
+    pub list_in_gallery: bool,
+}
+
+impl Default for HostingChoice {
+    /// A computer with no settings file (the headless engine): this
+    /// computer only, on the default port, never listed.
+    fn default() -> Self {
+        Self { lan: false, port: native::DEFAULT_PORT, public: None, list_in_gallery: false }
+    }
+}
+
+/// Settings > Hosting with the variables over it. `var` reads one variable
+/// (`std::env::var` in Studio; a table in tests):
+///
+/// - `EUSTRESS_HOST_PORT`, a whole number, wins over the port;
+/// - `EUSTRESS_HOST_LAN`, when set at all, decides the reach (`1`, `true`,
+///   `yes` open it; anything else keeps it on this computer);
+/// - `EUSTRESS_HOST_PUBLIC`, when it names an address, is the public address
+///   and lists the session, as it did before Settings had the switch.
+pub fn resolve_hosting(
+    settings: Option<&crate::editor_settings::EditorSettings>,
+    var: impl Fn(&str) -> Option<String>,
+) -> HostingChoice {
+    let mut choice = settings.map_or_else(HostingChoice::default, |s| HostingChoice {
+        lan: s.host_lan,
+        port: s.host_port,
+        public: parse_public_address(&s.host_public_address),
+        list_in_gallery: s.host_list_in_gallery,
+    });
+    if let Some(port) = var("EUSTRESS_HOST_PORT").and_then(|v| v.trim().parse::<u16>().ok()) {
+        choice.port = port;
+    }
+    if let Some(lan) = var("EUSTRESS_HOST_LAN") {
+        choice.lan = is_yes(&lan);
+    }
+    if let Some(public) = var("EUSTRESS_HOST_PUBLIC").as_deref().and_then(parse_public_address) {
+        choice.public = Some(public);
+        choice.list_in_gallery = true;
+    }
+    choice
+}
+
+/// How a host will listen, read once per start, before its bake: the
+/// choice's port and reach, and a fresh join key. The same value binds the
+/// listener and chooses the export's destination ([`export_destination`]).
 #[cfg_attr(not(feature = "world-db"), allow(dead_code))]
-fn host_options() -> HostOptions {
-    HostOptions {
-        port: env_number("EUSTRESS_HOST_PORT", native::DEFAULT_PORT),
-        lan: env_flag("EUSTRESS_HOST_LAN"),
-        join_key: native::new_join_key(),
+fn host_options(choice: &HostingChoice) -> HostOptions {
+    HostOptions { port: choice.port, lan: choice.lan, join_key: native::new_join_key() }
+}
+
+/// Where Studio asks for this computer's public IPv4 address when none is
+/// typed: Cloudflare's trace page, which answers with the address the request
+/// came from (`ip=...`). Asked by address first, so the answer is IPv4 (a host
+/// listens on IPv4 only); by name if that fails. Nothing is sent but the
+/// request itself; the website already asks the same page.
+const PUBLIC_ECHOES: [&str; 2] = ["https://1.1.1.1/cdn-cgi/trace", "https://www.cloudflare.com/cdn-cgi/trace"];
+
+/// The public IPv4 address in a trace page's answer. A private, shared
+/// (carrier-grade NAT), loopback or link-local address, or an IPv6 one, is
+/// refused with the reason: none of them is where players reach this host.
+fn parse_echo(body: &str) -> Result<std::net::Ipv4Addr, String> {
+    let ip = body
+        .lines()
+        .find_map(|line| line.trim().strip_prefix("ip="))
+        .map(str::trim)
+        .ok_or_else(|| "the echo named no address".to_string())?;
+    match ip.parse::<std::net::IpAddr>() {
+        Ok(std::net::IpAddr::V4(v4)) if is_public_v4(v4) => Ok(v4),
+        Ok(std::net::IpAddr::V4(v4)) => Err(format!("the echo saw {v4}, which is not reachable from the internet")),
+        Ok(std::net::IpAddr::V6(_)) => {
+            Err("the echo saw an IPv6 address, and a host listens on IPv4 only".to_string())
+        }
+        Err(_) => Err("the echo's answer is not an address".to_string()),
+    }
+}
+
+/// Whether players on the internet can reach an IPv4 address at all.
+fn is_public_v4(ip: std::net::Ipv4Addr) -> bool {
+    let [a, b, ..] = ip.octets();
+    let shared = a == 100 && (b & 0xC0) == 64; // 100.64.0.0/10, carrier-grade NAT
+    !(ip.is_private()
+        || ip.is_loopback()
+        || ip.is_link_local()
+        || ip.is_unspecified()
+        || ip.is_broadcast()
+        || ip.is_documentation()
+        || ip.is_multicast()
+        || shared
+        || a == 0)
+}
+
+/// Ask the echoes, in order, on this thread.
+fn ask_public_echo() -> Result<std::net::Ipv4Addr, String> {
+    let mut why = String::from("no echo answered");
+    for url in PUBLIC_ECHOES {
+        match ureq::get(url).timeout(std::time::Duration::from_secs(5)).call() {
+            Ok(reply) => match reply.into_string() {
+                Ok(body) => match parse_echo(&body) {
+                    Ok(ip) => return Ok(ip),
+                    Err(e) => why = e,
+                },
+                Err(e) => why = format!("could not read the echo's answer: {e}"),
+            },
+            Err(e) => why = format!("could not reach the echo: {e}"),
+        }
+    }
+    Err(why)
+}
+
+/// The public echo's answer for this hosting session.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub enum Detected {
+    /// Not asked: an address is typed, or the host is this computer's only.
+    #[default]
+    NotAsked,
+    Asking,
+    Found(std::net::Ipv4Addr),
+    Failed(String),
+}
+
+/// The address a gallery listing carries, from the choice and the echo.
+#[derive(Debug, Clone, PartialEq)]
+enum ListingAddress {
+    At(String, Option<u16>),
+    /// The echo is still answering.
+    Waiting,
+    Unknown,
+}
+
+/// A typed address wins; else the echo's answer. Never a guess at this
+/// computer's own adapters, which can be a VPN's or a tunnel's.
+fn listing_address(choice: &HostingChoice, detected: Option<&Detected>) -> ListingAddress {
+    if let Some((host, port)) = &choice.public {
+        return ListingAddress::At(host.clone(), *port);
+    }
+    match detected {
+        Some(Detected::Found(ip)) => ListingAddress::At(ip.to_string(), None),
+        Some(Detected::Asking) => ListingAddress::Waiting,
+        _ => ListingAddress::Unknown,
+    }
+}
+
+/// Where hosting reaches, for Settings > Hosting's status line and the
+/// Output: the running session's choice and the public echo's answer.
+#[derive(Resource, Default)]
+pub struct HostingReach {
+    /// The running session's choice; `None` while not hosting.
+    choice: Option<HostingChoice>,
+    detected: Detected,
+    /// Written by the echo's thread; a fresh slot per session, so a late
+    /// answer for an earlier session lands nowhere.
+    answer: Arc<Mutex<Option<Result<std::net::Ipv4Addr, String>>>>,
+    /// This computer's local network address, read once per session.
+    local_ip: Option<std::net::IpAddr>,
+    /// The Output has the public join link for this session.
+    told_public: bool,
+    /// Settings > Hosting's status line.
+    pub status: String,
+}
+
+impl HostingReach {
+    /// A session starts with `choice`: ask the echo when players outside
+    /// this computer may join and no address is typed.
+    fn begin(&mut self, choice: HostingChoice) {
+        self.answer = Arc::new(Mutex::new(None));
+        self.told_public = false;
+        self.local_ip = if choice.lan { native::local_network_ip() } else { None };
+        self.detected = Detected::NotAsked;
+        if choice.lan && choice.public.is_none() {
+            let slot = self.answer.clone();
+            let started = std::thread::Builder::new().name("eustress-public-echo".into()).spawn(move || {
+                let found = ask_public_echo();
+                if let Ok(mut slot) = slot.lock() {
+                    *slot = Some(found);
+                }
+            });
+            self.detected = match started {
+                Ok(_) => Detected::Asking,
+                Err(e) => Detected::Failed(format!("could not start the request: {e}")),
+            };
+        }
+        self.choice = Some(choice);
+    }
+}
+
+/// Settings > Hosting's status line, in plain words. `hosting`: the running
+/// session's choice and the port it listens on, or `None` with the choice the
+/// next start would use.
+fn hosting_status(
+    hosting: Option<u16>,
+    choice: &HostingChoice,
+    detected: &Detected,
+    local_ip: Option<std::net::IpAddr>,
+) -> String {
+    let Some(port) = hosting else {
+        return if choice.lan {
+            format!(
+                "Not hosting. Start Server (F9) listens on UDP {} for players on other computers.",
+                choice.port
+            )
+        } else {
+            "Not hosting. Start Server (F9) hosts for this computer only until you turn on the switch above.".to_string()
+        };
+    };
+    if !choice.lan {
+        return format!("Hosting on this computer only, port {port}. Players on other computers cannot join.");
+    }
+    let this_computer = local_ip.map(|ip| format!(" ({ip})")).unwrap_or_default();
+    let forward = |outside: u16| {
+        if outside == port {
+            format!("Players outside your network need UDP {port} forwarded to this computer{this_computer}.")
+        } else {
+            format!(
+                "Players outside your network need UDP {outside} forwarded to UDP {port} on this computer{this_computer}."
+            )
+        }
+    };
+    match listing_address(choice, Some(detected)) {
+        ListingAddress::At(host, outside) => {
+            let outside = outside.unwrap_or(port);
+            format!("Hosting on {host}:{outside}. {}", forward(outside))
+        }
+        ListingAddress::Waiting => {
+            format!("Hosting on UDP {port}. Finding your public address... {}", forward(port))
+        }
+        ListingAddress::Unknown => {
+            let why = match detected {
+                Detected::Failed(why) => format!(" ({why})"),
+                _ => String::new(),
+            };
+            format!(
+                "Hosting on UDP {port} for your local network. Studio could not find your public address{why}; \
+                 type it above. {}",
+                forward(port)
+            )
+        }
+    }
+}
+
+/// Keep [`HostingReach`] current: read the echo's answer, end a session's
+/// reach when it stops, put the public join link in the Output once, and
+/// keep the status line in step.
+fn refresh_hosting_status(
+    request: Res<HostRequest>,
+    host: Option<Res<HostSession>>,
+    settings: Option<Res<crate::editor_settings::EditorSettings>>,
+    mut reach: ResMut<HostingReach>,
+    mut output: Option<ResMut<OutputConsole>>,
+) {
+    let mut changed = false;
+    if request.active.is_none() && reach.choice.is_some() {
+        reach.bypass_change_detection().choice = None;
+        reach.bypass_change_detection().detected = Detected::NotAsked;
+        changed = true;
+    }
+    let answered = reach.answer.lock().ok().and_then(|mut slot| slot.take());
+    if let Some(answer) = answered {
+        let r = reach.bypass_change_detection();
+        r.detected = match answer {
+            Ok(ip) => Detected::Found(ip),
+            Err(why) => {
+                warn!("multiplayer: could not find this computer's public address: {why}");
+                Detected::Failed(why)
+            }
+        };
+        changed = true;
+    }
+    // The public link, once the session listens and its address is known.
+    let listening = request.active.as_ref().filter(|a| a.port != 0).map(|a| (a, a.pin));
+    if let (Some((active, Some(pin))), Some(choice)) = (listening, reach.choice.clone()) {
+        if !reach.told_public && host.is_some() {
+            if let ListingAddress::At(address, outside) = listing_address(&choice, Some(&reach.detected)) {
+                reach.bypass_change_detection().told_public = true;
+                let link = JoinLink {
+                    host: address,
+                    port: outside.unwrap_or(active.port),
+                    key: Some(active.join_key.clone()),
+                    pin: Some(pin),
+                }
+                .to_link();
+                info!("multiplayer: players on the internet join with {link}");
+                if let Some(o) = output.as_mut() {
+                    o.info(format!("Players on the internet join with: {link}"));
+                }
+            }
+        }
+    }
+    let settings_changed = settings.as_ref().is_some_and(|s| s.is_changed());
+    if !changed && !request.is_changed() && !settings_changed && !reach.status.is_empty() {
+        return;
+    }
+    let status = match (&reach.choice, request.active.as_ref()) {
+        (Some(choice), Some(active)) if active.port != 0 => {
+            hosting_status(Some(active.port), choice, &reach.detected, reach.local_ip)
+        }
+        (Some(_), Some(_)) => "Starting the server...".to_string(),
+        _ if request.pending.is_some() || request.wanted => "Preparing to host...".to_string(),
+        _ => {
+            let next = resolve_hosting(settings.as_deref(), |name| std::env::var(name).ok());
+            hosting_status(None, &next, &Detected::NotAsked, None)
+        }
+    };
+    if reach.status != status {
+        reach.status = status;
     }
 }
 
@@ -1398,7 +1740,11 @@ fn prepare_export(world: &mut World) -> Result<PendingExport, String> {
     let out_root = host_cache_dir(&universe_root);
     // How this host will listen, read once: the listener binds by it, and the
     // export screens for the same reach.
-    let options = host_options();
+    let choice = resolve_hosting(
+        world.get_resource::<crate::editor_settings::EditorSettings>(),
+        |name| std::env::var(name).ok(),
+    );
+    let options = host_options(&choice);
     let destination = export_destination(&options);
 
     let (tx, rx) = mpsc::channel();
@@ -1488,6 +1834,7 @@ fn prepare_export(world: &mut World) -> Result<PendingExport, String> {
         start_play: editing,
         sim_id,
         max_players,
+        choice,
     })
 }
 
@@ -1565,6 +1912,7 @@ fn poll_host_export(
     mut start_play: MessageWriter<StartPlayEvent>,
     mut notifications: Option<ResMut<NotificationManager>>,
     mut output: Option<ResMut<OutputConsole>>,
+    mut reach: ResMut<HostingReach>,
 ) {
     let result = {
         let Some(pending) = &request.pending else { return };
@@ -1643,6 +1991,7 @@ fn poll_host_export(
         },
     );
     request.active = Some(ActiveHost { join_key: options.join_key, lan: options.lan, port: 0, pin: None, saw_playing: false });
+    reach.begin(pending.choice);
     if pending.start_play {
         start_play.write(StartPlayEvent { play_type: PlayModeType::WithCharacter });
     }
@@ -2156,8 +2505,12 @@ mod tests {
         let lan_ip = Some("192.168.1.20");
         let unpublished = unlisted_because(false, lan_ip, true).unwrap();
         assert!(unpublished.contains("publish it there"), "{unpublished}");
-        assert!(unlisted_because(true, None, true).unwrap().contains("EUSTRESS_HOST_PUBLIC"));
-        assert!(unlisted_because(true, lan_ip, false).unwrap().contains("EUSTRESS_HOST_LAN=1"));
+        let no_address = unlisted_because(true, None, true).unwrap();
+        assert!(no_address.contains("Settings > Hosting") && no_address.contains("EUSTRESS_HOST_PUBLIC"), "{no_address}");
+        let this_computer = unlisted_because(true, lan_ip, false).unwrap();
+        assert!(this_computer.contains("Settings > Hosting") && this_computer.contains("EUSTRESS_HOST_LAN=1"), "{this_computer}");
+        // A session for this computer only says so first, whatever the address.
+        assert!(unlisted_because(true, None, false).unwrap().contains("this computer only"));
         assert_eq!(unlisted_because(true, lan_ip, true), None);
         assert_eq!(unlisted_because(true, Some("play.example.com"), true), None, "a name is listed");
         // A host listens on IPv4 only: an IPv6 link would list a session
@@ -2170,6 +2523,131 @@ mod tests {
         assert!(missing.message().contains("publish the Universe to it first"), "{}", missing.message());
         let other = BeatOutcome::of(Err(BeatFailure::Status(403, String::new())));
         assert!(other.message().contains("sign in as the author"), "{}", other.message());
+    }
+
+    /// Settings > Hosting decides, and each variable wins while it is set.
+    #[test]
+    fn hosting_settings_resolve_with_the_variables_over_them() {
+        let none = |_: &str| None::<String>;
+        // No settings file (the headless engine), no variables: as before.
+        assert_eq!(resolve_hosting(None, none), HostingChoice::default());
+        assert_eq!(HostingChoice::default().port, native::DEFAULT_PORT);
+
+        let mut settings = crate::editor_settings::EditorSettings::default();
+        assert_eq!(resolve_hosting(Some(&settings), none), HostingChoice::default(), "the defaults host for this computer only");
+        settings.host_lan = true;
+        settings.host_port = 25565;
+        settings.host_public_address = " play.example.com:30000 ".into();
+        settings.host_list_in_gallery = true;
+        let chosen = resolve_hosting(Some(&settings), none);
+        assert_eq!(
+            chosen,
+            HostingChoice { lan: true, port: 25565, public: Some(("play.example.com".into(), Some(30000))), list_in_gallery: true }
+        );
+
+        let vars = |table: &'static [(&'static str, &'static str)]| {
+            move |name: &str| table.iter().find(|(n, _)| *n == name).map(|(_, v)| v.to_string())
+        };
+        let over = resolve_hosting(Some(&settings), vars(&[("EUSTRESS_HOST_PORT", "7788"), ("EUSTRESS_HOST_LAN", "0")]));
+        assert_eq!((over.port, over.lan), (7788, false), "a set variable wins, off as well as on");
+        let bad_port = resolve_hosting(Some(&settings), vars(&[("EUSTRESS_HOST_PORT", "lots")]));
+        assert_eq!(bad_port.port, 25565, "a port that is not a number is ignored");
+
+        settings.host_list_in_gallery = false;
+        settings.host_public_address.clear();
+        let public = resolve_hosting(Some(&settings), vars(&[("EUSTRESS_HOST_PUBLIC", "203.0.113.7")]));
+        assert_eq!(public.public, Some(("203.0.113.7".into(), None)));
+        assert!(public.list_in_gallery, "EUSTRESS_HOST_PUBLIC lists the session, as it always did");
+        let empty = resolve_hosting(Some(&settings), vars(&[("EUSTRESS_HOST_PUBLIC", "  ")]));
+        assert!(empty.public.is_none() && !empty.list_in_gallery, "an empty variable names nothing");
+
+        let options = host_options(&chosen);
+        assert_eq!((options.port, options.lan), (25565, true), "the listener binds by the choice");
+    }
+
+    /// The echo's answer is used only when it is a public IPv4 address.
+    #[test]
+    fn hosting_echo_accepts_only_a_public_ipv4_address() {
+        let trace = |ip: &str| format!("fl=123\nh=1.1.1.1\nip={ip}\nts=1760000000.1\nvisit_scheme=https\n");
+        assert_eq!(parse_echo(&trace("203.0.113.7")), Err("the echo saw 203.0.113.7, which is not reachable from the internet".into()),
+            "a documentation address is no one's");
+        assert_eq!(parse_echo(&trace("8.8.4.4")), Ok(std::net::Ipv4Addr::new(8, 8, 4, 4)));
+        assert_eq!(parse_echo(&trace("81.2.69.160")), Ok(std::net::Ipv4Addr::new(81, 2, 69, 160)));
+        for private in ["192.168.1.20", "10.0.0.5", "172.16.4.4", "100.64.0.1", "100.127.255.254", "127.0.0.1", "169.254.1.1", "0.0.0.0"] {
+            assert!(parse_echo(&trace(private)).is_err(), "{private} is not where players reach this host");
+        }
+        assert!(parse_echo(&trace("100.128.0.1")).is_ok(), "just past the carrier-grade NAT block");
+        assert!(parse_echo(&trace("2001:4860::8888")).unwrap_err().contains("IPv4 only"));
+        assert!(parse_echo("fl=1\nh=x\n").is_err(), "no ip= line");
+        assert!(parse_echo(&trace("not-an-ip")).is_err());
+    }
+
+    /// A typed address wins over the echo; while the echo answers, the
+    /// listing waits; without either, nothing is listed.
+    #[test]
+    fn hosting_listing_address_prefers_the_typed_address() {
+        let typed = HostingChoice { lan: true, public: Some(("play.example.com".into(), Some(30000))), ..HostingChoice::default() };
+        let found = Detected::Found(std::net::Ipv4Addr::new(81, 2, 69, 160));
+        assert_eq!(listing_address(&typed, Some(&found)), ListingAddress::At("play.example.com".into(), Some(30000)));
+        let open = HostingChoice { lan: true, ..HostingChoice::default() };
+        assert_eq!(listing_address(&open, Some(&found)), ListingAddress::At("81.2.69.160".into(), None));
+        assert_eq!(listing_address(&open, Some(&Detected::Asking)), ListingAddress::Waiting);
+        assert_eq!(listing_address(&open, Some(&Detected::Failed("x".into()))), ListingAddress::Unknown);
+        assert_eq!(listing_address(&open, None), ListingAddress::Unknown);
+    }
+
+    /// The status line names the address players use and what to forward,
+    /// and says plainly when only this computer can join.
+    #[test]
+    fn hosting_status_says_where_players_join_and_what_to_forward() {
+        let lan_ip = Some(std::net::IpAddr::V4(std::net::Ipv4Addr::new(192, 168, 1, 20)));
+        let open = HostingChoice { lan: true, ..HostingChoice::default() };
+        let found = Detected::Found(std::net::Ipv4Addr::new(81, 2, 69, 160));
+
+        let line = hosting_status(Some(7777), &open, &found, lan_ip);
+        assert!(line.starts_with("Hosting on 81.2.69.160:7777."), "{line}");
+        assert!(line.contains("need UDP 7777 forwarded to this computer (192.168.1.20)"), "{line}");
+
+        let mapped = HostingChoice { public: Some(("play.example.com".into(), Some(30000))), ..open.clone() };
+        let line = hosting_status(Some(7777), &mapped, &Detected::NotAsked, lan_ip);
+        assert!(line.starts_with("Hosting on play.example.com:30000."), "{line}");
+        assert!(line.contains("UDP 30000 forwarded to UDP 7777 on this computer"), "{line}");
+
+        let line = hosting_status(Some(7777), &open, &Detected::Asking, lan_ip);
+        assert!(line.contains("Finding your public address"), "{line}");
+        let line = hosting_status(Some(7777), &open, &Detected::Failed("could not reach the echo".into()), None);
+        assert!(line.contains("could not reach the echo") && line.contains("type it above"), "{line}");
+
+        let local = HostingChoice::default();
+        let line = hosting_status(Some(7777), &local, &Detected::NotAsked, None);
+        assert!(line.contains("this computer only") && line.contains("cannot join"), "{line}");
+        assert!(hosting_status(None, &local, &Detected::NotAsked, None).starts_with("Not hosting"));
+        assert!(hosting_status(None, &open, &Detected::NotAsked, None).contains("UDP 7777"));
+    }
+
+    /// The address Settings or `EUSTRESS_HOST_PUBLIC` names: a host, and a
+    /// port only when one follows it.
+    #[test]
+    fn hosting_public_address_reads_a_host_and_an_optional_port() {
+        assert_eq!(parse_public_address(""), None);
+        assert_eq!(parse_public_address("   "), None);
+        assert_eq!(parse_public_address("81.2.69.160"), Some(("81.2.69.160".into(), None)));
+        assert_eq!(parse_public_address(" 81.2.69.160:30000 "), Some(("81.2.69.160".into(), Some(30000))));
+        assert_eq!(parse_public_address("play.example.com:7777"), Some(("play.example.com".into(), Some(7777))));
+        assert_eq!(parse_public_address("[2001:db8::7]:7777"), Some(("[2001:db8::7]".into(), Some(7777))));
+        assert_eq!(parse_public_address("2001:db8::7"), Some(("2001:db8::7".into(), None)));
+    }
+
+    /// Hosting starts its reach from the choice: the echo is asked only when
+    /// other computers may join and no address is typed.
+    #[test]
+    fn hosting_asks_the_echo_only_when_it_needs_an_address() {
+        let mut reach = HostingReach::default();
+        reach.begin(HostingChoice::default());
+        assert_eq!(reach.detected, Detected::NotAsked, "this computer only needs no public address");
+        reach.begin(HostingChoice { lan: true, public: Some(("play.example.com".into(), None)), ..HostingChoice::default() });
+        assert_eq!(reach.detected, Detected::NotAsked, "a typed address is used as typed");
+        assert!(reach.choice.is_some());
     }
 
     /// Quitting tells the gallery only about a session it may show, and only

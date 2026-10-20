@@ -313,6 +313,7 @@ mod tests {
             normal: Vector3::new(0.0, 1.0, 0.0),
             distance: (d * t).magnitude(),
             terrain: false,
+            material: None,
         })
     }
 

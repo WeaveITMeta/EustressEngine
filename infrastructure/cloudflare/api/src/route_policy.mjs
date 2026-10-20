@@ -55,6 +55,8 @@ export const RULES = [
   ['/api/guest/beat', PUBLIC, 'a guest session, no account'],
   ['/api/guest/end', PUBLIC, 'a guest session, no account'],
   ['/api/guest/play', PUBLIC, 'a guest session, no account'],
+  ['/api/guest/ticket', PUBLIC, 'a guest session, no account: the lease ticket in the body is the proof'],
+  ['/api/guest/live', PUBLIC, 'read-only: the guest-only sessions live now'],
   ['/api/kyc/jurisdiction', PUBLIC, 'verification at registration: no account yet'],
   ['/api/kyc/upload', PUBLIC, 'verification at registration: no account yet'],
   ['/api/kyc/submit', PUBLIC, 'verification at registration: no account yet'],
@@ -143,6 +145,7 @@ export const RULES = [
   [new RegExp(`^/api/simulations/${ID}/rating-questionnaire$`), FRESH, 'the author answers the rating questionnaire a review reads (Guardian Code v2.1 Part V); the author\'s session, checked fresh like the other moderation steps'],
   [new RegExp(`^/api/simulations/${ID}/captures/[0-7]$`), FRESH, 'moderation steps of a listing'],
   [new RegExp(`^/api/simulations/${ID}/live(/admit)?$`), FRESH, 'hosting a listing'],
+  ['/api/guest/chat/check', FRESH, 'the host of a guest-only session asks whether to deliver one guest chat line: the author\'s session, checked fresh like hosting'],
 
   // ── Session: the cheap check is enough, named one route at a time ───────
   ['/api/auth/logout', SESSION, 'ends the caller\'s own sessions'],

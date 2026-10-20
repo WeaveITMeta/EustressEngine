@@ -47,6 +47,7 @@ use crate::pages::{
     docs_earning::DocsEarningPage,
     docs_getting_started::DocsGettingStartedPage,
     docs_importing::DocsImportingPage,
+    docs_hosting::DocsHostingPage,
     docs_networking::DocsNetworkingPage,
     docs_philosophy::DocsPhilosophyPage,
     docs_perspective::DocsPerspectivePage,
@@ -304,6 +305,7 @@ pub fn App() -> impl IntoView {
                 <Route path=path!("/docs/studio") view=DocsStudioPage />
                 <Route path=path!("/docs/scripting") view=DocsScriptingPage />
                 <Route path=path!("/docs/networking") view=DocsNetworkingPage />
+                <Route path=path!("/docs/hosting") view=DocsHostingPage />
                 <Route path=path!("/docs/physics") view=DocsPhysicsPage />
                 <Route path=path!("/docs/building") view=DocsBuildingPage />
                 <Route path=path!("/docs/perspective") view=DocsPerspectivePage />

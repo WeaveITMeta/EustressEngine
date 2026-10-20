@@ -3458,7 +3458,15 @@ static RENDER_FRAME: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64
 fn sync_gui_elements_to_slint(
     slint_context: Option<NonSend<SlintUiState>>,
     gui_query: Query<(Entity, &eustress_common::gui::billboard_renderer::GuiElementDisplay, Option<&ChildOf>)>,
-    billboard_q: Query<(), With<eustress_common::gui::billboard_renderer::BillboardGuiMarker>>,
+    // The roots of GUI drawn in the world: a BillboardGui, or a SurfaceGui
+    // (its class, which every spawn path gives it).
+    world_gui_q: Query<
+        (),
+        Or<(
+            With<eustress_common::gui::billboard_renderer::BillboardGuiMarker>,
+            With<eustress_common::classes::SurfaceGui>,
+        )>,
+    >,
     parent_q: Query<&ChildOf>,
     // Service ancestry: a `ScreenGui` only paints to the screen when it lives
     // under `StarterGui` (Roblox: StarterGui → each player's PlayerGui). A
@@ -3493,19 +3501,26 @@ fn sync_gui_elements_to_slint(
 
     let lookup = |e: Entity| gui_query.get(e).ok().map(|(_, d, p)| (d, p.map(|c| c.parent())));
 
-    // Check whether any ancestor of `entity` is a BillboardGuiMarker. Those
-    // GuiElementDisplay entities are consumed by the per-billboard Slint
-    // renderer in `billboard_gui.rs` and must NOT leak into the screen-space
-    // overlay — otherwise a TextLabel parented to a billboard would draw
-    // both in 3D on the card AND as a 2D UI element in the top-left.
-    fn is_under_billboard(
+    // Check whether any ancestor of `entity` is a BillboardGui or a
+    // SurfaceGui. Those GuiElementDisplay entities are drawn in the world, on
+    // the billboard's card or the part's face (`billboards.rs` in the play
+    // runtime), and must NOT leak into the screen-space overlay, or a
+    // TextLabel parented to a billboard would draw both in 3D on the card AND
+    // as a 2D UI element in the top-left.
+    fn is_under_world_gui(
         entity: Entity,
-        billboard_q: &Query<(), With<eustress_common::gui::billboard_renderer::BillboardGuiMarker>>,
+        world_gui_q: &Query<
+            (),
+            Or<(
+                With<eustress_common::gui::billboard_renderer::BillboardGuiMarker>,
+                With<eustress_common::classes::SurfaceGui>,
+            )>,
+        >,
         parent_q: &Query<&ChildOf>,
     ) -> bool {
         let mut cur = entity;
         loop {
-            if billboard_q.get(cur).is_ok() { return true; }
+            if world_gui_q.get(cur).is_ok() { return true; }
             match parent_q.get(cur) {
                 Ok(p) => cur = p.parent(),
                 Err(_) => return false,
@@ -3518,7 +3533,7 @@ fn sync_gui_elements_to_slint(
     // This kills the "fixed-screen mindmap ghost" class — orphan or
     // non-billboard-ancestor `GuiElementDisplay` entities (mindmap connector
     // frames, stray TextLabels, etc.) were leaking into the overlay because
-    // the negative `is_under_billboard` filter only catches things explicitly
+    // the negative `is_under_world_gui` filter only catches things explicitly
     // under a billboard. By contract, 2D UI lives under a ScreenGui; if it
     // doesn't, it shouldn't be in the screen-space overlay at all.
     fn has_screen_gui_ancestor(
@@ -3585,8 +3600,8 @@ fn sync_gui_elements_to_slint(
                 // Skip children of hidden ScreenGuis
                 if gui_hidden_by_ancestor(*e, &lookup) { return false; }
                 funnel.2 += 1;
-                // Skip billboard descendants — rendered by billboard_gui plugin
-                if is_under_billboard(*e, &billboard_q, &parent_q) { return false; }
+                // Skip billboard and SurfaceGui descendants: they draw in the world
+                if is_under_world_gui(*e, &world_gui_q, &parent_q) { return false; }
                 funnel.3 += 1;
                 // POSITIVE: only render entities that genuinely descend from a
                 // ScreenGui. Orphan or mindmap-adjacent GUI elements that lack
