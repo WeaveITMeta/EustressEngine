@@ -7941,6 +7941,7 @@ dependencies = [
  "avian3d",
  "bevy 0.19.0",
  "bevy_core_pipeline 0.19.0",
+ "bevy_ecs 0.19.0",
  "bevy_pbr 0.19.0",
  "bevy_render 0.19.0",
  "console_error_panic_hook",
