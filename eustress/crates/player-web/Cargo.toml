@@ -55,6 +55,14 @@ bevy = { workspace = true, features = [
     "bevy_core_pipeline",
     "bevy_pbr",
     "bevy_asset",
+    # REQUIRED for the glTF loader to emit `Animation*` labels. Bevy 0.19
+    # split this out: `bevy_animation` only compiles the animation runtime,
+    # while `gltf_animation` turns on animation parsing in bevy_gltf (see
+    # crates/client/Cargo.toml). This graph already enables `bevy_animation`
+    # and `bevy_gltf` through eustress-common. Without `gltf_animation` a
+    # character .glb loads its nodes, scene and skin but zero clips, and
+    # AssetServer reports "does not contain the labeled asset 'Animation0'".
+    "gltf_animation",
     "bevy_color",
     "bevy_log",
     "keyboard",
