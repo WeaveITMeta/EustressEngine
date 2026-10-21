@@ -533,6 +533,10 @@ fn init_slint(world: &mut World) {
         adapter.slint_window.dispatch_event(WindowEvent::Resized {
             size: physical.to_logical(1.0),
         });
+        // Slint's platform types are `!Send`. This exclusive system runs on the
+        // schedule thread. Inserting them from `Plugin::build` or `finish`
+        // would record the constructing thread, and the next frame's NonSend
+        // systems would abort.
         world.insert_non_send(shell::ShellUi { ui });
         world.insert_non_send(SlintContext {
             adapter,
@@ -1444,6 +1448,9 @@ struct SurfaceGate {
     settings: WgpuSettings,
     texture_tx: std::sync::mpsc::Sender<wgpu::Texture>,
     device_tx: std::sync::mpsc::Sender<WgpuHandles>,
+    /// Host tests have no display. `finish` still runs for every other plugin;
+    /// this one does not create a device.
+    headless: bool,
 }
 
 impl Plugin for SurfaceGate {
@@ -1473,7 +1480,7 @@ impl Plugin for SurfaceGate {
     }
 
     fn finish(&self, app: &mut App) {
-        if app.is_plugin_added::<RenderPlugin>() {
+        if self.headless || app.is_plugin_added::<RenderPlugin>() {
             return;
         }
         #[cfg(target_os = "android")]
@@ -1547,8 +1554,9 @@ pub fn run_game() {
 /// The mobile Player's `App`, before `run`.
 ///
 /// `headless` drops `WinitPlugin` so a host test can `update` without a
-/// window. Render plugins stay disabled either way: `SurfaceGate` adds them
-/// from `finish`, and this function does not call `finish`.
+/// window. `SurfaceGate::finish` then skips the renderer. A test that wants
+/// the same plugin `finish`/`cleanup` Android runs before the first frame
+/// calls `App::finish` and `App::cleanup` itself.
 fn build_game(headless: bool) -> App {
     let (texture_tx, texture_rx) = std::sync::mpsc::channel();
     let (device_tx, device_rx) = std::sync::mpsc::channel();
@@ -1642,6 +1650,7 @@ fn build_game(headless: bool) -> App {
         settings: settings.clone(),
         texture_tx,
         device_tx,
+        headless,
     })
     .insert_resource(ClearColor(Color::srgb(0.07, 0.09, 0.12)))
     .insert_resource(SlintSharedTexture {
@@ -1706,9 +1715,52 @@ mod headless_startup {
             !app.is_plugin_added::<RenderPlugin>(),
             "RenderPlugin stays deferred until SurfaceGate::finish",
         );
+        // Android's runner calls these once the surface exists, before the
+        // first `update`. Headless `SurfaceGate` does not create a device.
+        app.finish();
+        app.cleanup();
+        assert!(!app.is_plugin_added::<RenderPlugin>());
         for _ in 0..3 {
             app.update();
         }
+        assert!(!app.is_plugin_added::<RenderPlugin>());
+    }
+
+    /// `App` is `!Send` (its runner), so it cannot move to another thread.
+    /// Bevy's compute pool is the other thread: after a `Send` system
+    /// finishes, that worker evaluates `atlas_ready`. parity5 aborted there
+    /// because the atlas was `NonSend`. `Assets<Image>` is what `SurfaceGate`
+    /// registers before the first frame. Registering it here does not create
+    /// a GPU. Font state must still be absent after `build`, because
+    /// `Plugin::build` runs on the constructing thread and a `!Send` value
+    /// inserted there cannot be read from a later update thread.
+    #[test]
+    fn frame_schedule_reads_the_billboard_atlas_from_a_pool_thread() {
+        let mut app = build_game(true);
+        assert!(
+            app.world()
+                .get_non_send::<eustress_play_runtime::billboards::BillboardTextState>()
+                .is_none(),
+            "BillboardTextState must be inserted by Startup, not Plugin::build",
+        );
+        app.finish();
+        app.cleanup();
+        assert!(!app.is_plugin_added::<RenderPlugin>());
+        app.init_asset::<Image>();
+        for _ in 0..3 {
+            app.update();
+        }
+        assert!(
+            app.world()
+                .contains_resource::<eustress_play_runtime::billboards::BillboardAtlas>(),
+            "atlas init did not run, so no worker read it",
+        );
+        assert!(
+            app.world()
+                .get_non_send::<eustress_play_runtime::billboards::BillboardTextState>()
+                .is_some(),
+            "Startup did not insert BillboardTextState on the update thread",
+        );
         assert!(!app.is_plugin_added::<RenderPlugin>());
     }
 }

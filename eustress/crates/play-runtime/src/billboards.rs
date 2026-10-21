@@ -258,13 +258,6 @@ fn billboard_font_system() -> FontSystem {
     FontSystem::new_with_locale_and_db("en-US".to_string(), db)
 }
 
-/// Shared atlas backing every billboard. The CPU buffer is staged here and
-/// copied wholesale into the atlas `Image` asset at end of frame so Bevy's
-/// render-asset extraction picks up the change.
-///
-/// `!Send` because `Pixmap` (used during rendering) isn't `Send`; treating
-/// the atlas itself as NonSend keeps every billboard system on the main
-/// thread, which is fine — the renderer is CPU-bound and serial anyway.
 /// Sparse spatial hash over billboard positions. The three distance-driven
 /// systems (slot allocation, slot recycling, and their diagnostics) used to
 /// brute-force EVERY billboard in the world each frame — in a 130K-instance
@@ -362,6 +355,15 @@ fn maintain_billboard_spatial_grid(
     }
 }
 
+/// Shared atlas backing every billboard. The CPU buffer is staged here and
+/// copied into the atlas `Image` at the end of the frame.
+///
+/// A `Pixmap` is built inside the raster system and dropped there. Nothing
+/// in this struct is `!Send`, so it is a normal resource. Android's
+/// multithreaded schedule evaluates [`atlas_ready`] on a worker after a
+/// `Send` system finishes. Storing the atlas as `NonSend` panics there:
+/// the worker is not the thread that inserted it.
+#[derive(Resource)]
 pub struct BillboardAtlas {
     /// Atlas Image asset shared by every billboard's bind group.
     pub texture: Handle<Image>,
@@ -781,7 +783,7 @@ fn spawn_billboard_render_state(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut images: ResMut<Assets<Image>>,
-    mut atlas: NonSendMut<BillboardAtlas>,
+    mut atlas: ResMut<BillboardAtlas>,
     // Camera for the near-camera allocation gate (mirrors the render cull in
     // `update_and_render_billboards`). Atlas slots are scarce (512 max), so
     // we only allocate them to billboards the user can actually see/repaint.
@@ -1131,7 +1133,7 @@ fn spawn_billboard_render_state(
 /// time in `spawn_billboard_render_state`, not reconstructed here from a
 /// live scan (see that field's doc comment for the leak this replaces).
 fn release_atlas_slots(
-    mut atlas: NonSendMut<BillboardAtlas>,
+    mut atlas: ResMut<BillboardAtlas>,
     mut removed: RemovedComponents<BillboardAtlasTile>,
 ) {
     for entity in removed.read() {
@@ -1170,7 +1172,7 @@ fn release_atlas_slots(
 /// billboard hovering at the boundary can't thrash allocate↔evict every frame.
 fn recycle_offscreen_billboard_slots(
     mut commands: Commands,
-    atlas: NonSend<BillboardAtlas>,
+    atlas: Res<BillboardAtlas>,
     cameras: Query<(&GlobalTransform, &Camera), With<Camera3d>>,
     slotted: Query<(Entity, &GlobalTransform, &BillboardGuiMarker), With<BillboardAtlasTile>>,
     // Un-slotted billboards competing for the scarce slots — needed to compute
@@ -1371,7 +1373,7 @@ fn zero_tile_in_atlas(cpu_buf: &mut [u8], slot: u32, atlas_w_px: u32, cols: u32)
 
 fn sync_billboard_properties(
     mut commands: Commands,
-    atlas: NonSend<BillboardAtlas>,
+    atlas: Res<BillboardAtlas>,
     mut billboards: Query<
         (
             Entity,
@@ -1722,7 +1724,7 @@ impl BillboardPassStats {
 #[allow(clippy::too_many_arguments)]
 fn update_and_render_billboards(
     mut text_state: NonSendMut<BillboardTextState>,
-    mut atlas: NonSendMut<BillboardAtlas>,
+    mut atlas: ResMut<BillboardAtlas>,
     mut billboards: Query<(Entity, &mut BillboardRenderHandle, &BillboardAtlasTile, &GlobalTransform, &BillboardGuiMarker)>,
     cameras: Query<(&GlobalTransform, &Camera), With<Camera3d>>,
     gui_elements: Query<(Entity, &GuiElementDisplay, &ChildOf)>,
@@ -1981,7 +1983,7 @@ pub struct PendingAtlasTiles {
 ///   through a dense world repaints tiles every frame — a per-frame
 ///   full-atlas PCIe copy that dominated GPU time.
 fn upload_atlas_to_gpu(
-    mut atlas: NonSendMut<BillboardAtlas>,
+    mut atlas: ResMut<BillboardAtlas>,
     mut images: ResMut<Assets<Image>>,
     mut pending: ResMut<PendingAtlasTiles>,
 ) {
@@ -2654,7 +2656,7 @@ pub struct BillboardDrawPlugin;
 
 impl Plugin for BillboardDrawPlugin {
     fn build(&self, app: &mut App) {
-        app.insert_non_send(BillboardTextState::default())
+        app
             // Spatial hash for the distance-driven slot systems + the staged
             // per-tile GPU uploads (extracted to the render world by
             // BillboardPipelinePlugin's ExtractResourcePlugin).
@@ -2667,7 +2669,12 @@ impl Plugin for BillboardDrawPlugin {
             .configure_sets(Update, BillboardDrawSet::Prepare.before(BillboardDrawSet::Render))
             // Grid maintenance runs before anything queries it this frame.
             .add_systems(Update, maintain_billboard_spatial_grid.before(recycle_offscreen_billboard_slots))
-            .add_systems(Startup, init_billboard_atlas.run_if(resource_exists::<Assets<Image>>))
+            // Both run on the thread that calls `App::update`, not the thread
+            // that built the plugin. `BillboardTextState` is `!Send`.
+            .add_systems(Startup, (
+                init_billboard_text_state,
+                init_billboard_atlas.run_if(resource_exists::<Assets<Image>>),
+            ))
             .add_systems(
                 Update,
                 (
@@ -2717,9 +2724,20 @@ impl Plugin for BillboardDrawPlugin {
 }
 
 /// The atlas is created in `init_billboard_atlas` once `Assets<Image>` exists.
-/// Until then the draw systems have no non-send atlas to borrow.
-fn atlas_ready(atlas: Option<NonSend<BillboardAtlas>>) -> bool {
+/// `Res` so a worker can evaluate this. `NonSend` here is what parity5 aborted
+/// on: the condition ran on a pool thread, and the atlas had been inserted on
+/// the schedule thread.
+fn atlas_ready(atlas: Option<Res<BillboardAtlas>>) -> bool {
     atlas.is_some()
+}
+
+/// `FontSystem` and `SwashCache` are `!Send`. Create them on the schedule
+/// thread. `Plugin::build` runs on the thread that constructed the `App`,
+/// and a later `App::update` on another thread cannot touch that `NonSend`.
+fn init_billboard_text_state(world: &mut World) {
+    if world.get_non_send_resource::<BillboardTextState>().is_none() {
+        world.insert_non_send(BillboardTextState::default());
+    }
 }
 
 fn init_billboard_atlas(world: &mut World) {
@@ -2746,5 +2764,10 @@ fn init_billboard_atlas(world: &mut World) {
         let mut images = world.resource_mut::<Assets<Image>>();
         create_atlas_image(&mut images, INITIAL_ATLAS_ROWS, cols)
     };
-    world.insert_non_send_resource(BillboardAtlas::new(texture, INITIAL_ATLAS_ROWS, cols, max_dim));
+    world.insert_resource(BillboardAtlas::new(texture, INITIAL_ATLAS_ROWS, cols, max_dim));
 }
+
+const _: fn() = || {
+    fn assert_send_sync<T: Send + Sync>() {}
+    assert_send_sync::<BillboardAtlas>();
+};
