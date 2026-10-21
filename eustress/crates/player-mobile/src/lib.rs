@@ -38,7 +38,8 @@ mod session;
 mod shell;
 mod space;
 
-use std::cell::{RefCell, UnsafeCell};
+use std::cell::{Cell, RefCell, UnsafeCell};
+use std::collections::HashSet;
 use std::rc::{Rc, Weak};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -46,6 +47,7 @@ use std::sync::{Arc, Mutex};
 use bevy::camera::visibility::RenderLayers;
 use bevy::camera::{CameraOutputMode, ClearColorConfig, ScalingMode};
 use bevy::core_pipeline::tonemapping::Tonemapping;
+use bevy::input::keyboard::KeyboardInput;
 use bevy::input::touch::TouchInput;
 use bevy::input::{mouse::MouseButtonInput, ButtonState};
 use bevy::prelude::*;
@@ -113,7 +115,10 @@ impl RendererSlot {
 }
 
 struct BevyWindowAdapter {
-    size: std::cell::Cell<slint::PhysicalSize>,
+    size: Cell<slint::PhysicalSize>,
+    /// Set by Slint when a property, animation, or input event needs paint.
+    /// `render_slint` draws on this and then clears it.
+    dirty: Cell<bool>,
     slint_window: slint::Window,
     renderer: RendererSlot,
 }
@@ -135,14 +140,33 @@ impl slint::platform::WindowAdapter for BevyWindowAdapter {
         Ok(())
     }
 
-    fn request_redraw(&self) {}
+    fn request_redraw(&self) {
+        self.dirty.set(true);
+    }
+
+    fn internal(
+        &self,
+        _: i_slint_core::InternalToken,
+    ) -> Option<&dyn i_slint_core::window::WindowAdapterInternal> {
+        Some(self)
+    }
+}
+
+impl i_slint_core::window::WindowAdapterInternal for BevyWindowAdapter {
+    fn input_method_request(&self, request: i_slint_core::window::InputMethodRequest) {
+        // Slint calls this when a TextInput gains or loses focus. The default
+        // adapter method is empty, so GameActivity never showed the keyboard
+        // (`mInputShown=false`) and hardware keys stayed in the InputConnection.
+        apply_input_method(&request);
+    }
 }
 
 impl BevyWindowAdapter {
     fn new(handles: &WgpuHandles) -> Rc<Self> {
         let renderer = make_skia(handles).expect("SkiaWGPURenderer::new");
         Rc::new_cyclic(|self_weak: &Weak<Self>| Self {
-            size: std::cell::Cell::new(slint::PhysicalSize::new(UI_WIDTH, UI_HEIGHT)),
+            size: Cell::new(slint::PhysicalSize::new(UI_WIDTH, UI_HEIGHT)),
+            dirty: Cell::new(true),
             slint_window: slint::Window::new(self_weak.clone()),
             renderer: RendererSlot::new(renderer),
         })
@@ -527,12 +551,12 @@ fn init_slint(world: &mut World) {
             .expect("window adapter");
         ui.window()
             .dispatch_event(WindowEvent::WindowActiveChanged(true));
-        let overlay = world.resource::<OverlaySize>();
-        let physical = PhysicalSize::new(overlay.width, overlay.height);
-        adapter.size.set(physical);
-        adapter.slint_window.dispatch_event(WindowEvent::Resized {
-            size: physical.to_logical(1.0),
-        });
+        // The first `publish_overlay` runs before this adapter exists, so it
+        // cannot send `ScaleFactorChanged`. Applying scale 1 here laid the
+        // gallery out in physical pixels. Resume looked right only because
+        // that later publish finally sent the window scale.
+        let (width, height, scale) = slint_size_now(world);
+        apply_slint_size(&adapter, width, height, scale);
         // Slint's platform types are `!Send`. This exclusive system runs on the
         // schedule thread. Inserting them from `Plugin::build` or `finish`
         // would record the constructing thread, and the next frame's NonSend
@@ -607,21 +631,32 @@ fn render_slint(ctx: Option<NonSend<SlintContext>>, shared: Res<SlintSharedTextu
         return;
     }
     slint::platform::update_timers_and_animations();
-    if let Some(texture) = shared.texture.lock().expect("texture slot").as_ref() {
-        if let Err(err) = ctx
-            .adapter
-            .renderer
-            .get()
-            .expect("slint renderer")
-            .render_to_texture(texture)
-        {
-            eprintln!("slint render_to_texture: {err}");
-        } else {
-            static LOGGED: AtomicBool = AtomicBool::new(false);
-            if !LOGGED.swap(true, Ordering::Relaxed) {
-                eprintln!("phase0: slint overlay drawn into the shared texture");
-            }
-        }
+    let dirty = ctx.adapter.dirty.get() || ctx.adapter.slint_window.has_active_animations();
+    if !dirty {
+        return;
+    }
+    let slot = shared.texture.lock().expect("texture slot");
+    let Some(texture) = slot.as_ref() else {
+        // Keep `dirty` set until the render world publishes the image.
+        return;
+    };
+    let size = ctx.adapter.size.get();
+    if let Err(err) = ctx
+        .adapter
+        .renderer
+        .get()
+        .expect("slint renderer")
+        .render_to_texture(texture)
+    {
+        eprintln!("slint render_to_texture: {err}");
+    } else {
+        ctx.adapter.dirty.set(false);
+        eprintln!(
+            "phase0: slint overlay drawn {}x{} scale {:.3}",
+            size.width,
+            size.height,
+            ctx.adapter.slint_window.scale_factor()
+        );
     }
 }
 
@@ -632,9 +667,112 @@ fn spin_cube(time: Res<Time>, mut cubes: Query<&mut Transform, With<LitCube>>) {
     }
 }
 
-fn pointer_logical(window_pos: Vec2, scale: f32) -> LogicalPosition {
-    let scale = scale.max(0.01);
-    LogicalPosition::new(window_pos.x / scale, window_pos.y / scale)
+/// Bevy 0.19 already reports touch positions in logical pixels. Dividing by
+/// `scale_factor` again (about 2.625 at 420 dpi) mapped every tap off the widget.
+fn logical_from_touch(position: Vec2) -> LogicalPosition {
+    LogicalPosition::new(position.x, position.y)
+}
+
+/// Bevy's window starts at 1280×720. `create_windows` multiplies that by the
+/// monitor scale before the native size is applied, so the first resolution
+/// on a 420 dpi phone is 3360×1890. That is not the window.
+fn is_scaled_default_window(width: u32, height: u32, scale: f32) -> bool {
+    if !(scale.is_finite() && scale > 1.01) {
+        return false;
+    }
+    let expected_w = (1280.0 * scale).round() as u32;
+    let expected_h = (720.0 * scale).round() as u32;
+    width == expected_w && height == expected_h
+}
+
+fn window_scale(window: &Window) -> f32 {
+    let scale = window.resolution.scale_factor();
+    if scale.is_finite() && scale > 0.01 {
+        scale
+    } else {
+        1.0
+    }
+}
+
+/// Physical overlay size. Prefer the winit window: on Android its `inner_size`
+/// is the native window (2400×1080) while Bevy's component can still be the
+/// scaled 1280×720 default.
+fn overlay_pixels(entity: Entity, window: &Window) -> Option<(u32, u32, f32)> {
+    let scale = window_scale(window);
+    let native = bevy::winit::WINIT_WINDOWS.with(|windows| {
+        windows.borrow().get_window(entity).map(|winit_window| {
+            let size = winit_window.inner_size();
+            (size.width, size.height)
+        })
+    });
+    if let Some((width, height)) = native {
+        if width > 0 && height > 0 {
+            return Some((width, height, scale));
+        }
+    }
+    let width = window.resolution.physical_width();
+    let height = window.resolution.physical_height();
+    if width == 0 || height == 0 || is_scaled_default_window(width, height, scale) {
+        return None;
+    }
+    Some((width, height, scale))
+}
+
+fn slint_size_now(world: &mut World) -> (u32, u32, f32) {
+    let from_window = {
+        let mut windows = world.query_filtered::<(Entity, &Window), With<PrimaryWindow>>();
+        windows
+            .iter(world)
+            .find_map(|(entity, window)| overlay_pixels(entity, window))
+    };
+    if let Some(size) = from_window {
+        return size;
+    }
+    let scale = {
+        let mut windows = world.query_filtered::<&Window, With<PrimaryWindow>>();
+        windows.iter(world).next().map(window_scale).unwrap_or(1.0)
+    };
+    let overlay = world.resource::<OverlaySize>();
+    (overlay.width, overlay.height, scale)
+}
+
+fn apply_slint_size(adapter: &BevyWindowAdapter, width: u32, height: u32, scale: f32) {
+    let scale = if scale.is_finite() && scale > 0.01 { scale } else { 1.0 };
+    let physical = PhysicalSize::new(width.max(1), height.max(1));
+    adapter.size.set(physical);
+    let logical = physical.to_logical(scale);
+    if (adapter.slint_window.scale_factor() - scale).abs() > 0.01 {
+        adapter
+            .slint_window
+            .dispatch_event(WindowEvent::ScaleFactorChanged { scale_factor: scale });
+    }
+    adapter
+        .slint_window
+        .dispatch_event(WindowEvent::Resized { size: logical });
+    slint::platform::WindowAdapter::request_redraw(adapter);
+    eprintln!(
+        "phase0: slint window {}x{} scale {scale:.3} logical {:.1}x{:.1}",
+        physical.width, physical.height, logical.width, logical.height
+    );
+}
+
+/// Copy the native window size onto Bevy before `input_actions` reads the
+/// logical viewport. Runs in `First`, ahead of `PreUpdate`.
+fn sync_native_window_size(mut windows: Query<(Entity, &mut Window), With<PrimaryWindow>>) {
+    for (entity, mut window) in &mut windows {
+        let Some((width, height, _)) = overlay_pixels(entity, &window) else {
+            continue;
+        };
+        if window.resolution.physical_width() == width && window.resolution.physical_height() == height {
+            continue;
+        }
+        eprintln!(
+            "phase0: native window {width}x{height} replaces {}x{}",
+            window.resolution.physical_width(),
+            window.resolution.physical_height()
+        );
+        window.resolution.set_physical_resolution(width, height);
+    }
 }
 
 fn dispatch_pointer(
@@ -666,7 +804,9 @@ fn pointer_input(
     mut mouse: MessageReader<MouseButtonInput>,
     mut touches: MessageReader<TouchInput>,
     windows: Query<&Window>,
+    input: Option<Res<eustress_common::input_actions::InputState>>,
     ctx: Option<NonSend<SlintContext>>,
+    mut ui_fingers: Local<HashSet<u64>>,
 ) {
     let Some(ctx) = ctx else {
         return;
@@ -677,7 +817,7 @@ fn pointer_input(
     let Some(window) = windows.iter().next() else {
         return;
     };
-    let scale = window.resolution.scale_factor();
+    let scale = window_scale(window);
 
     if let Some(cursor) = window.cursor_position() {
         // `cursor_position` is already in logical pixels.
@@ -688,12 +828,49 @@ fn pointer_input(
                 press = Some(event.state == ButtonState::Pressed);
             }
         }
+        if press.is_some() {
+            eprintln!(
+                "phase0: slint pointer mouse logical=({:.1}, {:.1}) scale={scale:.3} pressed={press:?}",
+                cursor.x, cursor.y
+            );
+        }
         dispatch_pointer(&ctx.adapter, over, press);
     }
 
     for touch in touches.read() {
-        // Bevy reports touch positions in physical pixels. Slint wants logical.
-        let over = Some(pointer_logical(touch.position, scale));
+        let over = logical_from_touch(touch.position);
+        // `input_actions` runs in PreUpdate and assigns the finger. Gallery
+        // sets `capture_all`, so every finger is UI. Stick and camera fingers
+        // stay with the world. `Ended` has already removed the finger; the
+        // id is in `released_ui` or in the set recorded on `Started`.
+        let ui = match touch.phase {
+            bevy::input::touch::TouchPhase::Started => {
+                let ui = input.as_ref().is_none_or(|input| {
+                    input.finger_is_ui(touch.id) || input.released_ui.contains(&touch.id)
+                });
+                if ui {
+                    ui_fingers.insert(touch.id);
+                }
+                ui
+            }
+            bevy::input::touch::TouchPhase::Moved => {
+                ui_fingers.contains(&touch.id)
+                    || input.as_ref().is_some_and(|input| input.finger_is_ui(touch.id))
+            }
+            bevy::input::touch::TouchPhase::Ended | bevy::input::touch::TouchPhase::Canceled => {
+                ui_fingers.remove(&touch.id)
+                    || input.as_ref().is_some_and(|input| input.released_ui.contains(&touch.id))
+            }
+        };
+        if !ui {
+            if !matches!(touch.phase, bevy::input::touch::TouchPhase::Moved) {
+                eprintln!(
+                    "phase0: touch id={} {:?} logical=({:.1}, {:.1}) scale={scale:.3} kept by the world",
+                    touch.id, touch.phase, over.x, over.y
+                );
+            }
+            continue;
+        }
         let press = match touch.phase {
             bevy::input::touch::TouchPhase::Started => Some(true),
             bevy::input::touch::TouchPhase::Ended | bevy::input::touch::TouchPhase::Canceled => {
@@ -701,19 +878,200 @@ fn pointer_input(
             }
             bevy::input::touch::TouchPhase::Moved => None,
         };
-        dispatch_pointer(&ctx.adapter, over, press);
+        if !matches!(touch.phase, bevy::input::touch::TouchPhase::Moved) {
+            eprintln!(
+                "phase0: slint pointer id={} {:?} logical=({:.1}, {:.1}) scale={scale:.3}",
+                touch.id, touch.phase, over.x, over.y
+            );
+        }
+        dispatch_pointer(&ctx.adapter, Some(over), press);
     }
 }
 
-/// The overlay texture matches the window's physical size, so rotation
-/// rebuilds it instead of stretching a fixed panel.
-fn overlay_size_for_window(window: &Window) -> Option<(u32, u32)> {
-    let width = window.resolution.physical_width();
-    let height = window.resolution.physical_height();
-    if width == 0 || height == 0 {
-        return None;
+fn slint_key_text(event: &KeyboardInput) -> Option<slint::SharedString> {
+    if let Some(text) = &event.text {
+        if !text.is_empty() {
+            return Some(text.as_str().into());
+        }
     }
-    Some((width, height))
+    use bevy::input::keyboard::Key as BevyKey;
+    use slint::platform::Key as SlintKey;
+    let named = match &event.logical_key {
+        BevyKey::Backspace => SlintKey::Backspace,
+        BevyKey::Delete => SlintKey::Delete,
+        BevyKey::Enter => SlintKey::Return,
+        BevyKey::Tab => SlintKey::Tab,
+        BevyKey::ArrowLeft => SlintKey::LeftArrow,
+        BevyKey::ArrowRight => SlintKey::RightArrow,
+        BevyKey::ArrowUp => SlintKey::UpArrow,
+        BevyKey::ArrowDown => SlintKey::DownArrow,
+        BevyKey::Escape => SlintKey::Escape,
+        BevyKey::Home => SlintKey::Home,
+        BevyKey::End => SlintKey::End,
+        BevyKey::PageUp => SlintKey::PageUp,
+        BevyKey::PageDown => SlintKey::PageDown,
+        _ => return None,
+    };
+    Some(named.into())
+}
+
+fn dispatch_key(adapter: &BevyWindowAdapter, text: slint::SharedString, state: ButtonState, repeat: bool) {
+    let event = match state {
+        ButtonState::Pressed if repeat => WindowEvent::KeyPressRepeated { text: text.clone() },
+        ButtonState::Pressed => WindowEvent::KeyPressed { text: text.clone() },
+        ButtonState::Released => WindowEvent::KeyReleased { text: text.clone() },
+    };
+    eprintln!("phase0: slint key {state:?} repeat={repeat} text={text:?}");
+    adapter.slint_window.dispatch_event(event);
+}
+
+/// Hardware keys arrive as `KeyboardInput`. GameActivity's text buffer arrives
+/// as `Ime`, except on Android where winit drops `InputEvent::TextEvent` after
+/// clearing the dirty flag. The buffer itself is still readable.
+fn slint_keyboard(
+    mut windows: Query<&mut Window, With<PrimaryWindow>>,
+    mut keys: MessageReader<KeyboardInput>,
+    mut ime: MessageReader<Ime>,
+    ctx: Option<NonSend<SlintContext>>,
+    mut ime_text: Local<String>,
+) {
+    let Some(ctx) = ctx else {
+        return;
+    };
+    if ctx.adapter.renderer.get().is_none() {
+        return;
+    }
+    let focused = i_slint_core::window::WindowInner::from_pub(&ctx.adapter.slint_window)
+        .text_input_focused();
+    for mut window in &mut windows {
+        if window.ime_enabled != focused {
+            eprintln!("phase0: soft keyboard via ime_enabled={focused}");
+            window.ime_enabled = focused;
+        }
+    }
+
+    #[cfg(target_os = "android")]
+    let mut ime_consumed_chars = poll_android_text(&ctx.adapter, focused, &mut ime_text);
+    #[cfg(not(target_os = "android"))]
+    let mut ime_consumed_chars = {
+        let _ = (&mut *ime_text, focused);
+        false
+    };
+
+    for event in ime.read() {
+        if let Ime::Commit { value, .. } = event {
+            if value.is_empty() {
+                continue;
+            }
+            eprintln!("phase0: slint ime commit {value:?}");
+            dispatch_key(&ctx.adapter, value.as_str().into(), ButtonState::Pressed, false);
+            dispatch_key(&ctx.adapter, value.as_str().into(), ButtonState::Released, false);
+            ime_consumed_chars = true;
+        }
+    }
+
+    for event in keys.read() {
+        let Some(text) = slint_key_text(event) else {
+            continue;
+        };
+        // The Android text buffer already contains this frame's letters.
+        // Forwarding the key as well would insert it twice.
+        if ime_consumed_chars && event.text.is_some() {
+            eprintln!("phase0: slint key skipped (ime buffer has the text) {text:?}");
+            continue;
+        }
+        dispatch_key(&ctx.adapter, text, event.state, event.repeat);
+    }
+}
+
+#[cfg(target_os = "android")]
+fn poll_android_text(adapter: &BevyWindowAdapter, focused: bool, last: &mut String) -> bool {
+    if !focused {
+        last.clear();
+        return false;
+    }
+    let Some(app) = bevy::android::ANDROID_APP.get() else {
+        return false;
+    };
+    let state = app.text_input_state();
+    if state.text == *last {
+        return false;
+    }
+    eprintln!(
+        "phase0: slint ime text {:?} selection={:?}..{:?}",
+        state.text, state.selection.start, state.selection.end
+    );
+    *last = state.text.clone();
+    let mut key_event = i_slint_core::input::KeyEvent::default();
+    key_event.text = state.text.as_str().into();
+    let event = i_slint_core::input::InternalKeyEvent {
+        event_type: i_slint_core::input::KeyEventType::CommitComposition,
+        replacement_range: Some(i32::MIN..i32::MAX),
+        cursor_position: Some(state.selection.end as i32),
+        anchor_position: Some(state.selection.start as i32),
+        key_event,
+        ..Default::default()
+    };
+    i_slint_core::window::WindowInner::from_pub(&adapter.slint_window).process_key_input(event);
+    true
+}
+
+fn apply_input_method(request: &i_slint_core::window::InputMethodRequest) {
+    use i_slint_core::window::InputMethodRequest;
+    match request {
+        InputMethodRequest::Enable(props) => {
+            eprintln!("phase0: soft keyboard show");
+            show_soft_keyboard(true, Some(props));
+        }
+        InputMethodRequest::Update(props) => {
+            show_soft_keyboard(true, Some(props));
+        }
+        InputMethodRequest::Disable => {
+            eprintln!("phase0: soft keyboard hide");
+            show_soft_keyboard(false, None);
+        }
+        _ => {}
+    }
+}
+
+fn show_soft_keyboard(show: bool, props: Option<&i_slint_core::window::InputMethodProperties>) {
+    #[cfg(target_os = "android")]
+    {
+        let Some(app) = bevy::android::ANDROID_APP.get() else {
+            eprintln!("phase0: soft keyboard requested and ANDROID_APP is missing");
+            return;
+        };
+        if show {
+            // SHOW_IMPLICIT, matching winit's `set_ime_allowed(true)`.
+            app.show_soft_input(true);
+            if let Some(props) = props {
+                let mut text = props.text.to_string();
+                if !props.preedit_text.is_empty() {
+                    text.insert_str(props.preedit_offset, props.preedit_text.as_str());
+                }
+                app.set_text_input_state(bevy::android::android_activity::input::TextInputState {
+                    text,
+                    selection: bevy::android::android_activity::input::TextSpan {
+                        start: props.anchor_position.unwrap_or(props.cursor_position),
+                        end: props.cursor_position,
+                    },
+                    compose_region: (!props.preedit_text.is_empty()).then_some(
+                        bevy::android::android_activity::input::TextSpan {
+                            start: props.preedit_offset,
+                            end: props.preedit_offset + props.preedit_text.len(),
+                        },
+                    ),
+                });
+            }
+        } else {
+            // HIDE_IMPLICIT_ONLY, matching the show flag above.
+            app.hide_soft_input(true);
+        }
+    }
+    #[cfg(not(target_os = "android"))]
+    {
+        let _ = (show, props);
+    }
 }
 
 /// Tell Slint the panel size, allocate a matching texture, and scale the quad
@@ -732,15 +1090,7 @@ fn publish_overlay(
     quads: &Query<&MeshMaterial3d<StandardMaterial>, With<SlintQuad>>,
 ) {
     if let Some(ctx) = ctx {
-        let physical = PhysicalSize::new(width, height);
-        ctx.adapter.size.set(physical);
-        let scale = scale.max(0.01);
-        ctx.adapter.slint_window.dispatch_event(WindowEvent::ScaleFactorChanged { scale_factor: scale });
-        ctx.adapter
-            .slint_window
-            .dispatch_event(WindowEvent::Resized {
-                size: physical.to_logical(scale),
-            });
+        apply_slint_size(&ctx.adapter, width, height, scale);
     }
     let image_handle = images.add(overlay_image(width, height));
     let mat_handle = quads.iter().next().map(|mat| mat.0.clone());
@@ -759,7 +1109,7 @@ fn publish_overlay(
         .is_ok()
     {}
     *shared.texture.lock().expect("texture slot") = None;
-    eprintln!("phase0: slint overlay texture {width}x{height} scheduled");
+    eprintln!("phase0: slint overlay texture {width}x{height} scale {scale:.3} scheduled");
 }
 
 fn fit_overlay(
@@ -856,7 +1206,7 @@ fn refresh_overlay(
     mut loss: ResMut<SurfaceLoss>,
     hold: Res<PlayerSwapchainHold>,
     mut size: ResMut<OverlaySize>,
-    windows: Query<&Window, With<PrimaryWindow>>,
+    windows: Query<(Entity, &Window), With<PrimaryWindow>>,
     ctx: Option<NonSend<SlintContext>>,
     shared: Res<SlintSharedTexture>,
     mut images: ResMut<Assets<Image>>,
@@ -868,10 +1218,10 @@ fn refresh_overlay(
     if hold.0 {
         return;
     }
-    let Some(window) = windows.iter().next() else {
+    let Some((entity, window)) = windows.iter().next() else {
         return;
     };
-    let Some((width, height)) = overlay_size_for_window(window) else {
+    let Some((width, height, scale)) = overlay_pixels(entity, window) else {
         return;
     };
     let size_changed = size.width != width || size.height != height;
@@ -896,7 +1246,7 @@ fn refresh_overlay(
     publish_overlay(
         width,
         height,
-        window.resolution.scale_factor(),
+        scale,
         ctx.as_deref(),
         &shared,
         &mut images,
@@ -1684,6 +2034,7 @@ fn build_game(headless: bool) -> App {
         brightness: 280.0,
         ..default()
     })
+    .add_systems(First, sync_native_window_size)
     .add_systems(Startup, (
         install_render_error_handler.run_if(resource_exists::<RenderErrorHandler>),
         setup_scene
@@ -1704,6 +2055,7 @@ fn build_game(headless: bool) -> App {
             receive_texture,
             render_slint,
             pointer_input,
+            slint_keyboard,
             gate_gallery_camera,
             spin_cube,
         )
@@ -1840,6 +2192,136 @@ mod headless_startup {
             "system param validation failed:\n{}",
             failures.join("\n"),
         );
+    }
+
+    #[test]
+    fn scaled_default_window_is_not_the_phone() {
+        // 1280×720 × (420/160) = 3360×1890, the texture parity7 scheduled first.
+        assert!(is_scaled_default_window(3360, 1890, 2.625));
+        assert!(!is_scaled_default_window(2400, 1080, 2.625));
+        // Scale 1 keeps the real 1280×720 desktop default.
+        assert!(!is_scaled_default_window(1280, 720, 1.0));
+    }
+
+    #[test]
+    fn touch_position_stays_in_logical_pixels() {
+        let logical = logical_from_touch(Vec2::new(800.0, 200.0));
+        assert_eq!((logical.x, logical.y), (800.0, 200.0));
+    }
+
+    /// Press and release on the Sign in button. The Slint callback must run
+    /// and the window must ask to redraw. The software renderer needs no GPU.
+    #[test]
+    fn pointer_on_sign_in_fires_the_callback_and_redraws() {
+        use std::rc::Rc;
+
+        use slint::platform::software_renderer::{MinimalSoftwareWindow, RepaintBufferType};
+        use slint::platform::{Platform, WindowAdapter, WindowEvent};
+
+        struct TestPlatform {
+            window: Rc<MinimalSoftwareWindow>,
+        }
+
+        impl Platform for TestPlatform {
+            fn create_window_adapter(
+                &self,
+            ) -> Result<Rc<dyn WindowAdapter>, slint::PlatformError> {
+                Ok(self.window.clone())
+            }
+        }
+
+        let window = MinimalSoftwareWindow::new(RepaintBufferType::ReusedBuffer);
+        slint::platform::set_platform(Box::new(TestPlatform {
+            window: window.clone(),
+        }))
+        .expect("set_platform");
+        let ui = shell::PlayerShell::new().expect("PlayerShell");
+        shell::wire(&ui);
+        ui.show().expect("show");
+        ui.window()
+            .dispatch_event(WindowEvent::ScaleFactorChanged { scale_factor: 1.0 });
+        window.set_size(slint::PhysicalSize::new(900, 500));
+        ui.window()
+            .dispatch_event(WindowEvent::WindowActiveChanged(true));
+        slint::platform::update_timers_and_animations();
+        // A real render subscribes the redraw tracker. An empty callback does
+        // not, so a later click would change pixels and never call
+        // `request_redraw`.
+        let _ = paint_shell(&window);
+
+        let center = sign_in_button_center(&ui);
+        let _ = paint_shell(&window);
+        ui.window()
+            .dispatch_event(WindowEvent::PointerMoved { position: center });
+        ui.window().dispatch_event(WindowEvent::PointerPressed {
+            position: center,
+            button: slint::platform::PointerEventButton::Left,
+        });
+        // The press paints the button's pressed state. Release may return
+        // that property to its old value in the same turn.
+        let redraw_on_press = paint_shell(&window);
+        ui.window().dispatch_event(WindowEvent::PointerReleased {
+            position: center,
+            button: slint::platform::PointerEventButton::Left,
+        });
+        let redraw_on_release = paint_shell(&window);
+        let commands = shell::take_commands();
+        assert!(
+            commands
+                .iter()
+                .any(|command| matches!(command, session::Command::SignIn)),
+            "Sign in at ({}, {}) window {}x{} produced {commands:?}",
+            center.x,
+            center.y,
+            ui.window().size().width,
+            ui.window().size().height,
+        );
+        assert!(
+            redraw_on_press || redraw_on_release,
+            "the click must request a redraw",
+        );
+    }
+
+    fn paint_shell(window: &slint::platform::software_renderer::MinimalSoftwareWindow) -> bool {
+        window.draw_if_needed(|renderer| {
+            let mut buffer = i_slint_core::graphics::SharedPixelBuffer::<
+                i_slint_core::graphics::Rgb8Pixel,
+            >::new(900, 500);
+            let stride = buffer.width() as usize;
+            let _ = renderer.render(buffer.make_mut_slice(), stride);
+        })
+    }
+
+    fn sign_in_button_center(ui: &shell::PlayerShell) -> slint::LogicalPosition {
+        let inner = i_slint_core::window::WindowInner::from_pub(ui.window());
+        let tree = inner.component();
+        let mut found: Option<(slint::LogicalPosition, f32)> = None;
+        i_slint_core::item_tree::visit_items(
+            &tree,
+            i_slint_core::item_tree::TraversalOrder::BackToFront,
+            |item_tree, _item, index, _state| {
+                let item = i_slint_core::item_tree::ItemRc::new(item_tree.clone(), index);
+                let label = item.accessible_string_property(
+                    i_slint_core::accessibility::AccessibleStringProperty::Label,
+                );
+                if label.as_deref() == Some("Sign in") {
+                    let geom = item.geometry();
+                    // `map_to_window` adds ancestor positions and not this item's own x/y.
+                    let center = item.map_to_window(i_slint_core::lengths::LogicalPoint::new(
+                        geom.origin.x + geom.size.width / 2.0,
+                        geom.origin.y + geom.size.height / 2.0,
+                    ));
+                    let area = geom.size.width * geom.size.height;
+                    let better = found.as_ref().is_none_or(|(_, best)| area > *best);
+                    if better {
+                        found = Some((slint::LogicalPosition::new(center.x, center.y), area));
+                    }
+                }
+                i_slint_core::item_tree::ItemVisitorResult::Continue(())
+            },
+            (),
+        );
+        found.expect("Sign in button has a layout rect").0
     }
 }
 

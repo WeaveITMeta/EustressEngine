@@ -76,6 +76,7 @@ impl Default for MobileApp {
     }
 }
 
+#[derive(Debug)]
 pub enum Command {
     Search(String),
     Play(String),

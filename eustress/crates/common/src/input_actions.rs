@@ -228,6 +228,9 @@ pub struct InputState {
     pub ui_held: HashSet<u32>,
     /// Gallery and sign-in cover the window, so every finger belongs to the UI.
     pub capture_all: bool,
+    /// UI fingers released this frame. `Ended` removes the finger before the
+    /// shell's pointer system runs, and a press and release can share a frame.
+    pub released_ui: Vec<u64>,
 }
 
 impl Default for InputState {
@@ -254,6 +257,7 @@ impl InputState {
             ui_rects: Vec::new(),
             ui_held: HashSet::new(),
             capture_all: false,
+            released_ui: Vec::new(),
         };
         state.push_context("SystemMenu", 1000, true, false);
         state.push_context("TextFocus", 900, true, true);
@@ -772,10 +776,19 @@ fn in_ui(state: &InputState, pos: Vec2) -> bool {
     state.ui_rects.iter().any(|r| r.contains(pos)) || point_in_jump(state, pos)
 }
 
+impl InputState {
+    /// This finger is owned by the UI for its whole life. A finger that ended
+    /// this frame is in [`Self::released_ui`] instead.
+    pub fn finger_is_ui(&self, id: u64) -> bool {
+        self.fingers.get(&id).is_some_and(|finger| finger.owner == FingerOwner::Ui)
+    }
+}
+
 fn update_fingers(state: &mut InputState, frame: &DeviceFrame) -> (Vec2, f32, Option<Vec2>) {
     let mut look = Vec2::ZERO;
     let mut pinch_px = 0.0;
     let mut world_tap = None;
+    state.released_ui.clear();
     for touch in &frame.touches {
         match touch.phase {
             TouchPhase::Started => {
@@ -823,11 +836,15 @@ fn update_fingers(state: &mut InputState, frame: &DeviceFrame) -> (Vec2, f32, Op
                         state.pinch = None;
                     }
                 }
-                if touch.phase == TouchPhase::Ended {
-                    if let Some(finger) = finished {
-                        if finger.owner == FingerOwner::World && finger.moved < 10.0 {
-                            world_tap = Some(finger.pos);
-                        }
+                if let Some(finger) = finished {
+                    if finger.owner == FingerOwner::Ui {
+                        state.released_ui.push(touch.id);
+                    }
+                    if touch.phase == TouchPhase::Ended
+                        && finger.owner == FingerOwner::World
+                        && finger.moved < 10.0
+                    {
+                        world_tap = Some(finger.pos);
                     }
                 }
             }
@@ -923,7 +940,6 @@ fn drive_input(
     typing: Option<Res<crate::play_session::GuiKeyboardFocus>>,
     time: Res<Time>,
 ) {
-    let scale = windows.iter().next().map(|w| w.resolution.scale_factor()).unwrap_or(1.0).max(0.01);
     if let Some(window) = windows.iter().next() {
         state.viewport = Vec2::new(window.resolution.width(), window.resolution.height());
     }
@@ -953,10 +969,13 @@ fn drive_input(
         frame.wheel_y += y;
     }
     for touch in touches.read() {
+        // Bevy 0.19's winit backend already stores `TouchInput.position` in
+        // logical pixels (`location.to_logical(scale_factor)`). Dividing again
+        // sent the thumbstick and the UI hit test to 1/scale of the real point.
         frame.touches.push(TouchSample {
             id: touch.id,
             phase: touch.phase,
-            pos: touch.position / scale,
+            pos: touch.position,
         });
     }
     if let Some(pad) = pads.iter().next() {
