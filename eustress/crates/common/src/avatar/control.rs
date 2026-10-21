@@ -24,7 +24,6 @@
 //! Escape has exactly one owner and the host decides its meaning through
 //! [`HostSeams::escape_action`].
 
-use bevy::input::mouse::{MouseMotion, MouseWheel};
 use bevy::prelude::*;
 use bevy::window::{CursorGrabMode, CursorOptions};
 
@@ -121,6 +120,9 @@ pub(crate) struct AvatarControlPlugin;
 
 impl Plugin for AvatarControlPlugin {
     fn build(&self, app: &mut App) {
+        if !app.is_plugin_added::<crate::input_actions::InputActionsPlugin>() {
+            app.add_plugins(crate::input_actions::InputActionsPlugin);
+        }
         app.init_resource::<AvatarInputEnabled>()
             .add_message::<AvatarEscapePressed>()
             .add_systems(Update, spawn_camera_for_new_avatars.in_set(AvatarSystems::Lifecycle))
@@ -201,9 +203,10 @@ fn spawn_camera_for_new_avatars(
 }
 
 fn sample_movement_input(
-    keys: Res<ButtonInput<KeyCode>>,
+    actions: Res<crate::input_actions::Actions>,
     enabled: Res<AvatarInputEnabled>,
     // A GUI TextBox holding the keyboard takes the keys, WASD and Space too.
+    // The action layer also sinks those keys while this is set.
     typing: Option<Res<crate::play_session::GuiKeyboardFocus>>,
     cameras: Query<&AvatarCamera>,
     mut q: Query<(&mut AvatarIntent, &AvatarBody), (With<LocalAvatar>, With<SpawnedByAvatarRuntime>)>,
@@ -217,50 +220,51 @@ fn sample_movement_input(
         }
 
         let yaw = cameras.iter().next().map(|c| c.yaw).unwrap_or(0.0);
-
-        let mut local = Vec3::ZERO;
-        if keys.pressed(KeyCode::KeyW) {
-            local.z -= 1.0;
-        }
-        if keys.pressed(KeyCode::KeyS) {
-            local.z += 1.0;
-        }
-        if keys.pressed(KeyCode::KeyA) {
-            local.x -= 1.0;
-        }
-        if keys.pressed(KeyCode::KeyD) {
-            local.x += 1.0;
-        }
-
-        if local.length_squared() > 0.0 {
-            local = local.normalize();
-        }
-
-        // Camera-relative on the ground plane.
-        let forward = Vec3::new(-yaw.sin(), 0.0, -yaw.cos());
-        let right = Vec3::new(yaw.cos(), 0.0, -yaw.sin());
-        intent.direction = forward * -local.z + right * local.x;
-
-        intent.sprint = keys.pressed(KeyCode::ShiftLeft) || keys.pressed(KeyCode::ShiftRight);
-        intent.crouch = keys.pressed(KeyCode::ControlLeft) || keys.pressed(KeyCode::ControlRight);
+        let move_v = actions.d2("Move");
+        // Move.y is forward (W). The ground vector's z is -forward, which is
+        // what reading KeyW used to write.
+        intent.direction = crate::input_actions::camera_relative_direction(move_v.x, -move_v.y, yaw);
+        intent.sprint = actions.pressed("Sprint");
+        intent.crouch = actions.pressed("Crouch");
 
         // Latched, not level-triggered: the controller clears it on consume so
         // one press cannot produce two jumps.
-        if keys.just_pressed(KeyCode::Space) {
+        if actions.pressed_this_frame("Jump") {
             intent.jump_pressed = true;
         }
     }
 }
 
+/// Mouse pixels keep [`AvatarCamera::sensitivity`]. Touch radians are already
+/// scaled (0.01 rad per logical pixel) and are not multiplied again.
+pub fn apply_look(
+    mut yaw: f32,
+    mut pitch: f32,
+    pitch_min: f32,
+    pitch_max: f32,
+    sensitivity: f32,
+    first_person: bool,
+    right_held: bool,
+    mouse_px: Vec2,
+    touch_rad: Vec2,
+) -> (f32, f32) {
+    if first_person || right_held {
+        yaw -= mouse_px.x * sensitivity;
+        pitch = (pitch + mouse_px.y * sensitivity).clamp(pitch_min, pitch_max);
+    }
+    yaw -= touch_rad.x;
+    pitch = (pitch + touch_rad.y).clamp(pitch_min, pitch_max);
+    (yaw, pitch)
+}
+
 fn camera_look(
-    mut motion: MessageReader<MouseMotion>,
+    actions: Res<crate::input_actions::Actions>,
     mouse: Res<ButtonInput<MouseButton>>,
     enabled: Res<AvatarInputEnabled>,
     mut cameras: Query<&mut AvatarCamera, Without<AvatarCameraScripted>>,
     mut warned: Local<bool>,
 ) {
     if !enabled.0 {
-        motion.clear();
         return;
     }
 
@@ -277,21 +281,28 @@ fn camera_look(
         warn!("avatar: expected 1 AvatarCamera, found {n} — orbit will drive all of them");
     }
 
-    let deltas: Vec<Vec2> = motion.read().map(|e| e.delta).collect();
-    if deltas.is_empty() {
+    let right = mouse.pressed(MouseButton::Right);
+    if actions.mouse_look_px == Vec2::ZERO && actions.touch_look_rad == Vec2::ZERO {
         return;
     }
 
     for mut cam in cameras.iter_mut() {
         // First person always looks; third person orbits on right-drag.
-        if !(cam.first_person || mouse.pressed(MouseButton::Right)) {
-            continue;
-        }
-        for d in &deltas {
-            cam.yaw -= d.x * cam.sensitivity;
-            cam.pitch =
-                (cam.pitch + d.y * cam.sensitivity).clamp(cam.pitch_min, cam.pitch_max);
-        }
+        // Touch look is not gated on the right button: the right half of the
+        // screen is the camera zone.
+        let (yaw, pitch) = apply_look(
+            cam.yaw,
+            cam.pitch,
+            cam.pitch_min,
+            cam.pitch_max,
+            cam.sensitivity,
+            cam.first_person,
+            right,
+            actions.mouse_look_px,
+            actions.touch_look_rad,
+        );
+        cam.yaw = yaw;
+        cam.pitch = pitch;
     }
 }
 
@@ -345,24 +356,20 @@ fn camera_orbit_keys(
 }
 
 fn camera_zoom(
-    mut wheel: MessageReader<MouseWheel>,
+    actions: Res<crate::input_actions::Actions>,
     enabled: Res<AvatarInputEnabled>,
     mut cameras: Query<&mut AvatarCamera, Without<AvatarCameraScripted>>,
     mut cursor: Query<&mut CursorOptions, With<Window>>,
 ) {
     let Ok(mut cam) = cameras.single_mut() else {
-        wheel.clear();
         return;
     };
     if !enabled.0 {
-        wheel.clear();
         return;
     }
 
-    let mut delta = 0.0;
-    for e in wheel.read() {
-        delta += e.y;
-    }
+    // Wheel notches, plus pinch already converted to that unit.
+    let delta = actions.zoom_notches;
     if delta == 0.0 {
         return;
     }
@@ -579,5 +586,25 @@ pub(crate) fn face_movement_direction(
             - std::f32::consts::PI;
         let alpha = 1.0 - (-10.0 * dt).exp();
         tf.rotation = Quat::from_rotation_y(current + diff * alpha);
+    }
+}
+
+#[cfg(test)]
+mod look_tests {
+    use super::apply_look;
+
+    #[test]
+    fn mouse_pixels_use_the_camera_sensitivity_and_the_right_button() {
+        let (yaw, pitch) = apply_look(0.0, 0.3, -1.35, 1.35, 0.003, false, true, bevy::prelude::Vec2::new(10.0, -4.0), bevy::prelude::Vec2::ZERO);
+        assert!((yaw - -0.03).abs() < 1e-6, "{yaw}");
+        assert!((pitch - (0.3 - 0.012)).abs() < 1e-6, "{pitch}");
+        let (yaw, pitch) = apply_look(0.0, 0.3, -1.35, 1.35, 0.003, false, false, bevy::prelude::Vec2::new(10.0, -4.0), bevy::prelude::Vec2::ZERO);
+        assert_eq!((yaw, pitch), (0.0, 0.3), "third person ignores the mouse until the right button is held");
+    }
+
+    #[test]
+    fn touch_radians_apply_without_the_mouse_button() {
+        let (yaw, pitch) = apply_look(0.0, 0.0, -1.35, 1.35, 0.003, false, false, bevy::prelude::Vec2::ZERO, bevy::prelude::Vec2::new(0.01, 0.02));
+        assert!((yaw - -0.01).abs() < 1e-6 && (pitch - 0.02).abs() < 1e-6, "{yaw} {pitch}");
     }
 }

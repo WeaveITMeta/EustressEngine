@@ -63,10 +63,14 @@ pub use eustress_common::plugins::humanoid::{
 // Movement Systems (kept for reference, client uses player_plugin.rs systems)
 // ============================================================================
 
-/// Process movement input and update intent
+/// Process movement input and update intent.
+///
+/// Reads `Move`, `Jump`, `Sprint`, and `Crouch` from the shared action layer.
+/// The live avatar uses [`eustress_common::avatar::control`] for the same
+/// actions; this path stays for the older character root.
 #[allow(dead_code)]
 pub fn process_movement_input(
-    keys: Res<ButtonInput<KeyCode>>,
+    actions: Res<eustress_common::input_actions::Actions>,
     player_service: Res<PlayerService>,
     camera_query: Query<&PlayerCamera>,
     mut intent_query: Query<&mut MovementIntent, With<CharacterRoot>>,
@@ -81,31 +85,16 @@ pub fn process_movement_input(
     
     let Ok(camera) = camera_query.single() else { return };
     let Ok(mut intent) = intent_query.single_mut() else { return };
-    
-    // Get input direction
-    let mut input = Vec3::ZERO;
-    if keys.pressed(KeyCode::KeyW) { input.z -= 1.0; }
-    if keys.pressed(KeyCode::KeyS) { input.z += 1.0; }
-    if keys.pressed(KeyCode::KeyA) { input.x -= 1.0; }
-    if keys.pressed(KeyCode::KeyD) { input.x += 1.0; }
-    
-    // Normalize input
-    if input.length_squared() > 0.0 {
-        input = input.normalize();
-    }
-    
-    // Transform to world space based on camera yaw
-    let forward = Vec3::new(-camera.yaw.sin(), 0.0, -camera.yaw.cos());
-    let right = Vec3::new(camera.yaw.cos(), 0.0, -camera.yaw.sin());
-    intent.direction = forward * -input.z + right * input.x;
-    
-    // Speed and modifiers
-    intent.sprint = keys.pressed(KeyCode::ShiftLeft) || keys.pressed(KeyCode::ShiftRight);
-    intent.crouch = keys.pressed(KeyCode::ControlLeft) || keys.pressed(KeyCode::ControlRight);
-    intent.jump = keys.just_pressed(KeyCode::Space);
-    
-    // Calculate speed (0.0 = idle, 0.5 = walk, 1.0 = run, 1.5 = sprint)
-    if input.length_squared() > 0.0 {
+
+    let move_v = actions.d2("Move");
+    let input = eustress_common::input_actions::camera_relative_direction(move_v.x, -move_v.y, camera.yaw);
+    intent.direction = input;
+
+    intent.sprint = actions.pressed("Sprint");
+    intent.crouch = actions.pressed("Crouch");
+    intent.jump = actions.pressed_this_frame("Jump");
+
+    if move_v.length_squared() > 0.0 {
         intent.speed = if intent.sprint { 1.5 } else { 1.0 };
     } else {
         intent.speed = 0.0;
