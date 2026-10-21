@@ -2,6 +2,55 @@
 
 Branch `mobile/phase0-spike`. Spike only. No release, no store upload, no production deploy.
 
+## Follow-up: surface lifecycle
+
+The wgpu instance, surface, and device are created only after winit `Resumed` has put a `RawHandleWrapper` on the primary window. That is GameActivity `onSurfaceCreated`. `RenderPlugin` stays out of the app until then (`SurfaceGate`), so GLES is not asked for an adapter before a window exists.
+
+**Backend.** Vulkan is the default (`Backends::VULKAN | Backends::GL`, or `WGPU_BACKEND`). The instance that Bevy keeps is a single backend. A Vulkan+GLES instance would connect the `ANativeWindow` to Vulkan and the GLES window surface then fails with "already connected to another API". GLES is compiled in with `bevy_render` feature `gles` (Bevy does not re-export that feature) and is used when Vulkan enumerates nothing. `WGPU_BACKEND=gl` forces GLES. The emulator check uses that, because gfxstream Vulkan on this host blocks in `vkCreateImageView`. An arm64 device has no `wrap.sh`, so it still tries Vulkan first.
+
+**Suspend / resume.** `Suspended` drops the wgpu swapchain (`WindowSurfaces`) and sets `SwapchainHold` in the patched `bevy_render`, so `prepare_windows` does not call `Surface::get_current_texture` on a dead `ANativeWindow`. The Slint renderer and its overlay texture are dropped too. `Running` clears the hold. Bevy configures a new surface on the **same** device, and the overlay image is allocated again. Logcat on the emulator (GLES):
+
+```
+phase0: surface lost (Suspended). swapchain hold on. gles=true
+phase0: dropped wgpu swapchain (Suspended / surface loss)
+phase0: resume (Running). new surface on the same device. gles=true
+phase0: slint overlay texture scheduled for recreate
+Surface format Rgba8Unorm stays non-sRGB; this adapter has no SURFACE_VIEW_FORMATS
+```
+
+No panic on that resume. The process stayed up.
+
+Destroying the GLES device from `Update` was tried and reverted. wgpu panics instead of reporting `DeviceLost` (`Surface::get_current_texture`: "Surface is not configured for presentation", and later `Buffer::get_mapped_range`: "Buffer is invalid"). The error handler still rebuilds the device when wgpu does deliver `DeviceLost`.
+
+**Skia on GLES.** `SkiaWGPURenderer` rejects the GL backend (`Unsupported WGPU backend for use with Skia: gl`). The Bevy scene continues without the overlay. Vulkan is the path that can draw the Slint label. That path was not run on a device. **UNVERIFIED on hardware.**
+
+**Downlevel.** SwiftShader GLES has neither `SURFACE_VIEW_FORMATS` nor `VIEW_FORMATS`. The `bevy_render` patch leaves `view_formats` empty in those cases so `Surface::configure` and the camera targets (`main_texture_a` / `main_texture_b`) are not rejected. `bevy_app` is patched so plugins added during `finish` (the renderer, once the window exists) are finished in the same pass.
+
+## What was built and tested this follow-up
+
+| Check | Result |
+| --- | --- |
+| Host `cargo check -p eustress-player-mobile --features android` | Passed. Dev profile, 45.22s. |
+| `cargo ndk -t arm64-v8a -P 29 build --release -p eustress-player-mobile --features android` | Passed. `libeustress_player_mobile.so` is ELF aarch64, 66,881,768 bytes uncompressed in the APK. |
+| `cargo ndk -t x86_64 -P 29` same package | Passed. Used only for the emulator. |
+| Emulator, Android 14 `google_apis` x86_64 AVD `phase0`, `-gpu swiftshader_indirect -accel off -feature -Vulkan`, `WGPU_BACKEND=gl` | Device and surface created after `onSurfaceCreated`. Suspend drops the swapchain. Resume configures a new surface on the same GLES device. No panic. |
+| Screenshot `/opt/cursor/artifacts/phase0-gles-frame.png` | 2400×1080, every sampled pixel `(0,0,0)`. GameActivity was the resumed activity. Logcat also showed `GL_FRAMEBUFFER_INCOMPLETE` (depth attachment `GL_DEPTH_COMPONENT16`) and a naga error `CUBE_ARRAY_TEXTURES is required`. A lit frame is **not** in this file. |
+| Real device / Play / store | **UNVERIFIED.** Not run. |
+
+An earlier binary in this same session, before the suspend-hold edits, did produce a screencap with a non-black scene (bright pixels in the middle of the frame). That file was overwritten by the black capture above. Do not treat the saved PNG as a picture of the cube.
+
+**arm64 debug APK** (this follow-up, arm64-v8a only, no `wrap.sh`):
+
+- Path: `/opt/cursor/artifacts/eustress-player-phase0-arm64-debug.apk`
+- Size: 32,101,506 bytes
+- sha256: `71397b075304148c1fd0253428a5a6f66b3a32671958f680d9b871f66a7019f1`
+- `minSdk` 29, `targetSdk` 34, `compileSdk` 34
+- Native ABI: `arm64-v8a` only
+- Permissions in the packaged manifest: `android.permission.INTERNET`, and the AndroidX signature permission `dev.eustress.player.debug.DYNAMIC_RECEIVER_NOT_EXPORTED_PERMISSION`
+- `uses-feature` `glEsVersion` 3.0, Vulkan level, and Vulkan version are `required=false`
+
+KVM is unusable on this host (`kernel BUG` in `kvm_arch_vcpu_create`). The emulator is TCG. Everything above that says "emulator" is **UNVERIFIED** on hardware.
+
 ## Which integration pattern worked
 
 **Pattern (a), Skia on Bevy's wgpu device, is the one that builds.** Bevy 0.19 owns the window (`android-game-activity` / stock `GameActivity`). `SkiaWGPURenderer` draws a Slint label and a button into an `Rgba8Unorm` texture on that same device. Bevy samples the texture on an unlit quad in front of a lit cube.
@@ -80,7 +129,7 @@ Unable to find a GPU! Make sure you have installed required drivers!
 
 That panic is ~5s **before** `GameActivity: onSurfaceCreated_native`. GLES does not enumerate without the surface, and Bevy asks for the adapter first. Screenshot `/opt/cursor/artifacts/phase0-spike.png` is the System UI ANR dialog on a black portrait frame, not the scene.
 
-**Rendered frame: UNVERIFIED.**
+**Rendered frame on that first attempt: UNVERIFIED.** The follow-up section above is the later run. The device is created after `onSurfaceCreated` now, and suspend/resume no longer hits the "Unable to find a GPU" panic. The saved screenshot is still not a lit frame.
 
 AGP does not pack a non-`.so` file from `jniLibs`. `wrap.sh` is added to the APK after `packageDebug` (`zip` + `zipalign` + `apksigner`). Source copy: `app/src/emulator-jni/x86_64/wrap.sh`. arm64 has no wrap script, so a device still uses `VULKAN|GL`.
 
