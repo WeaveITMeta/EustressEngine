@@ -1577,6 +1577,15 @@ fn build_game(headless: bool) -> App {
     }
 
     let mut app = App::new();
+    // A missing `Res` / `ResMut` is a system-param validation error. Bevy's
+    // default handler panics, which is how parity6 died on the first frame.
+    // On Android, log it and skip that system. A `panic!` in a system body
+    // is still a panic: the executor resumes the unwind after the handler.
+    // Host tests keep the panic handler so the param sweep fails the build.
+    #[cfg(target_os = "android")]
+    {
+        app.set_error_handler(bevy::ecs::error::warn);
+    }
     // Before AssetPlugin freezes the source table. On Android the character
     // GLBs are copied out of the APK first; a host build finds the checkout.
     // The self-check logs each Bridge signature. A type mismatch returns
@@ -1624,7 +1633,12 @@ fn build_game(headless: bool) -> App {
     // `eustress-common` turns on `bevy_gizmos`, so DefaultPlugins includes
     // `GizmoPlugin`. Its skinned-mesh system requires `Assets<Mesh>`, which
     // mobile does not insert until SurfaceGate. The Player does not draw
-    // editor gizmos.
+    // editor gizmos. `LightPlugin` (added later, from `SurfaceGate`) still
+    // registers `LightGizmoPlugin` while this feature is on. That plugin's
+    // mesh system needs `Assets<GizmoAsset>`, which only `GizmoPlugin`
+    // inserts. The patched `bevy_light` skips `LightGizmoPlugin` when this
+    // variable is set, so those systems are never scheduled.
+    std::env::set_var("EUSTRESS_DISABLE_LIGHT_GIZMOS", "1");
     defaults = defaults.disable::<bevy::gizmos::GizmoPlugin>();
     app.add_plugins(defaults)
     .add_plugins(avian3d::prelude::PhysicsPlugins::default())
@@ -1763,4 +1777,71 @@ mod headless_startup {
         );
         assert!(!app.is_plugin_added::<RenderPlugin>());
     }
+
+    /// Records Bevy system-param validation failures. Anything else still panics.
+    fn record_validation_failure(
+        err: bevy::ecs::error::BevyError,
+        ctx: bevy::ecs::error::ErrorContext,
+    ) {
+        let message = err.to_string();
+        if message.contains("failed validation") {
+            let first = message.lines().next().unwrap_or(message.as_str());
+            VALIDATION_FAILURES
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .push(format!("{}: {first}", ctx.name()));
+        } else {
+            bevy::ecs::error::panic(err, ctx);
+        }
+    }
+
+    /// After `finish` / `cleanup` and Startup, every system Bevy actually
+    /// attempts must pass param validation. The plugins `SurfaceGate` adds
+    /// on device are included here except `RenderPlugin` (no display) and
+    /// the pipeline plugins whose `build` requires `RenderApp`.
+    #[test]
+    fn every_scheduled_system_passes_param_validation() {
+        let mut app = build_game(true);
+        app.add_plugins((
+            bevy::image::ImagePlugin::default(),
+            bevy::mesh::MeshPlugin,
+            bevy::camera::CameraPlugin,
+            bevy::light::LightPlugin,
+        ));
+        app.finish();
+        app.cleanup();
+        assert!(
+            !app.is_plugin_added::<bevy::light::gizmos::LightGizmoPlugin>(),
+            "LightGizmoPlugin must stay off when GizmoPlugin is off",
+        );
+        app.insert_resource(bevy::ecs::error::FallbackErrorHandler(
+            record_validation_failure,
+        ));
+        VALIDATION_FAILURES
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clear();
+        // Startup inserts resources before `Last`, where gizmo meshes update.
+        app.update();
+        // One fixed step, so `FixedFirst` / `FixedLast` gizmo systems run.
+        app.world_mut()
+            .resource_mut::<bevy::time::Time<bevy::time::Fixed>>()
+            .accumulate_overstep(std::time::Duration::from_secs(1));
+        app.update();
+        app.update();
+        let mut failures = VALIDATION_FAILURES
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone();
+        failures.sort();
+        failures.dedup();
+        assert!(
+            failures.is_empty(),
+            "system param validation failed:\n{}",
+            failures.join("\n"),
+        );
+    }
 }
+
+#[cfg(test)]
+static VALIDATION_FAILURES: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
