@@ -3,6 +3,7 @@ package dev.eustress.player;
 import android.app.Activity;
 import android.content.Context;
 import android.content.SharedPreferences;
+import android.content.res.AssetManager;
 import android.os.Build;
 import android.os.VibrationEffect;
 import android.os.Vibrator;
@@ -10,6 +11,12 @@ import android.view.DisplayCutout;
 import android.view.HapticFeedbackConstants;
 import android.view.View;
 import android.view.WindowInsets;
+
+import java.io.File;
+import java.io.FileOutputStream;
+import java.io.IOException;
+import java.io.InputStream;
+import java.io.OutputStream;
 
 import androidx.security.crypto.EncryptedSharedPreferences;
 import androidx.security.crypto.MasterKey;
@@ -135,6 +142,49 @@ public final class Bridge {
 
     public static String filesDir(Activity activity) {
         return activity.getFilesDir().getAbsolutePath();
+    }
+
+    /**
+     * Copy {@code assets/bundled} into the app files directory. Returns that
+     * directory when {@code characters/y_bot.glb} landed, else null. The Rust
+     * player points {@code bundled://} at it before Bevy freezes asset sources.
+     */
+    public static String installBundledAssets(Activity activity) {
+        File dest = new File(activity.getFilesDir(), "bundled");
+        try {
+            copyAssetTree(activity.getAssets(), "bundled", dest);
+        } catch (IOException ignored) {
+            return null;
+        }
+        File body = new File(dest, "characters/y_bot.glb");
+        if (!body.isFile()) {
+            return null;
+        }
+        return dest.getAbsolutePath();
+    }
+
+    /** {@code path} is a file when {@code list} is empty, otherwise a directory. */
+    private static void copyAssetTree(AssetManager assets, String path, File dest) throws IOException {
+        String[] children = assets.list(path);
+        if (children == null || children.length == 0) {
+            File parent = dest.getParentFile();
+            if (parent != null) {
+                parent.mkdirs();
+            }
+            try (InputStream in = assets.open(path); OutputStream out = new FileOutputStream(dest)) {
+                byte[] buf = new byte[8192];
+                int read;
+                while ((read = in.read(buf)) != -1) {
+                    out.write(buf, 0, read);
+                }
+            }
+            return;
+        }
+        dest.mkdirs();
+        for (String child : children) {
+            String childPath = path.isEmpty() ? child : path + "/" + child;
+            copyAssetTree(assets, childPath, new File(dest, child));
+        }
     }
 
     /** The view intent's data, when it is an eustress-player link. */

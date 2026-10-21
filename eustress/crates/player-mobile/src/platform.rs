@@ -57,6 +57,23 @@ pub fn token_remove(key: &str) -> Result<(), String> {
     }
 }
 
+/// Unpack the character GLBs shipped in the APK. `None` on a host build,
+/// which resolves `bundled://` from the checkout instead.
+pub fn install_bundled_assets() -> Option<PathBuf> {
+    #[cfg(target_os = "android")]
+    {
+        let path = eustress_bridge_android::install_bundled_assets()?;
+        let path = PathBuf::from(path);
+        if path.join("characters/y_bot.glb").is_file() {
+            return Some(path);
+        }
+        eprintln!("eustress player: bundled copy at {} has no characters/y_bot.glb", path.display());
+        return None;
+    }
+    #[cfg(not(target_os = "android"))]
+    None
+}
+
 /// Where downloaded worlds are cached. Android uses the activity's files
 /// directory. A host build uses a directory under the temp folder.
 pub fn files_dir() -> PathBuf {

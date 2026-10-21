@@ -25,6 +25,19 @@ android {
         }
     }
 
+    // One debug key for every machine. The default ~/.android/debug.keystore
+    // is generated per host, so a phase0 APK and a parity APK would not
+    // install over each other. Password and alias are the Android debug
+    // convention. This key is not a release key.
+    signingConfigs {
+        debug {
+            storeFile file('../debug.keystore')
+            storePassword 'android'
+            keyAlias 'androiddebugkey'
+            keyPassword 'android'
+        }
+    }
+
     buildTypes {
         release {
             minifyEnabled false
@@ -32,6 +45,7 @@ android {
         debug {
             applicationIdSuffix ".debug"
             debuggable true
+            signingConfig signingConfigs.debug
         }
     }
 
@@ -40,13 +54,26 @@ android {
         targetCompatibility JavaVersion.VERSION_17
     }
 
+    def bundledAssets = layout.buildDirectory.dir("generated/bundledAssets")
+    tasks.register('copyCharacterGlbs', Copy) {
+        from('../../common/assets/characters') {
+            include '**/*.glb'
+        }
+        into bundledAssets.map { it.dir('bundled/characters') }
+        includeEmptyDirs = false
+    }
+
     sourceSets {
         main {
             // emulator-jni holds x86_64/wrap.sh (WGPU_BACKEND=gl). AGP
             // packages only .so from jniLibs; the spike APK gets wrap.sh
             // from a zip after packageDebug. See PHASE0_SPIKE.md.
             jniLibs.srcDirs = ['src/main/jniLibs', 'src/emulator-jni']
+            assets.srcDir(bundledAssets)
         }
+    }
+    tasks.matching { it.name.startsWith('merge') && it.name.endsWith('Assets') }.configureEach {
+        dependsOn 'copyCharacterGlbs'
     }
 
     packaging {

@@ -36,6 +36,7 @@ mod links;
 mod platform;
 mod session;
 mod shell;
+mod space;
 
 use std::cell::{RefCell, UnsafeCell};
 use std::rc::{Rc, Weak};
@@ -196,10 +197,14 @@ struct SlintContext {
     handles: RefCell<Option<WgpuHandles>>,
 }
 
-/// The gallery camera. Turned off once the avatar camera exists, so the two
+/// The gallery camera. Turned off once a play camera is drawing, so the two
 /// do not both clear the window.
 #[derive(Component)]
 struct GalleryCamera;
+
+/// The gallery's floor and cube. Removed when a downloaded Space opens.
+#[derive(Component)]
+pub(crate) struct StandInYard;
 
 /// Draws the Slint texture above the world. It does not clear.
 #[derive(Component)]
@@ -352,6 +357,7 @@ fn setup_scene(
         MeshMaterial3d(cube_material),
         Transform::from_xyz(0.0, -0.15, 0.0),
         LitCube,
+        StandInYard,
     ));
     commands.spawn((
         Mesh3d(meshes.add(Rectangle::new(1.0, 1.0))),
@@ -370,6 +376,7 @@ fn setup_scene(
             ..default()
         })),
         Transform::from_xyz(0.0, -0.5, 0.0),
+        StandInYard,
     ));
 
     commands.spawn((
@@ -778,10 +785,11 @@ fn fit_overlay(
 }
 
 fn gate_gallery_camera(
-    avatars: Query<(), With<eustress_common::avatar::control::AvatarCamera>>,
-    mut cameras: Query<&mut Camera, With<GalleryCamera>>,
+    avatars: Query<&Camera, With<eustress_common::avatar::control::AvatarCamera>>,
+    scripted: Query<&Camera, With<eustress_common::play_session::ScriptedPlayCamera>>,
+    mut cameras: Query<&mut Camera, (With<GalleryCamera>, Without<eustress_common::avatar::control::AvatarCamera>, Without<eustress_common::play_session::ScriptedPlayCamera>)>,
 ) {
-    let live = !avatars.is_empty();
+    let live = avatars.iter().any(|camera| camera.is_active) || scripted.iter().any(|camera| camera.is_active);
     for mut camera in &mut cameras {
         camera.is_active = !live;
     }
@@ -925,11 +933,35 @@ fn primary_window_handle(world: &World) -> Option<RawHandleWrapper> {
     })
 }
 
+/// Flags for the Vulkan instance on Android.
+///
+/// A debug build's default is `DEBUG | VALIDATION | VALIDATION_INDIRECT_CALL`.
+/// `Device::new` then builds the indirect-validation bind-group layout and
+/// names it. The emulator's ranchu driver (`vulkan.ranchu.so` on API 36,
+/// `-gpu host`) SIGSEGVs in `vkSetDebugUtilsObjectNameEXT` on that call
+/// (`fault addr 0x0`), about a second after launch, after the log line
+/// `adapter via with-surface: Vulkan …`. Phase 0's APKs were release-profile
+/// native code, so Bevy had already stripped `VALIDATION_INDIRECT_CALL` and
+/// `from_build_config` had not turned `DEBUG` on; the same emulator stayed
+/// up. The device-creation calls themselves are unchanged. Android keeps
+/// those release-shaped flags in a debug APK. `WGPU_DEBUG` / `WGPU_VALIDATION`
+/// cannot turn them back on here.
+#[cfg(target_os = "android")]
+fn android_instance_flags(mut flags: wgpu::InstanceFlags) -> wgpu::InstanceFlags {
+    flags.remove(wgpu::InstanceFlags::DEBUG);
+    flags.remove(wgpu::InstanceFlags::VALIDATION);
+    flags.remove(wgpu::InstanceFlags::VALIDATION_INDIRECT_CALL);
+    flags.remove(wgpu::InstanceFlags::GPU_BASED_VALIDATION);
+    flags
+}
+
 #[cfg(target_os = "android")]
 fn make_instance(settings: &WgpuSettings, backends: wgpu::Backends) -> wgpu::Instance {
+    let flags = android_instance_flags(settings.instance_flags);
+    eprintln!("phase0: instance flags {backends:?} {flags:?}");
     wgpu::Instance::new(wgpu::InstanceDescriptor {
         backends,
-        flags: settings.instance_flags,
+        flags,
         memory_budget_thresholds: settings.instance_memory_budget_thresholds,
         backend_options: wgpu::BackendOptions {
             gl: wgpu::GlBackendOptions {
@@ -1120,7 +1152,7 @@ fn try_instance(
 fn probe_hal_gles(settings: &WgpuSettings) -> String {
     let desc = wgpu::hal::InstanceDescriptor {
         name: "phase0-gles-probe",
-        flags: settings.instance_flags,
+        flags: android_instance_flags(settings.instance_flags),
         memory_budget_thresholds: settings.instance_memory_budget_thresholds,
         backend_options: wgpu::BackendOptions {
             gl: wgpu::GlBackendOptions {
@@ -1515,11 +1547,35 @@ pub fn run_game() {
     let mut settings = WgpuSettings::default();
     settings.backends =
         Some(wgpu::Backends::from_env().unwrap_or(wgpu::Backends::VULKAN | wgpu::Backends::GL));
+    // See `android_instance_flags`. Bevy's default keeps debug labels and
+    // indirect validation on whenever `debug_assertions` is set, which is
+    // this debug APK. The instance is created from these settings.
+    #[cfg(target_os = "android")]
+    {
+        settings.instance_flags = android_instance_flags(settings.instance_flags);
+    }
 
     let mut app = App::new();
-    // Before AssetPlugin freezes the source table. The GLBs may be absent
-    // from the APK; the capsule and follow camera still spawn.
+    // Before AssetPlugin freezes the source table. On Android the character
+    // GLBs are copied out of the APK first; a host build finds the checkout.
+    if let Some(root) = platform::install_bundled_assets() {
+        std::env::set_var("EUSTRESS_BUNDLED_ASSETS", &root);
+        eprintln!("eustress player: bundled assets at {}", root.display());
+    }
     eustress_common::avatar::boot::register_avatar_asset_sources(&mut app);
+    // `space://` is the live folder a downloaded world is written into.
+    // The directory has to exist before the first read; the world arrives later.
+    {
+        use bevy::asset::io::{AssetSourceBuilder, ErasedAssetReader};
+        let space_root = space::live_space_root();
+        let _ = std::fs::create_dir_all(&space_root);
+        app.register_asset_source(
+            "space",
+            AssetSourceBuilder::new(move || -> Box<dyn ErasedAssetReader> {
+                Box::new(eustress_play_runtime::space_paths::ContainedFileReader::new(space_root.clone()))
+            }),
+        );
+    }
     app.add_plugins(
         DefaultPlugins
             .build()
@@ -1537,6 +1593,16 @@ pub fn run_game() {
         eustress_common::avatar::AvatarHost::Client,
     ))
     .add_plugins(eustress_networking::NetPlugin)
+    .add_plugins(eustress_networking::player_replica::NetReplicaPlugin)
+    // Draw the opened tree. RenderApp does not exist yet: billboard and
+    // particle setup waits until SurfaceGate::finish, then runs from cleanup.
+    .add_plugins(eustress_play_runtime::PlayRuntimePlugin {
+        role: eustress_common::play_session::PlayRole::Replica,
+    })
+    .add_plugins(eustress_common::data_mesh::DataMeshPlugin)
+    .add_plugins(eustress_common::terrain::TerrainPlugin)
+    .add_plugins(eustress_common::plugins::light_classes::LightClassSyncPlugin)
+    .add_plugins(space::SpaceOpenPlugin)
     .init_resource::<eustress_common::play_session::GuiKeyboardFocus>()
     .init_resource::<session::MobileApp>()
     .add_plugins(SurfaceGate {
@@ -1579,6 +1645,7 @@ pub fn run_game() {
             .chain(),
     )
     .add_systems(Update, session::drive);
+    eustress_common::avatar::boot::register_gltf_scene_types(&mut app);
 
     app.run();
 }

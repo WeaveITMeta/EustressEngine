@@ -7973,6 +7973,7 @@ dependencies = [
  "eustress-bridge-ios",
  "eustress-common",
  "eustress-networking",
+ "eustress-play-runtime",
  "hex",
  "i-slint-core",
  "log",

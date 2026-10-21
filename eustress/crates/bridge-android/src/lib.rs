@@ -81,7 +81,35 @@ impl SecureStore for AndroidPlatform {
 pub fn files_dir() -> Option<String> {
     #[cfg(target_os = "android")]
     {
-        return android_string("filesDir", "()Ljava/lang/String;", &[]).ok().flatten();
+        return android_string("filesDir", "(Landroid/app/Activity;)Ljava/lang/String;", &[]).ok().flatten();
+    }
+    #[cfg(not(target_os = "android"))]
+    None
+}
+
+/// Copy the APK's `assets/bundled` tree into the app files directory.
+/// The path contains `characters/y_bot.glb` when the copy worked.
+pub fn install_bundled_assets() -> Option<String> {
+    #[cfg(target_os = "android")]
+    {
+        return with_activity(|env, activity| {
+            let class = env.find_class("dev/eustress/player/Bridge").map_err(|e| e.to_string())?;
+            let value = env
+                .call_static_method(
+                    class,
+                    "installBundledAssets",
+                    "(Landroid/app/Activity;)Ljava/lang/String;",
+                    &[jni::objects::JValue::Object(activity)],
+                )
+                .map_err(|e| e.to_string())?;
+            let obj = value.l().map_err(|e| e.to_string())?;
+            if obj.is_null() {
+                return Ok(None);
+            }
+            java_string(env, obj)
+        })
+        .ok()
+        .flatten();
     }
     #[cfg(not(target_os = "android"))]
     None
@@ -91,7 +119,7 @@ pub fn files_dir() -> Option<String> {
 pub fn view_intent_uri() -> Option<String> {
     #[cfg(target_os = "android")]
     {
-        return android_string("intentUri", "()Ljava/lang/String;", &[]).ok().flatten();
+        return android_string("intentUri", "(Landroid/app/Activity;)Ljava/lang/String;", &[]).ok().flatten();
     }
     #[cfg(not(target_os = "android"))]
     None

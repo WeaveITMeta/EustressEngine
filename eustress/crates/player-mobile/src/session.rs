@@ -35,14 +35,20 @@ pub struct MobileApp {
     pub show_sign_in: bool,
     pub search: String,
     pub playing: bool,
+    /// Name written into the opened tree's local Player. A join link sets it.
+    /// A published Space uses `Player`.
+    pub player_name: String,
     gallery_rx: Option<Mutex<Receiver<Result<Vec<Card>, String>>>>,
     auth_rx: Option<Mutex<Receiver<Result<crate::auth::SignedIn, String>>>>,
     fetch_rx: Option<Mutex<Receiver<Result<eustress_networking::session::DownloadedWorld, String>>>>,
     restore_rx: Option<Mutex<Receiver<Result<Option<crate::auth::SignedIn>, String>>>>,
     seen_intent: String,
     launch_done: bool,
-    spawned: bool,
-    joined: bool,
+    /// The avatar for the open Space has been requested. The Space opener
+    /// clears this when a new world replaces the previous one.
+    pub(crate) spawned: bool,
+    /// A host session is running, as opposed to a published Space played solo.
+    pub(crate) joined: bool,
     token: Option<String>,
 }
 
@@ -56,6 +62,7 @@ impl Default for MobileApp {
             show_sign_in: false,
             search: String::new(),
             playing: false,
+            player_name: "Player".into(),
             gallery_rx: None,
             auth_rx: None,
             fetch_rx: None,
@@ -136,6 +143,7 @@ fn apply(world: &mut World, command: Command) {
                 input.capture_all = true;
                 input.release_touch();
             }
+            world.write_message(eustress_common::avatar::DespawnAllAvatars);
         }
     }
 }
@@ -221,12 +229,8 @@ fn poll(world: &mut World) {
         match recv(&rx) {
             Ok(Ok(world_dl)) => {
                 let files: usize = world_dl.spaces.iter().map(|(_, records)| records.len()).sum::<usize>() + world_dl.assets.len();
-                let at = world_dl.spawn;
-                world.resource_mut::<MobileApp>().status = format!(
-                    "Cached {files} files. The Space mesh opener still lives in the desktop Player, so this build shows the character in a stand-in yard."
-                );
+                world.resource_mut::<MobileApp>().status = format!("Cached {files} files. Opening the Space…");
                 world.write_message(WorldDownloaded(Arc::new(world_dl)));
-                spawn_player(world, Vec3::from_array(at));
             }
             Ok(Err(err)) => world.resource_mut::<MobileApp>().status = err,
             Err(TryRecvError::Empty) => world.resource_mut::<MobileApp>().fetch_rx = Some(rx),
@@ -282,24 +286,13 @@ fn begin_network(world: &mut World, link: JoinLink, name: String, ticket: Option
             app.playing = true;
             app.mode = Mode::Playing;
             app.status = format!("Joining {}:{}…", link.host, link.port);
+            app.player_name = name;
             if let Some(mut input) = world.get_resource_mut::<InputState>() {
                 input.capture_all = false;
             }
-            spawn_player(world, Vec3::new(0.0, 2.0, 8.0));
         }
         Err(err) => world.resource_mut::<MobileApp>().status = err,
     }
-}
-
-fn spawn_player(world: &mut World, at: Vec3) {
-    if world.resource::<MobileApp>().spawned {
-        return;
-    }
-    world.resource_mut::<MobileApp>().spawned = true;
-    world.write_message(eustress_common::avatar::SpawnAvatar::new(
-        eustress_common::avatar::AvatarDescriptor::default(),
-        at,
-    ));
 }
 
 fn note_signed_in(world: &mut World, signed: crate::auth::SignedIn) {
