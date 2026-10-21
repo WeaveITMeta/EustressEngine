@@ -42,6 +42,9 @@ pub mod wire;
 #[cfg(all(feature = "native", not(target_arch = "wasm32")))]
 pub mod native;
 
+#[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+pub mod stress;
+
 pub mod ownership;
 pub mod protocol;
 pub mod replication;

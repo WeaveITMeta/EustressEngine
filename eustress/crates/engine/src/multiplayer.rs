@@ -129,6 +129,23 @@ impl HostRequest {
     pub fn listen_port(&self) -> Option<u16> {
         self.active.as_ref().map(|host| host.port)
     }
+
+    /// Start hosting, the same as Start Server, when nothing is already up.
+    pub fn request_start(&mut self) {
+        if self.active.is_none() && self.pending.is_none() {
+            self.wanted = true;
+        }
+    }
+
+    /// The link a player would use, once the listener has a port and a pin.
+    pub fn join_link(&self) -> Option<JoinLink> {
+        let active = self.active.as_ref()?;
+        let pin = active.pin?;
+        if active.port == 0 {
+            return None;
+        }
+        Some(join_link(active, Some(pin)))
+    }
 }
 
 /// The author's session, or the dedicated server's `esrv_` credential.

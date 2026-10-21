@@ -182,6 +182,10 @@ pub enum LinkEvent {
     /// The transport itself failed: a bind, a connect, a certificate. Ends
     /// the session.
     Failed { reason: String },
+    /// QUIC path counters, about once a second. `sent_bytes` and
+    /// `recv_bytes` are cumulative for the connection. The session does not
+    /// act on it; a stress run reads it.
+    PathStats { conn: ConnId, rtt_ms: f32, sent_bytes: u64, recv_bytes: u64 },
 }
 
 /// Session → transport.
@@ -239,7 +243,7 @@ impl NetLink {
         let _ = self.commands.send(LinkCommand::Close { conn, reason: reason.to_string() });
     }
 
-    fn poll(&self) -> Option<LinkEvent> {
+    pub(crate) fn poll(&self) -> Option<LinkEvent> {
         self.events.try_recv().ok()
     }
 }
@@ -1084,6 +1088,13 @@ impl HostSession {
         self.config.max_players
     }
 
+    /// Raise or lower the session cap. A stress run raises it before the
+    /// bots connect and restores it when they leave. Players already in
+    /// the session stay.
+    pub fn set_max_players(&mut self, max: u16) {
+        self.config.max_players = max.max(1);
+    }
+
     /// Names of players in the world.
     pub fn player_names(&self) -> Vec<String> {
         self.peers.values().filter(|p| p.stage == PeerStage::Ready).map(|p| p.name.clone()).collect()
@@ -1648,6 +1659,7 @@ fn host_pump(
                 end_session(&mut commands);
                 return;
             }
+            LinkEvent::PathStats { .. } => {}
         }
     }
     // The host's own Space says whether movement is checked; nothing a
@@ -2350,7 +2362,7 @@ fn player_pump(
             }
             LinkEvent::Closed { reason, .. } => Err(format!("the host closed the connection: {reason}")),
             LinkEvent::Failed { reason } => Err(reason),
-            LinkEvent::Listening { .. } => Ok(()),
+            LinkEvent::Listening { .. } | LinkEvent::PathStats { .. } => Ok(()),
         };
         if let Err(reason) = outcome {
             let failed_before_playing = player.stage != JoinStage::Playing;
@@ -3246,6 +3258,25 @@ fn clear_replicas_after_session(
     if local.announced.is_some() {
         local.announced = None;
     }
+}
+
+/// A host app for the stress-test loopback: the real `host_pump` and chunk
+/// sender, no avatar runtime. Time does not advance on its own; the test
+/// calls [`Time::advance_by`] before each [`App::update`].
+#[cfg(test)]
+pub(crate) fn app_hosting(link: NetLink, config: HostConfig) -> App {
+    let mut app = App::new();
+    app.init_resource::<Time>()
+        .add_message::<NetNotice>()
+        .add_message::<RemoteArrived>()
+        .add_message::<TracksArrived>()
+        .init_resource::<RemoteAvatars>()
+        .init_resource::<PeerPaces>()
+        .init_resource::<PeerInputs>()
+        .insert_resource(HostSession::new(config))
+        .insert_resource(link)
+        .add_systems(Update, (host_pump, host_send_chunks).chain());
+    app
 }
 
 #[cfg(test)]
