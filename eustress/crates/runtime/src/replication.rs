@@ -15,6 +15,13 @@ use bevy::prelude::*;
 use eustress_common::classes::BasePart;
 use eustress_networking::prelude::*;
 
+/// This machine's client id for ownership checks. `eustress_networking` dropped its own
+/// `LocalClient` (2026-09-24); the runtime keeps this one. Absent means id 0 (the host).
+#[derive(Resource, Debug, Clone, Copy, Default)]
+pub struct LocalClient {
+    pub id: u64,
+}
+
 // ============================================================================
 // Replication Sync Plugin
 // ============================================================================
