@@ -381,6 +381,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "android-build"
+version = "0.1.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f9fc9904ad2ad097c3c1cfe2eacaaf0fc24710936fa9ed941cb310b7c6ed2ab7"
+dependencies = [
+ "windows-sys 0.52.0",
+]
+
+[[package]]
 name = "android-properties"
 version = "0.2.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2149,8 +2158,6 @@ dependencies = [
 [[package]]
 name = "bevy_app"
 version = "0.19.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "671ae6f3a8d84f9ed696c531a138558596e041231a8414b6efeafa8469e841f9"
 dependencies = [
  "bevy_derive 0.19.0",
  "bevy_ecs 0.19.0",
@@ -3738,8 +3745,6 @@ dependencies = [
 [[package]]
 name = "bevy_render"
 version = "0.19.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a89b2cc850a4c3fd12a6a088a4fc3e80118b2e1b569da8936f6d4d99ca1b6ee7"
 dependencies = [
  "async-channel",
  "bevy_app 0.19.0",
@@ -7931,7 +7936,12 @@ version = "0.1.0"
 dependencies = [
  "android_logger",
  "bevy 0.19.0",
+ "bevy_render 0.19.0",
+ "i-slint-core",
  "log",
+ "slint",
+ "smol",
+ "spin_on",
 ]
 
 [[package]]
@@ -8356,6 +8366,7 @@ dependencies = [
  "swash 0.2.9",
  "wasm-bindgen",
  "web-sys",
+ "wgpu 29.0.4",
 ]
 
 [[package]]
@@ -10581,6 +10592,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "i-slint-backend-android-activity"
+version = "1.17.1"
+source = "git+https://github.com/slint-ui/slint?branch=master#2447c697327e7f87c5044af229e0be6c18608fcc"
+dependencies = [
+ "android-build",
+ "i-slint-common",
+ "i-slint-core",
+ "i-slint-renderer-skia",
+ "jni 0.22.4",
+ "raw-window-handle",
+]
+
+[[package]]
 name = "i-slint-backend-linuxkms"
 version = "1.17.1"
 source = "git+https://github.com/slint-ui/slint?branch=master#2447c697327e7f87c5044af229e0be6c18608fcc"
@@ -10594,6 +10618,7 @@ dependencies = [
  "i-slint-common",
  "i-slint-core",
  "i-slint-renderer-femtovg",
+ "i-slint-renderer-skia",
  "i-slint-renderer-software",
  "input",
  "memmap2",
@@ -10616,6 +10641,7 @@ dependencies = [
  "i-slint-core",
  "i-slint-core-macros",
  "i-slint-renderer-femtovg",
+ "i-slint-renderer-skia",
 ]
 
 [[package]]
@@ -10626,6 +10652,7 @@ dependencies = [
  "cfg_aliases",
  "i-slint-common",
  "i-slint-core",
+ "i-slint-renderer-skia",
  "i-slint-renderer-software",
  "vtable",
 ]
@@ -10773,6 +10800,7 @@ dependencies = [
  "wasm-bindgen",
  "web-sys",
  "web-time",
+ "wgpu 29.0.4",
  "windows 0.62.2",
 ]
 
@@ -10805,6 +10833,7 @@ dependencies = [
  "rgb",
  "wasm-bindgen",
  "web-sys",
+ "wgpu 29.0.4",
 ]
 
 [[package]]
@@ -10812,6 +10841,7 @@ name = "i-slint-renderer-skia"
 version = "1.17.1"
 source = "git+https://github.com/slint-ui/slint?branch=master#2447c697327e7f87c5044af229e0be6c18608fcc"
 dependencies = [
+ "ash",
  "bytemuck",
  "cfg-if",
  "cfg_aliases",
@@ -10837,9 +10867,12 @@ dependencies = [
  "scoped-tls-hkt",
  "skia-safe",
  "softbuffer",
+ "spin_on",
  "unicode-segmentation",
  "vtable",
+ "wgpu 29.0.4",
  "windows 0.62.2",
+ "windows-core 0.62.2",
  "write-fonts",
 ]
 
@@ -18083,11 +18116,13 @@ version = "1.17.1"
 source = "git+https://github.com/slint-ui/slint?branch=master#2447c697327e7f87c5044af229e0be6c18608fcc"
 dependencies = [
  "const-field-offset",
+ "i-slint-backend-android-activity",
  "i-slint-backend-selector",
  "i-slint-common",
  "i-slint-core",
  "i-slint-core-macros",
  "i-slint-renderer-femtovg",
+ "i-slint-renderer-skia",
  "i-slint-renderer-software",
  "num-traits",
  "once_cell",
@@ -18095,6 +18130,7 @@ dependencies = [
  "slint-macros",
  "unicode-segmentation",
  "vtable",
+ "wgpu 29.0.4",
 ]
 
 [[package]]
@@ -18322,6 +18358,7 @@ checksum = "aac18da81ebbf05109ab275b157c22a653bb3c12cf884450179942f81bcbf6c3"
 dependencies = [
  "as-raw-xcb-connection",
  "bytemuck",
+ "drm",
  "fastrand",
  "js-sys",
  "memmap2",

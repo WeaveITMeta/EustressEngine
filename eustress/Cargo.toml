@@ -199,6 +199,14 @@ lsm-tree = { path = "vendor/lsm-tree" }
 # contact change panics. One function patched; `.patches/avian3d-0.7.0/PATCH.md` says
 # what, why and when to drop it.
 avian3d = { path = ".patches/avian3d-0.7.0" }
+# Bevy 0.19 finishes plugins with a frozen registry length, so a plugin cannot
+# add the renderer from `finish` after the Android window exists. The loop now
+# keeps going while `finish` appends plugins. See `.patches/bevy_app-0.19.0/PATCH.md`.
+bevy_app = { path = ".patches/bevy_app-0.19.0" }
+# GLES on Android has no SURFACE_VIEW_FORMATS. Bevy still asks for an sRGB
+# view of a non-sRGB surface, and configure fails. See
+# `.patches/bevy_render-0.19.0/PATCH.md`.
+bevy_render = { path = ".patches/bevy_render-0.19.0" }
 
 # Slint's software renderer (2026-10-01): a Text or TextInput drawing past
 # 32,767 physical px panicked in an i16 conversion and aborted Studio. Two
