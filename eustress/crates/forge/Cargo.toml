@@ -75,6 +75,10 @@ raft-persist = ["forge-orchestration/raft-persist", "raft"]
 sim-orchestration = ["raft-persist"]
 
 [[bin]]
+name = "eustress-forge"
+path = "src/bin/eustress_forge.rs"
+
+[[bin]]
 name = "forge-sim-demo"
 path = "src/bin/forge_sim_demo.rs"
 required-features = ["sim-orchestration"]

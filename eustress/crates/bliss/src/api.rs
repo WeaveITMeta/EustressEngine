@@ -265,24 +265,53 @@ fn new_state(node_mode: NodeMode, fork_id: String, witness_url: String) -> ApiSt
     }
 }
 
-/// The node's listener: the loopback interface only, never the network.
-async fn bind_local(port: u16) -> Result<tokio::net::TcpListener, BlissError> {
-    tokio::net::TcpListener::bind(("127.0.0.1", port))
-        .await
-        .map_err(|e| BlissError::Node(format!("Failed to bind port {}: {}", port, e)))
+/// The address Bliss listens on when nobody configures one.
+pub const DEFAULT_BIND: &str = "127.0.0.1";
+
+/// `cli` (`--bliss-bind`), else `env` (`EUSTRESS_BLISS_BIND`), else
+/// [`DEFAULT_BIND`]. The string must be an IP address.
+pub fn resolve_bind(cli: Option<&str>, env: Option<&str>) -> Result<std::net::IpAddr, String> {
+    let raw = cli
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .or_else(|| env.map(str::trim).filter(|s| !s.is_empty()))
+        .unwrap_or(DEFAULT_BIND);
+    raw.parse::<std::net::IpAddr>()
+        .map_err(|_| format!("Bliss bind address '{raw}' is not an IP address"))
 }
 
-/// Start the node API server on the given port, on this machine only.
+/// The line both the tracing log and Studio's stdout print. It is the
+/// listener's `local_addr`, not a constant, so it cannot disagree with the socket.
+pub fn listener_log_line(addr: std::net::SocketAddr) -> String {
+    format!("http://{addr}")
+}
+
+/// Bind `addr:port`. The default address is loopback; a configured address
+/// is used as given.
+async fn bind_on(addr: std::net::IpAddr, port: u16) -> Result<tokio::net::TcpListener, BlissError> {
+    tokio::net::TcpListener::bind((addr, port))
+        .await
+        .map_err(|e| BlissError::Node(format!("Failed to bind {addr}:{port}: {e}")))
+}
+
+/// Start the node API server on `bind:port`.
+///
+/// The `Ok` address is `listener.local_addr()` — the same address the log
+/// prints. Port 0 comes back as the port the OS assigned.
 pub async fn start_server(
+    bind: std::net::IpAddr,
     port: u16,
     node_mode: NodeMode,
     fork_id: String,
     witness_url: String,
-) -> Result<tokio::task::JoinHandle<()>, BlissError> {
+) -> Result<(tokio::task::JoinHandle<()>, std::net::SocketAddr), BlissError> {
     let app = router(new_state(node_mode, fork_id.clone(), witness_url));
-    let listener = bind_local(port).await?;
+    let listener = bind_on(bind, port).await?;
+    let bound = listener
+        .local_addr()
+        .map_err(|e| BlissError::Node(format!("listener has no local address: {e}")))?;
 
-    tracing::info!("Bliss node API running on http://127.0.0.1:{} (this machine only)", port);
+    tracing::info!("Bliss node API running on {}", listener_log_line(bound));
     tracing::info!("  Fork: {}", fork_id);
     tracing::info!("  Mode: {}", node_mode);
     tracing::info!("  Registration and co-signing: https://api.eustress.dev (Cloudflare)");
@@ -294,7 +323,7 @@ pub async fn start_server(
         }
     });
 
-    Ok(handle)
+    Ok((handle, bound))
 }
 
 #[cfg(test)]
@@ -305,11 +334,31 @@ mod tests {
         new_state(NodeMode::Light, "eustress.dev".to_string(), "https://api.eustress.dev".to_string())
     }
 
+    #[test]
+    fn the_default_bind_is_loopback_and_a_bad_address_is_refused() {
+        assert_eq!(resolve_bind(None, None).unwrap(), std::net::Ipv4Addr::LOCALHOST);
+        assert_eq!(
+            resolve_bind(Some("10.0.0.8"), Some("0.0.0.0")).unwrap(),
+            "10.0.0.8".parse::<std::net::IpAddr>().unwrap(),
+            "the command-line address wins"
+        );
+        assert_eq!(
+            resolve_bind(None, Some("0.0.0.0")).unwrap(),
+            "0.0.0.0".parse::<std::net::IpAddr>().unwrap()
+        );
+        assert!(resolve_bind(Some("every-interface"), None).is_err());
+    }
+
     #[tokio::test]
-    async fn listener_binds_this_machine_only() {
-        let listener = bind_local(0).await.expect("bind an ephemeral loopback port");
+    async fn listener_binds_the_address_it_logs() {
+        let ip = resolve_bind(None, None).unwrap();
+        let listener = bind_on(ip, 0).await.expect("bind an ephemeral loopback port");
         let addr = listener.local_addr().expect("local address");
         assert!(addr.ip().is_loopback(), "bound {addr}, which other hosts could reach");
+        assert_eq!(addr.ip(), ip);
+        let line = listener_log_line(addr);
+        assert_eq!(line, format!("http://{addr}"));
+        assert!(!line.contains("0.0.0.0"), "the log must not claim a different interface");
     }
 
     #[tokio::test]

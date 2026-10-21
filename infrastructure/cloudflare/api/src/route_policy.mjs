@@ -146,6 +146,7 @@ export const RULES = [
   [new RegExp(`^/api/simulations/${ID}/captures/[0-7]$`), FRESH, 'moderation steps of a listing'],
   [new RegExp(`^/api/simulations/${ID}/live(/admit)?$`), FRESH, 'hosting a listing'],
   ['/api/guest/chat/check', FRESH, 'the host of a guest-only session asks whether to deliver one guest chat line: the author\'s session, checked fresh like hosting'],
+  [new RegExp(`^/api/simulations/${ID}/server-credential$`), FRESH, 'mints or revokes the credential a dedicated server uses to mark this listing live; it acts as the author'],
 
   // ── Session: the cheap check is enough, named one route at a time ───────
   ['/api/auth/logout', SESSION, 'ends the caller\'s own sessions'],

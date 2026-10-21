@@ -30,7 +30,7 @@ pub use bliss_embedded as embedded;
 pub use bliss_events as events;
 pub use bliss_wallet as wallet;
 
-pub use api::start_server;
+pub use api::{listener_log_line, resolve_bind, start_server, DEFAULT_BIND};
 pub use cosign::{CosignClient, HeartbeatReply};
 pub use error::BlissError;
 pub use node::{BlissNode, NodeConfig, NodeMode};

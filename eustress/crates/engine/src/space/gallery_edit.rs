@@ -239,6 +239,160 @@ fn unique_dir(workspace: &Path, name: &str) -> PathBuf {
         .expect("an unbounded range always finds a free name")
 }
 
+/// What a dedicated server downloaded for one listing.
+pub struct DownloadedHostWorld {
+    /// The Space folder to open.
+    pub space_root: PathBuf,
+    /// The source world (server services included) was what was written.
+    pub from_source: bool,
+    /// `.server.luau` files in the written Universe.
+    pub server_script_count: usize,
+    /// One sentence for the status window and the log.
+    pub note: String,
+}
+
+/// Download a listing's world into `universe_dir` for a dedicated server.
+///
+/// The source world is requested first: it is the player world plus the
+/// server-only services, and it is what carries server Luau scripts. The
+/// author's session or a server credential (`esrv_…`) can read it. When the
+/// listing has no source world, the player world is written instead and
+/// `note` says that server scripts are not in it.
+///
+/// Blocking. `EUSTRESS_API_URL` must already name the API this listing is on.
+/// Writes `universe_dir/.eustress/sync.toml` so the host's heartbeat names
+/// this listing.
+pub fn download_for_host(sim_id: &str, token: Option<&str>, universe_dir: &Path) -> Result<DownloadedHostWorld, String> {
+    if !sim_id.chars().all(|c| c.is_ascii_hexdigit() || c == '-') || sim_id.is_empty() || sim_id.len() > 64 {
+        return Err("the simulation id is not a listing id".into());
+    }
+    let agent = ureq::AgentBuilder::new()
+        .timeout_connect(Duration::from_secs(30))
+        .timeout_read(Duration::from_secs(300))
+        .build();
+    let get = |path: &str| {
+        let mut request = agent.get(&eustress_common::api_base::api_url(path));
+        if let Some(token) = token {
+            request = request.set("Authorization", &format!("Bearer {token}"));
+        }
+        request.call()
+    };
+
+    let (manifest_bytes, from_source) = match get(&format!("/api/simulations/{sim_id}/world/source")) {
+        Ok(resp) => (read_limited(resp, MAX_MANIFEST_BYTES, "the source manifest")?, true),
+        Err(ureq::Error::Status(status, _)) if status == 404 || status == 403 => {
+            match get(&format!("/api/simulations/{sim_id}/world/manifest")) {
+                Ok(resp) => (read_limited(resp, MAX_MANIFEST_BYTES, "the world manifest")?, false),
+                Err(ureq::Error::Status(409, _)) => {
+                    return Err("this listing was published as a .pak, before worlds were chunked. Publish it again from Studio.".into());
+                }
+                Err(ureq::Error::Status(404, _)) => {
+                    return Err("nothing has been published to this listing yet".into());
+                }
+                Err(e) => return Err(format!("read the world manifest: {e}")),
+            }
+        }
+        Err(e) => return Err(format!("read the source manifest: {e}")),
+    };
+    let manifest: WorldManifest =
+        serde_json::from_slice(&manifest_bytes).map_err(|e| format!("the world manifest is unreadable: {e}"))?;
+    manifest.validate().map_err(|e| format!("the world manifest was refused: {e}"))?;
+
+    if universe_dir.exists() {
+        std::fs::remove_dir_all(universe_dir).map_err(|e| format!("clear {}: {e}", universe_dir.display()))?;
+    }
+    std::fs::create_dir_all(universe_dir).map_err(|e| format!("create {}: {e}", universe_dir.display()))?;
+
+    let mut chunks: HashMap<String, Vec<u8>> = HashMap::new();
+    for hash in manifest.hashes() {
+        if !is_content_hash(&hash) {
+            return Err(format!("bad chunk name {hash:?}"));
+        }
+        let resp = get(&format!("/api/simulations/{sim_id}/world/chunks/{hash}"))
+            .map_err(|e| format!("download chunk {hash}: {e}"))?;
+        let bytes = read_limited(resp, MAX_CHUNK_BYTES, "a chunk")?;
+        if content_hash(&bytes) != hash {
+            return Err(format!("chunk {hash} does not match its content hash"));
+        }
+        chunks.insert(hash, bytes);
+    }
+    let world = eustress_networking::session::assemble_world(&manifest, |h| chunks.get(h).map(|b| b.as_slice()), [0.0; 3])?;
+    for (space, records) in &world.spaces {
+        write_records(&universe_dir.join("Spaces").join(space), records)?;
+    }
+    write_records(universe_dir, &world.assets)?;
+    remember_listing(universe_dir, sim_id)?;
+
+    let server_script_count = count_server_scripts(universe_dir);
+    let note = if from_source {
+        format!(
+            "Loaded the published source world. {server_script_count} server Luau script{} on disk.",
+            if server_script_count == 1 { "" } else { "s" }
+        )
+    } else {
+        "The source world is not available for this listing, so this is the player world. ServerScriptService is not in it, and server Luau scripts will not run. Commit the source world (Share Source) and start again.".to_string()
+    };
+    let start = if world.start_space.is_empty() {
+        world.spaces.first().map(|(n, _)| n.clone()).unwrap_or_default()
+    } else {
+        world.start_space.clone()
+    };
+    Ok(DownloadedHostWorld {
+        space_root: universe_dir.join("Spaces").join(start),
+        from_source,
+        server_script_count,
+        note,
+    })
+}
+
+/// Remember `sim_id` as this Universe's listing on the API in use, so the
+/// host heartbeat posts to that listing.
+fn remember_listing(universe: &Path, sim_id: &str) -> Result<(), String> {
+    let dir = universe.join(".eustress");
+    std::fs::create_dir_all(&dir).map_err(|e| format!("create {}: {e}", dir.display()))?;
+    let mut remote = eustress_common::RemoteState {
+        provider: "eustress".into(),
+        project_id: None,
+        experience_id: None,
+        bucket: None,
+        editable: false,
+        open_source: false,
+        listings: std::collections::BTreeMap::new(),
+    };
+    remote.set_listing_id(Some(sim_id.to_string()));
+    let manifest = eustress_common::SyncManifest {
+        sync: eustress_common::SyncState {
+            mode: "local".into(),
+            auto_sync: false,
+            last_sync: None,
+            pending_uploads: 0,
+            pending_downloads: 0,
+            offline_changes: 0,
+        },
+        remote,
+    };
+    eustress_common::save_toml_file(&manifest, &dir.join("sync.toml")).map_err(|e| format!("write the listing id: {e}"))
+}
+
+fn count_server_scripts(root: &Path) -> usize {
+    fn walk(dir: &Path, count: &mut usize) {
+        let Ok(entries) = std::fs::read_dir(dir) else { return };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                walk(&path, count);
+            } else if path.extension().and_then(|e| e.to_str()) == Some("luau")
+                && path.file_name().and_then(|n| n.to_str()).is_some_and(|n| n.ends_with(".server.luau"))
+            {
+                *count += 1;
+            }
+        }
+    }
+    let mut count = 0;
+    walk(root, &mut count);
+    count
+}
+
 fn write_records(root: &Path, records: &[Record]) -> Result<(), String> {
     for (path, bytes) in records {
         // Checked again at the one place bytes reach the disk.

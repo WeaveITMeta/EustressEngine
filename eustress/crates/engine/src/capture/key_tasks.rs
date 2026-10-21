@@ -35,7 +35,7 @@ pub const FORGE_KEY_CREDENTIAL: &str = "EUSTRESS_FORGE_API_KEY";
 /// The URL the Forge dialog's field starts with (`forge-server-url` in
 /// main.slint, `server-url` in forge_connect.slint). A saved URL replaces it:
 /// the field holding it is a field nobody has typed in.
-pub const FORGE_DEFAULT_URL: &str = "https://forge.eustress.dev";
+pub const FORGE_DEFAULT_URL: &str = "http://127.0.0.1:8090";
 
 /// What the Forge dialog's key field shows while a remembered key is in use.
 pub const FORGE_KEY_MASK: &str = "••••••••••••";

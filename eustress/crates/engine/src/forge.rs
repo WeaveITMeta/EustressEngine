@@ -11,11 +11,17 @@
 //! 5. Player connects via QUIC to the allocated server
 
 use bevy::prelude::*;
+use std::collections::HashMap;
 use std::sync::Arc;
 use parking_lot::Mutex;
+
+/// Studio's Allocate Server target when nothing is connected yet.
+pub const LOCAL_FORGE_URL: &str = "http://127.0.0.1:8090";
+/// Key the local compatibility server accepts unless `FORGE_LOCAL_API_KEY` overrides it.
+pub const LOCAL_FORGE_KEY: &str = "local-dev";
 use eustress_forge_sdk::{
     client::ForgeClient,
-    deployment::{DeploymentSpec, DeploymentInfo, DeploymentStatus},
+    deployment::{DeploymentSpec, DeploymentInfo},
     types::Region,
 };
 
@@ -64,7 +70,7 @@ impl Default for ForgeState {
             status: ForgeConnectionStatus::Disconnected,
             error: None,
             deployment: None,
-            url: "https://forge.eustress.dev".to_string(),
+            url: LOCAL_FORGE_URL.to_string(),
             authenticated: false,
         }
     }
@@ -190,23 +196,105 @@ pub fn connect_to_forge(
 
 /// Allocate a dedicated server for a simulation via Forge.
 /// Returns immediately — the deployment status is polled via ForgeState.
+fn deployment_env(author_token: Option<String>) -> Option<HashMap<String, String>> {
+    let mut env = HashMap::new();
+    if let Some(token) = author_token.filter(|token| !token.is_empty()) {
+        env.insert("EUSTRESS_AUTHOR_TOKEN".into(), token);
+    }
+    for key in ["EUSTRESS_HOST_PUBLIC", "EUSTRESS_HOST_REGION"] {
+        if let Ok(value) = std::env::var(key) {
+            if !value.trim().is_empty() {
+                env.insert(key.into(), value);
+            }
+        }
+    }
+    // The dedicated server heartbeats staging even when Studio itself is signed in to production.
+    env.insert("EUSTRESS_API_URL".into(), eustress_common::api_base::STAGING_API.to_string());
+    if env.is_empty() { None } else { Some(env) }
+}
+
+fn deployment_spec(sim_id: String, max_players: u32, region: Region, author_token: Option<String>) -> DeploymentSpec {
+    DeploymentSpec {
+        experience_id: sim_id,
+        version: "latest".to_string(),
+        regions: vec![region],
+        min_servers: 1,
+        max_servers: 5,
+        max_players_per_server: Some(max_players),
+        env: deployment_env(author_token),
+    }
+}
+
+async fn deploy_with(client: &ForgeClient, spec: DeploymentSpec) -> ForgeOutcome {
+    match client.deploy_experience(spec).await {
+        Ok(info) => {
+            tracing::info!("Forge deployment created: {} (status: {})", info.id, info.status);
+            ForgeOutcome::Deployed(info)
+        }
+        Err(e) => {
+            tracing::error!("Forge deployment failed: {}", e);
+            ForgeOutcome::DeployFailed(e.to_string())
+        }
+    }
+}
+
+/// Allocate a dedicated server for a simulation via Forge.
+/// Returns immediately — the deployment status is polled via ForgeState.
+///
+/// When nothing is connected, this connects to the local Forge
+/// (`http://127.0.0.1:8090`, key `local-dev`) and deploys there. A client
+/// already connected to another URL, including a cloud Forge, is left as it is.
 pub fn allocate_server(
     forge_state: &mut ForgeState,
     sim_id: &str,
     max_players: u32,
     region: Region,
+    author_token: Option<String>,
 ) {
     let client_arc = forge_state.client.clone();
     let outcomes = forge_state.outcomes.clone();
     let sim_id = sim_id.to_string();
+    let spec = deployment_spec(sim_id, max_players, region, author_token);
 
-    let client_guard = client_arc.lock();
-    if client_guard.is_none() {
-        forge_state.error = Some("Not connected to Forge".to_string());
-        tracing::warn!("Cannot allocate server — not connected to Forge");
+    if client_arc.lock().is_none() {
+        forge_state.url = LOCAL_FORGE_URL.to_string();
+        forge_state.status = ForgeConnectionStatus::Connecting;
+        forge_state.authenticated = true;
+        forge_state.error = None;
+        let url = LOCAL_FORGE_URL.to_string();
+        let key = LOCAL_FORGE_KEY.to_string();
+        std::thread::spawn(move || {
+            let result = tokio::runtime::Builder::new_current_thread().enable_all().build();
+            let produced = match result {
+                Ok(rt) => rt.block_on(async {
+                    match ForgeClient::new(&url).await {
+                        Ok(mut client) => {
+                            if let Err(e) = client.authenticate(&key).await {
+                                return vec![
+                                    ForgeOutcome::ConnectFailed(format!("authentication failed: {e}")),
+                                    ForgeOutcome::DeployFailed(format!("could not allocate on the local Forge: {e}")),
+                                ];
+                            }
+                            *client_arc.lock() = Some(client);
+                            let mut out = vec![ForgeOutcome::Connected];
+                            let guard = client_arc.lock();
+                            if let Some(ref client) = *guard {
+                                out.push(deploy_with(client, spec).await);
+                            }
+                            out
+                        }
+                        Err(e) => vec![
+                            ForgeOutcome::ConnectFailed(format!("could not reach {url}: {e}. Start eustress-forge on this computer.")),
+                            ForgeOutcome::DeployFailed(format!("could not reach the local Forge at {url}: {e}")),
+                        ],
+                    }
+                }),
+                Err(e) => vec![ForgeOutcome::DeployFailed(format!("could not start the network runtime: {e}"))],
+            };
+            outcomes.lock().extend(produced);
+        });
         return;
     }
-    drop(client_guard);
 
     std::thread::spawn(move || {
         let rt = tokio::runtime::Builder::new_current_thread()
@@ -217,31 +305,12 @@ pub fn allocate_server(
             Ok(rt) => {
                 rt.block_on(async {
                     let guard = client_arc.lock();
-                    let Some(ref client) = *guard else { return };
-
-                    let spec = DeploymentSpec {
-                        experience_id: sim_id.clone(),
-                        version: "latest".to_string(),
-                        regions: vec![region],
-                        min_servers: 1,
-                        max_servers: 5,
-                        max_players_per_server: Some(max_players),
-                        env: None,
+                    let Some(ref client) = *guard else {
+                        outcomes.lock().push(ForgeOutcome::DeployFailed("Not connected to Forge".into()));
+                        return;
                     };
-
-                    match client.deploy_experience(spec).await {
-                        Ok(info) => {
-                            tracing::info!(
-                                "Forge deployment created: {} (status: {})",
-                                info.id, info.status
-                            );
-                            outcomes.lock().push(ForgeOutcome::Deployed(info));
-                        }
-                        Err(e) => {
-                            tracing::error!("Forge deployment failed: {}", e);
-                            outcomes.lock().push(ForgeOutcome::DeployFailed(e.to_string()));
-                        }
-                    }
+                    let outcome = deploy_with(client, spec).await;
+                    outcomes.lock().push(outcome);
                 });
             }
             Err(e) => {

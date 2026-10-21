@@ -2,6 +2,11 @@
 //!
 //! Headless server binary for hosting multiplayer games.
 //!
+//! This program downloads a published world and runs it with MinimalPlugins.
+//! It does not host the Player's WebTransport protocol and it does not
+//! heartbeat `/live`. The host is `eustress-engine --server`, started by
+//! `eustress-forge`. See `docs/networking/DEDICATED_SERVER.md`.
+//!
 //! ## Usage
 //!
 //! ```bash

@@ -257,6 +257,7 @@ async function sha256Hex(bytes) {
 import { contentLockedFor, inReview, simForServing, sourceApproved, REVIEW_SCHEMA } from './moderation.mjs';
 import { checkTags, listingTags, genreTag, setAuthorTags, withTagsWrittenBack, listingTagFields } from './tags.mjs';
 import { refuseAdult } from './adult_content.mjs';
+import { authorFromServerCredential, bearerOf } from './live.mjs';
 import { refuseBlockedUpload } from './takedown.mjs';
 
 /// A listing its author may publish into.
@@ -283,15 +284,19 @@ async function servableListing(request, simId, env, cors, deps, kind = 'content'
   if (!raw) return { error: deps.json({ error: 'Simulation not found' }, 404, cors) };
   // Through the legal lock and the approval binding (see simForServing).
   const sim = await simForServing(env, JSON.parse(raw), kind);
+  // A dedicated server's credential stands for the author on this listing
+  // (src/live.mjs). It is not a session, so it is resolved before verifyAuth.
+  const serverAuthor = await authorFromServerCredential(env, bearerOf(request), simId, sim.author_id);
+  const authenticate = async (request, env) => serverAuthor || deps.verifyAuth(request, env);
   if (deps.isListable(sim)) {
     // Adult content goes to a viewer who turned it on, and to its author (src/adult_content.mjs). The manifest, every
     // chunk and the source world all pass here; the Player sends its session with each (crates/client space_fetch.rs).
-    const refused = await refuseAdult(request, env, sim, { authenticate: deps.verifyAuth, json: deps.json, cors });
+    const refused = await refuseAdult(request, env, sim, { authenticate, json: deps.json, cors });
     if (refused) return { error: refused };
     return { sim, listable: true };
   }
-  const auth = await deps.verifyAuth(request, env);
-  const admin = auth ? await deps.requireAdmin(request, env) : null;
+  const auth = await authenticate(request, env);
+  const admin = serverAuthor ? null : auth ? await deps.requireAdmin(request, env) : null;
   if (!deps.canServe(sim, auth, !!admin))
     return { error: deps.json({ error: 'Simulation not available' }, 403, cors) };
   return { sim, listable: false };
@@ -564,8 +569,9 @@ async function handleGetManifest(request, simId, env, cors, deps) {
 
 /// Whether this viewer may read a listing's source world: anyone when its
 /// author shares the source, otherwise its author or an admin.
-async function mayReadSource(request, sim, env, deps) {
+async function mayReadSource(request, sim, simId, env, deps) {
   if (sim.open_source === true) return true;
+  if (await authorFromServerCredential(env, bearerOf(request), simId, sim.author_id)) return true;
   const auth = await deps.verifyAuth(request, env);
   if (!auth) return false;
   return auth === sim.author_id || !!(await deps.requireAdmin(request, env));
@@ -576,7 +582,7 @@ async function handleGetSource(request, simId, env, cors, deps) {
   if (gate.error) return gate.error;
   const sim = gate.sim;
   // Not found either way, so a private source is indistinguishable from none.
-  if (!worldIsCurrent(sim) || !sim.world?.source_manifest_key || !(await mayReadSource(request, sim, env, deps)))
+  if (!worldIsCurrent(sim) || !sim.world?.source_manifest_key || !(await mayReadSource(request, sim, simId, env, deps)))
     return deps.json({ error: 'This listing shares no source' }, 404, cors);
   const obj = await env.SCENES.get(sim.world.source_manifest_key);
   if (!obj) return deps.json({ error: 'The source manifest is missing from storage' }, 404, cors);
@@ -599,7 +605,7 @@ async function handleGetChunk(request, simId, hash, env, cors, deps) {
   // A chunk the world names, or one only the source world names (a
   // server-only service) for a viewer who may read the source.
   let named = (await committedHashes(env, sim.world.manifest_key))?.has(hash);
-  if (!named && sim.world.source_manifest_key && (await mayReadSource(request, sim, env, deps)) && (!gate.listable || (await sourceApproved(env, sim))))
+  if (!named && sim.world.source_manifest_key && (await mayReadSource(request, sim, simId, env, deps)) && (!gate.listable || (await sourceApproved(env, sim))))
     named = (await committedHashes(env, sim.world.source_manifest_key))?.has(hash);
   if (!named) return deps.json({ error: 'Chunk not found' }, 404, cors);
   const obj = await env.SCENES.get(chunkKey(simId, hash));

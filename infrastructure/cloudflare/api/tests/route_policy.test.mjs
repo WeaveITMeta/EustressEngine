@@ -64,6 +64,7 @@ test('the routes that matter are in the class they must be in', () => {
     ['PUT', '/api/simulations/abc-123/website-manifest', FRESH], ['POST', '/api/simulations/abc-123/world/begin', FRESH],
     ['POST', '/api/simulations/abc-123/submit', FRESH], ['POST', '/api/simulations/abc-123/appeal', FRESH],
     ['POST', '/api/simulations/abc-123/live', FRESH], ['DELETE', '/api/simulations/abc-123/live', FRESH], ['POST', '/api/simulations/abc-123/live/admit', FRESH],
+    ['POST', '/api/simulations/abc-123/server-credential', FRESH], ['DELETE', '/api/simulations/abc-123/server-credential', FRESH],
     // session: the cheap check is enough
     ['POST', '/api/auth/logout', SESSION], ['PUT', '/api/avatar', SESSION], ['POST', '/api/social/follow', SESSION],
     ['POST', '/api/identity/ticket', SESSION], ['POST', '/api/tickets/checkout', SESSION], ['POST', '/api/stripe/checkout', SESSION],

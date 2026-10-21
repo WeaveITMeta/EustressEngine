@@ -58,7 +58,7 @@ component ForgeField inherits VerticalLayout {
 }
 
 export component ForgeConnectDialog inherits Rectangle {
-    in-out property <string> server-url: "https://forge.eustress.dev";
+    in-out property <string> server-url: "http://127.0.0.1:8090";
     in-out property <string> api-key: "";
     in-out property <bool> remember-credentials: true;
     in property <bool> connecting: false;
