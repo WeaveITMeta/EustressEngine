@@ -137,7 +137,9 @@ impl Plugin for SkyAtmospherePlugin {
                         .after(sync_atmosphere_planet)
                         .after(SkyLightSet),
                     sync_camera_atmosphere_settings.after(attach_sky_to_cameras),
-                    apply_custom_skybox.after(attach_sky_to_cameras),
+                    apply_custom_skybox
+                        .run_if(resource_exists::<Assets<Image>>)
+                        .after(attach_sky_to_cameras),
                     sync_cubemap_sky_brightness.after(apply_custom_skybox),
                     sync_environment_intensity.after(attach_sky_to_cameras),
                     attach_exposure_to_opted_out_cameras.after(attach_sky_to_cameras),
@@ -146,6 +148,7 @@ impl Plugin for SkyAtmospherePlugin {
                         .after(attach_exposure_to_opted_out_cameras),
                     rebuild_star_field_on_sky_change.after(resolve_sky_mode),
                     poll_star_field_build
+                        .run_if(resource_exists::<Assets<Image>>)
                         .after(attach_sky_to_cameras)
                         .after(rebuild_star_field_on_sky_change),
                     fade_star_field
@@ -163,15 +166,16 @@ impl Plugin for SkyAtmospherePlugin {
             );
     }
 
-    fn finish(&self, app: &mut App) {
-        // In `finish`, after every plugin's `build`, so the render app is
-        // there whatever order the plugins were added in. No renderer, no-op.
-        if let Some(render_app) = app.get_sub_app_mut(RenderApp) {
-            render_app.add_systems(
-                ExtractSchedule,
-                drop_idle_atmosphere_views.after(bevy::pbr::extract_atmosphere),
-            );
-        }
+    fn cleanup(&self, app: &mut App) {
+        // After every `finish`, including SurfaceGate's. `finish` itself runs
+        // before mobile creates RenderApp, so a no-op there never retried.
+        let Some(render_app) = app.get_sub_app_mut(RenderApp) else {
+            return;
+        };
+        render_app.add_systems(
+            ExtractSchedule,
+            drop_idle_atmosphere_views.after(bevy::pbr::extract_atmosphere),
+        );
     }
 }
 

@@ -445,15 +445,22 @@ pub struct SkyDomePlugin;
 
 impl Plugin for SkyDomePlugin {
     fn build(&self, app: &mut App) {
-        // A material plugin sets up its render side in `build`; without a
-        // renderer there is nothing to draw.
-        if app.get_sub_app(bevy::render::RenderApp).is_none() {
-            return;
-        }
-        embedded_asset!(app, "sky_dome.wgsl");
+        // The material sets up its render side in `build`. Queue it when
+        // RenderApp does not exist yet instead of skipping the dome forever.
+        crate::render_later::when_render_app(app, install_sky_dome);
+    }
+}
+
+fn install_sky_dome(app: &mut App) {
+    if app.get_sub_app(bevy::render::RenderApp).is_none() {
+        return;
+    }
+    if app.is_plugin_added::<MaterialPlugin<SkyDomeMaterial>>() {
+        return;
+    }
+    embedded_asset!(app, "sky_dome.wgsl");
         app.add_plugins(MaterialPlugin::<SkyDomeMaterial>::default())
             .add_systems(Update, sync_sky_dome.after(SkyLightSet));
-    }
 }
 
 /// Everything the dome's parameters are made from, for one frame.

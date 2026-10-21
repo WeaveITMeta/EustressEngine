@@ -10,7 +10,13 @@ pub struct ColliderCachePlugin;
 impl Plugin for ColliderCachePlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<ColliderCache>();
-        app.add_systems(PreUpdate, clear_unused_colliders);
+        // `AssetEvent<Mesh>` is registered by `MeshPlugin`. Mobile adds that
+        // plugin later, from `SurfaceGate::finish`, and a host update before
+        // then has no mesh messages yet.
+        app.add_systems(
+            PreUpdate,
+            clear_unused_colliders.run_if(resource_exists::<Messages<AssetEvent<Mesh>>>),
+        );
     }
 }
 

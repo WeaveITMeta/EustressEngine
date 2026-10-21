@@ -878,15 +878,24 @@ impl Plugin for TerrainSurfacePlugin {
         if !app.is_plugin_added::<TerrainMaterialSlotsPlugin>() {
             app.add_plugins(TerrainMaterialSlotsPlugin);
         }
-        // A material plugin sets up its render side in `build`, so the render
-        // sub-app must exist by now: add this after the render plugins
-        // (DefaultPlugins), as both hosts do. Without one, chunks keep the
-        // vertex-colour material.
-        if app.get_sub_app(bevy::render::RenderApp).is_none() {
-            debug!(target: "eustress::terrain::textures", "no renderer: terrain chunks keep the vertex-colour material");
-            return;
-        }
-        embedded_asset!(app, "terrain_surface.wgsl");
+        // `MaterialPlugin` sets up its render side in `build`, so it runs
+        // once `RenderApp` exists. Desktop adds this after DefaultPlugins.
+        // Mobile's SurfaceGate creates RenderApp later; queue the material
+        // until then instead of skipping it for the rest of the launch.
+        // Without a renderer, chunks keep the vertex-colour material.
+        crate::render_later::when_render_app(app, install_terrain_surface);
+    }
+}
+
+fn install_terrain_surface(app: &mut App) {
+    if app.get_sub_app(bevy::render::RenderApp).is_none() {
+        debug!(target: "eustress::terrain::textures", "no renderer: terrain chunks keep the vertex-colour material");
+        return;
+    }
+    if app.is_plugin_added::<MaterialPlugin<TerrainSurfaceMaterial>>() {
+        return;
+    }
+    embedded_asset!(app, "terrain_surface.wgsl");
         app.add_plugins(MaterialPlugin::<TerrainSurfaceMaterial>::default())
             .init_resource::<TerrainSurfaceBindings>()
             .init_resource::<TerrainHeightTextureRequest>()
@@ -918,7 +927,6 @@ impl Plugin for TerrainSurfacePlugin {
         if !app.is_plugin_added::<TerrainFarFieldPlugin>() {
             app.add_plugins(TerrainFarFieldPlugin);
         }
-    }
 }
 
 /// Reading a struct's layout out of WGSL source, so the tests of every

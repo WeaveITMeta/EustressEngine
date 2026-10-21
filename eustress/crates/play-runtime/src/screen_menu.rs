@@ -220,7 +220,7 @@ pub struct ScreenMenuPlugin;
 impl Plugin for ScreenMenuPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<ScreenMenu>()
-            .add_systems(PostUpdate, show_screen_menu.before(TransformSystems::Propagate));
+            .add_systems(PostUpdate, show_screen_menu.run_if(crate::draw_assets_ready).before(TransformSystems::Propagate));
     }
 }
 

@@ -64,7 +64,14 @@ impl Plugin for SpaceOpenPlugin {
             .add_systems(Update, eustress_common::services::workspace::sync_workspace_gravity_to_avian)
             .add_systems(
                 Update,
-                (open_downloaded, register_opened_materials, poll_voxel, settle_avatar)
+                (
+                    open_downloaded
+                        .run_if(resource_exists::<Assets<Mesh>>)
+                        .run_if(resource_exists::<Assets<StandardMaterial>>),
+                    register_opened_materials.run_if(resource_exists::<Assets<StandardMaterial>>),
+                    poll_voxel,
+                    settle_avatar,
+                )
                     .chain()
                     .after(session::drive),
             );

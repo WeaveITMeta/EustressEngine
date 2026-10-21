@@ -849,19 +849,25 @@ pub struct TerrainFarFieldPlugin;
 impl Plugin for TerrainFarFieldPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<TerrainFarFieldSettings>();
-        // A material plugin sets up its render side in `build`, so the render
-        // sub-app must exist by now (see `TerrainSurfacePlugin`). Without one
-        // there is nothing to draw, and no root is ever marked
+        // The material waits for RenderApp (see `TerrainSurfacePlugin`).
+        // Without one there is nothing to draw, and no root is ever marked
         // `TerrainFarFieldActive`, so streaming chunks keep reaching the
-        // whole map.
-        if app.get_sub_app(bevy::render::RenderApp).is_none() {
-            debug!(target: "eustress::terrain::far_field", "no renderer: no terrain far field");
-            return;
-        }
-        embedded_asset!(app, "terrain_far_field.wgsl");
+        // whole map. Queue it instead of returning forever.
+        crate::render_later::when_render_app(app, install_terrain_far_field);
+    }
+}
+
+fn install_terrain_far_field(app: &mut App) {
+    if app.get_sub_app(bevy::render::RenderApp).is_none() {
+        debug!(target: "eustress::terrain::far_field", "no renderer: no terrain far field");
+        return;
+    }
+    if app.is_plugin_added::<MaterialPlugin<TerrainFarFieldMaterial>>() {
+        return;
+    }
+    embedded_asset!(app, "terrain_far_field.wgsl");
         app.add_plugins(MaterialPlugin::<TerrainFarFieldMaterial>::default())
             .add_systems(Update, sync_terrain_far_fields.after(sync_terrain_surfaces).after(sync_terrain_height_textures));
-    }
 }
 
 #[cfg(test)]

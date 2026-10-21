@@ -96,6 +96,8 @@ pub mod eustress_format;
 pub mod generation;
 pub mod parameters;
 pub mod plugins;
+/// Render installs that wait until `RenderApp` exists (mobile `SurfaceGate`).
+pub mod render_later;
 pub mod pointcloud;
 pub mod project_manifest;
 /// A listing's hashtags: the rule Studio, the MCP tool and the Worker share.

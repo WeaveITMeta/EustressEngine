@@ -70,7 +70,12 @@ impl Plugin for SoundPlayerPlugin {
         app.init_resource::<SoundMix>()
             .add_message::<SoundEnded>()
             .add_message::<SoundLooped>()
-            .add_systems(Update, drive_sounds.in_set(SoundPlayerSystems));
+            .add_systems(
+                Update,
+                drive_sounds
+                    .run_if(resource_exists::<Assets<AudioSource>>)
+                    .in_set(SoundPlayerSystems),
+            );
     }
 }
 

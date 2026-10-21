@@ -2667,7 +2667,7 @@ impl Plugin for BillboardDrawPlugin {
             .configure_sets(Update, BillboardDrawSet::Prepare.before(BillboardDrawSet::Render))
             // Grid maintenance runs before anything queries it this frame.
             .add_systems(Update, maintain_billboard_spatial_grid.before(recycle_offscreen_billboard_slots))
-            .add_systems(Startup, init_billboard_atlas)
+            .add_systems(Startup, init_billboard_atlas.run_if(resource_exists::<Assets<Image>>))
             .add_systems(
                 Update,
                 (
@@ -2686,20 +2686,40 @@ impl Plugin for BillboardDrawPlugin {
                     // it runs on UI sync ticks only.
                     recycle_offscreen_billboard_slots
                         .after(sync_billboard_class_to_marker)
-                        .run_if(gui_sync_tick),
-                    release_atlas_slots.after(recycle_offscreen_billboard_slots),
-                    spawn_billboard_render_state.after(release_atlas_slots),
-                    sync_billboard_properties.after(spawn_billboard_render_state),
+                        .run_if(gui_sync_tick)
+                        .run_if(atlas_ready),
+                    release_atlas_slots
+                        .after(recycle_offscreen_billboard_slots)
+                        .run_if(atlas_ready),
+                    spawn_billboard_render_state
+                        .after(release_atlas_slots)
+                        .run_if(crate::draw_assets_ready)
+                        .run_if(atlas_ready),
+                    sync_billboard_properties
+                        .after(spawn_billboard_render_state)
+                        .run_if(atlas_ready),
                 )
                     .in_set(BillboardDrawSet::Prepare),
             )
             .add_systems(
                 Update,
-                (cull_billboards_by_distance, update_and_render_billboards, upload_atlas_to_gpu)
+                (
+                    cull_billboards_by_distance,
+                    update_and_render_billboards.run_if(atlas_ready),
+                    upload_atlas_to_gpu
+                        .run_if(resource_exists::<Assets<Image>>)
+                        .run_if(atlas_ready),
+                )
                     .chain()
                     .in_set(BillboardDrawSet::Render),
             );
     }
+}
+
+/// The atlas is created in `init_billboard_atlas` once `Assets<Image>` exists.
+/// Until then the draw systems have no non-send atlas to borrow.
+fn atlas_ready(atlas: Option<NonSend<BillboardAtlas>>) -> bool {
+    atlas.is_some()
 }
 
 fn init_billboard_atlas(world: &mut World) {

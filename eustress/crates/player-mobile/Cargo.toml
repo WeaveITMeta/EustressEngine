@@ -39,6 +39,14 @@ bevy = { version = "0.19", default-features = false, features = [
     "zstd_rust",
     "ktx2",
     "bevy_audio",
+    # Same decoder set as the desktop Player. `bevy_audio` alone registers no
+    # `AudioSource` assets (`default-features = false` drops vorbis), and
+    # `drive_sounds` then panics on the missing storage.
+    "audio-all-formats",
+    # Names the resource in `Requested resource ... does not exist` panics.
+    # Cargo cannot turn a feature on for the debug profile only, and the
+    # debug APK is this crate's debug build, so the feature stays on.
+    "debug",
 ] }
 # `branch = "master"`, not a rev: the software-renderer patch depends on
 # i-slint-core with `branch = "master"`. A rev is a different git source,

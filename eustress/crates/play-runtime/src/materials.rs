@@ -123,7 +123,7 @@ impl Plugin for MaterialSyncPlugin {
                 sync_basepart_to_material,
                 hydrate_used_material_textures,
                 prepare_meshes_for_materials,
-            ).chain());
+            ).chain().run_if(crate::draw_assets_ready));
     }
 }
 

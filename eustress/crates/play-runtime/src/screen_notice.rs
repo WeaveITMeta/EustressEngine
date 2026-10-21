@@ -72,7 +72,7 @@ pub struct ScreenNoticePlugin;
 impl Plugin for ScreenNoticePlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<ScreenNotice>()
-            .add_systems(PostUpdate, show_screen_notice.before(TransformSystems::Propagate));
+            .add_systems(PostUpdate, show_screen_notice.run_if(crate::draw_assets_ready).before(TransformSystems::Propagate));
     }
 }
 

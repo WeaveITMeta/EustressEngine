@@ -424,13 +424,13 @@ struct ParticleDrawInstalled;
 
 impl Plugin for ParticleRenderPlugin {
     fn build(&self, app: &mut App) {
-        let shader: Handle<Shader> = {
-            let mut shaders = app.world_mut().resource_mut::<Assets<Shader>>();
-            shaders.add(Shader::from_wgsl(SHADER_WGSL, "particle_cloud.wgsl"))
-        };
-        app.insert_resource(ParticleCloudShader(shader))
-            .add_systems(PostUpdate, sync_particle_clouds_to_render_world);
-        install_particle_draw(app);
+        app.add_systems(PostUpdate, sync_particle_clouds_to_render_world);
+        // Same ordering as the billboard shader: `Assets<Shader>` is inserted
+        // by RenderPlugin, which mobile adds later from SurfaceGate. Reading
+        // it here panics before any adapter is chosen.
+        if ensure_particle_shader(app) {
+            install_particle_draw(app);
+        }
     }
 
     /// The draw is set up here, once the GPU is known. A GPU that cannot read
@@ -443,12 +443,34 @@ impl Plugin for ParticleRenderPlugin {
     /// then runs too early and used to return forever. `cleanup` runs after
     /// SurfaceGate::finish, so the draw is installed there instead.
     fn finish(&self, app: &mut App) {
-        install_particle_draw(app);
+        if ensure_particle_shader(app) {
+            install_particle_draw(app);
+        }
     }
 
     fn cleanup(&self, app: &mut App) {
-        install_particle_draw(app);
+        // After SurfaceGate::finish, so `Assets<Shader>` and RenderDevice exist.
+        if ensure_particle_shader(app) {
+            install_particle_draw(app);
+        }
     }
+}
+
+/// Register the baked shader once `Assets<Shader>` exists. Returns whether
+/// [`ParticleCloudShader`] is stored.
+fn ensure_particle_shader(app: &mut App) -> bool {
+    if app.world().contains_resource::<ParticleCloudShader>() {
+        return true;
+    }
+    if !app.world().contains_resource::<Assets<Shader>>() {
+        return false;
+    }
+    let shader = {
+        let mut shaders = app.world_mut().resource_mut::<Assets<Shader>>();
+        shaders.add(Shader::from_wgsl(SHADER_WGSL, "particle_cloud.wgsl"))
+    };
+    app.insert_resource(ParticleCloudShader(shader));
+    true
 }
 
 fn install_particle_draw(app: &mut App) {

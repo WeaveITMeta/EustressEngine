@@ -437,9 +437,12 @@ pub struct BillboardPipeline {
 /// didn't match what `embedded_asset!` registered in the render
 /// world's AssetServer).
 ///
-/// Registered in the MAIN world's `Assets<Shader>` during plugin
-/// `build()` (the render world has no `Assets<Shader>` — that storage
-/// is main-world only; assets are extracted across each frame). The
+/// Registered in the MAIN world's `Assets<Shader>` (the render world has
+/// no `Assets<Shader>` — that storage is main-world only; assets are
+/// extracted across each frame). Desktop does this in `build`, because
+/// `RenderPlugin` has already run. Mobile's `SurfaceGate` adds
+/// `RenderPlugin` later, so the same registration waits until the storage
+/// exists (`finish` on desktop, `cleanup` after the surface). The
 /// resulting Handle is stored in a `BillboardShaderHandle` Resource
 /// inserted into BOTH worlds so `BillboardPipeline::from_world` (which
 /// runs in the render world) can read it.
@@ -1092,34 +1095,52 @@ struct BillboardRenderAttached;
 
 impl Plugin for BillboardPipelinePlugin {
     fn build(&self, app: &mut App) {
-        // Register the baked shader source in the MAIN world's
-        // `Assets<Shader>` and stash the resulting strong handle in a
-        // resource so the render world can read it. Bevy's render-asset
-        // extraction will propagate the shader to the render side on
-        // the first frame.
-        let shader_handle: Handle<Shader> = {
-            let mut shaders = app.world_mut().resource_mut::<Assets<Shader>>();
-            shaders.add(Shader::from_wgsl(BILLBOARD_SHADER_WGSL, "billboard.wgsl"))
-        };
-        app.insert_resource(BillboardShaderHandle(shader_handle));
-        attach_billboard_render(app);
+        // Desktop: `Assets<Shader>` already exists. Mobile: RenderPlugin has
+        // not been added, and `resource_mut` would panic before any adapter
+        // is chosen (parity4). Registration retries from finish and cleanup.
+        if ensure_billboard_shader(app) {
+            attach_billboard_render(app);
+        }
     }
 
     fn finish(&self, app: &mut App) {
         // Pipeline construction needs RenderDevice, which exists after
         // RenderPlugin's own finish. Desktop reaches that here. Mobile's
         // SurfaceGate adds RenderPlugin from its own finish, later in the
-        // same pass, so the device is not here yet.
-        attach_billboard_render(app);
-        init_billboard_pipeline(app);
+        // same pass, so the device is not here yet. `Assets<Shader>` is
+        // inserted by RenderPlugin::build, which also has not run yet.
+        if ensure_billboard_shader(app) {
+            attach_billboard_render(app);
+            init_billboard_pipeline(app);
+        }
     }
 
     fn cleanup(&self, app: &mut App) {
-        // Runs after every `finish`, including SurfaceGate's, so RenderApp
-        // and RenderDevice exist even when this plugin was added first.
-        attach_billboard_render(app);
-        init_billboard_pipeline(app);
+        // Runs after every `finish`, including SurfaceGate's, so RenderApp,
+        // `Assets<Shader>`, and RenderDevice exist even when this plugin was
+        // added first.
+        if ensure_billboard_shader(app) {
+            attach_billboard_render(app);
+            init_billboard_pipeline(app);
+        }
     }
+}
+
+/// Register the baked shader in the main world's `Assets<Shader>` once that
+/// storage exists. Returns whether [`BillboardShaderHandle`] is stored.
+fn ensure_billboard_shader(app: &mut App) -> bool {
+    if app.world().contains_resource::<BillboardShaderHandle>() {
+        return true;
+    }
+    if !app.world().contains_resource::<Assets<Shader>>() {
+        return false;
+    }
+    let shader_handle = {
+        let mut shaders = app.world_mut().resource_mut::<Assets<Shader>>();
+        shaders.add(Shader::from_wgsl(BILLBOARD_SHADER_WGSL, "billboard.wgsl"))
+    };
+    app.insert_resource(BillboardShaderHandle(shader_handle));
+    true
 }
 
 fn attach_billboard_render(app: &mut App) {

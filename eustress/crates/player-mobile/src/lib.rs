@@ -1495,6 +1495,10 @@ impl Plugin for SurfaceGate {
             bevy::core_pipeline::CorePipelinePlugin,
             bevy::pbr::PbrPlugin::default(),
         ));
+        // Terrain, water, the far field, and the celestial materials queued
+        // their `MaterialPlugin`s while RenderApp was missing. This drains
+        // that queue while plugins can still be added.
+        app.add_plugins(eustress_common::render_later::InstallDeferredRenderPlugin);
         // Extract plugins no-op if they are added before `RenderApp` exists.
         app.add_plugins((
             ExtractResourcePlugin::<SlintImageHandle>::default(),
@@ -1537,6 +1541,15 @@ fn main() {
 }
 
 pub fn run_game() {
+    build_game(false).run();
+}
+
+/// The mobile Player's `App`, before `run`.
+///
+/// `headless` drops `WinitPlugin` so a host test can `update` without a
+/// window. Render plugins stay disabled either way: `SurfaceGate` adds them
+/// from `finish`, and this function does not call `finish`.
+fn build_game(headless: bool) -> App {
     let (texture_tx, texture_rx) = std::sync::mpsc::channel();
     let (device_tx, device_rx) = std::sync::mpsc::channel();
     // Vulkan is the default. GLES is compiled in only on Android
@@ -1582,17 +1595,30 @@ pub fn run_game() {
             }),
         );
     }
-    app.add_plugins(
-        DefaultPlugins
-            .build()
-            .disable::<RenderPlugin>()
-            .disable::<bevy::image::ImagePlugin>()
-            .disable::<bevy::mesh::MeshPlugin>()
-            .disable::<bevy::camera::CameraPlugin>()
-            .disable::<bevy::light::LightPlugin>()
-            .disable::<bevy::core_pipeline::CorePipelinePlugin>()
-            .disable::<bevy::pbr::PbrPlugin>(),
-    )
+    let mut defaults = DefaultPlugins
+        .build()
+        .disable::<RenderPlugin>()
+        .disable::<bevy::image::ImagePlugin>()
+        .disable::<bevy::mesh::MeshPlugin>()
+        .disable::<bevy::camera::CameraPlugin>()
+        .disable::<bevy::light::LightPlugin>()
+        .disable::<bevy::core_pipeline::CorePipelinePlugin>()
+        .disable::<bevy::pbr::PbrPlugin>();
+    // `android_logger::init_once` already installed the process logger.
+    // LogPlugin tries again and errors "Could not set global logger".
+    #[cfg(target_os = "android")]
+    {
+        defaults = defaults.disable::<bevy::log::LogPlugin>();
+    }
+    if headless {
+        defaults = defaults.disable::<bevy::winit::WinitPlugin>();
+    }
+    // `eustress-common` turns on `bevy_gizmos`, so DefaultPlugins includes
+    // `GizmoPlugin`. Its skinned-mesh system requires `Assets<Mesh>`, which
+    // mobile does not insert until SurfaceGate. The Player does not draw
+    // editor gizmos.
+    defaults = defaults.disable::<bevy::gizmos::GizmoPlugin>();
+    app.add_plugins(defaults)
     .add_plugins(avian3d::prelude::PhysicsPlugins::default())
     .insert_resource(avian3d::prelude::Gravity(Vec3::NEG_Y * eustress_common::avatar::GRAVITY_MPS2))
     .add_plugins(eustress_common::avatar::AvatarRuntimePlugin::new(
@@ -1601,7 +1627,8 @@ pub fn run_game() {
     .add_plugins(eustress_networking::NetPlugin)
     .add_plugins(eustress_networking::player_replica::NetReplicaPlugin)
     // Draw the opened tree. RenderApp does not exist yet: billboard and
-    // particle setup waits until SurfaceGate::finish, then runs from cleanup.
+    // particle shaders wait until `Assets<Shader>` exists, and terrain
+    // materials wait in `when_render_app` until SurfaceGate adds the renderer.
     .add_plugins(eustress_play_runtime::PlayRuntimePlugin {
         role: eustress_common::play_session::PlayRole::Replica,
     })
@@ -1634,12 +1661,21 @@ pub fn run_game() {
         brightness: 280.0,
         ..default()
     })
-    .add_systems(Startup, (install_render_error_handler, setup_scene, session::startup))
+    .add_systems(Startup, (
+        install_render_error_handler.run_if(resource_exists::<RenderErrorHandler>),
+        setup_scene
+            .run_if(resource_exists::<Assets<Image>>)
+            .run_if(resource_exists::<Assets<Mesh>>)
+            .run_if(resource_exists::<Assets<StandardMaterial>>),
+        session::startup,
+    ))
     .add_systems(
         Update,
         (
             sync_surface_loss,
-            refresh_overlay,
+            refresh_overlay
+                .run_if(resource_exists::<Assets<Image>>)
+                .run_if(resource_exists::<Assets<StandardMaterial>>),
             fit_overlay,
             init_slint,
             receive_texture,
@@ -1653,5 +1689,26 @@ pub fn run_game() {
     .add_systems(Update, session::drive);
     eustress_common::avatar::boot::register_gltf_scene_types(&mut app);
 
-    app.run();
+    app
+}
+
+#[cfg(test)]
+mod headless_startup {
+    use super::*;
+
+    /// The plugin set `android_main` builds, with RenderApp still deferred,
+    /// updated a few times and with no window. A panic here is the failure
+    /// the emulator used to find one launch at a time.
+    #[test]
+    fn mobile_app_updates_without_a_window_while_render_is_deferred() {
+        let mut app = build_game(true);
+        assert!(
+            !app.is_plugin_added::<RenderPlugin>(),
+            "RenderPlugin stays deferred until SurfaceGate::finish",
+        );
+        for _ in 0..3 {
+            app.update();
+        }
+        assert!(!app.is_plugin_added::<RenderPlugin>());
+    }
 }

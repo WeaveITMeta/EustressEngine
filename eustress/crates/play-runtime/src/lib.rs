@@ -34,6 +34,20 @@ pub mod space_paths;
 use bevy::prelude::*;
 use eustress_common::play_session::{PlayDataModel, PlayRole, PlayScriptSet};
 
+/// Mesh, image, and standard-material storage exist.
+///
+/// Mobile inserts them from `SurfaceGate::finish`, after play plugins have
+/// already built. Systems that require the storage stay off until then, so an
+/// update before the renderer exists does not panic. Desktop has all three
+/// from `DefaultPlugins`, so the condition is true on the first frame.
+pub fn draw_assets_ready(
+    images: Option<Res<Assets<Image>>>,
+    meshes: Option<Res<Assets<Mesh>>>,
+    materials: Option<Res<Assets<StandardMaterial>>>,
+) -> bool {
+    images.is_some() && meshes.is_some() && materials.is_some()
+}
+
 /// Everything a Play session draws, for an app that runs the shared runtime
 /// whole: the Player, as a [`PlayRole::Replica`]. It owns the order of the
 /// frame's sets (`Pull`, `Scripts`, `Apply`, `End`, after the avatar moves),
