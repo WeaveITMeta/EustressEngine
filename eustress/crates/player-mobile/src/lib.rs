@@ -13,13 +13,14 @@
 //! GLES, which reports device type Other. If the surface filter rejects every
 //! adapter, the same instance is asked again with no `compatible_surface`.
 //! GLES-only is the next try. `WGPU_BACKEND=gl` forces that path. On suspend
-//! the swapchain is dropped and presentation is held, and the Skia texture is
-//! released. Resume clears the hold so Bevy creates a new surface on the same
-//! device and the overlay texture is allocated again. Destroying the GLES
-//! device from `Update` panics inside wgpu (`Surface::get_current_texture` or
-//! `Buffer::get_mapped_range`) instead of reporting `DeviceLost`, so the
-//! device stays. A real device-lost callback still rebuilds it. See
-//! `PHASE0_SPIKE.md`.
+//! the swapchain is dropped and presentation is held. The Skia renderer stays
+//! alive: it was associated with the Slint window when the component was
+//! shown, and a replacement renderer is not. Resume clears the hold, Bevy
+//! creates a new surface on the same device, and the overlay texture is
+//! allocated again and drawn by that same renderer. Rotation swaps the
+//! texture between 640×280 and 280×640. Destroying the GLES device from
+//! `Update` panics inside wgpu, so the device stays. A real device-lost
+//! callback still rebuilds it and re-associates Skia. See `PHASE0_SPIKE.md`.
 //!
 //! Pattern (b) lives behind the `pattern-b` feature (`pattern_b` module) and
 //! is not the activity entry. FemtoVG-wgpu is not used: Slint does not build
@@ -50,9 +51,10 @@ use bevy::render::settings::WgpuSettingsPriority;
 use bevy::render::settings::{RenderCreation, WgpuSettings};
 use bevy::render::texture::GpuImage;
 use bevy::render::{Render, RenderApp, RenderPlugin};
-use bevy::window::AppLifecycle;
 #[cfg(target_os = "android")]
-use bevy::window::{PrimaryWindow, RawHandleWrapper};
+use bevy::window::RawHandleWrapper;
+use bevy::window::{AppLifecycle, PrimaryWindow};
+use i_slint_core::renderer::RendererSealed;
 use slint::platform::skia_renderer::SkiaWGPURenderer;
 use slint::platform::WindowEvent;
 use slint::wgpu_29::wgpu;
@@ -97,7 +99,10 @@ slint::slint! {
 
 /// `WindowAdapter::renderer` returns a shared reference, so the Skia renderer
 /// cannot live behind `RefCell`. It is swapped only on the main thread,
-/// between frames, when the surface is recreated.
+/// between frames, and only when the wgpu device itself is replaced.
+/// Replacing it requires [`bind_renderer`]: Slint records the window adapter
+/// on the renderer inside `Window::set_component`, and a fresh renderer does
+/// not have that link.
 struct RendererSlot {
     slot: UnsafeCell<Option<SkiaWGPURenderer>>,
 }
@@ -111,7 +116,7 @@ impl RendererSlot {
 
     fn get(&self) -> Option<&SkiaWGPURenderer> {
         // SAFETY: the slot is touched only on the main thread, and the
-        // returned reference is not held across `set` / `clear`.
+        // returned reference is not held across `set`.
         unsafe { (*self.slot.get()).as_ref() }
     }
 
@@ -119,13 +124,6 @@ impl RendererSlot {
         // SAFETY: same main-thread rule as `get`. No renderer reference is live.
         unsafe {
             *self.slot.get() = Some(renderer);
-        }
-    }
-
-    fn clear(&self) {
-        // SAFETY: same main-thread rule as `get`.
-        unsafe {
-            *self.slot.get() = None;
         }
     }
 }
@@ -190,6 +188,24 @@ impl slint::platform::Platform for SlintBevyPlatform {
     }
 }
 
+/// `Window::set_component` is what stores this adapter on the renderer.
+/// `render_to_texture` fails with "Renderer must be associated with component
+/// before use" until that call has been made on the renderer currently in the slot.
+fn bind_renderer(adapter: &Rc<BevyWindowAdapter>) {
+    let as_dyn: Rc<dyn slint::platform::WindowAdapter> = adapter.clone();
+    if let Some(renderer) = adapter.renderer.get() {
+        renderer.set_window_adapter(&as_dyn);
+    }
+}
+
+fn dispatch_resized(adapter: &BevyWindowAdapter) {
+    let physical = adapter.size.get();
+    let scale = adapter.slint_window.scale_factor();
+    adapter.slint_window.dispatch_event(WindowEvent::Resized {
+        size: physical.to_logical(scale),
+    });
+}
+
 struct SlintContext {
     _instance: Demo,
     adapter: Rc<BevyWindowAdapter>,
@@ -234,9 +250,17 @@ struct StoredWgpuSettings(WgpuSettings);
 struct SurfaceLoss {
     /// `Suspended` was delivered. The next `Running` is a resume, not startup.
     suspended: bool,
-    /// GLES device was destroyed on resume. Rebuild the overlay once the
-    /// replacement device has released the swapchain hold.
+    /// Resume (or a device replacement) should allocate a new overlay texture
+    /// and draw into it. The Skia renderer itself is kept.
     pending_overlay: bool,
+}
+
+/// Pixel size of the overlay texture. Landscape is 640×280. Portrait swaps
+/// those axes so a rotation rebuilds the texture instead of stretching it.
+#[derive(Resource)]
+struct OverlaySize {
+    width: u32,
+    height: u32,
 }
 
 /// Extracted into the render world. While true, the patched `bevy_render`
@@ -285,10 +309,10 @@ fn make_skia(handles: &WgpuHandles) -> Result<SkiaWGPURenderer, String> {
     })
 }
 
-fn overlay_image() -> Image {
+fn overlay_image(width: u32, height: u32) -> Image {
     let size = Extent3d {
-        width: UI_WIDTH,
-        height: UI_HEIGHT,
+        width: width.max(1),
+        height: height.max(1),
         depth_or_array_layers: 1,
     };
     let mut image = Image {
@@ -316,7 +340,7 @@ fn setup_scene(
     mut materials: ResMut<Assets<StandardMaterial>>,
     mut meshes: ResMut<Assets<Mesh>>,
 ) {
-    let image_handle = images.add(overlay_image());
+    let image_handle = images.add(overlay_image(UI_WIDTH, UI_HEIGHT));
     commands.insert_resource(SlintImageHandle(image_handle.clone()));
     commands.insert_resource(OverlayEpoch(1));
 
@@ -442,6 +466,11 @@ fn init_slint(world: &mut World) {
             let ctx = world.non_send::<SlintContext>();
             *ctx.handles.borrow_mut() = Some(handles.clone());
             ctx.adapter.renderer.set(renderer);
+            bind_renderer(&ctx.adapter);
+            dispatch_resized(&ctx.adapter);
+            if let Some(mut loss) = world.get_resource_mut::<SurfaceLoss>() {
+                loss.pending_overlay = true;
+            }
             eprintln!("phase0: Skia renderer recreated on the new device");
             return;
         }
@@ -464,9 +493,11 @@ fn init_slint(world: &mut World) {
             .expect("window adapter");
         ui.window()
             .dispatch_event(WindowEvent::WindowActiveChanged(true));
-        adapter.size.set(PhysicalSize::new(UI_WIDTH, UI_HEIGHT));
+        let overlay = world.resource::<OverlaySize>();
+        let physical = PhysicalSize::new(overlay.width, overlay.height);
+        adapter.size.set(physical);
         adapter.slint_window.dispatch_event(WindowEvent::Resized {
-            size: PhysicalSize::new(UI_WIDTH, UI_HEIGHT).to_logical(1.0),
+            size: physical.to_logical(1.0),
         });
         world.insert_non_send(SlintContext {
             _instance: ui,
@@ -489,6 +520,11 @@ fn init_slint(world: &mut World) {
     match make_skia(&handles) {
         Ok(renderer) => {
             ctx.adapter.renderer.set(renderer);
+            bind_renderer(&ctx.adapter);
+            dispatch_resized(&ctx.adapter);
+            if let Some(mut loss) = world.get_resource_mut::<SurfaceLoss>() {
+                loss.pending_overlay = true;
+            }
             eprintln!("phase0: Skia renderer recreated on the stored device");
         }
         Err(err) => eprintln!("phase0: {err}"),
@@ -563,6 +599,8 @@ fn pointer_on_quad(
     window: &Window,
     camera: (&Camera, &GlobalTransform),
     quad: &GlobalTransform,
+    texture_width: f32,
+    texture_height: f32,
 ) -> Option<LogicalPosition> {
     let (camera, camera_transform) = camera;
     let ray = camera
@@ -578,10 +616,7 @@ fn pointer_on_quad(
     let u = (local.x + 1.45) / 2.9;
     let v = 1.0 - (local.y + 0.635) / 1.27;
     let _ = window;
-    Some(LogicalPosition::new(
-        u * UI_WIDTH as f32,
-        v * UI_HEIGHT as f32,
-    ))
+    Some(LogicalPosition::new(u * texture_width, v * texture_height))
 }
 
 fn dispatch_pointer(
@@ -633,8 +668,16 @@ fn pointer_input(
         return;
     };
 
+    let panel = ctx.adapter.size.get();
     if let Some(cursor) = window.cursor_position() {
-        let over = pointer_on_quad(cursor, window, camera, quad);
+        let over = pointer_on_quad(
+            cursor,
+            window,
+            camera,
+            quad,
+            panel.width as f32,
+            panel.height as f32,
+        );
         let mut press = None;
         for event in mouse.read() {
             if event.button == MouseButton::Left {
@@ -645,7 +688,14 @@ fn pointer_input(
     }
 
     for touch in touches.read() {
-        let over = pointer_on_quad(touch.position, window, camera, quad);
+        let over = pointer_on_quad(
+            touch.position,
+            window,
+            camera,
+            quad,
+            panel.width as f32,
+            panel.height as f32,
+        );
         let press = match touch.phase {
             bevy::input::touch::TouchPhase::Started => Some(true),
             bevy::input::touch::TouchPhase::Ended | bevy::input::touch::TouchPhase::Canceled => {
@@ -657,72 +707,53 @@ fn pointer_input(
     }
 }
 
-/// `Suspended` drops Skia's renderer and holds the swapchain. On `Running`
-/// the hold clears so Bevy builds a new surface on the same device and the
-/// overlay image is allocated again. The device is not destroyed here:
-/// `Device::destroy` panics in wgpu before the error handler can replace it.
-fn sync_surface_loss(
-    mut events: MessageReader<AppLifecycle>,
-    mut loss: ResMut<SurfaceLoss>,
-    mut hold: ResMut<PlayerSwapchainHold>,
-    ctx: Option<NonSend<SlintContext>>,
-    adapter: Option<Res<RenderAdapter>>,
-    shared: Res<SlintSharedTexture>,
-    mut images: ResMut<Assets<Image>>,
-    mut materials: ResMut<Assets<StandardMaterial>>,
-    mut overlay: Option<ResMut<SlintImageHandle>>,
-    mut epoch: Option<ResMut<OverlayEpoch>>,
-    quads: Query<&MeshMaterial3d<StandardMaterial>, With<SlintQuad>>,
+/// Landscape panel is 640×280. A taller window swaps those axes so rotation
+/// rebuilds the texture instead of stretching the landscape image.
+fn overlay_size_for_window(window: &Window) -> Option<(u32, u32)> {
+    let width = window.resolution.physical_width();
+    let height = window.resolution.physical_height();
+    if width == 0 || height == 0 {
+        return None;
+    }
+    if width >= height {
+        Some((UI_WIDTH, UI_HEIGHT))
+    } else {
+        Some((UI_HEIGHT, UI_WIDTH))
+    }
+}
+
+/// Tell Slint the panel size, allocate a matching texture, and scale the quad
+/// so the mesh aspect matches. The Skia renderer is the one already associated
+/// with the window; this only replaces the texture it draws into.
+fn publish_overlay(
+    width: u32,
+    height: u32,
+    ctx: Option<&SlintContext>,
+    shared: &SlintSharedTexture,
+    images: &mut Assets<Image>,
+    materials: &mut Assets<StandardMaterial>,
+    overlay: &mut SlintImageHandle,
+    epoch: &mut OverlayEpoch,
+    quads: &Query<&MeshMaterial3d<StandardMaterial>, With<SlintQuad>>,
+    quad_transforms: &mut Query<&mut Transform, With<SlintQuad>>,
 ) {
-    let mut saw_suspended = false;
-    let mut saw_running = false;
-    for event in events.read() {
-        match event {
-            AppLifecycle::Suspended | AppLifecycle::WillSuspend => saw_suspended = true,
-            AppLifecycle::Running | AppLifecycle::WillResume => saw_running = true,
-            _ => {}
-        }
+    if let Some(ctx) = ctx {
+        let physical = PhysicalSize::new(width, height);
+        ctx.adapter.size.set(physical);
+        let scale = ctx.adapter.slint_window.scale_factor();
+        ctx.adapter
+            .slint_window
+            .dispatch_event(WindowEvent::Resized {
+                size: physical.to_logical(scale),
+            });
     }
-
-    if saw_suspended {
-        if let Some(ctx) = ctx.as_ref() {
-            ctx.adapter.renderer.clear();
-        }
-        *shared.texture.lock().expect("texture slot") = None;
-        loss.suspended = true;
-        hold.0 = true;
-        let gles = adapter
-            .as_ref()
-            .map(|adapter| adapter.0.get_info().backend == wgpu::Backend::Gl)
-            .unwrap_or(false);
-        eprintln!("phase0: surface lost (Suspended). swapchain hold on. gles={gles}");
+    let aspect = width as f32 / height as f32;
+    let height_world = 1.27;
+    let width_world = height_world * aspect;
+    for mut transform in quad_transforms.iter_mut() {
+        transform.scale = Vec3::new(width_world / 2.9, height_world / 1.27, 1.0);
     }
-
-    if saw_running && loss.suspended {
-        loss.suspended = false;
-        hold.0 = false;
-        loss.pending_overlay = true;
-        let gles = adapter
-            .as_ref()
-            .map(|adapter| adapter.0.get_info().backend == wgpu::Backend::Gl)
-            .unwrap_or(false);
-        eprintln!(
-            "phase0: resume (Running). new surface on the same device. gles={gles}"
-        );
-    }
-
-    if !loss.pending_overlay || hold.0 {
-        return;
-    }
-    loss.pending_overlay = false;
-
-    let Some(overlay) = overlay.as_mut() else {
-        return;
-    };
-    let Some(epoch) = epoch.as_mut() else {
-        return;
-    };
-    let image_handle = images.add(overlay_image());
+    let image_handle = images.add(overlay_image(width, height));
     let mat_handle = quads.iter().next().map(|mat| mat.0.clone());
     if let Some(mat_handle) = mat_handle {
         if let Some(mut material) = materials.get_mut(&mat_handle) {
@@ -739,7 +770,112 @@ fn sync_surface_loss(
         .is_ok()
     {}
     *shared.texture.lock().expect("texture slot") = None;
-    eprintln!("phase0: slint overlay texture scheduled for recreate");
+    eprintln!("phase0: slint overlay texture {width}x{height} scheduled");
+}
+
+/// `Suspended` holds the swapchain and drops the overlay texture slot. The
+/// Skia renderer stays: it is already associated with the Slint window, and
+/// the wgpu device is still the one it was created with. `Running` clears the
+/// hold so Bevy builds a new surface and [`refresh_overlay`] allocates a new
+/// texture for that same renderer.
+fn sync_surface_loss(
+    mut events: MessageReader<AppLifecycle>,
+    mut loss: ResMut<SurfaceLoss>,
+    mut hold: ResMut<PlayerSwapchainHold>,
+    adapter: Option<Res<RenderAdapter>>,
+    shared: Res<SlintSharedTexture>,
+) {
+    let mut saw_suspended = false;
+    let mut saw_running = false;
+    for event in events.read() {
+        match event {
+            AppLifecycle::Suspended | AppLifecycle::WillSuspend => saw_suspended = true,
+            AppLifecycle::Running | AppLifecycle::WillResume => saw_running = true,
+            _ => {}
+        }
+    }
+
+    if saw_suspended {
+        *shared.texture.lock().expect("texture slot") = None;
+        loss.suspended = true;
+        hold.0 = true;
+        let gles = adapter
+            .as_ref()
+            .map(|adapter| adapter.0.get_info().backend == wgpu::Backend::Gl)
+            .unwrap_or(false);
+        eprintln!(
+            "phase0: surface lost (Suspended). swapchain hold on. skia renderer kept. gles={gles}"
+        );
+    }
+
+    if saw_running && loss.suspended {
+        loss.suspended = false;
+        hold.0 = false;
+        loss.pending_overlay = true;
+        let gles = adapter
+            .as_ref()
+            .map(|adapter| adapter.0.get_info().backend == wgpu::Backend::Gl)
+            .unwrap_or(false);
+        eprintln!(
+            "phase0: resume (Running). new surface on the same device. skia renderer kept. gles={gles}"
+        );
+    }
+}
+
+fn refresh_overlay(
+    mut loss: ResMut<SurfaceLoss>,
+    hold: Res<PlayerSwapchainHold>,
+    mut size: ResMut<OverlaySize>,
+    windows: Query<&Window, With<PrimaryWindow>>,
+    ctx: Option<NonSend<SlintContext>>,
+    shared: Res<SlintSharedTexture>,
+    mut images: ResMut<Assets<Image>>,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+    mut overlay: Option<ResMut<SlintImageHandle>>,
+    mut epoch: Option<ResMut<OverlayEpoch>>,
+    quads: Query<&MeshMaterial3d<StandardMaterial>, With<SlintQuad>>,
+    mut quad_transforms: Query<&mut Transform, With<SlintQuad>>,
+) {
+    if hold.0 {
+        return;
+    }
+    let Some(window) = windows.iter().next() else {
+        return;
+    };
+    let Some((width, height)) = overlay_size_for_window(window) else {
+        return;
+    };
+    let size_changed = size.width != width || size.height != height;
+    if !loss.pending_overlay && !size_changed {
+        return;
+    }
+    let Some(overlay) = overlay.as_mut() else {
+        return;
+    };
+    let Some(epoch) = epoch.as_mut() else {
+        return;
+    };
+    loss.pending_overlay = false;
+    size.width = width;
+    size.height = height;
+    let reason = if size_changed {
+        "window size"
+    } else {
+        "resume"
+    };
+    eprintln!("phase0: overlay refresh ({reason})");
+    publish_overlay(
+        width,
+        height,
+        ctx.as_deref(),
+        &shared,
+        &mut images,
+        &mut materials,
+        overlay,
+        epoch,
+        &quads,
+        &mut quad_transforms,
+    );
 }
 
 /// Runs in the render world, before `create_surfaces`. Drops the swapchain
@@ -1385,6 +1521,10 @@ pub fn run_game() {
     .insert_resource(StoredWgpuSettings(settings))
     .init_resource::<SurfaceLoss>()
     .init_resource::<PlayerSwapchainHold>()
+    .insert_resource(OverlaySize {
+        width: UI_WIDTH,
+        height: UI_HEIGHT,
+    })
     .insert_resource(GlobalAmbientLight {
         color: Color::WHITE,
         brightness: 280.0,
@@ -1395,6 +1535,7 @@ pub fn run_game() {
         Update,
         (
             sync_surface_loss,
+            refresh_overlay,
             init_slint,
             receive_texture,
             render_slint,

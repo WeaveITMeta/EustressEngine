@@ -8,7 +8,11 @@ The wgpu instance, surface, and device are created only after winit `Resumed` ha
 
 **Backend.** Vulkan is the default (`Backends::VULKAN | Backends::GL`, or `WGPU_BACKEND`). The instance that Bevy keeps is a single backend. A Vulkan+GLES instance would connect the `ANativeWindow` to Vulkan and the GLES window surface then fails with "already connected to another API". GLES is compiled in with `bevy_render` feature `gles` (Bevy does not re-export that feature) and is used when Vulkan enumerates nothing. `WGPU_BACKEND=gl` forces GLES. The emulator check uses that, because gfxstream Vulkan on this host blocks in `vkCreateImageView`. An arm64 device has no `wrap.sh`, so it still tries Vulkan first.
 
-**Suspend / resume.** `Suspended` drops the wgpu swapchain (`WindowSurfaces`) and sets `SwapchainHold` in the patched `bevy_render`, so `prepare_windows` does not call `Surface::get_current_texture` on a dead `ANativeWindow`. The Slint renderer and its overlay texture are dropped too. `Running` clears the hold. Bevy configures a new surface on the **same** device, and the overlay image is allocated again. Logcat on the emulator (GLES):
+**Suspend / resume.** `Suspended` drops the wgpu swapchain (`WindowSurfaces`) and sets `SwapchainHold` in the patched `bevy_render`, so `prepare_windows` does not call `Surface::get_current_texture` on a dead `ANativeWindow`. The Skia renderer stays. Slint associates it with the window inside `Window::set_component` (`set_window_adapter`). Dropping that renderer and installing a new one left the new renderer with no window, and `render_to_texture` then failed every frame with `Renderer must be associated with component before use`. The panel texture was reallocated, but nothing was drawn into it, so the quad went blank while the cube kept rendering. `Running` clears the hold. Bevy configures a new surface on the **same** device. The overlay image is allocated again and the original renderer draws into it. A device-lost replacement calls `set_window_adapter` on the new renderer and schedules a new overlay texture.
+
+**Rotation.** The panel texture is 640×280 when the window is wider than it is tall, and 280×640 otherwise. A size change (rotation, or the first real window size) dispatches `WindowEvent::Resized`, allocates a new texture, and scales the quad so its aspect matches. Pointer hits use that texture size. Resume does the same redraw even when the size is unchanged.
+
+Logcat on the SwiftShader emulator (GLES, no Skia) from the earlier lifecycle check:
 
 ```
 phase0: surface lost (Suspended). swapchain hold on. gles=true
@@ -22,7 +26,11 @@ No panic on that resume. The process stayed up.
 
 Destroying the GLES device from `Update` was tried and reverted. wgpu panics instead of reporting `DeviceLost` (`Surface::get_current_texture`: "Surface is not configured for presentation", and later `Buffer::get_mapped_range`: "Buffer is invalid"). The error handler still rebuilds the device when wgpu does deliver `DeviceLost`.
 
-**Skia on GLES.** `SkiaWGPURenderer` rejects the GL backend (`Unsupported WGPU backend for use with Skia: gl`). The Bevy scene continues without the overlay. Vulkan is the path that can draw the Slint label. That path was not run on a device. **UNVERIFIED on hardware.**
+**Skia on GLES.** `SkiaWGPURenderer` rejects the GL backend (`Unsupported WGPU backend for use with Skia: gl`). The Bevy scene continues without the overlay. Vulkan is the path that draws the Slint label.
+
+**Observed on commit `1863f701` (before this overlay fix).** Android Studio emulator Medium_Phone_API_36, API 36 x86_64, `-gpu host`, Vulkan, x86_64 debug APK. First launch showed the cube and the Slint panel. After background and resume, the swapchain was recreated on the same device, the cube kept rendering, and the panel was gone. logcat repeated `slint render_to_texture: Renderer must be associated with component before use`. That build cleared the `SkiaWGPURenderer` on `Suspended` and constructed a new one on resume without `set_window_adapter`.
+
+This VM cannot re-run that emulator. KVM hits `kernel BUG` in `kvm_arch_vcpu_create`, and there is no NVIDIA host GPU. The overlay fix below is **UNVERIFIED** on that emulator and on hardware.
 
 **Downlevel.** SwiftShader GLES has neither `SURFACE_VIEW_FORMATS` nor `VIEW_FORMATS`. The `bevy_render` patch leaves `view_formats` empty in those cases so `Surface::configure` and the camera targets (`main_texture_a` / `main_texture_b`) are not rejected. `bevy_app` is patched so plugins added during `finish` (the renderer, once the window exists) are finished in the same pass.
 
@@ -39,9 +47,8 @@ Destroying the GLES device from `Update` was tried and reverted. wgpu panics ins
 
 An earlier binary in this same session, before the suspend-hold edits, did produce a screencap with a non-black scene (bright pixels in the middle of the frame). That file was overwritten by the black capture above. Do not treat the saved PNG as a picture of the cube.
 
-**arm64 debug APK** (this follow-up, arm64-v8a only, no `wrap.sh`):
+**arm64 debug APK** from the lifecycle follow-up (commit `1863f701`, before the overlay association fix). That file was replaced in the artifact and agent-store paths by the overlay-fix APKs in the next section. Recorded hash of the `1863f701` build:
 
-- Path: `/opt/cursor/artifacts/eustress-player-phase0-arm64-debug.apk`
 - Size: 32,101,506 bytes
 - sha256: `71397b075304148c1fd0253428a5a6f66b3a32671958f680d9b871f66a7019f1`
 - `minSdk` 29, `targetSdk` 34, `compileSdk` 34
@@ -50,6 +57,31 @@ An earlier binary in this same session, before the suspend-hold edits, did produ
 - `uses-feature` `glEsVersion` 3.0, Vulkan level, and Vulkan version are `required=false`
 
 KVM is unusable on this host (`kernel BUG` in `kvm_arch_vcpu_create`). The emulator is TCG. Everything above that says "emulator" is **UNVERIFIED** on hardware.
+
+## Follow-up: Slint panel after suspend
+
+Root cause is in `crates/player-mobile`. `sync_surface_loss` called `renderer.clear()` on `Suspended`. `init_slint` then saw an empty slot, built a new `SkiaWGPURenderer`, and stored it. Slint only calls `RendererSealed::set_window_adapter` from `WindowInner::set_component`, which already ran at `show()` against the previous renderer. `render_to_texture` reads that weak pointer and returns `Renderer must be associated with component before use` when it is empty. The cube does not use that renderer, so it kept drawing.
+
+The renderer is no longer cleared on suspend. The device is the same one Skia was created with, so the association stays valid across surface loss. Resume and rotation go through `refresh_overlay` / `publish_overlay`: set the adapter size, dispatch `WindowEvent::Resized`, scale the quad, allocate the texture, and let the same renderer draw it. A replacement renderer (device lost) calls `set_window_adapter` and then schedules that texture refresh.
+
+The SwiftShader log lines above are from the lifecycle build, before this change. The new suspend line says `skia renderer kept`. That binary was not launched here.
+
+| Check | Result |
+| --- | --- |
+| Host `cargo check -p eustress-player-mobile --features android` | Passed after the association fix. |
+| `cargo ndk` release, `arm64-v8a` and `x86_64`, API 29 | Passed. x86_64 APK has no `wrap.sh`, so Vulkan is tried first. |
+| Medium_Phone_API_36 resume and rotation | **UNVERIFIED.** Not run from this VM. |
+
+**Debug APKs** (this overlay fix, one ABI each, no `wrap.sh`). Copies are in the agent store. They are not committed.
+
+| ABI | Store path | Size | sha256 |
+| --- | --- | --- | --- |
+| arm64-v8a | `/cursor/stores/self/eustress-player-phase0-arm64-debug.apk` | 32,103,122 bytes | `242bc249c42c48ada6842ce5f1897fd15730fc5def582ecaa950275eaf505193` |
+| x86_64 | `/cursor/stores/self/eustress-player-phase0-x86_64-debug.apk` | 33,675,523 bytes | `4eb1d9999e26ce3f6f81adfca11536ff95a6629ee94de1f8972ee579bb9da604` |
+
+The same files are at `/opt/cursor/artifacts/eustress-player-phase0-arm64-debug.apk` and `/opt/cursor/artifacts/eustress-player-phase0-x86_64-debug.apk`. The arm64 APK contains only `lib/arm64-v8a/libeustress_player_mobile.so` (66,898,888 bytes uncompressed). The x86_64 APK contains only `lib/x86_64/libeustress_player_mobile.so` (70,719,120 bytes uncompressed). Neither APK contains `wrap.sh`. Both verify with the Android debug key.
+
+`minSdk` 29, `targetSdk` 34, `compileSdk` 34. Packaged permissions: `android.permission.INTERNET`, and the AndroidX signature permission `dev.eustress.player.debug.DYNAMIC_RECEIVER_NOT_EXPORTED_PERMISSION`. `glEsVersion` 3.0 and the Vulkan features are `required=false`.
 
 ## Which integration pattern worked
 
