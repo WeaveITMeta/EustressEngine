@@ -12,7 +12,7 @@ path = "src/main.rs"
 # Workspace members
 eustress-common = { path = "../common", features = ["gui", "realism-scripting", "mlua", "physics", "realism", "avatar-profile", "view-look"] }
 # Multiplayer: joining a Studio host over WebTransport (`--connect`).
-eustress-networking = { path = "../common/eustress-networking" }
+eustress-networking = { path = "../common/eustress-networking", features = ["fetch"] }
 # The Play runtime Studio shares: the draw step, HUD, billboards, sounds,
 # particles and camera a joined world is shown with.
 eustress-play-runtime = { path = "../play-runtime" }

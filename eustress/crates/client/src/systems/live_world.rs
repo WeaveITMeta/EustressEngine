@@ -148,99 +148,16 @@ impl ChunkCache for DiskChunkCache {
     }
 }
 
-/// Where a published world's players should appear: the first top-level
-/// SpawnLocation in the opening Space, standing on it. `None` when it has none.
+/// Where a published world's players should appear. The reader lives with
+/// the download (`eustress_networking::published`) so the mobile Player uses
+/// the same one.
 pub fn find_spawn(world: &DownloadedWorld) -> Option<Vec3> {
-    let (_, records) = world.spaces.iter().find(|(name, _)| *name == world.start_space)?;
-    for (path, bytes) in records {
-        // Top-level only: a nested spawn's transform is relative to its parent.
-        let is_top_level = path.strip_prefix("Workspace/").is_some_and(|rest| rest.matches('/').count() == 1);
-        if !is_top_level || !path.ends_with("/_instance.toml") {
-            continue;
-        }
-        let Ok(text) = std::str::from_utf8(bytes) else { continue };
-        if !text.contains("SpawnLocation") {
-            continue;
-        }
-        let Ok(doc) = text.parse::<toml::Value>() else { continue };
-        if doc.get("metadata").and_then(|m| m.get("class_name")).and_then(|c| c.as_str()) != Some("SpawnLocation") {
-            continue;
-        }
-        let transform = doc.get("transform");
-        let array = |key: &str, i: usize, default: f64| -> f32 {
-            transform
-                .and_then(|t| t.get(key))
-                .and_then(|a| a.as_array())
-                .and_then(|a| a.get(i))
-                .and_then(|v| v.as_float().or_else(|| v.as_integer().map(|n| n as f64)))
-                .unwrap_or(default) as f32
-        };
-        let position = Vec3::new(array("position", 0, 0.0), array("position", 1, 0.0), array("position", 2, 0.0));
-        let half_height = array("scale", 1, 1.0) * 0.5;
-        return Some(position + Vec3::Y * (half_height + 0.1));
-    }
-    None
+    eustress_networking::published::find_spawn(world)
 }
 
-/// Turn an unpacked `.pak` (a Universe folder) into the same record form a
-/// `.echk` download produces, so both kinds of published world open the same
-/// way.
+/// Turn an unpacked `.pak` into records. Same function the download uses.
 pub fn world_from_universe_dir(universe: &Path) -> Result<DownloadedWorld, String> {
-    let spaces_dir = universe.join("Spaces");
-    let mut names: Vec<String> = std::fs::read_dir(&spaces_dir)
-        .map_err(|e| format!("read {}: {e}", spaces_dir.display()))?
-        .flatten()
-        .filter(|e| e.path().join("Workspace").is_dir())
-        .map(|e| e.file_name().to_string_lossy().to_string())
-        .collect();
-    names.sort();
-    let start_space = names.first().cloned().ok_or("the package holds no Space with a Workspace")?;
-
-    let mut spaces = Vec::new();
-    for name in &names {
-        spaces.push((name.clone(), records_from_dir(&spaces_dir.join(name), "")?));
-    }
-    let assets_dir = universe.join("assets");
-    let assets = if assets_dir.is_dir() { records_from_dir(&assets_dir, "assets/")? } else { Vec::new() };
-
-    let mut world = DownloadedWorld {
-        universe: universe.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default(),
-        start_space,
-        spaces,
-        assets,
-        spawn: [0.0, 2.0, 8.0],
-    };
-    if let Some(at) = find_spawn(&world) {
-        world.spawn = at.to_array();
-    }
-    Ok(world)
-}
-
-fn records_from_dir(root: &Path, prefix: &str) -> Result<Vec<Record>, String> {
-    fn walk(base: &Path, dir: &Path, prefix: &str, out: &mut Vec<Record>) -> Result<(), String> {
-        for entry in std::fs::read_dir(dir).map_err(|e| format!("read {}: {e}", dir.display()))?.flatten() {
-            let path = entry.path();
-            let name = entry.file_name().to_string_lossy().to_string();
-            if name.starts_with('.') || name.starts_with("world.fjalldb") || name.starts_with("header.bin") {
-                continue;
-            }
-            if path.is_dir() {
-                walk(base, &path, prefix, out)?;
-            } else {
-                let rel = path.strip_prefix(base).unwrap_or(&path).to_string_lossy().replace('\\', "/");
-                let rel = format!("{prefix}{rel}");
-                if is_safe_record_path(&rel) {
-                    let bytes = std::fs::read(&path).map_err(|e| format!("read {}: {e}", path.display()))?;
-                    out.push((rel, bytes));
-                }
-            }
-        }
-        Ok(())
-    }
-    let mut out = Vec::new();
-    walk(root, root, prefix, &mut out)?;
-    out.sort_by(|a, b| a.0.cmp(&b.0));
-    Ok(out)
+    eustress_networking::published::world_from_universe_dir(universe)
 }
 
 #[cfg(test)]
