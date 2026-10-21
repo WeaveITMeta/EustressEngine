@@ -26,7 +26,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
 use bevy::prelude::*;
-use eustress_echk::{is_content_hash, is_safe_record_path, Record};
+use eustress_echk::{is_content_hash, Record};
 use eustress_networking::session::{ChunkCache, DownloadedWorld};
 
 /// The folders a downloaded world is written to.
@@ -78,40 +78,11 @@ fn prune_stale(live_root: &Path, keep: Option<&Path>) {
 }
 
 /// Write a downloaded world into `live`, replacing whatever was there.
-/// Returns the number of files written.
+/// Returns the number of files written. The bytes are written by
+/// [`eustress_networking::published::materialize_world`], which the mobile
+/// Player calls too.
 pub fn materialize(world: &DownloadedWorld, live: &LiveWorld) -> Result<usize, String> {
-    if live.universe_root.exists() {
-        std::fs::remove_dir_all(&live.universe_root)
-            .map_err(|e| format!("clear {}: {e}", live.universe_root.display()))?;
-    }
-    std::fs::create_dir_all(&live.space_root).map_err(|e| format!("create {}: {e}", live.space_root.display()))?;
-
-    let mut written = 0;
-    for (name, records) in &world.spaces {
-        let root = if *name == world.start_space {
-            live.space_root.clone()
-        } else {
-            live.universe_root.join("Spaces").join(name)
-        };
-        written += write_records(&root, records)?;
-    }
-    written += write_records(&live.universe_root, &world.assets)?;
-    Ok(written)
-}
-
-fn write_records(root: &Path, records: &[Record]) -> Result<usize, String> {
-    for (path, bytes) in records {
-        // Checked again here, at the one place bytes reach the disk.
-        if !is_safe_record_path(path) {
-            return Err(format!("refusing to write {path:?} outside the world folder"));
-        }
-        let target = root.join(path);
-        if let Some(parent) = target.parent() {
-            std::fs::create_dir_all(parent).map_err(|e| format!("create {}: {e}", parent.display()))?;
-        }
-        std::fs::write(&target, bytes).map_err(|e| format!("write {}: {e}", target.display()))?;
-    }
-    Ok(records.len())
+    eustress_networking::published::materialize_world(world, &live.universe_root, &live.space_root)
 }
 
 /// Chunks kept between sessions under `<data_local>/eustress/echk/`, named by

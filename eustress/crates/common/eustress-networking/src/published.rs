@@ -267,3 +267,42 @@ fn records_from_dir(root: &Path, prefix: &str) -> Result<Vec<Record>, String> {
     out.sort_by(|a, b| a.0.cmp(&b.0));
     Ok(out)
 }
+
+/// Write a downloaded world onto disk. The start Space goes in `space_root`.
+/// Every other Space goes in `{universe_root}/Spaces/{name}`. Shared assets
+/// go in `universe_root`. Returns how many files were written.
+///
+/// The desktop Player (`client` `live_world::materialize`) and the mobile
+/// Player both call this. A path that would leave the folder is refused.
+pub fn materialize_world(world: &DownloadedWorld, universe_root: &Path, space_root: &Path) -> Result<usize, String> {
+    if universe_root.exists() {
+        std::fs::remove_dir_all(universe_root).map_err(|e| format!("clear {}: {e}", universe_root.display()))?;
+    }
+    std::fs::create_dir_all(space_root).map_err(|e| format!("create {}: {e}", space_root.display()))?;
+
+    let mut written = 0;
+    for (name, records) in &world.spaces {
+        let root = if *name == world.start_space {
+            space_root.to_path_buf()
+        } else {
+            universe_root.join("Spaces").join(name)
+        };
+        written += write_records(&root, records)?;
+    }
+    written += write_records(universe_root, &world.assets)?;
+    Ok(written)
+}
+
+fn write_records(root: &Path, records: &[Record]) -> Result<usize, String> {
+    for (path, bytes) in records {
+        if !is_safe_record_path(path) {
+            return Err(format!("refusing to write {path:?} outside the world folder"));
+        }
+        let target = root.join(path);
+        if let Some(parent) = target.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| format!("create {}: {e}", parent.display()))?;
+        }
+        std::fs::write(&target, bytes).map_err(|e| format!("write {}: {e}", target.display()))?;
+    }
+    Ok(records.len())
+}
