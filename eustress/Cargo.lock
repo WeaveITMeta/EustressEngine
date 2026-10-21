@@ -7933,6 +7933,7 @@ dependencies = [
  "android_logger",
  "bevy 0.19.0",
  "bevy_render 0.19.0",
+ "i-slint-core",
  "log",
  "slint",
  "smol",

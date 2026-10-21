@@ -40,6 +40,9 @@ bevy = { version = "0.19", default-features = false, features = [
 # so Cargo builds two i-slint-core copies and the cdylib link fails
 # (`duplicate symbol: LayerVTable`). Cargo.lock pins master to 2447c697,
 # the revision the patch was made from.
+# Same git source as `slint` (branch, not a rev) so Cargo uses one i-slint-core.
+# `RendererSealed::set_window_adapter` is not re-exported by the slint crate.
+i-slint-core = { git = "https://github.com/slint-ui/slint", branch = "master", default-features = false }
 slint = { git = "https://github.com/slint-ui/slint", branch = "master", default-features = false, features = [
     "std",
     "compat-1-2",
