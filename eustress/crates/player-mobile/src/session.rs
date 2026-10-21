@@ -161,6 +161,10 @@ fn begin_published(world: &mut World, id: String) {
     let api = api_base::api_base().to_string();
     let token = app.token.clone();
     let root = data_root();
+    // Desktop (`net_play::spawn_avatar_in_opened_world`) does not open a
+    // session for a published world: there is no host, so there is no Hello.
+    // A join link is the only path that speaks the protocol.
+    eprintln!("phase0: published play of {id} does not join a host (no Hello; desktop plays this Space solo)");
     app.fetch_rx = Some(Mutex::new(spawn_fetch(api, id, token, root)));
     if let Some(mut input) = world.get_resource_mut::<InputState>() {
         input.capture_all = false;
@@ -277,6 +281,13 @@ fn begin_network(world: &mut World, link: JoinLink, name: String, ticket: Option
         return;
     }
     let root = data_root();
+    eprintln!(
+        "net: joining {}:{} as {} protocol {}",
+        link.host,
+        link.port,
+        name,
+        eustress_networking::wire::PROTOCOL_VERSION,
+    );
     match eustress_networking::native::start_join(&link) {
         Ok(net) => {
             let mut commands = world.commands();

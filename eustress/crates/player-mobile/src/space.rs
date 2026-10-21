@@ -13,7 +13,9 @@ use std::path::{Path, PathBuf};
 use bevy::prelude::*;
 use bevy::tasks::{block_on, poll_once, AsyncComputeTaskPool, Task};
 use eustress_common::datamodel::{is_base_part, DataModel};
-use eustress_common::play_session::{space_character_auto_loads, space_gravity, PlayAssetRoot, PlayDataModel};
+use eustress_common::play_session::{
+    space_character_auto_loads, space_gravity, PlayAssetRoot, PlayDataModel, PlayScriptSet, ScriptedPlayCamera,
+};
 use eustress_common::plugins::light_classes::LightComponent;
 use eustress_common::terrain::disk::hydrate_terrain_from_disk;
 use eustress_common::terrain::layer_instances::{read_layer_instances, spawn_layer_instances};
@@ -27,7 +29,7 @@ use eustress_networking::session::{EndSession, LocalWorldReady, WorldDownloaded}
 use eustress_play_runtime::material_registry::{register_space_materials, MaterialRegistry};
 
 use crate::session::{self, MobileApp};
-use crate::StandInYard;
+use crate::{GalleryCamera, StandInYard};
 
 /// Frames after the files are open before the avatar spawns, matching the
 /// desktop Player (`net_play.rs` `SETTLE_FRAMES`), so part colliders exist.
@@ -71,10 +73,14 @@ impl Plugin for SpaceOpenPlugin {
                     register_opened_materials.run_if(resource_exists::<Assets<StandardMaterial>>),
                     poll_voxel,
                     settle_avatar,
+                    log_opened_view,
                 )
                     .chain()
                     .after(session::drive),
-            );
+            )
+            // After the play camera copies the Space's CFrame, so a fallback
+            // pose is replaced and a real one is left alone.
+            .add_systems(Update, frame_spawn_if_fallback.after(PlayScriptSet::Apply));
     }
 }
 
@@ -177,6 +183,9 @@ fn open_downloaded(
 
     let parts = tree_parts(&opened.dm);
     let spawn = opened.spawn;
+    let camera_at = opened.dm.current_camera().and_then(|id| {
+        opened.dm.get(id).and_then(|inst| inst.cframe()).map(|cf| cf.to_transform().translation)
+    });
     let shared = eustress_common::datamodel::new_shared();
     *shared.lock() = opened.dm;
     commands.insert_resource(SceneKeys(opened.keys));
@@ -233,6 +242,21 @@ fn open_downloaded(
         spawn.unwrap_or_else(|| Vec3::from_array(world.spawn))
     };
     let auto_loads = space_character_auto_loads(&space_root);
+    // The gallery yard (Bevy cuboids) is gone. Parts draw `parts/*.glb` from
+    // the default asset source, which on Android is the APK. The gallery
+    // directional light is not a yard entity, so it stays. The gallery camera
+    // stays too; `gate_gallery_camera` turns it off once the play camera is
+    // active. A published Space has no host, so this open does not join.
+    eprintln!(
+        "phase0: opened {} parts={parts} spawn=({:.1}, {:.1}, {:.1}) space_camera={} network={network} auto_loads={auto_loads} fill_lights={light_count}",
+        world.start_space,
+        at.x,
+        at.y,
+        at.z,
+        camera_at
+            .map(|p| format!("({:.1}, {:.1}, {:.1})", p.x, p.y, p.z))
+            .unwrap_or_else(|| "none".into()),
+    );
     commands.insert_resource(PendingSpawn {
         at,
         frames: 0,
@@ -381,11 +405,24 @@ fn settle_avatar(
     }
     if pending.auto_loads && !app.spawned {
         app.spawned = true;
+        let body = eustress_common::avatar::AvatarDescriptor::default().resolved_rig().body_asset;
+        let file = body.strip_prefix("bundled://").and_then(|rel| {
+            std::env::var_os("EUSTRESS_BUNDLED_ASSETS").map(|root| std::path::PathBuf::from(root).join(rel))
+        });
+        let exists = file.as_ref().is_some_and(|path| path.is_file());
+        eprintln!(
+            "phase0: avatar spawn at ({:.1}, {:.1}, {:.1}) body={body} file={} exists={exists}",
+            pending.at.x,
+            pending.at.y,
+            pending.at.z,
+            file.as_ref().map(|path| path.display().to_string()).unwrap_or_else(|| "unset".into()),
+        );
         spawn.write(eustress_common::avatar::SpawnAvatar::new(
             eustress_common::avatar::AvatarDescriptor::default(),
             pending.at,
         ));
     } else if !pending.auto_loads {
+        eprintln!("phase0: Players.CharacterAutoLoads is off, so no avatar is spawned");
         info!("space: Players.CharacterAutoLoads is off, so no avatar is spawned");
         app.spawned = true;
     }
@@ -394,4 +431,87 @@ fn settle_avatar(
     let _ = pending.network;
     ready.write(LocalWorldReady);
     commands.remove_resource::<PendingSpawn>();
+}
+
+/// One line for the next logcat: where the cameras are, and whether any
+/// part mesh exists yet. `tracing` on Android is easy to miss; this is
+/// `eprintln` like the rest of the phase0 lines.
+fn log_opened_view(
+    pending: Option<Res<PendingSpawn>>,
+    cameras: Query<
+        (&Transform, &Camera, Option<&Name>),
+        Or<(
+            With<GalleryCamera>,
+            With<ScriptedPlayCamera>,
+            With<eustress_common::avatar::control::AvatarCamera>,
+        )>,
+    >,
+    lights: Query<&DirectionalLight>,
+    parts: Query<(), (With<Mesh3d>, With<eustress_common::play_session::FromTree>)>,
+    mut logged: Local<bool>,
+) {
+    let Some(pending) = pending else {
+        *logged = false;
+        return;
+    };
+    if *logged || pending.frames < 2 {
+        return;
+    }
+    *logged = true;
+    eprintln!(
+        "phase0: view spawn=({:.1}, {:.1}, {:.1}) directional_lights={} part_meshes={}",
+        pending.at.x,
+        pending.at.y,
+        pending.at.z,
+        lights.iter().count(),
+        parts.iter().count(),
+    );
+    for (tf, camera, name) in &cameras {
+        let name = name.map(|n| n.as_str()).unwrap_or("camera");
+        eprintln!(
+            "phase0: camera {name} active={} order={} at=({:.1}, {:.1}, {:.1})",
+            camera.is_active,
+            camera.order,
+            tf.translation.x,
+            tf.translation.y,
+            tf.translation.z
+        );
+    }
+}
+
+/// The replica play camera starts at `(0, 12, 24)` looking at the origin when
+/// the Space has no camera CFrame. A map whose spawn is elsewhere is then
+/// outside the view, and the clear color is all that shows. A saved camera
+/// is not this pose, so it is left where the Space put it.
+fn frame_spawn_if_fallback(
+    pending: Option<Res<PendingSpawn>>,
+    mut scripted: Query<&mut Transform, (With<ScriptedPlayCamera>, Without<GalleryCamera>)>,
+    mut gallery: Query<&mut Transform, (With<GalleryCamera>, Without<ScriptedPlayCamera>)>,
+) {
+    let Some(pending) = pending else { return };
+    let spawn = pending.at;
+    if spawn.distance(Vec3::ZERO) < 8.0 {
+        return;
+    }
+    let eye = spawn + Vec3::new(0.0, 8.0, 16.0);
+    let view = Transform::from_translation(eye).looking_at(spawn + Vec3::Y, Vec3::Y);
+    let fallback = Vec3::new(0.0, 12.0, 24.0);
+    for mut tf in &mut scripted {
+        if tf.translation.distance(fallback) > 1.5 {
+            continue;
+        }
+        *tf = view;
+        eprintln!(
+            "phase0: play camera was the fallback (0, 12, 24); now looks at the spawn ({:.1}, {:.1}, {:.1})",
+            spawn.x, spawn.y, spawn.z
+        );
+    }
+    // The yard camera looks at the origin. The yard is gone on this open.
+    let yard = Vec3::new(0.0, 1.15, 6.2);
+    for mut tf in &mut gallery {
+        if tf.translation.distance(yard) > 1.5 {
+            continue;
+        }
+        *tf = view;
+    }
 }

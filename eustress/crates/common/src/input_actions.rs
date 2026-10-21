@@ -782,6 +782,16 @@ impl InputState {
     pub fn finger_is_ui(&self, id: u64) -> bool {
         self.fingers.get(&id).is_some_and(|finger| finger.owner == FingerOwner::Ui)
     }
+
+    /// Thumbstick, camera drag, or pinch. The shell does not take these.
+    pub fn finger_is_world_gesture(&self, id: u64) -> bool {
+        self.stick.finger == Some(id)
+            || self.camera_finger == Some(id)
+            || self.pinch.is_some_and(|(a, b, _)| a == id || b == id)
+            || self.fingers.get(&id).is_some_and(|finger| {
+                matches!(finger.owner, FingerOwner::Stick | FingerOwner::Camera | FingerOwner::Pinch)
+            })
+    }
 }
 
 fn update_fingers(state: &mut InputState, frame: &DeviceFrame) -> (Vec2, f32, Option<Vec2>) {
@@ -881,6 +891,11 @@ fn update_fingers(state: &mut InputState, frame: &DeviceFrame) -> (Vec2, f32, Op
             look = Vec2::ZERO;
             state.pinch = Some((a, b, dist));
         }
+    }
+    // A stick whose finger is already gone still reported its last offset.
+    if state.stick.finger.is_some_and(|id| !state.fingers.contains_key(&id)) {
+        state.stick.finger = None;
+        state.stick.value = Vec2::ZERO;
     }
     (look, pinch_px, world_tap)
 }
@@ -1238,6 +1253,31 @@ mod tests {
         });
         assert!(state.stick.finger.is_none());
         assert_eq!(state.stick.value, Vec2::ZERO);
+        assert!(state.fingers.is_empty());
+    }
+
+    #[test]
+    fn lift_resets_the_stick() {
+        let mut state = InputState::player_defaults(PreferredInput::Touch);
+        state.viewport = Vec2::new(1000.0, 500.0);
+        let origin = Vec2::new(80.0, 400.0);
+        step(&mut state, &DeviceFrame {
+            touches: vec![TouchSample { id: 1, phase: TouchPhase::Started, pos: origin }],
+            ..default()
+        });
+        step(&mut state, &DeviceFrame {
+            touches: vec![TouchSample { id: 1, phase: TouchPhase::Moved, pos: origin + Vec2::new(STICK_RADIUS, 0.0) }],
+            ..default()
+        });
+        let (_, knob) = state.stick_visual().expect("knob while the finger is down");
+        assert!(knob.x > origin.x + 1.0, "the knob follows the finger, got {knob}");
+        step(&mut state, &DeviceFrame {
+            touches: vec![TouchSample { id: 1, phase: TouchPhase::Ended, pos: origin + Vec2::new(STICK_RADIUS, 0.0) }],
+            ..default()
+        });
+        assert!(state.stick.finger.is_none());
+        assert_eq!(state.stick.value, Vec2::ZERO);
+        assert!(state.stick_visual().is_none(), "a lifted finger does not keep an offset knob");
         assert!(state.fingers.is_empty());
     }
 

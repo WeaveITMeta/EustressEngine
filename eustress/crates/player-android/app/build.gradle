@@ -62,6 +62,17 @@ android {
         into bundledAssets.map { it.dir('bundled/characters') }
         includeEmptyDirs = false
     }
+    // Primitive parts load `parts/block.glb` (and the other shapes) from the
+    // default asset source. On Android that source is the APK AssetManager,
+    // so the file has to sit at assets/parts/block.glb. Characters stay under
+    // assets/bundled/characters for `bundled://`.
+    tasks.register('copyPartGlbs', Copy) {
+        from('../../common/assets/parts') {
+            include '**/*.glb'
+        }
+        into bundledAssets.map { it.dir('parts') }
+        includeEmptyDirs = false
+    }
 
     sourceSets {
         main {
@@ -73,7 +84,7 @@ android {
         }
     }
     tasks.matching { it.name.startsWith('merge') && it.name.endsWith('Assets') }.configureEach {
-        dependsOn 'copyCharacterGlbs'
+        dependsOn 'copyCharacterGlbs', 'copyPartGlbs'
     }
 
     packaging {

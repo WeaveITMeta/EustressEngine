@@ -275,12 +275,20 @@ pub fn present(world: &mut World) {
     shell.ui.set_inset_left(insets.left);
     shell.ui.set_inset_right(insets.right);
     if let Some((origin, knob)) = stick {
-        shell.ui.set_stick_visible(playing);
+        // Positions before visibility, so the frame the ring appears is
+        // already at this finger and not the previous drag's offset.
         shell.ui.set_stick_x(origin.x);
         shell.ui.set_stick_y(origin.y);
         shell.ui.set_knob_x(knob.x);
         shell.ui.set_knob_y(knob.y);
+        shell.ui.set_stick_visible(playing);
     } else {
+        // The finger is up. Put the knob back on the ring's center before
+        // hiding it, so a stale offset is not what the next press draws.
+        let x = shell.ui.get_stick_x();
+        let y = shell.ui.get_stick_y();
+        shell.ui.set_knob_x(x);
+        shell.ui.set_knob_y(y);
         shell.ui.set_stick_visible(false);
     }
     shell.ui.set_jump_x(jump.0.x);

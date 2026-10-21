@@ -843,16 +843,18 @@ fn pointer_input(
         // sets `capture_all`, so every finger is UI. Stick and camera fingers
         // stay with the world. `Ended` has already removed the finger; the
         // id is in `released_ui` or in the set recorded on `Started`.
-        let ui = match touch.phase {
-            bevy::input::touch::TouchPhase::Started => {
-                let ui = input.as_ref().is_none_or(|input| {
-                    input.finger_is_ui(touch.id) || input.released_ui.contains(&touch.id)
-                });
-                if ui {
-                    ui_fingers.insert(touch.id);
-                }
-                ui
-            }
+        //
+        // While playing, `capture_all` is off and the Gallery button is not
+        // in `ui_rects`, so that tap was `FingerOwner::World` and never
+        // reached Slint (parity8, after resume). A TouchArea or TextInput
+        // under the point is still the shell's. A stick, camera, or pinch
+        // finger is not, even if a widget sits under it.
+        let gesture = input.as_ref().is_some_and(|input| input.finger_is_world_gesture(touch.id));
+        let chrome = !gesture && slint_chrome_contains(&ctx.adapter.slint_window, over);
+        let tracked = match touch.phase {
+            bevy::input::touch::TouchPhase::Started => input.as_ref().is_none_or(|input| {
+                input.finger_is_ui(touch.id) || input.released_ui.contains(&touch.id)
+            }),
             bevy::input::touch::TouchPhase::Moved => {
                 ui_fingers.contains(&touch.id)
                     || input.as_ref().is_some_and(|input| input.finger_is_ui(touch.id))
@@ -862,6 +864,10 @@ fn pointer_input(
                     || input.as_ref().is_some_and(|input| input.released_ui.contains(&touch.id))
             }
         };
+        let ui = !gesture && (tracked || chrome);
+        if ui && matches!(touch.phase, bevy::input::touch::TouchPhase::Started) {
+            ui_fingers.insert(touch.id);
+        }
         if !ui {
             if !matches!(touch.phase, bevy::input::touch::TouchPhase::Moved) {
                 eprintln!(
@@ -913,6 +919,46 @@ fn slint_key_text(event: &KeyboardInput) -> Option<slint::SharedString> {
         _ => return None,
     };
     Some(named.into())
+}
+
+/// A Slint `TouchArea` or `TextInput` covers this window point.
+///
+/// The playing shell's Gallery button and the gallery search field are
+/// those items. The jump circle and the thumbstick are drawn without one,
+/// so a point in the world does not hit.
+fn slint_chrome_contains(window: &slint::Window, pos: LogicalPosition) -> bool {
+    let inner = i_slint_core::window::WindowInner::from_pub(window);
+    let tree = inner.component();
+    let mut hit = false;
+    i_slint_core::item_tree::visit_items(
+        &tree,
+        i_slint_core::item_tree::TraversalOrder::BackToFront,
+        |item_tree, _item, index, _state| {
+            let item = i_slint_core::item_tree::ItemRc::new(item_tree.clone(), index);
+            let interactive = item.downcast::<i_slint_core::items::TouchArea>().is_some()
+                || item.downcast::<i_slint_core::items::TextInput>().is_some();
+            if interactive && slint_item_contains(&item, pos) {
+                hit = true;
+                return i_slint_core::item_tree::ItemVisitorResult::Abort;
+            }
+            i_slint_core::item_tree::ItemVisitorResult::Continue(())
+        },
+        (),
+    );
+    hit
+}
+
+fn slint_item_contains(item: &i_slint_core::item_tree::ItemRc, pos: LogicalPosition) -> bool {
+    let geom = item.geometry();
+    if geom.size.width <= 0.0 || geom.size.height <= 0.0 {
+        return false;
+    }
+    // `map_to_window` adds ancestor positions and not this item's own x/y.
+    let origin = item.map_to_window(i_slint_core::lengths::LogicalPoint::new(geom.origin.x, geom.origin.y));
+    pos.x >= origin.x
+        && pos.y >= origin.y
+        && pos.x <= origin.x + geom.size.width
+        && pos.y <= origin.y + geom.size.height
 }
 
 fn dispatch_key(adapter: &BevyWindowAdapter, text: slint::SharedString, state: ButtonState, repeat: bool) {
@@ -1042,27 +1088,43 @@ fn show_soft_keyboard(show: bool, props: Option<&i_slint_core::window::InputMeth
             return;
         };
         if show {
-            // SHOW_IMPLICIT, matching winit's `set_ime_allowed(true)`.
-            app.show_soft_input(true);
-            if let Some(props) = props {
+            // The first EditorInfo parity8 delivered was inputType NULL, so
+            // the IME never treated the field as text (`mInputShown` stayed
+            // false). Set TYPE_CLASS_TEXT before show. `GameActivity_showSoftInput`
+            // posts the show onto the UI thread itself (`mainWorkCallback`
+            // in that log); a second JNI hop is not required.
+            use bevy::android::android_activity::input::{
+                ImeOptions, InputType, TextInputAction, TextInputState, TextSpan,
+            };
+            app.set_ime_editor_info(InputType::TYPE_CLASS_TEXT, TextInputAction::Done, ImeOptions::empty());
+            let state = if let Some(props) = props {
                 let mut text = props.text.to_string();
                 if !props.preedit_text.is_empty() {
                     text.insert_str(props.preedit_offset, props.preedit_text.as_str());
                 }
-                app.set_text_input_state(bevy::android::android_activity::input::TextInputState {
+                TextInputState {
                     text,
-                    selection: bevy::android::android_activity::input::TextSpan {
+                    selection: TextSpan {
                         start: props.anchor_position.unwrap_or(props.cursor_position),
                         end: props.cursor_position,
                     },
-                    compose_region: (!props.preedit_text.is_empty()).then_some(
-                        bevy::android::android_activity::input::TextSpan {
-                            start: props.preedit_offset,
-                            end: props.preedit_offset + props.preedit_text.len(),
-                        },
-                    ),
-                });
-            }
+                    compose_region: (!props.preedit_text.is_empty()).then_some(TextSpan {
+                        start: props.preedit_offset,
+                        end: props.preedit_offset + props.preedit_text.len(),
+                    }),
+                }
+            } else {
+                TextInputState {
+                    text: String::new(),
+                    selection: TextSpan { start: 0, end: 0 },
+                    compose_region: None,
+                }
+            };
+            // Gives GameTextInput a buffer before the first `getTextInputState`.
+            app.set_text_input_state(state);
+            // SHOW_IMPLICIT, matching winit's `set_ime_allowed(true)`.
+            app.show_soft_input(true);
+            eprintln!("phase0: soft keyboard showSoftInput inputType=TYPE_CLASS_TEXT");
         } else {
             // HIDE_IMPLICIT_ONLY, matching the show flag above.
             app.hide_soft_input(true);
@@ -2280,6 +2342,114 @@ mod headless_startup {
             redraw_on_press || redraw_on_release,
             "the click must request a redraw",
         );
+
+        // Playing hides the gallery and shows the Gallery button. That button
+        // is a TouchArea. The middle of the view is not, so a world touch
+        // stays with the world.
+        ui.set_playing(true);
+        slint::platform::update_timers_and_animations();
+        let _ = paint_shell(&window);
+        let gallery = item_center(&ui, "Gallery");
+        assert!(
+            slint_chrome_contains(ui.window(), gallery),
+            "Gallery at ({}, {}) is a TouchArea",
+            gallery.x,
+            gallery.y,
+        );
+        assert!(
+            !slint_chrome_contains(ui.window(), slint::LogicalPosition::new(450.0, 250.0)),
+            "the play view has no full-screen TouchArea",
+        );
+    }
+
+    /// Headless: no GPU, so this does not render a frame. It opens a fixture
+    /// Space the way a download does and checks the world still has a camera,
+    /// a light, and a mesh, and that an avatar was spawned at the pad.
+    #[test]
+    fn opened_fixture_space_has_a_camera_a_light_and_a_mesh() {
+        let mut app = build_game(true);
+        app.add_plugins((
+            bevy::image::ImagePlugin::default(),
+            bevy::mesh::MeshPlugin,
+            bevy::camera::CameraPlugin,
+            bevy::light::LightPlugin,
+        ));
+        app.init_asset::<StandardMaterial>();
+        app.finish();
+        app.cleanup();
+        app.update();
+
+        let part = "\
+[metadata]\nclass_name = \"Part\"\nname = \"Block\"\n\n\
+[transform]\nposition = [40.0, 2.0, -30.0]\nscale = [4.0, 2.0, 4.0]\n\n\
+[properties]\nanchored = true\n";
+        let pad = "\
+[metadata]\nclass_name = \"SpawnLocation\"\nname = \"Pad\"\n\n\
+[transform]\nposition = [40.0, 0.5, -30.0]\nscale = [6.0, 1.0, 6.0]\n\n\
+[properties]\nanchored = true\n";
+        let world = eustress_networking::session::DownloadedWorld {
+            universe: "Fixture".into(),
+            start_space: "Yard".into(),
+            spaces: vec![(
+                "Yard".into(),
+                vec![
+                    ("Workspace/_service.toml".into(), b"[service]\nclass_name = \"Workspace\"\n".to_vec()),
+                    ("Workspace/Block/_instance.toml".into(), part.as_bytes().to_vec()),
+                    ("Workspace/Pad/_instance.toml".into(), pad.as_bytes().to_vec()),
+                ],
+            )],
+            assets: Vec::new(),
+            spawn: [40.0, 0.5, -30.0],
+        };
+        app.world_mut().write_message(eustress_networking::session::WorldDownloaded(std::sync::Arc::new(world)));
+        for _ in 0..8 {
+            app.update();
+        }
+
+        let status = app.world().resource::<session::MobileApp>().status.clone();
+        assert!(status.starts_with("Opened "), "{status}");
+
+        let mesh_count = {
+            let mut query = app.world_mut().query_filtered::<Entity, (With<Mesh3d>, With<eustress_common::play_session::FromTree>)>();
+            query.iter(app.world()).count()
+        };
+        assert!(mesh_count >= 1, "opened parts did not spawn a mesh ({status})");
+
+        let light_count = {
+            let mut query = app.world_mut().query::<&DirectionalLight>();
+            query.iter(app.world()).count()
+        };
+        assert!(light_count >= 1, "the yard light or a fill light should still be in the world");
+
+        let gallery_kept = {
+            let mut query = app.world_mut().query::<&GalleryCamera>();
+            query.iter(app.world()).count()
+        };
+        assert!(gallery_kept >= 1, "removing the yard despawned the world camera");
+
+        let world_camera = {
+            let mut scripted = app.world_mut().query_filtered::<&Camera, With<eustress_common::play_session::ScriptedPlayCamera>>();
+            let scripted_active = scripted.iter(app.world()).any(|camera| camera.is_active);
+            let mut avatar = app.world_mut().query_filtered::<&Camera, With<eustress_common::avatar::control::AvatarCamera>>();
+            let avatar_active = avatar.iter(app.world()).any(|camera| camera.is_active);
+            let mut gallery = app.world_mut().query_filtered::<&Camera, With<GalleryCamera>>();
+            let gallery_active = gallery.iter(app.world()).any(|camera| camera.is_active);
+            scripted_active || avatar_active || gallery_active
+        };
+        assert!(world_camera, "no world camera is active after the open");
+
+        let avatar_at = {
+            let mut query = app
+                .world_mut()
+                .query_filtered::<&Transform, With<eustress_common::avatar::SpawnedByAvatarRuntime>>();
+            query.iter(app.world()).next().map(|tf| tf.translation)
+        };
+        let avatar_at = avatar_at.expect("CharacterAutoLoads is on and no avatar spawned");
+        let spawn = Vec3::new(40.0, 0.5, -30.0);
+        assert!(
+            (avatar_at.x - spawn.x).abs() < 2.0 && (avatar_at.z - spawn.z).abs() < 2.0,
+            "avatar at {avatar_at} is not on the SpawnLocation {spawn}",
+        );
     }
 
     fn paint_shell(window: &slint::platform::software_renderer::MinimalSoftwareWindow) -> bool {
@@ -2293,6 +2463,10 @@ mod headless_startup {
     }
 
     fn sign_in_button_center(ui: &shell::PlayerShell) -> slint::LogicalPosition {
+        item_center(ui, "Sign in")
+    }
+
+    fn item_center(ui: &shell::PlayerShell, label: &str) -> slint::LogicalPosition {
         let inner = i_slint_core::window::WindowInner::from_pub(ui.window());
         let tree = inner.component();
         let mut found: Option<(slint::LogicalPosition, f32)> = None;
@@ -2301,10 +2475,10 @@ mod headless_startup {
             i_slint_core::item_tree::TraversalOrder::BackToFront,
             |item_tree, _item, index, _state| {
                 let item = i_slint_core::item_tree::ItemRc::new(item_tree.clone(), index);
-                let label = item.accessible_string_property(
+                let accessible = item.accessible_string_property(
                     i_slint_core::accessibility::AccessibleStringProperty::Label,
                 );
-                if label.as_deref() == Some("Sign in") {
+                if accessible.as_deref() == Some(label) {
                     let geom = item.geometry();
                     // `map_to_window` adds ancestor positions and not this item's own x/y.
                     let center = item.map_to_window(i_slint_core::lengths::LogicalPoint::new(
@@ -2321,7 +2495,7 @@ mod headless_startup {
             },
             (),
         );
-        found.expect("Sign in button has a layout rect").0
+        found.expect("button has a layout rect").0
     }
 }
 
