@@ -16,9 +16,12 @@ android {
         versionName "0.1.0-phase0"
 
         ndk {
-            // arm64-v8a is the spike artifact. x86_64 is included when the
-            // emulator build has been copied into jniLibs.
-            abiFilters 'arm64-v8a', 'x86_64'
+            // arm64-v8a is the spike artifact. An emulator check can pass
+            // -PeustressAbi=x86_64 (or a comma-separated list).
+            def eustressAbi = findProperty('eustressAbi') ?: 'arm64-v8a'
+            eustressAbi.toString().split(',').each { abi ->
+                abiFilters abi.trim()
+            }
         }
     }
 

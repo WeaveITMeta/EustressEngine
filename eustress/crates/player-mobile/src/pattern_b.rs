@@ -13,9 +13,9 @@
 
 use bevy::camera::RenderTarget;
 use bevy::prelude::*;
+use bevy::render::extract_resource::{ExtractResource, ExtractResourcePlugin};
 use bevy::render::renderer::WgpuWrapper;
 use bevy::render::settings::RenderCreation;
-use bevy::render::extract_resource::{ExtractResource, ExtractResourcePlugin};
 use bevy::render::{RenderApp, RenderPlugin};
 use slint::wgpu_29::wgpu;
 
@@ -39,9 +39,8 @@ pub fn shared_device_from_slint(
         bevy::render::renderer::RenderQueue(std::sync::Arc::new(WgpuWrapper::new(queue.clone())));
     let render_adapter_info =
         bevy::render::renderer::RenderAdapterInfo(WgpuWrapper::new(adapter.get_info()));
-    let render_adapter = bevy::render::renderer::RenderAdapter(std::sync::Arc::new(
-        WgpuWrapper::new(adapter),
-    ));
+    let render_adapter =
+        bevy::render::renderer::RenderAdapter(std::sync::Arc::new(WgpuWrapper::new(adapter)));
     let render_instance =
         bevy::render::renderer::RenderInstance(std::sync::Arc::new(WgpuWrapper::new(instance)));
 
