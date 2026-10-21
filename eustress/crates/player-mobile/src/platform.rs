@@ -62,7 +62,13 @@ pub fn token_remove(key: &str) -> Result<(), String> {
 pub fn install_bundled_assets() -> Option<PathBuf> {
     #[cfg(target_os = "android")]
     {
-        let path = eustress_bridge_android::install_bundled_assets()?;
+        let path = match eustress_bridge_android::install_bundled_assets() {
+            Some(path) => path,
+            None => {
+                eprintln!("eustress player: bundled assets were not installed; the character stays a capsule");
+                return None;
+            }
+        };
         let path = PathBuf::from(path);
         if path.join("characters/y_bot.glb").is_file() {
             return Some(path);
@@ -82,6 +88,14 @@ pub fn files_dir() -> PathBuf {
     }
     if let Some(dir) = ios_files() {
         return PathBuf::from(dir);
+    }
+    #[cfg(any(target_os = "android", target_os = "ios"))]
+    {
+        use std::sync::Once;
+        static ONCE: Once = Once::new();
+        ONCE.call_once(|| {
+            eprintln!("eustress player: files dir unavailable; downloaded worlds go under the temp directory");
+        });
     }
     std::env::temp_dir().join("eustress-player")
 }
@@ -245,4 +259,35 @@ fn ios_intent() -> Option<String> {
 #[cfg(not(target_os = "ios"))]
 fn ios_intent() -> Option<String> {
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::Path;
+
+    #[test]
+    fn player_mobile_does_not_call_jni() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut files = Vec::new();
+        collect(&root, &mut files);
+        for path in files {
+            let text = std::fs::read_to_string(&path).unwrap();
+            let impl_src = text.split("# [cfg(test)]").next().unwrap_or(&text);
+            let impl_src = impl_src.split("#[cfg(test)]").next().unwrap();
+            assert!(!impl_src.contains("jni::"), "{path:?} calls JNI; bridge-android owns that");
+            assert!(!impl_src.contains("JavaVM"), "{path:?} calls JNI; bridge-android owns that");
+            assert!(!impl_src.contains("ndk_context"), "{path:?} reads ndk_context; bridge-android owns that");
+        }
+    }
+
+    fn collect(dir: &Path, out: &mut Vec<std::path::PathBuf>) {
+        for entry in std::fs::read_dir(dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                collect(&path, out);
+            } else if path.extension().is_some_and(|ext| ext == "rs") {
+                out.push(path);
+            }
+        }
+    }
 }

@@ -1558,6 +1558,10 @@ pub fn run_game() {
     let mut app = App::new();
     // Before AssetPlugin freezes the source table. On Android the character
     // GLBs are copied out of the APK first; a host build finds the checkout.
+    // The self-check logs each Bridge signature. A type mismatch returns
+    // instead of the CheckJNI abort that killed parity3 at installBundledAssets.
+    #[cfg(target_os = "android")]
+    eustress_bridge_android::startup_self_check();
     if let Some(root) = platform::install_bundled_assets() {
         std::env::set_var("EUSTRESS_BUNDLED_ASSETS", &root);
         eprintln!("eustress player: bundled assets at {}", root.display());
@@ -1568,7 +1572,9 @@ pub fn run_game() {
     {
         use bevy::asset::io::{AssetSourceBuilder, ErasedAssetReader};
         let space_root = space::live_space_root();
-        let _ = std::fs::create_dir_all(&space_root);
+        if let Err(err) = std::fs::create_dir_all(&space_root) {
+            eprintln!("eustress player: live space folder {}: {err}", space_root.display());
+        }
         app.register_asset_source(
             "space",
             AssetSourceBuilder::new(move || -> Box<dyn ErasedAssetReader> {

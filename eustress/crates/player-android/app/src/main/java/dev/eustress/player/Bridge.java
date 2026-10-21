@@ -107,8 +107,8 @@ public final class Bridge {
         view.performHapticFeedback(constant);
     }
 
-    public static void hapticCustom(Activity activity, float intensity, int ms) {
-        Vibrator vibrator = (Vibrator) activity.getSystemService(Context.VIBRATOR_SERVICE);
+    public static void hapticCustom(Context context, float intensity, int ms) {
+        Vibrator vibrator = (Vibrator) context.getSystemService(Context.VIBRATOR_SERVICE);
         if (vibrator == null || ms <= 0) {
             return;
         }
@@ -120,9 +120,9 @@ public final class Bridge {
         }
     }
 
-    public static String secureGet(Activity activity, String key) {
+    public static String secureGet(Context context, String key) {
         try {
-            SharedPreferences prefs = store(activity);
+            SharedPreferences prefs = store(context);
             if (!prefs.contains(key)) {
                 return null;
             }
@@ -132,16 +132,16 @@ public final class Bridge {
         }
     }
 
-    public static void secureSet(Activity activity, String key, String value) throws Exception {
-        store(activity).edit().putString(key, value).apply();
+    public static void secureSet(Context context, String key, String value) throws Exception {
+        store(context).edit().putString(key, value).apply();
     }
 
-    public static void secureRemove(Activity activity, String key) throws Exception {
-        store(activity).edit().remove(key).apply();
+    public static void secureRemove(Context context, String key) throws Exception {
+        store(context).edit().remove(key).apply();
     }
 
-    public static String filesDir(Activity activity) {
-        return activity.getFilesDir().getAbsolutePath();
+    public static String filesDir(Context context) {
+        return context.getFilesDir().getAbsolutePath();
     }
 
     /**
@@ -149,10 +149,10 @@ public final class Bridge {
      * directory when {@code characters/y_bot.glb} landed, else null. The Rust
      * player points {@code bundled://} at it before Bevy freezes asset sources.
      */
-    public static String installBundledAssets(Activity activity) {
-        File dest = new File(activity.getFilesDir(), "bundled");
+    public static String installBundledAssets(Context context) {
+        File dest = new File(context.getFilesDir(), "bundled");
         try {
-            copyAssetTree(activity.getAssets(), "bundled", dest);
+            copyAssetTree(context.getAssets(), "bundled", dest);
         } catch (IOException ignored) {
             return null;
         }
@@ -199,12 +199,12 @@ public final class Bridge {
         return null;
     }
 
-    private static SharedPreferences store(Activity activity) throws Exception {
-        MasterKey masterKey = new MasterKey.Builder(activity)
+    private static SharedPreferences store(Context context) throws Exception {
+        MasterKey masterKey = new MasterKey.Builder(context)
                 .setKeyScheme(MasterKey.KeyScheme.AES256_GCM)
                 .build();
         return EncryptedSharedPreferences.create(
-                activity,
+                context,
                 STORE,
                 masterKey,
                 EncryptedSharedPreferences.PrefKeyEncryptionScheme.AES256_SIV,
