@@ -722,7 +722,7 @@ pub fn probe_udp_port(port: u16) -> String {
         }
     }
     drop(socket);
-    forward_guidance(lan.as_deref(), mapped.as_ref().map(|(ip, _)| ip.as_str()), mapped.map(|(_, p)| p))
+    forward_guidance(lan.as_deref(), mapped.as_ref().map(|(ip, _)| ip.as_str()), mapped.as_ref().map(|(_, p)| *p))
 }
 
 /// Router and firewall words, plus what the STUN answer means.
