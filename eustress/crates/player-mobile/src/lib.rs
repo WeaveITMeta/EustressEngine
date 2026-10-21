@@ -29,14 +29,27 @@
 #[cfg(feature = "pattern-b")]
 mod pattern_b;
 
+mod auth;
+mod env;
+mod gallery;
+mod links;
+mod platform;
+mod session;
+mod shell;
+
 use std::cell::{RefCell, UnsafeCell};
 use std::rc::{Rc, Weak};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
+use bevy::camera::visibility::RenderLayers;
+use bevy::camera::{CameraOutputMode, ClearColorConfig, ScalingMode};
+use bevy::core_pipeline::tonemapping::Tonemapping;
 use bevy::input::touch::TouchInput;
 use bevy::input::{mouse::MouseButtonInput, ButtonState};
 use bevy::prelude::*;
+use bevy::render::render_resource::BlendState;
+use bevy::render::view::Msaa;
 use bevy::render::error_handler::{ErrorType, RenderError, RenderErrorHandler, RenderErrorPolicy};
 use bevy::render::extract_resource::{ExtractResource, ExtractResourcePlugin};
 use bevy::render::render_asset::RenderAssets;
@@ -58,7 +71,7 @@ use i_slint_core::renderer::RendererSealed;
 use slint::platform::skia_renderer::SkiaWGPURenderer;
 use slint::platform::WindowEvent;
 use slint::wgpu_29::wgpu;
-use slint::{LogicalPosition, PhysicalSize};
+use slint::{ComponentHandle, LogicalPosition, PhysicalSize};
 
 const UI_WIDTH: u32 = 640;
 const UI_HEIGHT: u32 = 280;
@@ -66,36 +79,6 @@ const UI_HEIGHT: u32 = 280;
 /// Bumped when the GLES device is destroyed so the render world publishes the
 /// replacement handles. Starts at 0; the first device is epoch 0.
 static GPU_EPOCH: AtomicU64 = AtomicU64::new(0);
-
-slint::slint! {
-    import { VerticalBox, Button } from "std-widgets.slint";
-    export component Demo inherits Window {
-        background: rgba(16, 32, 48, 93%);
-        in-out property <int> click-count: 0;
-
-        VerticalBox {
-            padding: 18px;
-            alignment: start;
-            spacing: 10px;
-            Text {
-                text: "Eustress phase 0";
-                color: #f4efe6;
-                font-size: 26px;
-            }
-            Text {
-                text: "Slint on Bevy's wgpu device";
-                color: #c5d0d8;
-                font-size: 16px;
-            }
-            Button {
-                text: "Clicks: " + click-count;
-                clicked => {
-                    click-count += 1;
-                }
-            }
-        }
-    }
-}
 
 /// `WindowAdapter::renderer` returns a shared reference, so the Skia renderer
 /// cannot live behind `RefCell`. It is swapped only on the main thread,
@@ -207,12 +190,20 @@ fn dispatch_resized(adapter: &BevyWindowAdapter) {
 }
 
 struct SlintContext {
-    _instance: Demo,
     adapter: Rc<BevyWindowAdapter>,
     /// Last handles Skia was built with. Cleared when the GLES device is dropped
     /// so resume does not rebuild Skia on a dead context.
     handles: RefCell<Option<WgpuHandles>>,
 }
+
+/// The gallery camera. Turned off once the avatar camera exists, so the two
+/// do not both clear the window.
+#[derive(Component)]
+struct GalleryCamera;
+
+/// Draws the Slint texture above the world. It does not clear.
+#[derive(Component)]
+struct OverlayCamera;
 
 #[derive(Component)]
 struct LitCube;
@@ -363,15 +354,50 @@ fn setup_scene(
         LitCube,
     ));
     commands.spawn((
-        Mesh3d(meshes.add(Rectangle::new(2.9, 1.27))),
+        Mesh3d(meshes.add(Rectangle::new(1.0, 1.0))),
         MeshMaterial3d(ui_material),
-        Transform::from_xyz(0.0, 1.55, 2.6),
+        Transform::from_xyz(0.0, 0.0, 0.0),
+        RenderLayers::layer(1),
         SlintQuad,
     ));
 
     commands.spawn((
+        avian3d::prelude::RigidBody::Static,
+        avian3d::prelude::Collider::cuboid(40.0, 0.5, 40.0),
+        Mesh3d(meshes.add(Cuboid::new(80.0, 1.0, 80.0))),
+        MeshMaterial3d(materials.add(StandardMaterial {
+            base_color: Color::srgb(0.18, 0.22, 0.2),
+            ..default()
+        })),
+        Transform::from_xyz(0.0, -0.5, 0.0),
+    ));
+
+    commands.spawn((
         Camera3d::default(),
+        Camera { order: 0, ..default() },
         Transform::from_xyz(0.0, 1.15, 6.2).looking_at(Vec3::new(0.0, 0.35, 0.0), Vec3::Y),
+        GalleryCamera,
+    ));
+    commands.spawn((
+        Camera3d::default(),
+        Projection::Orthographic(OrthographicProjection {
+            scaling_mode: ScalingMode::Fixed { width: UI_WIDTH as f32, height: UI_HEIGHT as f32 },
+            ..OrthographicProjection::default_3d()
+        }),
+        Camera {
+            order: 20,
+            clear_color: ClearColorConfig::Custom(Color::NONE),
+            output_mode: CameraOutputMode::Write {
+                blend_state: Some(BlendState::ALPHA_BLENDING),
+                clear_color: ClearColorConfig::Custom(Color::NONE),
+            },
+            ..default()
+        },
+        Tonemapping::None,
+        Msaa::Off,
+        RenderLayers::layer(1),
+        Transform::from_xyz(0.0, 0.0, 1.0).looking_at(Vec3::ZERO, Vec3::Y),
+        OverlayCamera,
     ));
     commands.spawn((
         DirectionalLight {
@@ -486,7 +512,8 @@ fn init_slint(world: &mut World) {
         }))
         .expect("set_platform");
 
-        let ui = Demo::new().expect("Demo::new");
+        let ui = shell::PlayerShell::new().expect("PlayerShell::new");
+        shell::wire(&ui);
         ui.window().show().expect("show");
         let adapter = SLINT_WINDOWS
             .with(|windows| windows.borrow().first().and_then(|weak| weak.upgrade()))
@@ -499,8 +526,8 @@ fn init_slint(world: &mut World) {
         adapter.slint_window.dispatch_event(WindowEvent::Resized {
             size: physical.to_logical(1.0),
         });
+        world.insert_non_send(shell::ShellUi { ui });
         world.insert_non_send(SlintContext {
-            _instance: ui,
             adapter,
             handles: RefCell::new(Some(handles)),
         });
@@ -594,29 +621,9 @@ fn spin_cube(time: Res<Time>, mut cubes: Query<&mut Transform, With<LitCube>>) {
     }
 }
 
-fn pointer_on_quad(
-    window_pos: Vec2,
-    window: &Window,
-    camera: (&Camera, &GlobalTransform),
-    quad: &GlobalTransform,
-    texture_width: f32,
-    texture_height: f32,
-) -> Option<LogicalPosition> {
-    let (camera, camera_transform) = camera;
-    let ray = camera
-        .viewport_to_world(camera_transform, window_pos)
-        .ok()?;
-    let plane = InfinitePlane3d::new(quad.back());
-    let hit = ray.plane_intersection_point(quad.translation(), plane)?;
-    let local = quad.affine().inverse().transform_point3(hit);
-    // Rectangle::new(2.9, 1.27) is centered on the origin.
-    if local.x.abs() > 1.45 || local.y.abs() > 0.635 {
-        return None;
-    }
-    let u = (local.x + 1.45) / 2.9;
-    let v = 1.0 - (local.y + 0.635) / 1.27;
-    let _ = window;
-    Some(LogicalPosition::new(u * texture_width, v * texture_height))
+fn pointer_logical(window_pos: Vec2, scale: f32) -> LogicalPosition {
+    let scale = scale.max(0.01);
+    LogicalPosition::new(window_pos.x / scale, window_pos.y / scale)
 }
 
 fn dispatch_pointer(
@@ -649,8 +656,6 @@ fn pointer_input(
     mut touches: MessageReader<TouchInput>,
     windows: Query<&Window>,
     ctx: Option<NonSend<SlintContext>>,
-    quads: Query<&GlobalTransform, With<SlintQuad>>,
-    cameras: Query<(&Camera, &GlobalTransform), With<Camera3d>>,
 ) {
     let Some(ctx) = ctx else {
         return;
@@ -661,23 +666,11 @@ fn pointer_input(
     let Some(window) = windows.iter().next() else {
         return;
     };
-    let Some(camera) = cameras.iter().next() else {
-        return;
-    };
-    let Some(quad) = quads.iter().next() else {
-        return;
-    };
+    let scale = window.resolution.scale_factor();
 
-    let panel = ctx.adapter.size.get();
     if let Some(cursor) = window.cursor_position() {
-        let over = pointer_on_quad(
-            cursor,
-            window,
-            camera,
-            quad,
-            panel.width as f32,
-            panel.height as f32,
-        );
+        // `cursor_position` is already in logical pixels.
+        let over = Some(LogicalPosition::new(cursor.x, cursor.y));
         let mut press = None;
         for event in mouse.read() {
             if event.button == MouseButton::Left {
@@ -688,14 +681,8 @@ fn pointer_input(
     }
 
     for touch in touches.read() {
-        let over = pointer_on_quad(
-            touch.position,
-            window,
-            camera,
-            quad,
-            panel.width as f32,
-            panel.height as f32,
-        );
+        // Bevy reports touch positions in physical pixels. Slint wants logical.
+        let over = Some(pointer_logical(touch.position, scale));
         let press = match touch.phase {
             bevy::input::touch::TouchPhase::Started => Some(true),
             bevy::input::touch::TouchPhase::Ended | bevy::input::touch::TouchPhase::Canceled => {
@@ -707,19 +694,15 @@ fn pointer_input(
     }
 }
 
-/// Landscape panel is 640×280. A taller window swaps those axes so rotation
-/// rebuilds the texture instead of stretching the landscape image.
+/// The overlay texture matches the window's physical size, so rotation
+/// rebuilds it instead of stretching a fixed panel.
 fn overlay_size_for_window(window: &Window) -> Option<(u32, u32)> {
     let width = window.resolution.physical_width();
     let height = window.resolution.physical_height();
     if width == 0 || height == 0 {
         return None;
     }
-    if width >= height {
-        Some((UI_WIDTH, UI_HEIGHT))
-    } else {
-        Some((UI_HEIGHT, UI_WIDTH))
-    }
+    Some((width, height))
 }
 
 /// Tell Slint the panel size, allocate a matching texture, and scale the quad
@@ -728,6 +711,7 @@ fn overlay_size_for_window(window: &Window) -> Option<(u32, u32)> {
 fn publish_overlay(
     width: u32,
     height: u32,
+    scale: f32,
     ctx: Option<&SlintContext>,
     shared: &SlintSharedTexture,
     images: &mut Assets<Image>,
@@ -735,23 +719,17 @@ fn publish_overlay(
     overlay: &mut SlintImageHandle,
     epoch: &mut OverlayEpoch,
     quads: &Query<&MeshMaterial3d<StandardMaterial>, With<SlintQuad>>,
-    quad_transforms: &mut Query<&mut Transform, With<SlintQuad>>,
 ) {
     if let Some(ctx) = ctx {
         let physical = PhysicalSize::new(width, height);
         ctx.adapter.size.set(physical);
-        let scale = ctx.adapter.slint_window.scale_factor();
+        let scale = scale.max(0.01);
+        ctx.adapter.slint_window.dispatch_event(WindowEvent::ScaleFactorChanged { scale_factor: scale });
         ctx.adapter
             .slint_window
             .dispatch_event(WindowEvent::Resized {
                 size: physical.to_logical(scale),
             });
-    }
-    let aspect = width as f32 / height as f32;
-    let height_world = 1.27;
-    let width_world = height_world * aspect;
-    for mut transform in quad_transforms.iter_mut() {
-        transform.scale = Vec3::new(width_world / 2.9, height_world / 1.27, 1.0);
     }
     let image_handle = images.add(overlay_image(width, height));
     let mat_handle = quads.iter().next().map(|mat| mat.0.clone());
@@ -773,6 +751,42 @@ fn publish_overlay(
     eprintln!("phase0: slint overlay texture {width}x{height} scheduled");
 }
 
+fn fit_overlay(
+    windows: Query<&Window, With<PrimaryWindow>>,
+    mut quads: Query<&mut Transform, With<SlintQuad>>,
+    mut cameras: Query<&mut Projection, With<OverlayCamera>>,
+) {
+    let Some(window) = windows.iter().next() else {
+        return;
+    };
+    let scale = window.resolution.scale_factor().max(0.01);
+    let width = window.resolution.physical_width() as f32 / scale;
+    let height = window.resolution.physical_height() as f32 / scale;
+    if width < 1.0 || height < 1.0 {
+        return;
+    }
+    for mut transform in &mut quads {
+        transform.translation = Vec3::ZERO;
+        transform.scale = Vec3::new(width, height, 1.0);
+    }
+    for mut projection in &mut cameras {
+        *projection = Projection::Orthographic(OrthographicProjection {
+            scaling_mode: ScalingMode::Fixed { width, height },
+            ..OrthographicProjection::default_3d()
+        });
+    }
+}
+
+fn gate_gallery_camera(
+    avatars: Query<(), With<eustress_common::avatar::control::AvatarCamera>>,
+    mut cameras: Query<&mut Camera, With<GalleryCamera>>,
+) {
+    let live = !avatars.is_empty();
+    for mut camera in &mut cameras {
+        camera.is_active = !live;
+    }
+}
+
 /// `Suspended` holds the swapchain and drops the overlay texture slot. The
 /// Skia renderer stays: it is already associated with the Slint window, and
 /// the wgpu device is still the one it was created with. `Running` clears the
@@ -784,6 +798,7 @@ fn sync_surface_loss(
     mut hold: ResMut<PlayerSwapchainHold>,
     adapter: Option<Res<RenderAdapter>>,
     shared: Res<SlintSharedTexture>,
+    mut world_input: Option<ResMut<eustress_common::input_actions::InputState>>,
 ) {
     let mut saw_suspended = false;
     let mut saw_running = false;
@@ -799,6 +814,9 @@ fn sync_surface_loss(
         *shared.texture.lock().expect("texture slot") = None;
         loss.suspended = true;
         hold.0 = true;
+        if let Some(input) = world_input.as_mut() {
+            input.release_touch();
+        }
         let gles = adapter
             .as_ref()
             .map(|adapter| adapter.0.get_info().backend == wgpu::Backend::Gl)
@@ -834,7 +852,6 @@ fn refresh_overlay(
     mut overlay: Option<ResMut<SlintImageHandle>>,
     mut epoch: Option<ResMut<OverlayEpoch>>,
     quads: Query<&MeshMaterial3d<StandardMaterial>, With<SlintQuad>>,
-    mut quad_transforms: Query<&mut Transform, With<SlintQuad>>,
 ) {
     if hold.0 {
         return;
@@ -867,6 +884,7 @@ fn refresh_overlay(
     publish_overlay(
         width,
         height,
+        window.resolution.scale_factor(),
         ctx.as_deref(),
         &shared,
         &mut images,
@@ -874,7 +892,6 @@ fn refresh_overlay(
         overlay,
         epoch,
         &quads,
-        &mut quad_transforms,
     );
 }
 
@@ -1467,6 +1484,10 @@ impl Plugin for SurfaceGate {
 /// Android GameActivity entry, and the desktop body used by `cargo check`.
 #[bevy_main]
 fn main() {
+    let args: Vec<String> = std::env::args().collect();
+    if let Err(err) = env::install(&args) {
+        eprintln!("eustress player: {err}");
+    }
     #[cfg(all(target_os = "android", feature = "android"))]
     {
         android_logger::init_once(
@@ -1496,6 +1517,9 @@ pub fn run_game() {
         Some(wgpu::Backends::from_env().unwrap_or(wgpu::Backends::VULKAN | wgpu::Backends::GL));
 
     let mut app = App::new();
+    // Before AssetPlugin freezes the source table. The GLBs may be absent
+    // from the APK; the capsule and follow camera still spawn.
+    eustress_common::avatar::boot::register_avatar_asset_sources(&mut app);
     app.add_plugins(
         DefaultPlugins
             .build()
@@ -1507,6 +1531,14 @@ pub fn run_game() {
             .disable::<bevy::core_pipeline::CorePipelinePlugin>()
             .disable::<bevy::pbr::PbrPlugin>(),
     )
+    .add_plugins(avian3d::prelude::PhysicsPlugins::default())
+    .insert_resource(avian3d::prelude::Gravity(Vec3::NEG_Y * eustress_common::avatar::GRAVITY_MPS2))
+    .add_plugins(eustress_common::avatar::AvatarRuntimePlugin::new(
+        eustress_common::avatar::AvatarHost::Client,
+    ))
+    .add_plugins(eustress_networking::NetPlugin)
+    .init_resource::<eustress_common::play_session::GuiKeyboardFocus>()
+    .init_resource::<session::MobileApp>()
     .add_plugins(SurfaceGate {
         settings: settings.clone(),
         texture_tx,
@@ -1530,20 +1562,23 @@ pub fn run_game() {
         brightness: 280.0,
         ..default()
     })
-    .add_systems(Startup, (install_render_error_handler, setup_scene))
+    .add_systems(Startup, (install_render_error_handler, setup_scene, session::startup))
     .add_systems(
         Update,
         (
             sync_surface_loss,
             refresh_overlay,
+            fit_overlay,
             init_slint,
             receive_texture,
             render_slint,
             pointer_input,
+            gate_gallery_camera,
             spin_cube,
         )
             .chain(),
-    );
+    )
+    .add_systems(Update, session::drive);
 
     app.run();
 }

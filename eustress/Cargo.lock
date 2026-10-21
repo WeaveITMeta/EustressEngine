@@ -7365,12 +7365,33 @@ dependencies = [
 ]
 
 [[package]]
+name = "eustress-bridge-android"
+version = "0.1.0"
+dependencies = [
+ "eustress-bridge-core",
+ "jni 0.21.1",
+ "ndk-context",
+]
+
+[[package]]
 name = "eustress-bridge-client"
 version = "0.1.0"
 dependencies = [
  "dirs 5.0.1",
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "eustress-bridge-core"
+version = "0.1.0"
+
+[[package]]
+name = "eustress-bridge-ios"
+version = "0.1.0"
+dependencies = [
+ "eustress-bridge-core",
+ "objc2 0.6.4",
 ]
 
 [[package]]
@@ -7881,13 +7902,17 @@ dependencies = [
  "eustress-common",
  "eustress-echk",
  "parking_lot 0.12.5",
+ "reqwest",
  "serde",
  "serde_json",
+ "tar",
  "thiserror 2.0.18",
  "tokio",
+ "toml 0.8.23",
  "tracing",
  "uuid",
  "wtransport",
+ "zstd",
 ]
 
 [[package]]
@@ -7927,17 +7952,37 @@ dependencies = [
 ]
 
 [[package]]
+name = "eustress-player-ios"
+version = "0.1.0"
+dependencies = [
+ "eustress-bridge-core",
+ "eustress-bridge-ios",
+]
+
+[[package]]
 name = "eustress-player-mobile"
 version = "0.1.0"
 dependencies = [
  "android_logger",
+ "avian3d",
  "bevy 0.19.0",
  "bevy_render 0.19.0",
+ "ed25519-dalek",
+ "eustress-bridge-android",
+ "eustress-bridge-core",
+ "eustress-bridge-ios",
+ "eustress-common",
+ "eustress-networking",
+ "hex",
  "i-slint-core",
  "log",
+ "serde",
+ "serde_json",
  "slint",
  "smol",
  "spin_on",
+ "toml 0.8.23",
+ "ureq 2.12.1",
 ]
 
 [[package]]

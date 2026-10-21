@@ -8,11 +8,11 @@ name = "eustress-player-mobile"
 version = "0.1.0"
 edition = "2021"
 authors = ["Eustress Engine Team"]
-description = "Phase 0 mobile spike: Bevy 0.19 scene plus a Slint overlay on one wgpu device"
+description = "Mobile Eustress Player: Bevy world, Slint shell, shared desktop protocol"
 license = "PolyForm-Shield-1.0.0"
 
 [lib]
-crate-type = ["cdylib"]
+crate-type = ["cdylib", "rlib"]
 
 [features]
 default = []
@@ -53,14 +53,28 @@ slint = { git = "https://github.com/slint-ui/slint", branch = "master", default-
 spin_on = "0.1"
 log = "0.4"
 smol = { version = "2.0", optional = true }
+eustress-common = { path = "../common", default-features = false, features = ["physics", "units_v1", "model-import"] }
+eustress-networking = { path = "../common/eustress-networking", default-features = false, features = ["native", "fetch"] }
+eustress-bridge-core = { path = "../bridge-core" }
+avian3d = { workspace = true }
+ureq = { version = "2", default-features = false, features = ["json", "tls"] }
+ed25519-dalek = { version = "2", features = ["std"] }
+hex = "0.4"
+toml = "0.8"
+serde = { workspace = true }
+serde_json = { workspace = true }
 
 [target.'cfg(target_os = "android")'.dependencies]
 android_logger = { version = "0.14", optional = true }
+eustress-bridge-android = { path = "../bridge-android" }
 # Bevy 0.19's wgpu dependency is `default-features = false` and lists Vulkan,
 # Metal, and DX12, not GLES. `bevy` does not re-export `bevy_render`'s `gles`
 # feature, so without this line the cdylib is Vulkan-only and `Backends::GL`
 # enumerates nothing. Vulkan stays the default; this is the fallback.
 bevy_render = { version = "0.19", features = ["gles"] }
+
+[target.'cfg(target_os = "ios")'.dependencies]
+eustress-bridge-ios = { path = "../bridge-ios" }
 
 # Host `cargo check` only. `android-game-activity` does not enable a desktop
 # winit backend, and winit then refuses to compile. Android builds ignore this.

@@ -1,0 +1,13 @@
+[package]
+name = "eustress-player-ios"
+version = "0.1.0"
+edition = "2021"
+description = "iOS shell notes for the Eustress Player. UNVERIFIED: no Apple SDK on this machine."
+license = "PolyForm-Shield-1.0.0"
+
+[lib]
+crate-type = ["rlib"]
+
+[dependencies]
+eustress-bridge-core = { path = "../bridge-core" }
+eustress-bridge-ios = { path = "../bridge-ios" }

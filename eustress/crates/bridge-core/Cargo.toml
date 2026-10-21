@@ -1,0 +1,8 @@
+[package]
+name = "eustress-bridge-core"
+version = "0.1.0"
+edition = "2021"
+description = "Platform traits for the mobile Player. No JNI, no Objective-C."
+license = "PolyForm-Shield-1.0.0"
+
+[dependencies]

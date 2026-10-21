@@ -3,6 +3,7 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
     <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.VIBRATE" />
 
     <uses-feature android:glEsVersion="0x00030000" android:required="false" />
     <uses-feature android:name="android.hardware.vulkan.level" android:required="false" />
@@ -20,7 +21,7 @@
             android:value="eustress_player_mobile" />
 
         <activity
-            android:name="com.google.androidgamesdk.GameActivity"
+            android:name="dev.eustress.player.PlayerActivity"
             android:exported="true"
             android:launchMode="singleTask"
             android:screenOrientation="landscape"
@@ -32,6 +33,12 @@
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="eustress-player" />
             </intent-filter>
         </activity>
     </application>

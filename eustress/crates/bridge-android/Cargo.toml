@@ -1,0 +1,13 @@
+[package]
+name = "eustress-bridge-android"
+version = "0.1.0"
+edition = "2021"
+description = "Android JNI implementations of the mobile Player platform traits."
+license = "PolyForm-Shield-1.0.0"
+
+[dependencies]
+eustress-bridge-core = { path = "../bridge-core" }
+
+[target.'cfg(target_os = "android")'.dependencies]
+jni = "0.21"
+ndk-context = "0.1"
