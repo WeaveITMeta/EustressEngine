@@ -79,6 +79,11 @@ bevy = { workspace = true, features = [
 # The render crates the graphics features name; bevy already brings each (its
 # bevy_pbr feature), so these add no crate, only the features' names.
 bevy_render = { version = "0.19", default-features = false }
+# `#[derive(Resource)]` emits `bevy_ecs::…`. Bevy's manifest reader only looks
+# in `[dependencies]` and `[dev-dependencies]`, not this target table, so it
+# never rewrites that path to `::bevy::ecs`. Name the crate here or the wasm
+# build cannot find it. No features: `bevy` already turns on the ones in use.
+bevy_ecs = { version = "0.19", default-features = false }
 bevy_core_pipeline = { version = "0.19", default-features = false }
 bevy_pbr = { version = "0.19", default-features = false }
 # Exact, and together: the build is packaged by wasm-bindgen-cli 0.2.128, which
