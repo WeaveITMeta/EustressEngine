@@ -79,8 +79,15 @@ impl Plugin for SpaceOpenPlugin {
                     .after(session::drive),
             )
             // After the play camera copies the Space's CFrame, so a fallback
-            // pose is replaced and a real one is left alone.
-            .add_systems(Update, frame_spawn_if_fallback.after(PlayScriptSet::Apply));
+            // pose is replaced and a real one is left alone. The follow
+            // camera is claimed after that copy, the same hand-off desktop
+            // makes once an avatar exists and CameraType is not Scriptable.
+            .add_systems(
+                Update,
+                (frame_spawn_if_fallback, claim_follow_camera, note_avatar_meshes)
+                    .chain()
+                    .after(PlayScriptSet::Apply),
+            );
     }
 }
 
@@ -469,7 +476,7 @@ fn log_opened_view(
     for (tf, camera, name) in &cameras {
         let name = name.map(|n| n.as_str()).unwrap_or("camera");
         eprintln!(
-            "phase0: camera {name} active={} order={} at=({:.1}, {:.1}, {:.1})",
+            "phase0: camera {name} active={} order={} at=({:.1}, {:.1}, {:.1}) (before the avatar spawns)",
             camera.is_active,
             camera.order,
             tf.translation.x,
@@ -479,6 +486,136 @@ fn log_opened_view(
     }
 }
 
+/// Desktop (`show_script_camera_without_avatar`): once an avatar camera
+/// exists, it is the view and the Space's scripted camera stands down,
+/// unless a script has set `CameraType` to Scriptable, in which case that
+/// same avatar camera shows the script's CFrame. The gallery camera shares
+/// order 0 with both, so a tie can keep the yard view on top. The follow
+/// camera renders after them.
+fn claim_follow_camera(
+    dm: Option<Res<PlayDataModel>>,
+    follow_pose: Query<(&Transform, &eustress_common::avatar::control::AvatarCamera)>,
+    mut logged: Local<bool>,
+    mut follow: Query<&mut Camera, With<eustress_common::avatar::control::AvatarCamera>>,
+    mut scripted: Query<&mut Camera, (With<ScriptedPlayCamera>, Without<eustress_common::avatar::control::AvatarCamera>)>,
+    mut gallery: Query<
+        &mut Camera,
+        (
+            With<GalleryCamera>,
+            Without<eustress_common::avatar::control::AvatarCamera>,
+            Without<ScriptedPlayCamera>,
+        ),
+    >,
+) {
+    if follow.is_empty() {
+        return;
+    }
+    let scriptable = dm.as_ref().and_then(|dm| {
+        let g = dm.dm.lock();
+        let cam = g.current_camera()?;
+        g.get_prop(cam, "CameraType")
+            .and_then(|v| v.as_enum_name().map(|name| name == "Scriptable"))
+    });
+    // Scriptable still draws through the avatar camera (the play runtime
+    // writes the script CFrame onto it and `camera_follow` stands down).
+    // Every other type, including the default Custom, is the orbit that
+    // follows the character. Either way this camera is the one on screen.
+    for mut camera in &mut follow {
+        camera.is_active = true;
+        if camera.order < 1 {
+            camera.order = 1;
+        }
+    }
+    for mut camera in &mut scripted {
+        camera.is_active = false;
+    }
+    for mut camera in &mut gallery {
+        camera.is_active = false;
+    }
+    if !*logged {
+        *logged = true;
+        let kind = match scriptable {
+            Some(true) => "Scriptable",
+            Some(false) => "not Scriptable",
+            None => "no CurrentCamera",
+        };
+        if let Some((tf, cam)) = follow_pose.iter().next() {
+            eprintln!(
+                "phase0: follow camera active=true at=({:.1}, {:.1}, {:.1}) target={:?} pitch={:.2} clamped=[{:.2}, {:.2}] type={kind}",
+                tf.translation.x,
+                tf.translation.y,
+                tf.translation.z,
+                cam.target,
+                cam.pitch,
+                cam.pitch_min,
+                cam.pitch_max,
+            );
+        }
+    }
+}
+
+/// One line after the body scene has spawned: how many meshes, where they
+/// sit, and that a skinned mesh is not frustum-culled from its bind-pose box.
+fn note_avatar_meshes(
+    mut commands: Commands,
+    asset_server: Res<AssetServer>,
+    roots: Query<(Entity, &GlobalTransform, &eustress_common::avatar::spawn::AvatarMeshChild), With<eustress_common::avatar::SpawnedByAvatarRuntime>>,
+    children: Query<&Children>,
+    meshes: Query<&GlobalTransform, With<Mesh3d>>,
+    skinned: Query<(), With<bevy::mesh::skinning::SkinnedMesh>>,
+    scenes: Query<&WorldAssetRoot>,
+    mut logged: Local<bool>,
+    mut waited: Local<u32>,
+) {
+    if *logged {
+        return;
+    }
+    let Ok((root, root_tf, mesh_child)) = roots.single() else {
+        return;
+    };
+    *waited += 1;
+    let mut stack = vec![mesh_child.0];
+    let mut count = 0usize;
+    let mut skinned_count = 0usize;
+    let mut sample: Option<(Vec3, Vec3)> = None;
+    while let Some(entity) = stack.pop() {
+        if let Ok(tf) = meshes.get(entity) {
+            count += 1;
+            if skinned.get(entity).is_ok() {
+                skinned_count += 1;
+                commands.entity(entity).insert(bevy::camera::visibility::NoFrustumCulling);
+            }
+            if sample.is_none() {
+                let (scale, _, translation) = tf.to_scale_rotation_translation();
+                sample = Some((translation, scale));
+            }
+        }
+        if let Ok(kids) = children.get(entity) {
+            stack.extend(kids.iter());
+        }
+    }
+    let load = scenes.get(mesh_child.0).map(|scene| format!("{:?}", asset_server.get_load_state(scene.0.id())));
+    if count == 0 && *waited < 180 {
+        return;
+    }
+    *logged = true;
+    let (at, scale) = sample.unwrap_or((Vec3::ZERO, Vec3::ZERO));
+    eprintln!(
+        "phase0: avatar meshes={count} skinned={skinned_count} root=({:.2}, {:.2}, {:.2}) mesh_at=({:.2}, {:.2}, {:.2}) mesh_scale=({:.3}, {:.3}, {:.3}) load={}",
+        root_tf.translation().x,
+        root_tf.translation().y,
+        root_tf.translation().z,
+        at.x,
+        at.y,
+        at.z,
+        scale.x,
+        scale.y,
+        scale.z,
+        load.unwrap_or_else(|_| "no scene handle".into()),
+    );
+    let _ = root;
+}
+
 /// The replica play camera starts at `(0, 12, 24)` looking at the origin when
 /// the Space has no camera CFrame. A map whose spawn is elsewhere is then
 /// outside the view, and the clear color is all that shows. A saved camera
@@ -486,7 +623,6 @@ fn log_opened_view(
 fn frame_spawn_if_fallback(
     pending: Option<Res<PendingSpawn>>,
     mut scripted: Query<&mut Transform, (With<ScriptedPlayCamera>, Without<GalleryCamera>)>,
-    mut gallery: Query<&mut Transform, (With<GalleryCamera>, Without<ScriptedPlayCamera>)>,
 ) {
     let Some(pending) = pending else { return };
     let spawn = pending.at;
@@ -505,13 +641,5 @@ fn frame_spawn_if_fallback(
             "phase0: play camera was the fallback (0, 12, 24); now looks at the spawn ({:.1}, {:.1}, {:.1})",
             spawn.x, spawn.y, spawn.z
         );
-    }
-    // The yard camera looks at the origin. The yard is gone on this open.
-    let yard = Vec3::new(0.0, 1.15, 6.2);
-    for mut tf in &mut gallery {
-        if tf.translation.distance(yard) > 1.5 {
-            continue;
-        }
-        *tf = view;
     }
 }

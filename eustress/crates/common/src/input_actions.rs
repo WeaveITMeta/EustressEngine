@@ -136,6 +136,13 @@ impl InputBinding {
         self.deadzone = deadzone;
         self
     }
+
+    /// Screen-space touch Y grows downward. The thumbstick sets this so a
+    /// finger pushed up is `+Move.y`, the same sign as W.
+    pub fn invert_y(mut self, invert: bool) -> Self {
+        self.invert_y = invert;
+        self
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -279,7 +286,9 @@ impl InputState {
                 right: KeyCode::KeyD,
             }),
             InputBinding::new(BindingSource::GamepadStick).deadzone(0.1),
-            InputBinding::new(BindingSource::TouchZone(TouchZoneId::Thumbstick)).deadzone(0.1),
+            InputBinding::new(BindingSource::TouchZone(TouchZoneId::Thumbstick))
+                .deadzone(0.1)
+                .invert_y(true),
         ]);
         let _ = move_id;
         state.add_action(character, "Jump", ActionType::Bool, vec![
@@ -718,7 +727,9 @@ fn eval_binding(binding: &InputBinding, frame: &DeviceFrame, state: &InputState,
         }
         BindingSource::TouchZone(TouchZoneId::Thumbstick) => {
             let v = radial(state.stick.value, binding.deadzone.max(STICK_DEADZONE));
-            Some(ActionValue::D2(v * scale))
+            // The finger's offset is in screen space (Y down). W is +Y.
+            let y = if binding.invert_y { -v.y } else { v.y };
+            Some(ActionValue::D2(Vec2::new(v.x * scale, y * scale)))
         }
         BindingSource::MouseDelta => Some(ActionValue::D2(frame.mouse_delta_px * scale)),
         BindingSource::TouchDelta(TouchZoneId::Camera) => Some(ActionValue::D2(touch_look_px * scale)),
@@ -752,6 +763,15 @@ pub fn thumbstick_zone(viewport: Vec2, insets: SafeInsets, pos: Vec2) -> bool {
     let x = pos.x - insets.left;
     let y = pos.y - insets.top;
     x >= 0.0 && y >= 0.0 && x < safe_w * 0.40 && y > safe_h * 0.35 && pos.x < viewport.x && pos.y < viewport.y
+}
+
+/// Where the thumbstick rests while no finger is down: the jump circle,
+/// mirrored into the lower left, using the same safe-area inset.
+pub fn thumbstick_rest(viewport: Vec2, insets: SafeInsets) -> Vec2 {
+    Vec2::new(
+        insets.left + 24.0 + STICK_RADIUS,
+        viewport.y - insets.bottom - 24.0 - STICK_RADIUS,
+    )
 }
 
 /// Jump diameter, clamped, and its center inset 24px from the safe edges.
@@ -1102,6 +1122,7 @@ mod tests {
         let out = step(&mut state, &drag);
         let v = out.d2("Move");
         assert!((v.x - 1.0).abs() < 0.05, "{v}");
+        assert!(v.y.abs() < 0.05, "a sideways drag is not forward, got {v}");
         // A second finger in the zone does not steal the stick.
         let second = DeviceFrame {
             touches: vec![TouchSample { id: 2, phase: TouchPhase::Started, pos: origin + Vec2::new(10.0, 10.0) }],
@@ -1111,6 +1132,33 @@ mod tests {
         step(&mut state, &second);
         assert_eq!(state.stick.finger, Some(1));
         assert_ne!(state.fingers.get(&2).map(|f| f.owner), Some(FingerOwner::Stick));
+    }
+
+    #[test]
+    fn stick_up_is_forward_like_w() {
+        let mut state = InputState::player_defaults(PreferredInput::Touch);
+        state.viewport = Vec2::new(1000.0, 500.0);
+        let origin = Vec2::new(80.0, 400.0);
+        step(&mut state, &DeviceFrame {
+            touches: vec![TouchSample { id: 1, phase: TouchPhase::Started, pos: origin }],
+            ..default()
+        });
+        // Screen Y grows downward, so the finger moving up is a negative delta.
+        let out = step(&mut state, &DeviceFrame {
+            touches: vec![TouchSample {
+                id: 1,
+                phase: TouchPhase::Moved,
+                pos: origin + Vec2::new(0.0, -STICK_RADIUS),
+            }],
+            ..default()
+        });
+        let v = out.d2("Move");
+        assert!(v.y > 0.9, "finger up is +Move.y, the same sign as W, got {v}");
+        let dir = camera_relative_direction(v.x, -v.y, 0.0);
+        assert!(
+            (dir - Vec3::new(0.0, 0.0, -1.0)).length() < 0.05,
+            "at yaw 0 that walk is camera-forward (-Z), got {dir}"
+        );
     }
 
     #[test]

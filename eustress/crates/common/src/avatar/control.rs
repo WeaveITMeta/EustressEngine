@@ -464,10 +464,13 @@ fn camera_follow(
             continue;
         }
 
+        // The same limits `apply_look` writes. A pitch past ±90° sends the
+        // orbit through the character and `look_at` flips the view.
+        let pitch = cam.pitch.clamp(cam.pitch_min, cam.pitch_max);
         let offset = Vec3::new(
-            cam.yaw.sin() * cam.pitch.cos(),
-            cam.pitch.sin(),
-            cam.yaw.cos() * cam.pitch.cos(),
+            cam.yaw.sin() * pitch.cos(),
+            pitch.sin(),
+            cam.yaw.cos() * pitch.cos(),
         ) * cam.distance;
 
         let desired = eye + offset;
@@ -606,5 +609,13 @@ mod look_tests {
     fn touch_radians_apply_without_the_mouse_button() {
         let (yaw, pitch) = apply_look(0.0, 0.0, -1.35, 1.35, 0.003, false, false, bevy::prelude::Vec2::ZERO, bevy::prelude::Vec2::new(0.01, 0.02));
         assert!((yaw - -0.01).abs() < 1e-6 && (pitch - 0.02).abs() < 1e-6, "{yaw} {pitch}");
+    }
+
+    #[test]
+    fn touch_look_cannot_pitch_past_the_desktop_limit() {
+        let (_, pitch) = apply_look(0.0, 1.2, -1.35, 1.35, 0.003, false, false, bevy::prelude::Vec2::ZERO, bevy::prelude::Vec2::new(0.0, 4.0));
+        assert!((pitch - 1.35).abs() < 1e-5, "a downward drag stops at pitch_max, got {pitch}");
+        let (_, pitch) = apply_look(0.0, -1.2, -1.35, 1.35, 0.003, false, false, bevy::prelude::Vec2::ZERO, bevy::prelude::Vec2::new(0.0, -4.0));
+        assert!((pitch - -1.35).abs() < 1e-5, "an upward drag stops at pitch_min, got {pitch}");
     }
 }

@@ -408,6 +408,7 @@ fn setup_scene(
         Camera { order: 0, ..default() },
         Transform::from_xyz(0.0, 1.15, 6.2).looking_at(Vec3::new(0.0, 0.35, 0.0), Vec3::Y),
         GalleryCamera,
+        Name::new("GalleryCamera"),
     ));
     commands.spawn((
         Camera3d::default(),
@@ -2375,6 +2376,9 @@ mod headless_startup {
             bevy::light::LightPlugin,
         ));
         app.init_asset::<StandardMaterial>();
+        app.insert_resource(bevy::time::TimeUpdateStrategy::ManualDuration(
+            std::time::Duration::from_secs_f32(1.0 / 60.0),
+        ));
         app.finish();
         app.cleanup();
         app.update();
@@ -2387,6 +2391,10 @@ mod headless_startup {
 [metadata]\nclass_name = \"SpawnLocation\"\nname = \"Pad\"\n\n\
 [transform]\nposition = [40.0, 0.5, -30.0]\nscale = [6.0, 1.0, 6.0]\n\n\
 [properties]\nanchored = true\n";
+        let camera = "\
+[metadata]\nclass_name = \"Camera\"\nname = \"Camera\"\n\n\
+[transform]\nposition = [0.0, 20.0, 20.0]\n\n\
+[camera]\ncamera_type = \"Custom\"\n";
         let world = eustress_networking::session::DownloadedWorld {
             universe: "Fixture".into(),
             start_space: "Yard".into(),
@@ -2396,12 +2404,21 @@ mod headless_startup {
                     ("Workspace/_service.toml".into(), b"[service]\nclass_name = \"Workspace\"\n".to_vec()),
                     ("Workspace/Block/_instance.toml".into(), part.as_bytes().to_vec()),
                     ("Workspace/Pad/_instance.toml".into(), pad.as_bytes().to_vec()),
+                    ("Workspace/Camera/_instance.toml".into(), camera.as_bytes().to_vec()),
                 ],
             )],
             assets: Vec::new(),
             spawn: [40.0, 0.5, -30.0],
         };
         app.world_mut().write_message(eustress_networking::session::WorldDownloaded(std::sync::Arc::new(world)));
+        // A published open sets playing before the world arrives. This
+        // fixture writes the download directly, so match that: capture_all
+        // stays off and the stick is not swallowed as UI.
+        {
+            let mut mobile = app.world_mut().resource_mut::<session::MobileApp>();
+            mobile.playing = true;
+            mobile.mode = session::Mode::Playing;
+        }
         for _ in 0..8 {
             app.update();
         }
@@ -2427,29 +2444,170 @@ mod headless_startup {
         };
         assert!(gallery_kept >= 1, "removing the yard despawned the world camera");
 
-        let world_camera = {
-            let mut scripted = app.world_mut().query_filtered::<&Camera, With<eustress_common::play_session::ScriptedPlayCamera>>();
-            let scripted_active = scripted.iter(app.world()).any(|camera| camera.is_active);
-            let mut avatar = app.world_mut().query_filtered::<&Camera, With<eustress_common::avatar::control::AvatarCamera>>();
-            let avatar_active = avatar.iter(app.world()).any(|camera| camera.is_active);
-            let mut gallery = app.world_mut().query_filtered::<&Camera, With<GalleryCamera>>();
-            let gallery_active = gallery.iter(app.world()).any(|camera| camera.is_active);
-            scripted_active || avatar_active || gallery_active
-        };
-        assert!(world_camera, "no world camera is active after the open");
-
-        let avatar_at = {
-            let mut query = app
-                .world_mut()
-                .query_filtered::<&Transform, With<eustress_common::avatar::SpawnedByAvatarRuntime>>();
-            query.iter(app.world()).next().map(|tf| tf.translation)
-        };
-        let avatar_at = avatar_at.expect("CharacterAutoLoads is on and no avatar spawned");
+        let avatar_at = avatar_translation(&mut app).expect("CharacterAutoLoads is on and no avatar spawned");
         let spawn = Vec3::new(40.0, 0.5, -30.0);
         assert!(
             (avatar_at.x - spawn.x).abs() < 2.0 && (avatar_at.z - spawn.z).abs() < 2.0,
             "avatar at {avatar_at} is not on the SpawnLocation {spawn}",
         );
+
+        // The follow camera is spawned the frame after the avatar. Land, so
+        // the stick and the jump have a floor.
+        let mut settled_y = avatar_at.y;
+        let mut stable = 0u32;
+        for _ in 0..180 {
+            app.update();
+            let y = avatar_translation(&mut app).expect("avatar despawned").y;
+            if (y - settled_y).abs() < 0.002 {
+                stable += 1;
+            } else {
+                stable = 0;
+            }
+            settled_y = y;
+            if stable >= 8 && follow_is_the_view(&mut app) {
+                break;
+            }
+        }
+        let (follow_active, scripted_active, gallery_active, target) = camera_flags(&mut app);
+        assert!(follow_active, "the follow camera is not the active view");
+        assert!(!scripted_active, "the Space camera stayed active after the avatar spawned");
+        assert!(!gallery_active, "the gallery camera is covering the follow camera");
+        let avatar_entity = {
+            let mut query = app
+                .world_mut()
+                .query_filtered::<Entity, With<eustress_common::avatar::SpawnedByAvatarRuntime>>();
+            query.iter(app.world()).next().expect("avatar")
+        };
+        assert_eq!(target, Some(avatar_entity), "the follow camera is not aimed at the avatar");
+
+        let mut body_meshes = 0usize;
+        for _ in 0..180 {
+            app.update();
+            body_meshes = avatar_mesh_count(&mut app);
+            if body_meshes >= 1 {
+                break;
+            }
+        }
+        assert!(
+            body_meshes >= 1,
+            "y_bot.glb did not spawn a mesh under the avatar (count {body_meshes})"
+        );
+
+        let start = avatar_translation(&mut app).unwrap();
+        let yaw = follow_yaw(&mut app);
+        let forward = Vec3::new(-yaw.sin(), 0.0, -yaw.cos());
+        // Finger up in the thumbstick zone. Screen Y is down, so this is -Y.
+        let viewport = app.world().resource::<eustress_common::input_actions::InputState>().viewport;
+        let origin = Vec2::new((viewport.x * 0.12).max(80.0), viewport.y * 0.78);
+        send_touch(&mut app, bevy::input::touch::TouchPhase::Started, origin, 1);
+        app.update();
+        send_touch(
+            &mut app,
+            bevy::input::touch::TouchPhase::Moved,
+            origin + Vec2::new(0.0, -eustress_common::input_actions::STICK_RADIUS),
+            1,
+        );
+        for _ in 0..60 {
+            app.update();
+        }
+        let moved = avatar_translation(&mut app).unwrap();
+        let delta = moved - start;
+        let along = Vec3::new(delta.x, 0.0, delta.z).dot(forward);
+        assert!(
+            along > 0.3,
+            "stick forward moved {along:.3} m along camera-forward {forward:?} (from {start} to {moved}, yaw {yaw})"
+        );
+
+        send_touch(&mut app, bevy::input::touch::TouchPhase::Ended, origin, 1);
+        app.update();
+        let before_jump = avatar_translation(&mut app).unwrap().y;
+        let viewport = app.world().resource::<eustress_common::input_actions::InputState>().viewport;
+        let insets = app.world().resource::<eustress_common::input_actions::InputState>().insets;
+        let (jump_at, _) = eustress_common::input_actions::jump_button(viewport, insets);
+        send_touch(&mut app, bevy::input::touch::TouchPhase::Started, jump_at, 2);
+        app.update();
+        send_touch(&mut app, bevy::input::touch::TouchPhase::Ended, jump_at, 2);
+        let mut peak = before_jump;
+        for _ in 0..30 {
+            app.update();
+            peak = peak.max(avatar_translation(&mut app).unwrap().y);
+        }
+        assert!(
+            peak > before_jump + 0.15,
+            "jump raised y from {before_jump:.3} to {peak:.3}"
+        );
+    }
+
+    fn avatar_translation(app: &mut App) -> Option<Vec3> {
+        let mut query = app
+            .world_mut()
+            .query_filtered::<&Transform, With<eustress_common::avatar::SpawnedByAvatarRuntime>>();
+        query.iter(app.world()).next().map(|tf| tf.translation)
+    }
+
+    fn camera_flags(app: &mut App) -> (bool, bool, bool, Option<Entity>) {
+        let follow = {
+            let mut query = app.world_mut().query_filtered::<(&Camera, &eustress_common::avatar::control::AvatarCamera), With<eustress_common::avatar::control::AvatarCamera>>();
+            let world = app.world();
+            query.iter(world).next().map(|(camera, follow)| (camera.is_active, follow.target))
+        };
+        let scripted = {
+            let mut query = app.world_mut().query_filtered::<&Camera, With<eustress_common::play_session::ScriptedPlayCamera>>();
+            query.iter(app.world()).any(|camera| camera.is_active)
+        };
+        let gallery = {
+            let mut query = app.world_mut().query_filtered::<&Camera, With<GalleryCamera>>();
+            query.iter(app.world()).any(|camera| camera.is_active)
+        };
+        match follow {
+            Some((active, target)) => (active, scripted, gallery, Some(target)),
+            None => (false, scripted, gallery, None),
+        }
+    }
+
+    fn follow_is_the_view(app: &mut App) -> bool {
+        let (follow, scripted, gallery, _) = camera_flags(app);
+        follow && !scripted && !gallery
+    }
+
+    fn follow_yaw(app: &mut App) -> f32 {
+        let mut query = app.world_mut().query::<&eustress_common::avatar::control::AvatarCamera>();
+        query.iter(app.world()).next().map(|cam| cam.yaw).unwrap_or(0.0)
+    }
+
+    fn avatar_mesh_count(app: &mut App) -> usize {
+        let root = {
+            let mut query = app.world_mut().query_filtered::<&eustress_common::avatar::spawn::AvatarMeshChild, With<eustress_common::avatar::SpawnedByAvatarRuntime>>();
+            query.iter(app.world()).next().map(|child| child.0)
+        };
+        let Some(root) = root else { return 0 };
+        let mut count = 0usize;
+        let mut stack = vec![root];
+        let mut children = app.world_mut().query::<&Children>();
+        let mut meshes = app.world_mut().query::<&Mesh3d>();
+        while let Some(entity) = stack.pop() {
+            if meshes.get(app.world(), entity).is_ok() {
+                count += 1;
+            }
+            if let Ok(kids) = children.get(app.world(), entity) {
+                stack.extend(kids.iter());
+            }
+        }
+        count
+    }
+
+    fn send_touch(app: &mut App, phase: bevy::input::touch::TouchPhase, position: Vec2, id: u64) {
+        let window = {
+            let mut query = app.world_mut().query_filtered::<Entity, With<bevy::window::PrimaryWindow>>();
+            query.iter(app.world()).next().unwrap_or(Entity::PLACEHOLDER)
+        };
+        app.world_mut().write_message(bevy::input::touch::TouchInput {
+            phase,
+            position,
+            window,
+            force: None,
+            id,
+        });
     }
 
     fn paint_shell(window: &slint::platform::software_renderer::MinimalSoftwareWindow) -> bool {

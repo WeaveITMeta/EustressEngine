@@ -148,22 +148,25 @@ slint::slint! {
         if playing: Rectangle {
             background: transparent;
 
-            if stick-visible: Rectangle {
+            // Always in the tree while playing, the same way the jump circle
+            // is. A conditional that appears only for the frame a finger is
+            // down was not drawing on the emulator.
+            Rectangle {
                 x: stick-x * 1px - 60px;
                 y: stick-y * 1px - 60px;
                 width: 120px;
                 height: 120px;
                 border-radius: 60px;
-                background: #00000055;
+                background: stick-visible ? #00000055 : transparent;
                 border-width: 2px;
-                border-color: #f4efe680;
+                border-color: stick-visible ? #f4efe680 : transparent;
                 Rectangle {
                     x: knob-x * 1px - stick-x * 1px + 38px;
                     y: knob-y * 1px - stick-y * 1px + 38px;
                     width: 44px;
                     height: 44px;
                     border-radius: 22px;
-                    background: #f4efe6cc;
+                    background: stick-visible ? #f4efe6cc : transparent;
                 }
             }
 
@@ -274,6 +277,11 @@ pub fn present(world: &mut World) {
     shell.ui.set_inset_bottom(insets.bottom);
     shell.ui.set_inset_left(insets.left);
     shell.ui.set_inset_right(insets.right);
+    let viewport = world
+        .get_resource::<eustress_common::input_actions::InputState>()
+        .map(|input| input.viewport)
+        .unwrap_or(Vec2::new(1280.0, 720.0));
+    let rest = eustress_common::input_actions::thumbstick_rest(viewport, insets);
     if let Some((origin, knob)) = stick {
         // Positions before visibility, so the frame the ring appears is
         // already at this finger and not the previous drag's offset.
@@ -281,16 +289,15 @@ pub fn present(world: &mut World) {
         shell.ui.set_stick_y(origin.y);
         shell.ui.set_knob_x(knob.x);
         shell.ui.set_knob_y(knob.y);
-        shell.ui.set_stick_visible(playing);
     } else {
-        // The finger is up. Put the knob back on the ring's center before
-        // hiding it, so a stale offset is not what the next press draws.
-        let x = shell.ui.get_stick_x();
-        let y = shell.ui.get_stick_y();
-        shell.ui.set_knob_x(x);
-        shell.ui.set_knob_y(y);
-        shell.ui.set_stick_visible(false);
+        // No finger: the ring sits in the lower left, knob centered, the
+        // same corner the jump circle uses on the right.
+        shell.ui.set_stick_x(rest.x);
+        shell.ui.set_stick_y(rest.y);
+        shell.ui.set_knob_x(rest.x);
+        shell.ui.set_knob_y(rest.y);
     }
+    shell.ui.set_stick_visible(playing);
     shell.ui.set_jump_x(jump.0.x);
     shell.ui.set_jump_y(jump.0.y);
     shell.ui.set_jump_r(jump.1);
