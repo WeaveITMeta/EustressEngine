@@ -122,10 +122,18 @@ fn resolve_bundled_root() -> PathBuf {
 /// the engine shell also registers `space://` for its own reasons, so this
 /// guards itself.
 pub fn register_avatar_asset_sources(app: &mut App) {
-    if REGISTERED.swap(true, Ordering::Relaxed) {
-        debug!("avatar: asset sources already registered, skipping");
+    // Per app, not per process. A second `App` in the same test binary used
+    // to see the flag and skip, then load `bundled://` from nothing.
+    let already = app
+        .world_mut()
+        .get_resource_mut::<bevy::asset::io::AssetSourceBuilders>()
+        .is_some_and(|mut builders| builders.get_mut("bundled").is_some());
+    if already {
+        REGISTERED.store(true, Ordering::Relaxed);
+        debug!("avatar: bundled source already on this app, skipping");
         return;
     }
+    REGISTERED.store(true, Ordering::Relaxed);
 
     let root = resolve_bundled_root();
     info!("avatar: bundled asset source -> {:?}", root);

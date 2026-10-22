@@ -326,6 +326,7 @@ fn sync_chrome(world: &mut World) {
     }
     let jump = world.resource::<eustress_common::input_actions::Actions>().pressed_this_frame("Jump");
     if jump {
+        eprintln!("phase0: jump pressed_this_frame; forwarding to drive_locomotion");
         platform::haptic(eustress_bridge_core::HapticKind::ImpactMedium);
     }
     crate::shell::present(world);

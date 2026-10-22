@@ -238,6 +238,11 @@ pub struct InputState {
     /// UI fingers released this frame. `Ended` removes the finger before the
     /// shell's pointer system runs, and a press and release can share a frame.
     pub released_ui: Vec<u64>,
+    /// A jump-circle finger went down and up inside this `step`. A tap shorter
+    /// than the frame (the debug APK is often under 2 fps) would otherwise
+    /// insert the finger and remove it before `jump_held` looks, and Jump
+    /// would never press.
+    jump_edge: bool,
 }
 
 impl Default for InputState {
@@ -265,6 +270,7 @@ impl InputState {
             ui_held: HashSet::new(),
             capture_all: false,
             released_ui: Vec::new(),
+            jump_edge: false,
         };
         state.push_context("SystemMenu", 1000, true, false);
         state.push_context("TextFocus", 900, true, true);
@@ -369,6 +375,7 @@ impl InputState {
         self.camera_finger = None;
         self.pinch = None;
         self.ui_held.remove(&JUMP_BUTTON);
+        self.jump_edge = false;
     }
 
     /// Thumbstick origin and knob, in logical pixels, while a finger owns it.
@@ -528,6 +535,9 @@ pub fn step(state: &mut InputState, frame: &DeviceFrame) -> Actions {
         }
     }
     let touch_on = state.touch_zones || state.preferred.current == PreferredInput::Touch;
+    // Cleared before the finger update, so a tap that starts and ends in this
+    // frame can set it and `jump_held` still sees the press.
+    state.jump_edge = false;
     let (touch_look_px, pinch_px, world_tap) = if touch_on {
         update_fingers(state, frame)
     } else {
@@ -743,7 +753,8 @@ fn jump_held(state: &InputState, id: u32) -> bool {
     if id != JUMP_BUTTON {
         return false;
     }
-    state.fingers.values().any(|f| f.owner == FingerOwner::Ui && point_in_jump(state, f.pos))
+    state.jump_edge
+        || state.fingers.values().any(|f| f.owner == FingerOwner::Ui && point_in_jump(state, f.pos))
 }
 
 fn radial(v: Vec2, dead: f32) -> Vec2 {
@@ -869,6 +880,11 @@ fn update_fingers(state: &mut InputState, frame: &DeviceFrame) -> (Vec2, f32, Op
                 if let Some(finger) = finished {
                     if finger.owner == FingerOwner::Ui {
                         state.released_ui.push(touch.id);
+                        // The circle test uses where the finger went down, so a
+                        // release a few pixels outside the ring still counts.
+                        if point_in_jump(state, finger.start) || point_in_jump(state, touch.pos) {
+                            state.jump_edge = true;
+                        }
                     }
                     if touch.phase == TouchPhase::Ended
                         && finger.owner == FingerOwner::World
@@ -1327,6 +1343,69 @@ mod tests {
         assert_eq!(state.stick.value, Vec2::ZERO);
         assert!(state.stick_visual().is_none(), "a lifted finger does not keep an offset knob");
         assert!(state.fingers.is_empty());
+    }
+
+    /// A finger dragged past the ring keeps the knob on the rim, in the
+    /// direction of the finger. Screen Y is down, so a drag up is −Y.
+    #[test]
+    fn the_knob_tracks_the_finger_and_stays_inside_the_ring() {
+        let mut state = InputState::player_defaults(PreferredInput::Touch);
+        state.viewport = Vec2::new(1000.0, 500.0);
+        let origin = Vec2::new(80.0, 400.0);
+        step(&mut state, &DeviceFrame {
+            touches: vec![TouchSample { id: 1, phase: TouchPhase::Started, pos: origin }],
+            ..default()
+        });
+        let (rest_origin, rest_knob) = state.stick_visual().expect("ring under the finger");
+        assert_eq!(rest_origin, origin);
+        assert_eq!(rest_knob, origin, "a finger that has not moved leaves the knob centred");
+        let moved = origin + Vec2::new(10.0, -30.0);
+        step(&mut state, &DeviceFrame {
+            touches: vec![TouchSample { id: 1, phase: TouchPhase::Moved, pos: moved }],
+            ..default()
+        });
+        let (at, knob) = state.stick_visual().expect("knob while held");
+        assert_eq!(at, origin, "the ring stays where the finger went down");
+        assert!((knob - moved).length() < 1.0, "inside the ring the knob sits on the finger, got {knob} want {moved}");
+        let far = origin + Vec2::new(0.0, -400.0);
+        step(&mut state, &DeviceFrame {
+            touches: vec![TouchSample { id: 1, phase: TouchPhase::Moved, pos: far }],
+            ..default()
+        });
+        let (_, clamped) = state.stick_visual().expect("knob while held past the rim");
+        let offset = clamped - origin;
+        assert!(
+            (offset.length() - STICK_RADIUS).abs() < 0.05,
+            "past the rim the knob stays on the ring, offset {offset} len {}",
+            offset.length()
+        );
+        assert!(offset.y < 0.0, "a finger above the ring puts the knob above it, got {clamped}");
+    }
+
+    /// The debug player often delivers Started and Ended in one frame. Jump
+    /// still has to press, or the button does nothing on device.
+    #[test]
+    fn a_jump_tap_that_starts_and_ends_in_one_frame_still_presses() {
+        let mut state = InputState::player_defaults(PreferredInput::Touch);
+        state.touch_zones = true;
+        state.viewport = Vec2::new(914.3, 411.4);
+        let (center, radius) = jump_button(state.viewport, state.insets);
+        let pos = center + Vec2::new(0.0, -24.0);
+        assert!(pos.distance(center) <= radius, "the device tap is inside the circle");
+        let out = step(&mut state, &DeviceFrame {
+            touches: vec![
+                TouchSample { id: 7, phase: TouchPhase::Started, pos },
+                TouchSample { id: 7, phase: TouchPhase::Ended, pos },
+            ],
+            now_ms: 8,
+            ..default()
+        });
+        assert!(
+            out.pressed("Jump") && out.pressed_this_frame("Jump"),
+            "a same-frame jump tap must reach the Jump action"
+        );
+        let next = step(&mut state, &DeviceFrame::default());
+        assert!(!next.pressed("Jump"), "the tap does not stay held");
     }
 
     #[test]

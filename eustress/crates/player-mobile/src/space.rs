@@ -87,6 +87,13 @@ impl Plugin for SpaceOpenPlugin {
                 (frame_spawn_if_fallback, claim_follow_camera, note_avatar_meshes)
                     .chain()
                     .after(PlayScriptSet::Apply),
+            )
+            // After `camera_follow` has written the orbit and propagation
+            // has copied it. A hit between the eyes and that orbit pulls the
+            // camera back out of the wall; the follow itself has no clip.
+            .add_systems(
+                PostUpdate,
+                keep_follow_camera_out_of_walls.after(TransformSystems::Propagate),
             );
     }
 }
@@ -565,6 +572,7 @@ fn note_avatar_meshes(
     skinned: Query<(), With<bevy::mesh::skinning::SkinnedMesh>>,
     scenes: Query<&WorldAssetRoot>,
     mut logged: Local<bool>,
+    mut announced: Local<bool>,
     mut waited: Local<u32>,
 ) {
     if *logged {
@@ -573,7 +581,6 @@ fn note_avatar_meshes(
     let Ok((root, root_tf, mesh_child)) = roots.single() else {
         return;
     };
-    *waited += 1;
     let mut stack = vec![mesh_child.0];
     let mut count = 0usize;
     let mut skinned_count = 0usize;
@@ -594,26 +601,171 @@ fn note_avatar_meshes(
             stack.extend(kids.iter());
         }
     }
-    let load = scenes.get(mesh_child.0).map(|scene| format!("{:?}", asset_server.get_load_state(scene.0.id())));
-    if count == 0 && *waited < 180 {
-        return;
+    let load_state = scenes.get(mesh_child.0).ok().and_then(|scene| asset_server.get_load_state(scene.0.id()));
+    let terminal = count > 0 || load_state.as_ref().is_some_and(|state| state.is_loaded() || state.is_failed());
+    let bundled = std::env::var("EUSTRESS_BUNDLED_ASSETS").unwrap_or_else(|_| "(unset)".into());
+    // The old gate waited 180 frames before saying the mesh was missing.
+    // On the debug APK that is a few minutes, so the line showed up only
+    // after HOME. Say it the frame the avatar exists, and again when the
+    // load actually finishes or fails.
+    if !*announced {
+        *announced = true;
+        if !terminal {
+            log_avatar_meshes("spawn", count, skinned_count, root_tf, sample, &load_state, &bundled);
+        }
+    }
+    if !terminal {
+        *waited += 1;
+        if *waited < 180 {
+            return;
+        }
     }
     *logged = true;
+    log_avatar_meshes("ready", count, skinned_count, root_tf, sample, &load_state, &bundled);
+    let _ = root;
+}
+
+fn log_avatar_meshes(
+    when: &str,
+    count: usize,
+    skinned_count: usize,
+    root_tf: &GlobalTransform,
+    sample: Option<(Vec3, Vec3)>,
+    load_state: &Option<bevy::asset::LoadState>,
+    bundled: &str,
+) {
     let (at, scale) = sample.unwrap_or((Vec3::ZERO, Vec3::ZERO));
+    let root_at = root_tf.translation();
     eprintln!(
-        "phase0: avatar meshes={count} skinned={skinned_count} root=({:.2}, {:.2}, {:.2}) mesh_at=({:.2}, {:.2}, {:.2}) mesh_scale=({:.3}, {:.3}, {:.3}) load={}",
-        root_tf.translation().x,
-        root_tf.translation().y,
-        root_tf.translation().z,
+        "phase0: avatar meshes {when} meshes={count} skinned={skinned_count} root=({:.2}, {:.2}, {:.2}) mesh_at=({:.2}, {:.2}, {:.2}) mesh_scale=({:.3}, {:.3}, {:.3}) load={load_state:?} bundled={bundled}",
+        root_at.x,
+        root_at.y,
+        root_at.z,
         at.x,
         at.y,
         at.z,
         scale.x,
         scale.y,
         scale.z,
-        load.unwrap_or_else(|_| "no scene handle".into()),
     );
-    let _ = root;
+}
+
+/// The follow orbit has no collision of its own. A few seconds of stick
+/// input walks the capsule into a building and the camera with it, and the
+/// view is then the inside of a mesh: backfaces are not drawn, so the frame
+/// is the dark clear color and stops changing. Pull the camera to the near
+/// side of whatever the ray from the eyes hits, and say when the body itself
+/// is no longer moving in the direction it asked for.
+fn keep_follow_camera_out_of_walls(
+    time: Res<Time>,
+    spatial: avian3d::prelude::SpatialQuery,
+    names: Query<&Name>,
+    avatars: Query<
+        (Entity, &Transform, &avian3d::prelude::LinearVelocity, &eustress_common::avatar::spawn::AvatarIntent, &eustress_common::avatar::spawn::AvatarBody),
+        (With<eustress_common::avatar::SpawnedByAvatarRuntime>, Without<eustress_common::avatar::control::AvatarCamera>),
+    >,
+    mut cameras: Query<
+        (&mut Transform, &mut GlobalTransform, &eustress_common::avatar::control::AvatarCamera),
+        Without<eustress_common::avatar::SpawnedByAvatarRuntime>,
+    >,
+    mut blocked_for: Local<f32>,
+    mut since_log: Local<f32>,
+) {
+    let dt = time.delta_secs();
+    *since_log += dt;
+    for (mut cam_tf, mut cam_global, cam) in &mut cameras {
+        let Ok((entity, body_tf, vel, intent, body)) = avatars.get(cam.target) else {
+            continue;
+        };
+        let eye = body_tf.translation - Vec3::Y * body.metrics.capsule_half_extent()
+            + Vec3::Y * body.metrics.eye_height;
+        let to_cam = cam_tf.translation - eye;
+        let dist = to_cam.length();
+        if dist < 0.05 {
+            continue;
+        }
+        let Ok(dir) = Dir3::new(to_cam / dist) else { continue };
+        let filter = avian3d::prelude::SpatialQueryFilter::default().with_excluded_entities([entity]);
+        let hit = spatial.cast_ray(eye, dir, dist, true, &filter);
+        let skin = 0.25;
+        let mut pulled: Option<(Vec3, &'static str, f32, Entity)> = None;
+        if let Some(hit) = hit {
+            if hit.distance > 0.05 && hit.distance < dist - skin {
+                let place = eye + *dir * (hit.distance - skin).max(0.4);
+                pulled = Some((place, "between eye and camera", hit.distance, hit.entity));
+            } else if hit.distance <= 0.05 {
+                // The ray started inside a collider (the body walked into the
+                // mesh). Cast back from outside the orbit to the shell.
+                let far = eye + *dir * (dist + 30.0);
+                if let Ok(back) = Dir3::new(-*dir) {
+                    if let Some(shell) = spatial.cast_ray(far, back, dist + 30.0, true, &filter) {
+                        if shell.distance > 0.05 && shell.distance < dist + 30.0 - skin {
+                            let place = far + *back * (shell.distance - skin);
+                            pulled = Some((place, "camera inside geometry", shell.distance, shell.entity));
+                        }
+                    }
+                }
+            }
+        }
+        if let Some((place, why, hit_distance, hit_entity)) = pulled {
+            let name = names.get(hit_entity).map(|n| n.as_str()).unwrap_or("unnamed");
+            if *since_log > 0.4 {
+                *since_log = 0.0;
+                let v = vel.0;
+                eprintln!(
+                    "phase0: camera occluded ({why}) by {name} ({hit_entity}) hit={hit_distance:.2} m camera=({:.2}, {:.2}, {:.2}) pulled=({:.2}, {:.2}, {:.2}) eye=({:.2}, {:.2}, {:.2}) avatar=({:.2}, {:.2}, {:.2}) vel=({:.2}, {:.2}, {:.2}) intent=({:.2}, {:.2}, {:.2})",
+                    cam_tf.translation.x,
+                    cam_tf.translation.y,
+                    cam_tf.translation.z,
+                    place.x,
+                    place.y,
+                    place.z,
+                    eye.x,
+                    eye.y,
+                    eye.z,
+                    body_tf.translation.x,
+                    body_tf.translation.y,
+                    body_tf.translation.z,
+                    v.x,
+                    v.y,
+                    v.z,
+                    intent.direction.x,
+                    intent.direction.y,
+                    intent.direction.z,
+                );
+            }
+            cam_tf.translation = place;
+            cam_tf.look_at(eye, Vec3::Y);
+            *cam_global = GlobalTransform::from(*cam_tf);
+        }
+
+        let wanted = intent.direction.length_squared() > 1e-4;
+        let planar = Vec2::new(vel.0.x, vel.0.z).length();
+        if wanted && planar < 0.05 {
+            *blocked_for += dt;
+            if *blocked_for > 0.4 && *since_log > 0.4 {
+                *since_log = 0.0;
+                *blocked_for = 0.0;
+                eprintln!(
+                    "phase0: avatar blocked avatar=({:.2}, {:.2}, {:.2}) vel=({:.2}, {:.2}, {:.2}) intent=({:.2}, {:.2}, {:.2}) camera=({:.2}, {:.2}, {:.2})",
+                    body_tf.translation.x,
+                    body_tf.translation.y,
+                    body_tf.translation.z,
+                    vel.0.x,
+                    vel.0.y,
+                    vel.0.z,
+                    intent.direction.x,
+                    intent.direction.y,
+                    intent.direction.z,
+                    cam_tf.translation.x,
+                    cam_tf.translation.y,
+                    cam_tf.translation.z,
+                );
+            }
+        } else {
+            *blocked_for = 0.0;
+        }
+    }
 }
 
 /// The replica play camera starts at `(0, 12, 24)` looking at the origin when

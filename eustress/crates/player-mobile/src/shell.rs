@@ -223,6 +223,49 @@ fn push(command: Command) {
     COMMANDS.with(|commands| commands.borrow_mut().push(command));
 }
 
+thread_local! {
+    static LAST_STICK: RefCell<Option<(i32, i32, i32, i32, bool)>> = const { RefCell::new(None) };
+}
+
+/// Log when the knob moves, and when the finger lifts. Quantized so a held
+/// stick does not print every frame.
+fn log_stick(playing: bool, held: bool, origin: Vec2, knob: Vec2) {
+    if !playing {
+        return;
+    }
+    let key = (
+        (origin.x * 10.0) as i32,
+        (origin.y * 10.0) as i32,
+        (knob.x * 10.0) as i32,
+        (knob.y * 10.0) as i32,
+        held,
+    );
+    let changed = LAST_STICK.with(|last| {
+        let mut last = last.borrow_mut();
+        if *last == Some(key) {
+            false
+        } else {
+            *last = Some(key);
+            true
+        }
+    });
+    if !changed {
+        return;
+    }
+    let offset = knob - origin;
+    let len = offset.length();
+    eprintln!(
+        "phase0: stick held={held} origin=({:.1}, {:.1}) knob=({:.1}, {:.1}) offset=({:.1}, {:.1}) len={len:.1} ring={}",
+        origin.x,
+        origin.y,
+        knob.x,
+        knob.y,
+        offset.x,
+        offset.y,
+        eustress_common::input_actions::STICK_RADIUS,
+    );
+}
+
 pub fn wire(ui: &PlayerShell) {
     ui.on_search_edited(move |text| push(Command::Search(text.to_string())));
     ui.on_play_id(move |id| push(Command::Play(id.to_string())));
@@ -282,22 +325,21 @@ pub fn present(world: &mut World) {
         .map(|input| input.viewport)
         .unwrap_or(Vec2::new(1280.0, 720.0));
     let rest = eustress_common::input_actions::thumbstick_rest(viewport, insets);
-    if let Some((origin, knob)) = stick {
-        // Positions before visibility, so the frame the ring appears is
-        // already at this finger and not the previous drag's offset.
-        shell.ui.set_stick_x(origin.x);
-        shell.ui.set_stick_y(origin.y);
-        shell.ui.set_knob_x(knob.x);
-        shell.ui.set_knob_y(knob.y);
-    } else {
-        // No finger: the ring sits in the lower left, knob centered, the
-        // same corner the jump circle uses on the right.
-        shell.ui.set_stick_x(rest.x);
-        shell.ui.set_stick_y(rest.y);
-        shell.ui.set_knob_x(rest.x);
-        shell.ui.set_knob_y(rest.y);
-    }
+    let (origin, knob) = stick.unwrap_or((rest, rest));
+    // The value is already clamped to the ring (`STICK_RADIUS`). The knob
+    // centre is that point, so a drag past the rim stays on the circle.
+    shell.ui.set_stick_x(origin.x);
+    shell.ui.set_stick_y(origin.y);
+    shell.ui.set_knob_x(knob.x);
+    shell.ui.set_knob_y(knob.y);
     shell.ui.set_stick_visible(playing);
+    log_stick(playing, stick.is_some(), origin, knob);
+    if playing && stick.is_some() {
+        // Property writes mark the window dirty only when the value changes.
+        // A held stick that Slint already painted centred would otherwise
+        // stay there until some other widget asked for a frame.
+        shell.ui.window().request_redraw();
+    }
     shell.ui.set_jump_x(jump.0.x);
     shell.ui.set_jump_y(jump.0.y);
     shell.ui.set_jump_r(jump.1);

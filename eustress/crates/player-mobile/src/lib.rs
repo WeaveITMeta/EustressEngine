@@ -1224,6 +1224,10 @@ fn sync_surface_loss(
     adapter: Option<Res<RenderAdapter>>,
     shared: Res<SlintSharedTexture>,
     mut world_input: Option<ResMut<eustress_common::input_actions::InputState>>,
+    mut ambient: Option<ResMut<GlobalAmbientLight>>,
+    units: Option<Res<eustress_common::plugins::light_classes::LightUnits>>,
+    lights: Query<(&DirectionalLight, &GlobalTransform, Option<&Name>)>,
+    cameras: Query<(&Camera, Option<&bevy::camera::Exposure>, Option<&Tonemapping>, Option<&Name>, &GlobalTransform)>,
 ) {
     let mut saw_suspended = false;
     let mut saw_running = false;
@@ -1261,6 +1265,78 @@ fn sync_surface_loss(
             .unwrap_or(false);
         eprintln!(
             "phase0: resume (Running). new surface on the same device. skia renderer kept. gles={gles}"
+        );
+        log_scene_lighting("resume", ambient.as_deref(), units.as_deref(), &lights, &cameras);
+        if let Some(ambient) = ambient.as_deref_mut() {
+            if !ambient.brightness.is_finite() || ambient.brightness < 1.0 {
+                eprintln!(
+                    "phase0: resume ambient brightness {:.1} is gone; restoring 280",
+                    ambient.brightness
+                );
+                ambient.brightness = 280.0;
+                ambient.color = Color::WHITE;
+            }
+        }
+    }
+}
+
+/// One line after the play lights exist, so a resume log has something to
+/// compare with. Suspend does not remove these components; if the picture
+/// goes dark and these numbers did not move, the loss is in the surface or
+/// the shadow maps rather than the ECS light.
+fn log_lighting_baseline(
+    mut logged: Local<bool>,
+    ambient: Option<Res<GlobalAmbientLight>>,
+    units: Option<Res<eustress_common::plugins::light_classes::LightUnits>>,
+    lights: Query<(&DirectionalLight, &GlobalTransform, Option<&Name>)>,
+    cameras: Query<(&Camera, Option<&bevy::camera::Exposure>, Option<&Tonemapping>, Option<&Name>, &GlobalTransform)>,
+) {
+    if *logged || lights.is_empty() {
+        return;
+    }
+    if !cameras.iter().any(|(camera, _, _, _, _)| camera.is_active) {
+        return;
+    }
+    *logged = true;
+    log_scene_lighting("open", ambient.as_deref(), units.as_deref(), &lights, &cameras);
+}
+
+fn log_scene_lighting(
+    tag: &str,
+    ambient: Option<&GlobalAmbientLight>,
+    units: Option<&eustress_common::plugins::light_classes::LightUnits>,
+    lights: &Query<(&DirectionalLight, &GlobalTransform, Option<&Name>)>,
+    cameras: &Query<(&Camera, Option<&bevy::camera::Exposure>, Option<&Tonemapping>, Option<&Name>, &GlobalTransform)>,
+) {
+    let brightness = ambient.map(|light| light.brightness).unwrap_or(f32::NAN);
+    let ev = units.map(|units| units.ev100).unwrap_or(f32::NAN);
+    eprintln!("phase0: lighting {tag} ambient={brightness:.1} light_units_ev={ev:.2}");
+    for (light, transform, name) in lights.iter() {
+        let at = transform.translation();
+        eprintln!(
+            "phase0: lighting {tag} directional {} illuminance={:.0} shadows={} at=({:.1}, {:.1}, {:.1})",
+            name.map(|n| n.as_str()).unwrap_or("unnamed"),
+            light.illuminance,
+            light.shadow_maps_enabled,
+            at.x,
+            at.y,
+            at.z,
+        );
+    }
+    for (camera, exposure, tonemap, name, transform) in cameras.iter() {
+        if !camera.is_active {
+            continue;
+        }
+        let at = transform.translation();
+        eprintln!(
+            "phase0: lighting {tag} camera {} order={} exposure_ev100={:.2} tonemap={} at=({:.1}, {:.1}, {:.1})",
+            name.map(|n| n.as_str()).unwrap_or("unnamed"),
+            camera.order,
+            exposure.map(|e| e.ev100).unwrap_or(f32::NAN),
+            tonemap.map(|tone| format!("{tone:?}")).unwrap_or_else(|| "none".into()),
+            at.x,
+            at.y,
+            at.z,
         );
     }
 }
@@ -2007,7 +2083,26 @@ fn build_game(headless: bool) -> App {
     eustress_bridge_android::startup_self_check();
     if let Some(root) = platform::install_bundled_assets() {
         std::env::set_var("EUSTRESS_BUNDLED_ASSETS", &root);
-        eprintln!("eustress player: bundled assets at {}", root.display());
+        let character = root.join("characters/y_bot.glb");
+        eprintln!(
+            "eustress player: bundled assets at {} y_bot={} exists={}",
+            root.display(),
+            character.display(),
+            character.is_file(),
+        );
+        // Android `platform_default` ignores this path and reads the APK
+        // AssetManager (`NotFound("characters/y_bot.glb")` while the file is
+        // in files/bundled). A filesystem reader rooted at the absolute
+        // folder is what desktop uses for `bundled://`.
+        let bundled = root.clone();
+        app.register_asset_source(
+            "bundled",
+            bevy::asset::io::AssetSourceBuilder::new(move || -> Box<dyn bevy::asset::io::ErasedAssetReader> {
+                Box::new(eustress_play_runtime::space_paths::ContainedFileReader::new(bundled.clone()))
+            }),
+        );
+        eustress_common::avatar::boot::note_asset_sources_registered_externally();
+        eprintln!("eustress player: bundled:// reads {}", root.display());
     }
     eustress_common::avatar::boot::register_avatar_asset_sources(&mut app);
     // `space://` is the live folder a downloaded world is written into.
@@ -2116,6 +2211,7 @@ fn build_game(headless: bool) -> App {
             fit_overlay,
             init_slint,
             receive_texture,
+            session::drive,
             render_slint,
             pointer_input,
             slint_keyboard,
@@ -2124,7 +2220,7 @@ fn build_game(headless: bool) -> App {
         )
             .chain(),
     )
-    .add_systems(Update, session::drive);
+    .add_systems(Update, log_lighting_baseline);
     eustress_common::avatar::boot::register_gltf_scene_types(&mut app);
 
     app
@@ -2654,6 +2750,32 @@ mod headless_startup {
             (),
         );
         found.expect("button has a layout rect").0
+    }
+
+    /// `bundled://characters/y_bot.glb` is a path relative to the files
+    /// folder. Android's platform reader ignores that folder; this is the
+    /// reader `build_game` registers instead.
+    #[test]
+    fn bundled_reader_reads_the_character_from_an_absolute_folder() {
+        use bevy::asset::io::AssetReader;
+        let dir = std::env::temp_dir().join(format!("eustress_bundled_reader_{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("characters")).unwrap();
+        let file = dir.join("characters/y_bot.glb");
+        std::fs::write(&file, b"glb-bytes").unwrap();
+        let reader = eustress_play_runtime::space_paths::ContainedFileReader::new(dir.clone());
+        assert!(
+            reader.opens(std::path::Path::new("characters/y_bot.glb")),
+            "the files-folder reader must open characters/y_bot.glb"
+        );
+        let mut bytes = Vec::new();
+        bevy::tasks::block_on(async {
+            let mut opened = reader.read(std::path::Path::new("characters/y_bot.glb")).await.expect("read");
+            bevy::tasks::futures_lite::AsyncReadExt::read_to_end(&mut opened, &mut bytes)
+                .await
+                .expect("body");
+        });
+        assert_eq!(bytes, b"glb-bytes");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
 
