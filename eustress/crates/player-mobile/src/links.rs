@@ -20,7 +20,10 @@ pub struct Launch {
 
 pub enum LaunchKind {
     Gallery,
+    /// `play/<hex id>` or `space/<hex id>`: a published Space, no host or port.
     Published { sim_id: String },
+    /// `space/<slug>`: a published Space named in the gallery, no host or port.
+    Space { slug: String },
     Join { link: JoinLink, name: String, ticket: Option<String> },
 }
 
@@ -29,6 +32,7 @@ impl std::fmt::Debug for LaunchKind {
         match self {
             LaunchKind::Gallery => f.write_str("Gallery"),
             LaunchKind::Published { sim_id } => write!(f, "Published({sim_id})"),
+            LaunchKind::Space { slug } => write!(f, "Space({slug})"),
             LaunchKind::Join { link, name, ticket } => {
                 write!(f, "Join({link:?}, {name}, ticket {})", if ticket.is_some() { "set" } else { "absent" })
             }
@@ -41,6 +45,7 @@ impl std::fmt::Debug for Launch {
         match &self.kind {
             LaunchKind::Gallery => f.write_str("Gallery"),
             LaunchKind::Published { sim_id } => write!(f, "Published({sim_id})"),
+            LaunchKind::Space { slug } => write!(f, "Space({slug})"),
             LaunchKind::Join { link, name, ticket } => {
                 write!(f, "Join({link:?}, {name}, ticket {})", if ticket.is_some() { "set" } else { "absent" })
             }
@@ -51,7 +56,7 @@ impl std::fmt::Debug for Launch {
 /// Arguments after the program name, the same shapes the desktop Player accepts.
 pub fn parse_args(args: &[String], player_api: &str) -> Result<Launch, String> {
     let mut link: Option<(JoinLink, LinkExtras)> = None;
-    let mut sim: Option<(String, LinkExtras)> = None;
+    let mut sim: Option<(String, LinkExtras, PublishedPath)> = None;
     let (mut key, mut pin, mut name) = (None, None, None);
     let mut it = args.iter().skip(1);
     while let Some(raw) = it.next() {
@@ -70,11 +75,16 @@ pub fn parse_args(args: &[String], player_api: &str) -> Result<Launch, String> {
             "--key" => key = Some(value("--key")?),
             "--pin" => pin = Some(value("--pin")?),
             "--name" => name = Some(value("--name")?),
-            "--sim" => sim = Some((value("--sim")?, LinkExtras::default())),
+            "--sim" => sim = Some((value("--sim")?, LinkExtras::default(), PublishedPath::Play)),
             "--api-url" | "--env" => drop(value(arg)?),
-            other if other.starts_with("eustress://play/") => {
-                let id = other["eustress://play/".len()..].split('?').next().unwrap_or("");
-                sim = Some((id.trim_end_matches('/').to_string(), extras));
+            // `play/<id>` and `space/<name>` are published Spaces. They have
+            // no host and no port. Sending them through `parse_join_link`
+            // reports "the link names no port".
+            other if let Some(id) = published_path(other, "eustress://play/") => {
+                sim = Some((id, extras, PublishedPath::Play));
+            }
+            other if let Some(id) = published_path(other, "eustress://space/") => {
+                sim = Some((id, extras, PublishedPath::Space));
             }
             other if other.starts_with(STUDIO_SCHEME) || other.starts_with("https://") => {
                 link = Some((parse_join_link(other)?, extras));
@@ -93,21 +103,36 @@ pub fn parse_uri(uri: &str, player_api: &str) -> Result<Launch, String> {
     parse_args(&["eustress-player".to_string(), uri.to_string()], player_api)
 }
 
+/// Which published-Space path a link used. `Play` is desktop's
+/// `eustress-player://play/<hex id>`. `Space` is `eustress-player://space/<name>`,
+/// a gallery name when it is not itself a hex id.
+#[derive(Clone, Copy)]
+enum PublishedPath {
+    Play,
+    Space,
+}
+
 fn finish(
-    sim: Option<(String, LinkExtras)>,
+    sim: Option<(String, LinkExtras, PublishedPath)>,
     link: Option<(JoinLink, LinkExtras)>,
     key: Option<String>,
     pin: Option<String>,
     name: Option<String>,
     player_api: &str,
 ) -> Result<Launch, String> {
-    if let Some((sim_id, extras)) = sim {
-        let valid = !sim_id.is_empty() && sim_id.chars().all(|c| c.is_ascii_hexdigit() || c == '-');
-        if !valid {
-            return Err("the simulation id must be hex digits and dashes".into());
-        }
+    if let Some((sim_id, extras, path)) = sim {
         extras.check_api(player_api)?;
-        return Ok(Launch { kind: LaunchKind::Published { sim_id } });
+        if sim_id.is_empty() {
+            return Err("the link names no simulation".into());
+        }
+        if is_sim_id(&sim_id) {
+            return Ok(Launch { kind: LaunchKind::Published { sim_id } });
+        }
+        return match path {
+            PublishedPath::Play => Err("the simulation id must be hex digits and dashes".into()),
+            PublishedPath::Space if is_space_slug(&sim_id) => Ok(Launch { kind: LaunchKind::Space { slug: sim_id } }),
+            PublishedPath::Space => Err("the space name must be letters, digits and dashes".into()),
+        };
     }
     if let Some((mut link, extras)) = link {
         extras.check_api(player_api)?;
@@ -127,6 +152,49 @@ fn finish(
         return Ok(Launch { kind: LaunchKind::Join { link, name, ticket } });
     }
     Ok(Launch { kind: LaunchKind::Gallery })
+}
+
+fn published_path(arg: &str, prefix: &str) -> Option<String> {
+    let rest = arg.strip_prefix(prefix)?;
+    let id = rest.split(['?', '#']).next().unwrap_or("");
+    Some(id.trim_matches('/').to_string())
+}
+
+fn is_sim_id(id: &str) -> bool {
+    !id.is_empty() && id.chars().all(|c| c.is_ascii_hexdigit() || c == '-')
+}
+
+fn is_space_slug(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= 80
+        && id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
+        && !id.starts_with('-')
+        && !id.ends_with('-')
+}
+
+/// A link safe to print. `ticket` and `key` are secrets; the rest of the
+/// URI is what the log is for.
+pub fn redact_link(uri: &str) -> String {
+    let mut out = String::with_capacity(uri.len());
+    for (i, part) in uri.split('&').enumerate() {
+        if i > 0 {
+            out.push('&');
+        }
+        let Some((head, _)) = part.split_once('=') else {
+            out.push_str(part);
+            continue;
+        };
+        let name = head.rsplit(['?', '/']).next().unwrap_or(head);
+        if name == "ticket" || name == "key" {
+            let name_at = head.rfind(name).unwrap_or(0);
+            out.push_str(&head[..name_at]);
+            out.push_str(name);
+            out.push_str("=<redacted>");
+        } else {
+            out.push_str(part);
+        }
+    }
+    out
 }
 
 fn player_link(arg: &str) -> Option<&str> {
@@ -178,5 +246,26 @@ mod tests {
             }
             other => panic!("{other:?}"),
         }
+    }
+
+    #[test]
+    fn a_space_link_opens_a_published_space_without_a_port() {
+        for uri in ["eustress-player://space/box-head", "eustress://space/box-head", "EUSTRESS-PLAYER://space/box-head/"] {
+            let launch = parse_uri(uri, STAGING_API).unwrap();
+            match launch.kind {
+                LaunchKind::Space { slug } => assert_eq!(slug, "box-head"),
+                other => panic!("{uri} -> {other:?}"),
+            }
+        }
+        let shown = format!("{:?}", parse_uri("eustress-player://space/box-head", STAGING_API));
+        assert!(!shown.contains("port"), "{shown}");
+        let by_id = parse_uri(&format!("eustress-player://space/{SIM}"), STAGING_API).unwrap();
+        assert!(matches!(by_id.kind, LaunchKind::Published { .. }));
+        let join = parse_uri("eustress-player://join/127.0.0.1", STAGING_API).unwrap_err();
+        assert!(join.contains("port"), "{join}");
+        let redacted = redact_link("eustress-player://join/h:1?key=secret&pin=ab&ticket=abc.def");
+        assert!(!redacted.contains("secret") && !redacted.contains("abc.def"), "{redacted}");
+        assert!(redacted.contains("h:1") && redacted.contains("pin=ab"), "{redacted}");
+        assert_eq!(redact_link("eustress-player://space/box-head"), "eustress-player://space/box-head");
     }
 }

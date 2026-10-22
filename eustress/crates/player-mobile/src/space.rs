@@ -443,16 +443,23 @@ fn settle_avatar(
             .as_deref()
             .map(|policy| policy.apply(eustress_common::avatar::AvatarDescriptor::default()))
             .unwrap_or_default();
-        let (_, motion) = eustress_common::avatar::resolve(
+        let (metrics, motion) = eustress_common::avatar::resolve(
             &descriptor,
             eustress_common::avatar::NOMINAL_BIND_HEIGHT_M,
         );
+        // Same pair desktop's `profile::dress` then `resolve` produces for
+        // this descriptor. A taller body has a larger stride and a higher
+        // apex (`0.55 + 0.35 * stride_scale`). The undressed default is
+        // 0.886 m; a Space character at 2.05 m is 0.943 m. Neither number
+        // is written over the other.
         eprintln!(
-            "phase0: desktop jump apex={:.3} m takeoff={:.3} m/s at g={:.5} m/s² jump_power={:?}",
+            "phase0: desktop jump apex={:.3} m takeoff={:.3} m/s at g={:.5} m/s² jump_power={:?} height={:.3} m stride_scale={:.3}",
             motion.jump_apex_m,
             motion.jump_velocity(),
             eustress_common::avatar::GRAVITY_MPS2,
             motion.jump_speed_mps,
+            metrics.height_m,
+            metrics.stride_scale,
         );
         spawn.write(eustress_common::avatar::SpawnAvatar::new(descriptor, pending.at));
     } else if !pending.auto_loads {

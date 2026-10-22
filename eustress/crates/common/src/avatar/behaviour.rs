@@ -1087,6 +1087,86 @@ mod tests {
         assert!(loco(&mut app).grounded, "never came back down: {:?}", body_pos(&mut app));
     }
 
+    /// The avatar walks into a building that stands between its eyes and the
+    /// follow camera. The camera has to sit on the near side of that wall,
+    /// closer than the open orbit, which is the pull `camera_follow` applies
+    /// when the orbit ray hits.
+    #[test]
+    fn the_follow_camera_pulls_in_when_the_avatar_walks_into_a_building() {
+        use crate::avatar::climbable::Climbable;
+        use crate::avatar::control::follow_camera_translation;
+
+        let mut app = world(AvatarHost::Client);
+        ground(&mut app);
+        spawn_at(&mut app, Vec3::new(0.0, 2.0, 0.0));
+        settle(&mut app);
+
+        // Yaw 0 puts the orbit on +Z, behind a character facing −Z. The
+        // building is on that side. `Climbable(false)` keeps the face solid
+        // for the camera ray and for walking, and out of the climb probe:
+        // this test is the pull, not a vault.
+        let wall_centre = Vec3::new(0.0, 5.0, 8.0);
+        let wall_size = Vec3::new(6.0, 10.0, 1.0);
+        app.world_mut().spawn((
+            Transform::from_translation(wall_centre),
+            Collider::cuboid(wall_size.x, wall_size.y, wall_size.z),
+            RigidBody::Static,
+            Climbable(false),
+        ));
+        // The wall is still behind the open orbit. One step lets the
+        // broadphase see it before the walk.
+        step(&mut app, 2);
+
+        let clear = {
+            let (pos, cam) = follow_cam(&mut app);
+            let eye = eye_pos(&mut app);
+            let open = follow_camera_translation(eye, cam.yaw, cam.pitch, cam.distance, cam.pitch_min, cam.pitch_max, 0.0);
+            assert!(
+                (pos.distance(eye) - open.distance(eye)).abs() < 0.35,
+                "camera started pulled in, at {pos:?}, orbit {open:?}"
+            );
+            open.distance(eye)
+        };
+
+        set_intent(&mut app, Vec3::Z, false);
+        step(&mut app, 500);
+        set_intent(&mut app, Vec3::ZERO, false);
+        step(&mut app, 40);
+
+        let (pos, cam) = follow_cam(&mut app);
+        let eye = eye_pos(&mut app);
+        let body = body_pos(&mut app);
+        let open = follow_camera_translation(eye, cam.yaw, cam.pitch, cam.distance, cam.pitch_min, cam.pitch_max, 0.0);
+        let near_face = wall_centre.z - wall_size.z * 0.5;
+        let far_face = wall_centre.z + wall_size.z * 0.5;
+        assert!(body.z > 4.0, "the avatar never walked up to the building (at {body:?})");
+        assert!(body.z < near_face, "the avatar walked through the building to z={}", body.z);
+        assert!(
+            pos.distance(eye) + 1.0 < open.distance(eye),
+            "camera stayed out at {:.2} m; the open orbit is {:.2} m (clear was {:.2} m), camera {pos:?} eye {eye:?}",
+            pos.distance(eye),
+            open.distance(eye),
+            clear
+        );
+        assert!(pos.z < far_face, "camera went through the building to z={}", pos.z);
+        assert!(pos.z > eye.z - 0.05, "camera pulled through the avatar to z={}", pos.z);
+        assert!(climb_phase(&mut app) == ClimbPhase::None, "the building was climbed: {:?}", climb_phase(&mut app));
+    }
+
+    fn follow_cam(app: &mut App) -> (Vec3, crate::avatar::control::AvatarCamera) {
+        let w = app.world_mut();
+        let mut q = w.query::<(&Transform, &crate::avatar::control::AvatarCamera)>();
+        let (tf, cam) = q.iter(w).next().expect("no follow camera");
+        (tf.translation, cam.clone())
+    }
+
+    fn eye_pos(app: &mut App) -> Vec3 {
+        let w = app.world_mut();
+        let mut q = w.query_filtered::<(&Transform, &AvatarBody), With<SpawnedByAvatarRuntime>>();
+        let (tf, body) = q.iter(w).next().expect("no avatar");
+        tf.translation - Vec3::Y * body.metrics.capsule_half_extent() + Vec3::Y * body.metrics.eye_height
+    }
+
     /// Running and sprinting stop at a person's top speed, and a walk is never
     /// capped: Box Head (walk 8 m/s) sprints at 12.42, and a speed boost to
     /// 20 m/s moves at 20 walking and sprinting alike. The paces are set the

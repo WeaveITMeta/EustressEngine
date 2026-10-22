@@ -39,6 +39,8 @@ pub struct MobileApp {
     /// A published Space uses `Player`.
     pub player_name: String,
     gallery_rx: Option<Mutex<Receiver<Result<Vec<Card>, String>>>>,
+    /// A `space/<slug>` link looking the name up in the gallery.
+    space_rx: Option<Mutex<Receiver<Result<String, String>>>>,
     auth_rx: Option<Mutex<Receiver<Result<crate::auth::SignedIn, String>>>>,
     fetch_rx: Option<Mutex<Receiver<Result<eustress_networking::session::DownloadedWorld, String>>>>,
     restore_rx: Option<Mutex<Receiver<Result<Option<crate::auth::SignedIn>, String>>>>,
@@ -64,6 +66,7 @@ impl Default for MobileApp {
             playing: false,
             player_name: "Player".into(),
             gallery_rx: None,
+            space_rx: None,
             auth_rx: None,
             fetch_rx: None,
             restore_rx: None,
@@ -176,15 +179,27 @@ fn poll(world: &mut World) {
         let seen = world.resource::<MobileApp>().seen_intent.clone();
         if uri != seen {
             world.resource_mut::<MobileApp>().seen_intent = uri.clone();
+            eprintln!("phase0: incoming link {}", links::redact_link(&uri));
             open_text(world, &uri);
         }
     }
     if !world.resource::<MobileApp>().launch_done {
         world.resource_mut::<MobileApp>().launch_done = true;
         let args: Vec<String> = std::env::args().collect();
+        for arg in args.iter().skip(1) {
+            if arg.contains("://") {
+                eprintln!("phase0: incoming link {}", links::redact_link(arg));
+            }
+        }
         match links::parse_args(&args, api_base::api_base()) {
-            Ok(launch) => open_launch(world, launch.kind),
-            Err(err) => world.resource_mut::<MobileApp>().status = err,
+            Ok(launch) => {
+                eprintln!("phase0: launch {:?}", launch.kind);
+                open_launch(world, launch.kind);
+            }
+            Err(err) => {
+                eprintln!("phase0: launch refused: {err}");
+                world.resource_mut::<MobileApp>().status = err;
+            }
         }
     }
 
@@ -202,6 +217,24 @@ fn poll(world: &mut World) {
             Ok(Err(err)) => world.resource_mut::<MobileApp>().status = err,
             Err(TryRecvError::Empty) => world.resource_mut::<MobileApp>().gallery_rx = Some(rx),
             Err(TryRecvError::Disconnected) => world.resource_mut::<MobileApp>().status = "The gallery request stopped.".into(),
+        }
+    }
+
+    let space = world.resource_mut::<MobileApp>().space_rx.take();
+    if let Some(rx) = space {
+        match recv(&rx) {
+            Ok(Ok(id)) => {
+                eprintln!("phase0: space link is published simulation {id}");
+                begin_published(world, id);
+            }
+            Ok(Err(err)) => {
+                eprintln!("phase0: space link refused: {err}");
+                world.resource_mut::<MobileApp>().status = err;
+            }
+            Err(TryRecvError::Empty) => world.resource_mut::<MobileApp>().space_rx = Some(rx),
+            Err(TryRecvError::Disconnected) => {
+                world.resource_mut::<MobileApp>().status = "The space lookup stopped.".into();
+            }
         }
     }
 
@@ -263,8 +296,14 @@ fn poll(world: &mut World) {
 
 fn open_text(world: &mut World, uri: &str) {
     match links::parse_uri(uri, api_base::api_base()) {
-        Ok(launch) => open_launch(world, launch.kind),
-        Err(err) => world.resource_mut::<MobileApp>().status = err,
+        Ok(launch) => {
+            eprintln!("phase0: link parsed as {:?}", launch.kind);
+            open_launch(world, launch.kind);
+        }
+        Err(err) => {
+            eprintln!("phase0: link refused: {err}");
+            world.resource_mut::<MobileApp>().status = err;
+        }
     }
 }
 
@@ -272,8 +311,49 @@ fn open_launch(world: &mut World, kind: LaunchKind) {
     match kind {
         LaunchKind::Gallery => {}
         LaunchKind::Published { sim_id } => begin_published(world, sim_id),
+        LaunchKind::Space { slug } => begin_named_space(world, slug),
         LaunchKind::Join { link, name, ticket } => begin_network(world, link, name, ticket),
     }
+}
+
+/// `eustress-player://space/<slug>` is a published Space. It has no host and
+/// no port. A hex id opens directly; a name is the gallery listing whose
+/// slug matches (`box-head` → "Box Head …").
+fn begin_named_space(world: &mut World, slug: String) {
+    let cards = world.resource::<MobileApp>().cards.clone();
+    if !cards.is_empty() {
+        match gallery::pick_published(&slug, &cards) {
+            Ok(card) => {
+                eprintln!("phase0: space link {slug} is published simulation {}", card.id);
+                let id = card.id.clone();
+                begin_published(world, id);
+                return;
+            }
+            Err(err) => {
+                eprintln!("phase0: space link {slug} missed the loaded gallery ({err}); searching");
+            }
+        }
+    } else {
+        eprintln!("phase0: space link {slug} has no host or port; the gallery is not loaded yet");
+    }
+    world.resource_mut::<MobileApp>().status = format!("Opening {slug}…");
+    let api = api_base::api_base().to_string();
+    world.resource_mut::<MobileApp>().space_rx = Some(Mutex::new(spawn_space_lookup(api, slug)));
+}
+
+fn spawn_space_lookup(api: String, slug: String) -> Receiver<Result<String, String>> {
+    let (tx, rx) = mpsc::channel();
+    std::thread::Builder::new()
+        .name("eustress-space-link".into())
+        .spawn(move || {
+            let query = slug.replace('-', " ");
+            let result = gallery::fetch(&api, &query).and_then(|cards| {
+                gallery::pick_published(&slug, &cards).map(|card| card.id.clone())
+            });
+            let _ = tx.send(result);
+        })
+        .ok();
+    rx
 }
 
 fn begin_network(world: &mut World, link: JoinLink, name: String, ticket: Option<String>) {

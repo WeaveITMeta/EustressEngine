@@ -92,6 +92,57 @@ fn http_err(error: ureq::Error) -> String {
     }
 }
 
+/// Gallery name as a `space/<slug>` path: lower case, words joined by `-`.
+pub fn slug_of(name: &str) -> String {
+    let mut out = String::new();
+    let mut dash = false;
+    for c in name.chars() {
+        if c.is_ascii_alphanumeric() {
+            out.push(c.to_ascii_lowercase());
+            dash = false;
+        } else if !dash && !out.is_empty() {
+            out.push('-');
+            dash = true;
+        }
+    }
+    while out.ends_with('-') {
+        out.pop();
+    }
+    out
+}
+
+/// The published Space a `space/<slug>` link names.
+///
+/// An exact gallery id wins. Otherwise the listing whose name slug equals
+/// the link, or starts with it at a word boundary (`box-head` matches
+/// "Box Head Zombie Defense Tycoon"). Two listings at the same closeness
+/// are not a guess.
+pub fn pick_published<'a>(slug: &str, cards: &'a [Card]) -> Result<&'a Card, String> {
+    let slug = slug.trim().trim_matches('/').to_ascii_lowercase();
+    if slug.is_empty() {
+        return Err("the link names no space".into());
+    }
+    if let Some(exact) = cards.iter().find(|card| card.id.eq_ignore_ascii_case(&slug)) {
+        return Ok(exact);
+    }
+    let mut hits: Vec<&Card> = cards
+        .iter()
+        .filter(|card| {
+            let name = slug_of(&card.name);
+            name == slug || name.starts_with(&format!("{slug}-"))
+        })
+        .collect();
+    if hits.is_empty() {
+        return Err(format!("no published Space matches {slug}"));
+    }
+    hits.sort_by_key(|card| slug_of(&card.name).len());
+    let best = slug_of(&hits[0].name).len();
+    if hits.iter().filter(|card| slug_of(&card.name).len() == best).count() > 1 {
+        return Err(format!("several published Spaces match {slug}"));
+    }
+    Ok(hits[0])
+}
+
 fn encode(text: &str) -> String {
     let mut out = String::new();
     for byte in text.bytes() {
@@ -123,5 +174,39 @@ mod tests {
         let featured: FeaturedResponse =
             serde_json::from_str(r#"{"featured":[{"id":"abc","name":"Harbor"}]}"#).unwrap();
         assert_eq!(featured.featured[0].name, "Harbor");
+    }
+
+    #[test]
+    fn a_space_slug_picks_the_published_listing() {
+        let cards = vec![
+            Card {
+                id: "abc".into(),
+                name: "Box Head Zombie Defense Tycoon".into(),
+                description: String::new(),
+                creator_name: String::new(),
+                visit_count: 0,
+                tags: Vec::new(),
+                tags_source: None,
+            },
+            Card {
+                id: "def".into(),
+                name: "Harbor".into(),
+                description: String::new(),
+                creator_name: String::new(),
+                visit_count: 0,
+                tags: Vec::new(),
+                tags_source: None,
+            },
+        ];
+        assert_eq!(slug_of(&cards[0].name), "box-head-zombie-defense-tycoon");
+        let picked = pick_published("box-head", &cards).unwrap();
+        assert_eq!(picked.id, "abc");
+        assert_eq!(pick_published("ABC", &cards).unwrap().id, "abc");
+        assert!(pick_published("missing", &cards).is_err());
+        let tied = vec![
+            Card { id: "1".into(), name: "Box Head Alpha".into(), ..cards[1].clone() },
+            Card { id: "2".into(), name: "Box Head Bravo".into(), ..cards[1].clone() },
+        ];
+        assert!(pick_published("box-head", &tied).is_err());
     }
 }

@@ -1088,10 +1088,11 @@ fn slint_keyboard(
         let Some(text) = slint_key_text(event) else {
             continue;
         };
-        // The Android text buffer already contains this frame's letters.
-        // Forwarding the key as well would insert it twice.
-        if ime_consumed_chars && event.text.is_some() {
-            eprintln!("phase0: slint key skipped (ime buffer has the text) {text:?}");
+        // Skip a character the IME buffer already committed. A character that
+        // is not in that buffer was dropped (`commitText` on an inactive
+        // InputConnection) and the key is the only copy left.
+        if event.text.as_ref().is_some_and(|letter| key_is_already_in_ime(&ime_text, letter, ime_consumed_chars)) {
+            eprintln!("phase0: slint key skipped (already in the ime buffer) {text:?}");
             continue;
         }
         dispatch_key(&ctx.adapter, text, event.state, event.repeat);
@@ -1112,8 +1113,8 @@ fn poll_android_text(adapter: &BevyWindowAdapter, focused: bool, last: &mut Stri
         return false;
     }
     eprintln!(
-        "phase0: slint ime text {:?} selection={:?}..{:?}",
-        state.text, state.selection.start, state.selection.end
+        "phase0: slint ime text {:?} composing={:?} selection={:?}..{:?}",
+        state.text, state.compose_region, state.selection.start, state.selection.end
     );
     *last = state.text.clone();
     let mut key_event = i_slint_core::input::KeyEvent::default();
@@ -1134,11 +1135,22 @@ fn apply_input_method(request: &i_slint_core::window::InputMethodRequest) {
     use i_slint_core::window::InputMethodRequest;
     match request {
         InputMethodRequest::Enable(props) => {
-            eprintln!("phase0: soft keyboard show");
+            eprintln!(
+                "phase0: soft keyboard show text={:?} preedit={:?}",
+                props.text, props.preedit_text
+            );
             show_soft_keyboard(true, Some(props));
         }
         InputMethodRequest::Update(props) => {
-            show_soft_keyboard(true, Some(props));
+            // Slint reports the field after every committed or composing
+            // change. `setImeEditorInfo` / `showSoftInput` restart the
+            // InputConnection, and the next `commitText` is delivered to the
+            // dead one (`commitText on inactive InputConnection`) and never
+            // reaches the buffer. The keyboard is already up; leave it.
+            eprintln!(
+                "phase0: ime update commit={:?} composing={:?} at {}",
+                props.text, props.preedit_text, props.preedit_offset
+            );
         }
         InputMethodRequest::Disable => {
             eprintln!("phase0: soft keyboard hide");
@@ -1148,14 +1160,29 @@ fn apply_input_method(request: &i_slint_core::window::InputMethodRequest) {
     }
 }
 
+/// A key whose letters are already in the IME buffer must not be inserted
+/// again. A key whose letters are missing was dropped before the buffer
+/// updated, so it still has to be typed.
+fn key_is_already_in_ime(ime_text: &str, key_text: &str, ime_updated: bool) -> bool {
+    ime_updated && !key_text.is_empty() && ime_text.contains(key_text)
+}
+
 fn show_soft_keyboard(show: bool, props: Option<&i_slint_core::window::InputMethodProperties>) {
     #[cfg(target_os = "android")]
     {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        static KEYBOARD_SHOWN: AtomicBool = AtomicBool::new(false);
         let Some(app) = bevy::android::ANDROID_APP.get() else {
             eprintln!("phase0: soft keyboard requested and ANDROID_APP is missing");
             return;
         };
         if show {
+            // A second show restarts the InputConnection the same way an
+            // Update used to. The field is already focused.
+            if KEYBOARD_SHOWN.swap(true, Ordering::SeqCst) {
+                eprintln!("phase0: soft keyboard already shown; leaving the InputConnection alone");
+                return;
+            }
             // The first EditorInfo parity8 delivered was inputType NULL, so
             // the IME never treated the field as text (`mInputShown` stayed
             // false). Set TYPE_CLASS_TEXT before show. `GameActivity_showSoftInput`
@@ -1194,6 +1221,7 @@ fn show_soft_keyboard(show: bool, props: Option<&i_slint_core::window::InputMeth
             app.show_soft_input(true);
             eprintln!("phase0: soft keyboard showSoftInput inputType=TYPE_CLASS_TEXT");
         } else {
+            KEYBOARD_SHOWN.store(false, Ordering::SeqCst);
             // HIDE_IMPLICIT_ONLY, matching the show flag above.
             app.hide_soft_input(true);
         }
@@ -2858,6 +2886,21 @@ mod headless_startup {
         });
         assert_eq!(bytes, b"glb-bytes");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_dropped_ime_letter_is_not_thrown_away_with_the_keys_already_in_the_buffer() {
+        // "zombie" arrived as "zmbie": 'o' never reached the buffer, so the
+        // key still has to be typed. Letters already in the buffer are not
+        // inserted a second time. A composing span is inside that same
+        // buffer, and the field is replaced with the whole string.
+        assert!(!key_is_already_in_ime("zmbie", "o", true));
+        assert!(key_is_already_in_ime("zombie", "e", true));
+        assert!(!key_is_already_in_ime("z", "o", false));
+        let buffer = "zm";
+        let composing = 1..2;
+        assert_eq!(&buffer[composing.clone()], "m");
+        assert_eq!(buffer.len(), composing.end);
     }
 }
 

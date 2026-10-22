@@ -433,9 +433,37 @@ pub const CAMERA_FLOOR_CLEARANCE_M: f32 = 0.35;
 /// Gap left between an occluder and the pulled camera, in metres.
 pub const CAMERA_OCCLUSION_SKIN_M: f32 = 0.25;
 
-/// Third-person orbit translation. `pitch` is clamped to the angle limits,
-/// then raised until the camera's Y is at least `floor_y`. The axis that
-/// has to stay above the ground is Y, not the pitch angle.
+/// Third-person orbit translation and the pitch that produced it.
+///
+/// `pitch` is clamped to the angle limits, then raised until the camera's Y
+/// is at least `floor_y`. The raised angle is the one returned: a floor
+/// correction that only moves the translation leaves `AvatarCamera.pitch`
+/// at the stop (−1.35), and every later upward drag is spent climbing out
+/// of that dead zone before the camera leaves the ground.
+pub fn follow_camera_orbit(
+    eye: Vec3,
+    yaw: f32,
+    mut pitch: f32,
+    distance: f32,
+    pitch_min: f32,
+    pitch_max: f32,
+    floor_y: f32,
+) -> (Vec3, f32) {
+    pitch = pitch.clamp(pitch_min, pitch_max);
+    let offset_at = |pitch: f32| {
+        Vec3::new(yaw.sin() * pitch.cos(), pitch.sin(), yaw.cos() * pitch.cos()) * distance
+    };
+    let mut desired = eye + offset_at(pitch);
+    if desired.y < floor_y && distance > 1e-4 {
+        let min_sin = ((floor_y - eye.y) / distance).clamp(-1.0, 1.0);
+        pitch = pitch.max(min_sin.asin()).clamp(pitch_min, pitch_max);
+        desired = eye + offset_at(pitch);
+        desired.y = desired.y.max(floor_y);
+    }
+    (desired, pitch)
+}
+
+/// Third-person orbit translation. See [`follow_camera_orbit`].
 pub fn follow_camera_translation(
     eye: Vec3,
     yaw: f32,
@@ -445,18 +473,7 @@ pub fn follow_camera_translation(
     pitch_max: f32,
     floor_y: f32,
 ) -> Vec3 {
-    let pitch = pitch.clamp(pitch_min, pitch_max);
-    let offset_at = |pitch: f32| {
-        Vec3::new(yaw.sin() * pitch.cos(), pitch.sin(), yaw.cos() * pitch.cos()) * distance
-    };
-    let mut desired = eye + offset_at(pitch);
-    if desired.y < floor_y && distance > 1e-4 {
-        let min_sin = ((floor_y - eye.y) / distance).clamp(-1.0, 1.0);
-        let lifted = pitch.max(min_sin.asin());
-        desired = eye + offset_at(lifted);
-        desired.y = desired.y.max(floor_y);
-    }
-    desired
+    follow_camera_orbit(eye, yaw, pitch, distance, pitch_min, pitch_max, floor_y).0
 }
 
 /// Where the camera sits when a ray from `eye` toward `camera` hits at
@@ -490,11 +507,11 @@ fn camera_follow(
     time: Res<Time>,
     spatial: avian3d::prelude::SpatialQuery,
     bodies: Query<(&Transform, &AvatarBody), (With<SpawnedByAvatarRuntime>, Without<AvatarCamera>)>,
-    mut cameras: Query<(&mut Transform, &AvatarCamera), Without<AvatarCameraScripted>>,
+    mut cameras: Query<(&mut Transform, &mut AvatarCamera), Without<AvatarCameraScripted>>,
     mut since_log: Local<f32>,
 ) {
     let dt = time.delta_secs();
-    for (mut cam_tf, cam) in cameras.iter_mut() {
+    for (mut cam_tf, mut cam) in cameras.iter_mut() {
         let Ok((body_tf, body)) = bodies.get(cam.target) else { continue };
 
         // Eye height comes from the descriptor-derived metrics, so the Height
@@ -524,15 +541,28 @@ fn camera_follow(
         // not lerp back through the wall.
         let feet_y = body_tf.translation.y - body.metrics.capsule_half_extent();
         let floor_y = feet_y + CAMERA_FLOOR_CLEARANCE_M;
-        let open = follow_camera_translation(
+        let stored_pitch = cam.pitch;
+        let (open, used_pitch) = follow_camera_orbit(
             eye,
             cam.yaw,
-            cam.pitch,
+            stored_pitch,
             cam.distance,
             cam.pitch_min,
             cam.pitch_max,
             floor_y,
         );
+        // The floor raised the angle it used for this frame's position.
+        // Store that angle. Leaving −1.35 in `cam.pitch` makes the next
+        // upward drag invisible until the finger climbs back to the angle
+        // the camera is already using.
+        if used_pitch > stored_pitch + 1.0e-3 {
+            if used_pitch - stored_pitch > 0.05 {
+                eprintln!(
+                    "phase0: floor wrote pitch {stored_pitch:.3} -> {used_pitch:.3} (camera y was already on the floor)"
+                );
+            }
+            cam.pitch = used_pitch;
+        }
         let mut desired = open;
         let mut pulled = false;
         let to_cam = open - eye;
@@ -728,5 +758,30 @@ mod look_tests {
         );
         assert!(pulled.distance(eye) + 0.2 < underground.distance(eye));
         assert!(super::pull_follow_camera(eye, underground, 50.0).is_none());
+    }
+
+    #[test]
+    fn the_floor_writes_its_pitch_back_so_an_upward_drag_leaves_the_ground() {
+        use bevy::prelude::Vec3;
+        let eye = Vec3::new(11.0, 1.66, 10.29);
+        let (buried, pitch) = super::follow_camera_orbit(eye, 0.4, -1.35, 4.82, -1.35, 1.35, 0.35);
+        assert!(buried.y >= 0.35 - 1e-3, "camera went under the floor at y={}", buried.y);
+        assert!(
+            pitch > -0.5,
+            "the floor left pitch at the angle stop {pitch}; an upward drag would not move the camera"
+        );
+        let (_, stayed) = super::follow_camera_orbit(eye, 0.4, 0.4, 4.82, -1.35, 1.35, 0.35);
+        assert!((stayed - 0.4).abs() < 1e-5, "a pitch already above the floor was rewritten to {stayed}");
+
+        // One short upward drag from the angle the camera is actually using.
+        let (_, raised) = apply_look(0.4, pitch, -1.35, 1.35, 0.003, false, false, bevy::prelude::Vec2::ZERO, bevy::prelude::Vec2::new(0.0, -0.05));
+        assert!(raised > pitch + 0.04, "upward drag did not raise pitch ({pitch} -> {raised})");
+        let (up, _) = super::follow_camera_orbit(eye, 0.4, raised, 4.82, -1.35, 1.35, 0.35);
+        assert!(
+            up.y > buried.y + 0.05,
+            "upward drag from the floor pitch left the camera at y={} (was {})",
+            up.y,
+            buried.y
+        );
     }
 }
