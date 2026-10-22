@@ -253,7 +253,11 @@ pub fn apply_look(
         pitch = (pitch + mouse_px.y * sensitivity).clamp(pitch_min, pitch_max);
     }
     yaw -= touch_rad.x;
-    pitch = (pitch + touch_rad.y).clamp(pitch_min, pitch_max);
+    // Screen Y grows downward, so a finger moving up is a negative delta.
+    // Positive pitch lifts the camera (`offset.y = sin(pitch) * distance`),
+    // which is the direction Arrow Up already uses. Adding the raw delta
+    // pitched the orbit down through the floor.
+    pitch = (pitch - touch_rad.y).clamp(pitch_min, pitch_max);
     (yaw, pitch)
 }
 
@@ -421,6 +425,53 @@ fn escape_owner(
     out.write(AvatarEscapePressed(cfg.seams.escape_action));
 }
 
+/// How far above the feet the third-person camera is allowed to sit.
+/// The pitch clamp is an angle. `sin(pitch) * distance` is the Y that
+/// goes through the ground, and ±1.35 rad still does.
+pub const CAMERA_FLOOR_CLEARANCE_M: f32 = 0.35;
+
+/// Gap left between an occluder and the pulled camera, in metres.
+pub const CAMERA_OCCLUSION_SKIN_M: f32 = 0.25;
+
+/// Third-person orbit translation. `pitch` is clamped to the angle limits,
+/// then raised until the camera's Y is at least `floor_y`. The axis that
+/// has to stay above the ground is Y, not the pitch angle.
+pub fn follow_camera_translation(
+    eye: Vec3,
+    yaw: f32,
+    pitch: f32,
+    distance: f32,
+    pitch_min: f32,
+    pitch_max: f32,
+    floor_y: f32,
+) -> Vec3 {
+    let pitch = pitch.clamp(pitch_min, pitch_max);
+    let offset_at = |pitch: f32| {
+        Vec3::new(yaw.sin() * pitch.cos(), pitch.sin(), yaw.cos() * pitch.cos()) * distance
+    };
+    let mut desired = eye + offset_at(pitch);
+    if desired.y < floor_y && distance > 1e-4 {
+        let min_sin = ((floor_y - eye.y) / distance).clamp(-1.0, 1.0);
+        let lifted = pitch.max(min_sin.asin());
+        desired = eye + offset_at(lifted);
+        desired.y = desired.y.max(floor_y);
+    }
+    desired
+}
+
+/// Where the camera sits when a ray from `eye` toward `camera` hits at
+/// `hit_distance` metres. `None` when that hit does not block the orbit.
+/// The returned point is the pulled position, on the near side of the hit.
+pub fn pull_follow_camera(eye: Vec3, camera: Vec3, hit_distance: f32) -> Option<Vec3> {
+    let to_cam = camera - eye;
+    let dist = to_cam.length();
+    if dist < 1e-4 || !(hit_distance > 0.05 && hit_distance < dist - CAMERA_OCCLUSION_SKIN_M) {
+        return None;
+    }
+    let along = (hit_distance - CAMERA_OCCLUSION_SKIN_M).max(0.4);
+    Some(eye + (to_cam / dist) * along.min(dist))
+}
+
 /// How far ahead of the eyes the first-person camera sits, in metres.
 pub(crate) const FIRST_PERSON_FORWARD_M: f32 = 0.12;
 
@@ -437,8 +488,10 @@ pub(crate) const FIRST_PERSON_HIDDEN_BONES: [super::rig::HumanoidBone; 3] = [
 
 fn camera_follow(
     time: Res<Time>,
+    spatial: avian3d::prelude::SpatialQuery,
     bodies: Query<(&Transform, &AvatarBody), (With<SpawnedByAvatarRuntime>, Without<AvatarCamera>)>,
     mut cameras: Query<(&mut Transform, &AvatarCamera), Without<AvatarCameraScripted>>,
+    mut since_log: Local<f32>,
 ) {
     let dt = time.delta_secs();
     for (mut cam_tf, cam) in cameras.iter_mut() {
@@ -464,19 +517,52 @@ fn camera_follow(
             continue;
         }
 
-        // The same limits `apply_look` writes. A pitch past ±90° sends the
-        // orbit through the character and `look_at` flips the view.
-        let pitch = cam.pitch.clamp(cam.pitch_min, cam.pitch_max);
-        let offset = Vec3::new(
-            cam.yaw.sin() * pitch.cos(),
-            pitch.sin(),
-            cam.yaw.cos() * pitch.cos(),
-        ) * cam.distance;
-
-        let desired = eye + offset;
-        // Framerate-independent smoothing.
+        // The angle clamp alone does not keep the camera above the ground:
+        // pitch -1.35 puts `sin(pitch) * distance` several metres under the
+        // feet. `follow_camera_translation` clamps that Y. A hit on the way
+        // there is the position the camera keeps, so the next frame does
+        // not lerp back through the wall.
+        let feet_y = body_tf.translation.y - body.metrics.capsule_half_extent();
+        let floor_y = feet_y + CAMERA_FLOOR_CLEARANCE_M;
+        let open = follow_camera_translation(
+            eye,
+            cam.yaw,
+            cam.pitch,
+            cam.distance,
+            cam.pitch_min,
+            cam.pitch_max,
+            floor_y,
+        );
+        let mut desired = open;
+        let mut pulled = false;
+        let to_cam = open - eye;
+        let dist = to_cam.length();
+        if dist > 0.05 {
+            if let Ok(dir) = Dir3::new(to_cam / dist) {
+                let filter = avian3d::prelude::SpatialQueryFilter::default().with_excluded_entities([cam.target]);
+                if let Some(hit) = spatial.cast_ray(eye, dir, dist, true, &filter) {
+                    if let Some(place) = pull_follow_camera(eye, open, hit.distance) {
+                        desired = place;
+                        desired.y = desired.y.max(floor_y);
+                        pulled = true;
+                    }
+                }
+            }
+        }
+        *since_log += dt;
+        if *since_log > 0.4 && (pulled || (open.y - (eye.y + cam.pitch.sin() * cam.distance)).abs() > 0.2) {
+            *since_log = 0.0;
+            eprintln!(
+                "phase0: follow camera at ({:.2}, {:.2}, {:.2}) pitch={:.2} floor={floor_y:.2} pulled={pulled}",
+                desired.x, desired.y, desired.z, cam.pitch
+            );
+        }
+        // Framerate-independent smoothing toward the safe position.
         let alpha = 1.0 - (-12.0 * dt).exp();
         cam_tf.translation = cam_tf.translation.lerp(desired, alpha);
+        if cam_tf.translation.y < floor_y {
+            cam_tf.translation.y = floor_y;
+        }
         cam_tf.look_at(eye, Vec3::Y);
     }
 }
@@ -607,15 +693,40 @@ mod look_tests {
 
     #[test]
     fn touch_radians_apply_without_the_mouse_button() {
+        // Positive touch Y is a downward drag and lowers the camera.
         let (yaw, pitch) = apply_look(0.0, 0.0, -1.35, 1.35, 0.003, false, false, bevy::prelude::Vec2::ZERO, bevy::prelude::Vec2::new(0.01, 0.02));
-        assert!((yaw - -0.01).abs() < 1e-6 && (pitch - 0.02).abs() < 1e-6, "{yaw} {pitch}");
+        assert!((yaw - -0.01).abs() < 1e-6 && (pitch - -0.02).abs() < 1e-6, "{yaw} {pitch}");
     }
 
     #[test]
     fn touch_look_cannot_pitch_past_the_desktop_limit() {
-        let (_, pitch) = apply_look(0.0, 1.2, -1.35, 1.35, 0.003, false, false, bevy::prelude::Vec2::ZERO, bevy::prelude::Vec2::new(0.0, 4.0));
-        assert!((pitch - 1.35).abs() < 1e-5, "a downward drag stops at pitch_max, got {pitch}");
-        let (_, pitch) = apply_look(0.0, -1.2, -1.35, 1.35, 0.003, false, false, bevy::prelude::Vec2::ZERO, bevy::prelude::Vec2::new(0.0, -4.0));
-        assert!((pitch - -1.35).abs() < 1e-5, "an upward drag stops at pitch_min, got {pitch}");
+        // A finger moving up is a negative screen delta and lifts the camera,
+        // the same direction as Arrow Up.
+        let (_, pitch) = apply_look(0.0, 1.2, -1.35, 1.35, 0.003, false, false, bevy::prelude::Vec2::ZERO, bevy::prelude::Vec2::new(0.0, -4.0));
+        assert!((pitch - 1.35).abs() < 1e-5, "an upward drag stops at pitch_max, got {pitch}");
+        let (_, pitch) = apply_look(0.0, -1.2, -1.35, 1.35, 0.003, false, false, bevy::prelude::Vec2::ZERO, bevy::prelude::Vec2::new(0.0, 4.0));
+        assert!((pitch - -1.35).abs() < 1e-5, "a downward drag stops at pitch_min, got {pitch}");
+    }
+
+    #[test]
+    fn a_pitch_under_the_ground_stays_above_the_floor_and_a_hit_pulls_the_camera() {
+        use bevy::prelude::Vec3;
+        let eye = Vec3::new(11.0, 1.66, 10.29);
+        // The parity11 orbit: pitch -1.35 at ~4.82 m lands at y=-3.04.
+        let buried = super::follow_camera_translation(eye, 0.4, -1.35, 4.82, -1.35, 1.35, 0.35);
+        assert!(buried.y >= 0.35 - 1e-3, "camera went under the floor at y={}", buried.y);
+        let high = super::follow_camera_translation(eye, 0.4, 1.35, 4.82, -1.35, 1.35, 0.35);
+        assert!(high.y > eye.y, "positive pitch (drag up) should lift the camera, y={}", high.y);
+
+        let underground = Vec3::new(10.19, -3.04, 9.62);
+        let pulled = super::pull_follow_camera(eye, underground, 1.49).expect("the hit blocks the orbit");
+        let dir = (underground - eye).normalize();
+        let expected = eye + dir * (1.49 - super::CAMERA_OCCLUSION_SKIN_M);
+        assert!(
+            pulled.distance(expected) < 1e-3,
+            "pull left the camera at {pulled:?}, wanted {expected:?}"
+        );
+        assert!(pulled.distance(eye) + 0.2 < underground.distance(eye));
+        assert!(super::pull_follow_camera(eye, underground, 50.0).is_none());
     }
 }

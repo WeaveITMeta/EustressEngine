@@ -695,6 +695,71 @@ fn window_scale(window: &Window) -> f32 {
     }
 }
 
+/// A size that is the last accepted one with the axes swapped. Resume on a
+/// landscape phone reports 2400×1080 and then, for one configuration change,
+/// 1080×2400, then the landscape size again. The portrait report is the
+/// native window for that moment and it is wrong for the panel: the activity
+/// is still landscape. Keep the previous size until the swap has been the
+/// window for `SWAP_CONFIRM_MS`.
+const SWAP_CONFIRM_MS: u64 = 400;
+
+struct WindowSizeMemory {
+    accepted: (u32, u32),
+    pending_swap: Option<(u32, u32, u64)>,
+}
+
+fn stable_physical_size(mem: &mut WindowSizeMemory, width: u32, height: u32, now_ms: u64) -> (u32, u32) {
+    let (aw, ah) = mem.accepted;
+    if aw == 0 || ah == 0 || (width == aw && height == ah) {
+        mem.pending_swap = None;
+        mem.accepted = (width, height);
+        return (width, height);
+    }
+    let swapped = width == ah && height == aw && width != height;
+    if !swapped {
+        mem.pending_swap = None;
+        mem.accepted = (width, height);
+        return (width, height);
+    }
+    match mem.pending_swap {
+        Some((pw, ph, since)) if (pw, ph) == (width, height) && now_ms.saturating_sub(since) >= SWAP_CONFIRM_MS => {
+            mem.pending_swap = None;
+            mem.accepted = (width, height);
+            (width, height)
+        }
+        Some((pw, ph, _)) if (pw, ph) == (width, height) => (aw, ah),
+        _ => {
+            mem.pending_swap = Some((width, height, now_ms));
+            (aw, ah)
+        }
+    }
+}
+
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+fn remember_physical_size(width: u32, height: u32, source: &str) -> (u32, u32) {
+    use std::cell::RefCell;
+    thread_local! {
+        static MEM: RefCell<WindowSizeMemory> = const { RefCell::new(WindowSizeMemory { accepted: (0, 0), pending_swap: None }) };
+    }
+    MEM.with(|mem| {
+        let mut mem = mem.borrow_mut();
+        let (aw, ah) = mem.accepted;
+        let stable = stable_physical_size(&mut mem, width, height, now_ms());
+        if stable != (width, height) && (aw, ah) != (0, 0) {
+            eprintln!(
+                "phase0: window {width}x{height} from {source} is {aw}x{ah} with the axes swapped; keeping {aw}x{ah}"
+            );
+        }
+        stable
+    })
+}
+
 /// Physical overlay size. Prefer the winit window: on Android its `inner_size`
 /// is the native window (2400×1080) while Bevy's component can still be the
 /// scaled 1280×720 default.
@@ -708,6 +773,7 @@ fn overlay_pixels(entity: Entity, window: &Window) -> Option<(u32, u32, f32)> {
     });
     if let Some((width, height)) = native {
         if width > 0 && height > 0 {
+            let (width, height) = remember_physical_size(width, height, "winit");
             return Some((width, height, scale));
         }
     }
@@ -716,6 +782,7 @@ fn overlay_pixels(entity: Entity, window: &Window) -> Option<(u32, u32, f32)> {
     if width == 0 || height == 0 || is_scaled_default_window(width, height, scale) {
         return None;
     }
+    let (width, height) = remember_physical_size(width, height, "bevy");
     Some((width, height, scale))
 }
 
@@ -2350,6 +2417,21 @@ mod headless_startup {
             failures.is_empty(),
             "system param validation failed:\n{}",
             failures.join("\n"),
+        );
+    }
+
+    #[test]
+    fn a_swapped_resume_size_is_kept_until_it_holds() {
+        let mut mem = WindowSizeMemory { accepted: (0, 0), pending_swap: None };
+        assert_eq!(stable_physical_size(&mut mem, 2400, 1080, 0), (2400, 1080));
+        assert_eq!(stable_physical_size(&mut mem, 1080, 2400, 10), (2400, 1080), "one portrait report does not replace landscape");
+        assert_eq!(stable_physical_size(&mut mem, 1080, 2400, 200), (2400, 1080));
+        assert_eq!(stable_physical_size(&mut mem, 2400, 1080, 250), (2400, 1080), "the landscape size is the window again");
+        assert_eq!(stable_physical_size(&mut mem, 1080, 2400, 1_000), (2400, 1080));
+        assert_eq!(
+            stable_physical_size(&mut mem, 1080, 2400, 1_000 + SWAP_CONFIRM_MS),
+            (1080, 2400),
+            "a swap that stays is a real rotation"
         );
     }
 

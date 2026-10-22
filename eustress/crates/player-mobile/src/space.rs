@@ -189,6 +189,10 @@ fn open_downloaded(
     }
     commands.insert_resource(policy);
     let gravity = space_gravity(&space_root);
+    eprintln!(
+        "phase0: gravity ({:.5}, {:.5}, {:.5}) m/s²; desktop default is (0, -9.80665, 0)",
+        gravity.x, gravity.y, gravity.z
+    );
     commands.queue(move |world: &mut World| {
         world
             .get_resource_or_insert_with(eustress_common::services::workspace::Workspace::default)
@@ -408,6 +412,7 @@ fn settle_avatar(
     pending: Option<ResMut<PendingSpawn>>,
     voxels: Res<VoxelBuild>,
     mut app: ResMut<MobileApp>,
+    policy: Option<Res<eustress_common::avatar::space_character::SpaceCharacterPolicy>>,
     mut spawn: MessageWriter<eustress_common::avatar::SpawnAvatar>,
     mut ready: MessageWriter<LocalWorldReady>,
 ) {
@@ -431,10 +436,25 @@ fn settle_avatar(
             pending.at.z,
             file.as_ref().map(|path| path.display().to_string()).unwrap_or_else(|| "unset".into()),
         );
-        spawn.write(eustress_common::avatar::SpawnAvatar::new(
-            eustress_common::avatar::AvatarDescriptor::default(),
-            pending.at,
-        ));
+        // Desktop dresses the descriptor with the Space's StarterPlayer
+        // (`profile::dress` → `SpaceCharacterPolicy::apply`) before spawn.
+        // A direct default skipped CharacterJumpHeight and CharacterJumpPower.
+        let descriptor = policy
+            .as_deref()
+            .map(|policy| policy.apply(eustress_common::avatar::AvatarDescriptor::default()))
+            .unwrap_or_default();
+        let (_, motion) = eustress_common::avatar::resolve(
+            &descriptor,
+            eustress_common::avatar::NOMINAL_BIND_HEIGHT_M,
+        );
+        eprintln!(
+            "phase0: desktop jump apex={:.3} m takeoff={:.3} m/s at g={:.5} m/s² jump_power={:?}",
+            motion.jump_apex_m,
+            motion.jump_velocity(),
+            eustress_common::avatar::GRAVITY_MPS2,
+            motion.jump_speed_mps,
+        );
+        spawn.write(eustress_common::avatar::SpawnAvatar::new(descriptor, pending.at));
     } else if !pending.auto_loads {
         eprintln!("phase0: Players.CharacterAutoLoads is off, so no avatar is spawned");
         info!("space: Players.CharacterAutoLoads is off, so no avatar is spawned");
@@ -566,7 +586,15 @@ fn claim_follow_camera(
 fn note_avatar_meshes(
     mut commands: Commands,
     asset_server: Res<AssetServer>,
-    roots: Query<(Entity, &GlobalTransform, &eustress_common::avatar::spawn::AvatarMeshChild), With<eustress_common::avatar::SpawnedByAvatarRuntime>>,
+    roots: Query<
+        (
+            Entity,
+            &GlobalTransform,
+            &eustress_common::avatar::spawn::AvatarMeshChild,
+            Has<eustress_common::avatar::rig::AwaitingRigBind>,
+        ),
+        With<eustress_common::avatar::SpawnedByAvatarRuntime>,
+    >,
     children: Query<&Children>,
     meshes: Query<&GlobalTransform, With<Mesh3d>>,
     skinned: Query<(), With<bevy::mesh::skinning::SkinnedMesh>>,
@@ -578,10 +606,13 @@ fn note_avatar_meshes(
     if *logged {
         return;
     }
-    let Ok((root, root_tf, mesh_child)) = roots.single() else {
+    let Ok((root, root_tf, mesh_child, awaiting)) = roots.single() else {
         return;
     };
-    let mut stack = vec![mesh_child.0];
+    // The scene root is not the mesh. Descendants are parented here once
+    // `WorldInstanceReady` drops `AwaitingRigBind`. Walking only the root
+    // on the Loaded frame counted zero.
+    let mut stack = vec![mesh_child.0, root];
     let mut count = 0usize;
     let mut skinned_count = 0usize;
     let mut sample: Option<(Vec3, Vec3)> = None;
@@ -602,7 +633,11 @@ fn note_avatar_meshes(
         }
     }
     let load_state = scenes.get(mesh_child.0).ok().and_then(|scene| asset_server.get_load_state(scene.0.id()));
-    let terminal = count > 0 || load_state.as_ref().is_some_and(|state| state.is_loaded() || state.is_failed());
+    let loaded = load_state.as_ref().is_some_and(|state| state.is_loaded());
+    let failed = load_state.as_ref().is_some_and(|state| state.is_failed());
+    // Loaded is the asset, not the spawned graph. Count after the
+    // descendants exist (`AwaitingRigBind` cleared), or when the load fails.
+    let terminal = count > 0 || failed || (!awaiting && loaded) || *waited >= 180;
     let bundled = std::env::var("EUSTRESS_BUNDLED_ASSETS").unwrap_or_else(|_| "(unset)".into());
     // The old gate waited 180 frames before saying the mesh was missing.
     // On the debug APK that is a few minutes, so the line showed up only
@@ -611,7 +646,8 @@ fn note_avatar_meshes(
     if !*announced {
         *announced = true;
         if !terminal {
-            log_avatar_meshes("spawn", count, skinned_count, root_tf, sample, &load_state, &bundled);
+            let when = if awaiting { "waiting for descendants" } else { "spawn" };
+            log_avatar_meshes(when, count, skinned_count, root_tf, sample, &load_state, &bundled);
         }
     }
     if !terminal {
@@ -687,11 +723,12 @@ fn keep_follow_camera_out_of_walls(
         let Ok(dir) = Dir3::new(to_cam / dist) else { continue };
         let filter = avian3d::prelude::SpatialQueryFilter::default().with_excluded_entities([entity]);
         let hit = spatial.cast_ray(eye, dir, dist, true, &filter);
-        let skin = 0.25;
+        let skin = eustress_common::avatar::control::CAMERA_OCCLUSION_SKIN_M;
+        let feet_y = body_tf.translation.y - body.metrics.capsule_half_extent();
+        let floor_y = feet_y + eustress_common::avatar::control::CAMERA_FLOOR_CLEARANCE_M;
         let mut pulled: Option<(Vec3, &'static str, f32, Entity)> = None;
         if let Some(hit) = hit {
-            if hit.distance > 0.05 && hit.distance < dist - skin {
-                let place = eye + *dir * (hit.distance - skin).max(0.4);
+            if let Some(place) = eustress_common::avatar::control::pull_follow_camera(eye, cam_tf.translation, hit.distance) {
                 pulled = Some((place, "between eye and camera", hit.distance, hit.entity));
             } else if hit.distance <= 0.05 {
                 // The ray started inside a collider (the body walked into the
@@ -707,19 +744,27 @@ fn keep_follow_camera_out_of_walls(
                 }
             }
         }
-        if let Some((place, why, hit_distance, hit_entity)) = pulled {
+        if let Some((mut place, why, hit_distance, hit_entity)) = pulled {
+            place.y = place.y.max(floor_y);
+            let from = cam_tf.translation;
+            // Write the pulled point onto the transform the frame is drawn
+            // from. `camera_follow` aims at the same point, so the next
+            // frame does not put the camera back.
+            cam_tf.translation = place;
+            cam_tf.look_at(eye, Vec3::Y);
+            *cam_global = GlobalTransform::from(*cam_tf);
             let name = names.get(hit_entity).map(|n| n.as_str()).unwrap_or("unnamed");
             if *since_log > 0.4 {
                 *since_log = 0.0;
                 let v = vel.0;
                 eprintln!(
-                    "phase0: camera occluded ({why}) by {name} ({hit_entity}) hit={hit_distance:.2} m camera=({:.2}, {:.2}, {:.2}) pulled=({:.2}, {:.2}, {:.2}) eye=({:.2}, {:.2}, {:.2}) avatar=({:.2}, {:.2}, {:.2}) vel=({:.2}, {:.2}, {:.2}) intent=({:.2}, {:.2}, {:.2})",
+                    "phase0: camera occluded ({why}) by {name} ({hit_entity}) hit={hit_distance:.2} m from=({:.2}, {:.2}, {:.2}) camera=({:.2}, {:.2}, {:.2}) eye=({:.2}, {:.2}, {:.2}) avatar=({:.2}, {:.2}, {:.2}) vel=({:.2}, {:.2}, {:.2}) intent=({:.2}, {:.2}, {:.2})",
+                    from.x,
+                    from.y,
+                    from.z,
                     cam_tf.translation.x,
                     cam_tf.translation.y,
                     cam_tf.translation.z,
-                    place.x,
-                    place.y,
-                    place.z,
                     eye.x,
                     eye.y,
                     eye.z,
@@ -734,7 +779,8 @@ fn keep_follow_camera_out_of_walls(
                     intent.direction.z,
                 );
             }
-            cam_tf.translation = place;
+        } else if cam_tf.translation.y < floor_y {
+            cam_tf.translation.y = floor_y;
             cam_tf.look_at(eye, Vec3::Y);
             *cam_global = GlobalTransform::from(*cam_tf);
         }

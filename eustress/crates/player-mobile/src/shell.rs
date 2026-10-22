@@ -5,7 +5,7 @@
 //! owns the thumbstick, the jump circle, and the camera drag; this file only
 //! draws them.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 
 use bevy::prelude::*;
 use slint::{ModelRc, VecModel};
@@ -225,6 +225,11 @@ fn push(command: Command) {
 
 thread_local! {
     static LAST_STICK: RefCell<Option<(i32, i32, i32, i32, bool)>> = const { RefCell::new(None) };
+    static STICK_HELD: Cell<bool> = const { Cell::new(false) };
+    /// Paints left after the finger lifts. The release frame sets the knob
+    /// back to the centre; the frame after that paints it again, because the
+    /// lift is logged after the overlay has already drawn.
+    static RELEASE_REDRAWS: Cell<u8> = const { Cell::new(0) };
 }
 
 /// Log when the knob moves, and when the finger lifts. Quantized so a held
@@ -334,10 +339,29 @@ pub fn present(world: &mut World) {
     shell.ui.set_knob_y(knob.y);
     shell.ui.set_stick_visible(playing);
     log_stick(playing, stick.is_some(), origin, knob);
-    if playing && stick.is_some() {
+    let held = playing && stick.is_some();
+    let released = STICK_HELD.with(|previous| {
+        let was = previous.get();
+        previous.set(held);
+        was && !held
+    });
+    if released {
+        RELEASE_REDRAWS.with(|left| left.set(2));
+    }
+    let paint_release = RELEASE_REDRAWS.with(|left| {
+        let n = left.get();
+        if n > 0 {
+            left.set(n - 1);
+            true
+        } else {
+            false
+        }
+    });
+    if held || paint_release {
         // Property writes mark the window dirty only when the value changes.
         // A held stick that Slint already painted centred would otherwise
-        // stay there until some other widget asked for a frame.
+        // stay there, and a knob left at the rim stays there after the
+        // finger lifts unless this frame asks for a paint.
         shell.ui.window().request_redraw();
     }
     shell.ui.set_jump_x(jump.0.x);

@@ -868,10 +868,12 @@ pub(crate) fn drive_locomotion(
         vel.0 = new_vel;
         if jump_applied {
             eprintln!(
-                "phase0: jump applied y {y_before_jump:.3} -> {:.3} delta {:.3} v.y={:.3}",
+                "phase0: jump applied y {y_before_jump:.3} -> {:.3} delta {:.3} v.y={:.3} g={g:.5} apex={:.3} m takeoff={:.3} m/s",
                 new_pos.y,
                 new_pos.y - y_before_jump,
                 new_vel.y,
+                motion.jump_apex_m,
+                motion.jump_velocity_under(g),
             );
         }
 
