@@ -105,7 +105,7 @@ impl Plugin for HudPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<HudLayout>().add_systems(
             PostUpdate,
-            (sync_hud_camera, paint_hud.run_if(resource_exists::<PlayDataModel>))
+            (sync_hud_camera, paint_hud.run_if(resource_exists::<PlayDataModel>).run_if(crate::draw_assets_ready))
                 .chain()
                 .before(TransformSystems::Propagate),
         );

@@ -294,12 +294,20 @@ pub struct VolumetricCloudsPlugin;
 impl Plugin for VolumetricCloudsPlugin {
     fn build(&self, app: &mut App) {
         app.register_type::<Clouds>();
-        // A material plugin sets up its render side in `build`; without a
-        // renderer there is nothing to draw.
-        if app.get_sub_app(bevy::render::RenderApp).is_none() {
-            return;
-        }
-        embedded_asset!(app, "volumetric_clouds.wgsl");
+        // The material sets up its render side in `build`. Queue it when
+        // RenderApp does not exist yet instead of skipping clouds forever.
+        crate::render_later::when_render_app(app, install_volumetric_clouds);
+    }
+}
+
+fn install_volumetric_clouds(app: &mut App) {
+    if app.get_sub_app(bevy::render::RenderApp).is_none() {
+        return;
+    }
+    if app.is_plugin_added::<MaterialPlugin<CloudMaterial>>() {
+        return;
+    }
+    embedded_asset!(app, "volumetric_clouds.wgsl");
         app.add_plugins(MaterialPlugin::<CloudMaterial>::default())
             .init_resource::<CloudNoise>()
             .add_systems(Startup, start_cloud_noise)
@@ -307,7 +315,6 @@ impl Plugin for VolumetricCloudsPlugin {
                 Update,
                 (poll_cloud_noise, sync_cloud_dome.after(poll_cloud_noise).after(SkyLightSet)),
             );
-    }
 }
 
 /// Whether volumetric clouds draw in this launch: `EUSTRESS_CLOUDS=0` (or

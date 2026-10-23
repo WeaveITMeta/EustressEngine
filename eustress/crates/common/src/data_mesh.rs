@@ -198,7 +198,12 @@ pub struct DataMeshPlugin;
 
 impl Plugin for DataMeshPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(Update, (link_data_mesh_children, draw_data_mesh_looks, draw_own_shapes_again).chain());
+        app.add_systems(
+            Update,
+            (link_data_mesh_children, draw_data_mesh_looks, draw_own_shapes_again)
+                .chain()
+                .run_if(resource_exists::<Assets<Mesh>>),
+        );
     }
 }
 

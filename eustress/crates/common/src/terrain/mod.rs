@@ -345,7 +345,9 @@ impl Plugin for TerrainPlugin {
                 update_lod_system,
                 chunk_spawn_system,
                 chunk_cull_system,
-            ).chain())
+            ).chain()
+                .run_if(resource_exists::<Assets<Mesh>>)
+                .run_if(resource_exists::<Assets<StandardMaterial>>))
 
             // Editor systems (only run in Editor mode). The hover runs first
             // so the stroke dabs where this frame's cursor points.
@@ -357,6 +359,7 @@ impl Plugin for TerrainPlugin {
             // Ungated: edits also arrive outside Editor mode (undo, layer
             // changes), and their chunks still need rebuilding.
             .add_systems(Update, apply_terrain_dirty_chunks
+                .run_if(resource_exists::<Assets<Mesh>>)
                 .after(chunk_cull_system)
                 .after(terrain_paint_system));
 

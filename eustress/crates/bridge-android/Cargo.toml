@@ -1,0 +1,16 @@
+[package]
+name = "eustress-bridge-android"
+version = "0.1.0"
+edition = "2021"
+description = "Android JNI implementations of the mobile Player platform traits."
+license = "PolyForm-Shield-1.0.0"
+
+[dependencies]
+eustress-bridge-core = { path = "../bridge-core" }
+
+[target.'cfg(target_os = "android")'.dependencies]
+jni = "0.21"
+ndk-context = "0.1"
+# Same crate Bevy's `android_main` stores the `AndroidApp` in. The activity
+# pointer lives there. `ndk_context`'s context is the Application, not it.
+bevy_android = "0.19"

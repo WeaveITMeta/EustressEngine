@@ -1,48 +1,96 @@
-# =============================================================================
-# Eustress Player Mobile - Shared Mobile Code
-# =============================================================================
-# This crate contains shared Rust code for Android and iOS builds.
-# It depends on common game logic and adds mobile-specific features.
-# =============================================================================
+# Phase 0 Android spike. Library only: cdylib loaded by stock GameActivity.
+# Slint is pinned to the same git revision as the workspace lock and the
+# software-renderer patch. It is NOT `workspace = true`: the workspace line
+# enables `renderer-femtovg`, and that crate is cfg'd out of Slint on Android.
 
 [package]
 name = "eustress-player-mobile"
 version = "0.1.0"
 edition = "2021"
 authors = ["Eustress Engine Team"]
-description = "Mobile player runtime for Eustress games"
+description = "Mobile Eustress Player: Bevy world, Slint shell, shared desktop protocol"
 license = "PolyForm-Shield-1.0.0"
 
 [lib]
-crate-type = ["cdylib", "staticlib"]
+crate-type = ["cdylib", "rlib"]
 
 [features]
 default = []
-android = ["android_logger"]
-ios = []
+# android_logger. Pass `--features android` for the APK build.
+android = ["dep:android_logger"]
+# Pattern (b): Slint owns the wgpu surface and Bevy renders into a texture.
+# Not the APK entry. Checked separately; see PHASE0_SPIKE.md.
+pattern-b = ["dep:smol"]
 
 [dependencies]
-# Shared game logic
-# eustress-common = { path = "../common", features = ["mobile"] }
-
-# Bevy with mobile support (matching the workspace Bevy 0.19 crates.io release)
 bevy = { version = "0.19", default-features = false, features = [
     "bevy_asset",
     "bevy_render",
     "bevy_winit",
     "bevy_core_pipeline",
     "bevy_pbr",
-    "bevy_sprite",
-    "bevy_text",
-    "bevy_ui",
+    "bevy_log",
+    # Character GLBs are `WorldAsset` scenes. `bevy_gltf` itself arrives
+    # through eustress-common. `gltf_animation` is what parses the clips
+    # (`Animation0` and the rest); without it the body loads and never walks.
+    "gltf_animation",
     "android-game-activity",
+    "tonemapping_luts",
+    "zstd_rust",
+    "ktx2",
+    "bevy_audio",
+    # Same decoder set as the desktop Player. `bevy_audio` alone registers no
+    # `AudioSource` assets (`default-features = false` drops vorbis), and
+    # `drive_sounds` then panics on the missing storage.
+    "audio-all-formats",
+    # Names the resource in `Requested resource ... does not exist` panics.
+    # Cargo cannot turn a feature on for the debug profile only, and the
+    # debug APK is this crate's debug build, so the feature stays on.
+    "debug",
 ] }
-
-# Logging
+# `branch = "master"`, not a rev: the software-renderer patch depends on
+# i-slint-core with `branch = "master"`. A rev is a different git source,
+# so Cargo builds two i-slint-core copies and the cdylib link fails
+# (`duplicate symbol: LayerVTable`). Cargo.lock pins master to 2447c697,
+# the revision the patch was made from.
+# Same git source as `slint` (branch, not a rev) so Cargo uses one i-slint-core.
+# `RendererSealed::set_window_adapter` is not re-exported by the slint crate.
+i-slint-core = { git = "https://github.com/slint-ui/slint", branch = "master", default-features = false }
+slint = { git = "https://github.com/slint-ui/slint", branch = "master", default-features = false, features = [
+    "std",
+    "compat-1-2",
+    "renderer-software",
+    "renderer-skia",
+    "unstable-wgpu-29",
+] }
+spin_on = "0.1"
 log = "0.4"
+smol = { version = "2.0", optional = true }
+eustress-common = { path = "../common", default-features = false, features = ["physics", "units_v1", "model-import"] }
+eustress-networking = { path = "../common/eustress-networking", default-features = false, features = ["native", "fetch"] }
+eustress-play-runtime = { path = "../play-runtime" }
+eustress-bridge-core = { path = "../bridge-core" }
+avian3d = { workspace = true }
+ureq = { version = "2", default-features = false, features = ["json", "tls"] }
+ed25519-dalek = { version = "2", features = ["std"] }
+hex = "0.4"
+toml = "0.8"
+serde = { workspace = true }
+serde_json = { workspace = true }
 
 [target.'cfg(target_os = "android")'.dependencies]
 android_logger = { version = "0.14", optional = true }
+eustress-bridge-android = { path = "../bridge-android" }
+# Bevy 0.19's wgpu dependency is `default-features = false` and lists Vulkan,
+# Metal, and DX12, not GLES. `bevy` does not re-export `bevy_render`'s `gles`
+# feature, so without this line the cdylib is Vulkan-only and `Backends::GL`
+# enumerates nothing. Vulkan stays the default; this is the fallback.
+bevy_render = { version = "0.19", features = ["gles"] }
 
 [target.'cfg(target_os = "ios")'.dependencies]
-# iOS-specific dependencies as needed
+eustress-bridge-ios = { path = "../bridge-ios" }
+
+# Host `cargo check` only. `android-game-activity` does not enable a desktop
+# winit backend, and winit then refuses to compile. Android builds ignore this.
+[target.'cfg(all(unix, not(target_os = "android")))'.dependencies]
+bevy = { version = "0.19", default-features = false, features = ["x11"] }

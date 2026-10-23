@@ -1,0 +1,14 @@
+[package]
+name = "eustress-bridge-ios"
+version = "0.1.0"
+edition = "2021"
+description = "iOS implementations of the mobile Player platform traits. UNVERIFIED: no Apple SDK on the build machine."
+license = "PolyForm-Shield-1.0.0"
+
+[dependencies]
+eustress-bridge-core = { path = "../bridge-core" }
+
+# objc2 is only linked for an iOS target. This machine has no Xcode, so
+# `cargo check` here does not compile these bindings. See the crate docs.
+[target.'cfg(target_os = "ios")'.dependencies]
+objc2 = "0.6"

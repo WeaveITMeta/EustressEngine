@@ -437,9 +437,12 @@ pub struct BillboardPipeline {
 /// didn't match what `embedded_asset!` registered in the render
 /// world's AssetServer).
 ///
-/// Registered in the MAIN world's `Assets<Shader>` during plugin
-/// `build()` (the render world has no `Assets<Shader>` — that storage
-/// is main-world only; assets are extracted across each frame). The
+/// Registered in the MAIN world's `Assets<Shader>` (the render world has
+/// no `Assets<Shader>` — that storage is main-world only; assets are
+/// extracted across each frame). Desktop does this in `build`, because
+/// `RenderPlugin` has already run. Mobile's `SurfaceGate` adds
+/// `RenderPlugin` later, so the same registration waits until the storage
+/// exists (`finish` on desktop, `cleanup` after the surface). The
 /// resulting Handle is stored in a `BillboardShaderHandle` Resource
 /// inserted into BOTH worlds so `BillboardPipeline::from_world` (which
 /// runs in the render world) can read it.
@@ -1083,31 +1086,84 @@ fn write_billboard_atlas_tiles(
     }
 }
 
+/// Set once the render-world resources and extract systems are installed.
+/// Desktop installs them in `build` (RenderApp already exists). The mobile
+/// Player adds this plugin before `SurfaceGate` creates RenderApp, so the
+/// same install runs from `finish` or `cleanup` once the surface exists.
+#[derive(Resource)]
+struct BillboardRenderAttached;
+
 impl Plugin for BillboardPipelinePlugin {
     fn build(&self, app: &mut App) {
-        // Register the baked shader source in the MAIN world's
-        // `Assets<Shader>` and stash the resulting strong handle in a
-        // resource so the render world can read it. Bevy's render-asset
-        // extraction will propagate the shader to the render side on
-        // the first frame.
-        let shader_handle: Handle<Shader> = {
-            let mut shaders = app.world_mut().resource_mut::<Assets<Shader>>();
-            shaders.add(Shader::from_wgsl(BILLBOARD_SHADER_WGSL, "billboard.wgsl"))
-        };
-        app.insert_resource(BillboardShaderHandle(shader_handle.clone()));
-        app.sub_app_mut(RenderApp).insert_resource(BillboardShaderHandle(shader_handle));
+        // Desktop: `Assets<Shader>` already exists. Mobile: RenderPlugin has
+        // not been added, and `resource_mut` would panic before any adapter
+        // is chosen (parity4). Registration retries from finish and cleanup.
+        if ensure_billboard_shader(app) {
+            attach_billboard_render(app);
+        }
+    }
 
-        app.add_plugins((
-            // Per-tile atlas uploads staged by billboard_gui's
-            // `upload_atlas_to_gpu`; written by `write_billboard_atlas_tiles`
-            // below via direct `write_texture` (no Image-asset mutation → no
-            // full-atlas re-upload per repainted tile).
-            bevy::render::extract_resource::ExtractResourcePlugin::<
-                crate::billboards::PendingAtlasTiles,
-            >::default(),
-        ));
+    fn finish(&self, app: &mut App) {
+        // Pipeline construction needs RenderDevice, which exists after
+        // RenderPlugin's own finish. Desktop reaches that here. Mobile's
+        // SurfaceGate adds RenderPlugin from its own finish, later in the
+        // same pass, so the device is not here yet. `Assets<Shader>` is
+        // inserted by RenderPlugin::build, which also has not run yet.
+        if ensure_billboard_shader(app) {
+            attach_billboard_render(app);
+            init_billboard_pipeline(app);
+        }
+    }
 
+    fn cleanup(&self, app: &mut App) {
+        // Runs after every `finish`, including SurfaceGate's, so RenderApp,
+        // `Assets<Shader>`, and RenderDevice exist even when this plugin was
+        // added first.
+        if ensure_billboard_shader(app) {
+            attach_billboard_render(app);
+            init_billboard_pipeline(app);
+        }
+    }
+}
+
+/// Register the baked shader in the main world's `Assets<Shader>` once that
+/// storage exists. Returns whether [`BillboardShaderHandle`] is stored.
+fn ensure_billboard_shader(app: &mut App) -> bool {
+    if app.world().contains_resource::<BillboardShaderHandle>() {
+        return true;
+    }
+    if !app.world().contains_resource::<Assets<Shader>>() {
+        return false;
+    }
+    let shader_handle = {
+        let mut shaders = app.world_mut().resource_mut::<Assets<Shader>>();
+        shaders.add(Shader::from_wgsl(BILLBOARD_SHADER_WGSL, "billboard.wgsl"))
+    };
+    app.insert_resource(BillboardShaderHandle(shader_handle));
+    true
+}
+
+fn attach_billboard_render(app: &mut App) {
+    if app.world().contains_resource::<BillboardRenderAttached>() {
+        return;
+    }
+    if app.get_sub_app(RenderApp).is_none() {
+        return;
+    }
+    let shader = app.world().resource::<BillboardShaderHandle>().clone();
+    app.sub_app_mut(RenderApp).insert_resource(shader);
+    {
         let render_app = app.sub_app_mut(RenderApp);
+        // Same system `ExtractResourcePlugin` would add. That plugin cannot
+        // be added from `finish` or `cleanup`: `App::add_plugins` panics once
+        // the app has finished, which is exactly when the mobile Player's
+        // RenderApp first exists. Per-tile atlas uploads are staged by
+        // billboard_gui's `upload_atlas_to_gpu` and written by
+        // `write_billboard_atlas_tiles` via direct `write_texture`.
+        render_app.add_systems(
+            ExtractSchedule,
+            bevy::render::extract_resource::extract_resource::<crate::billboards::PendingAtlasTiles, ()>,
+        );
         render_app
             .init_resource::<BillboardImageBindGroups>()
             .init_resource::<BillboardInstanceBuffer>()
@@ -1128,15 +1184,23 @@ impl Plugin for BillboardPipelinePlugin {
                 ),
             );
     }
+    app.insert_resource(BillboardRenderAttached);
+}
 
-    fn finish(&self, app: &mut App) {
-        // Pipeline construction needs RenderDevice which only exists after
-        // RenderApp finishes its own setup — that's why this lives in
-        // `finish` and not `build`. The Strong shader handle is loaded
-        // inside `BillboardPipeline::from_world` via the render-app's
-        // AssetServer, so there's no extra load step here.
-        app.sub_app_mut(RenderApp).init_resource::<BillboardPipeline>();
+fn init_billboard_pipeline(app: &mut App) {
+    let Some(render_app) = app.get_sub_app_mut(RenderApp) else {
+        return;
+    };
+    if render_app.world().contains_resource::<BillboardPipeline>() {
+        return;
     }
+    // `BillboardPipeline::from_world` reads RenderDevice. That resource is
+    // inserted when the render app finishes, which is after this plugin's
+    // `finish` when RenderPlugin itself was added from SurfaceGate::finish.
+    if render_app.world().get_resource::<RenderDevice>().is_none() {
+        return;
+    }
+    render_app.init_resource::<BillboardPipeline>();
 }
 
 // ============================================================================

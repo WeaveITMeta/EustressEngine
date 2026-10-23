@@ -140,15 +140,23 @@ pub struct MoonDiscPlugin;
 
 impl Plugin for MoonDiscPlugin {
     fn build(&self, app: &mut App) {
-        // A material plugin sets up its render side in `build`; without a
-        // renderer there is nothing to draw.
-        if app.get_sub_app(bevy::render::RenderApp).is_none() {
-            return;
-        }
-        embedded_asset!(app, "moon_disc.wgsl");
+        // The material sets up its render side in `build`. Queue it when
+        // RenderApp does not exist yet (mobile SurfaceGate) instead of
+        // skipping the moon for the rest of the launch.
+        crate::render_later::when_render_app(app, install_moon_disc);
+    }
+}
+
+fn install_moon_disc(app: &mut App) {
+    if app.get_sub_app(bevy::render::RenderApp).is_none() {
+        return;
+    }
+    if app.is_plugin_added::<MaterialPlugin<MoonDiscMaterial>>() {
+        return;
+    }
+    embedded_asset!(app, "moon_disc.wgsl");
         app.add_plugins(MaterialPlugin::<MoonDiscMaterial>::default())
             .add_systems(Update, sync_moon_disc.after(SkyLightSet));
-    }
 }
 
 /// The moon's celestial north, as seen on its disc: the direction toward the

@@ -323,6 +323,34 @@ mod tests {
         assert!((morphs(1.0, 0.5).metrics(NOMINAL_BIND_HEIGHT_M).height_m - MAX_HEIGHT_M).abs() < 1e-6);
     }
 
+    /// Desktop and mobile both jump by [`resolve`]: apex
+    /// `0.55 + 0.35 * stride_scale` unless the descriptor sets `jump_apex_m`
+    /// or a launch speed. The undressed default body is 1.75 m. A body at
+    /// the top of the height slider is 2.05 m and peaks higher. A Space that
+    /// dresses the body (`SpaceCharacterPolicy::apply`, desktop `profile::dress`)
+    /// uses whichever of those the character file asks for. The 2.05 m
+    /// figure is what the parity12 device logged (0.943 m, 4.302 m/s); it is
+    /// not replaced with the undressed 0.886 m.
+    #[test]
+    fn jump_height_follows_stride_for_the_default_body_and_a_full_height_body() {
+        let (_, undressed) = resolve(&AvatarDescriptor::default(), NOMINAL_BIND_HEIGHT_M);
+        let metrics = AvatarDescriptor::default().morphs.metrics(NOMINAL_BIND_HEIGHT_M);
+        let expected = 0.55 + 0.35 * metrics.stride_scale;
+        assert!((undressed.jump_apex_m - expected).abs() < 1e-5, "{}", undressed.jump_apex_m);
+        assert!((undressed.jump_apex_m - 0.885887).abs() < 1e-3, "undressed default {}", undressed.jump_apex_m);
+        assert!((undressed.jump_velocity() - 4.168).abs() < 1e-2, "undressed takeoff {}", undressed.jump_velocity());
+
+        let mut tall = AvatarDescriptor::default();
+        tall.morphs.height = Norm01::new(1.0);
+        let (tall_metrics, tall_motion) = resolve(&tall, NOMINAL_BIND_HEIGHT_M);
+        assert!((tall_metrics.height_m - MAX_HEIGHT_M).abs() < 1e-5);
+        let tall_apex = 0.55 + 0.35 * tall_metrics.stride_scale;
+        assert!((tall_motion.jump_apex_m - tall_apex).abs() < 1e-5);
+        assert!((tall_motion.jump_apex_m - 0.943468).abs() < 1e-3, "full height {}", tall_motion.jump_apex_m);
+        assert!((tall_motion.jump_velocity() - 4.302).abs() < 1e-2, "full height takeoff {}", tall_motion.jump_velocity());
+        assert!(tall_motion.jump_speed_mps.is_none());
+    }
+
     #[test]
     fn taller_avatars_walk_faster_and_jump_higher() {
         let d = AvatarDescriptor::default();

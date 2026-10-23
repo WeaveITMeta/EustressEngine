@@ -266,7 +266,7 @@ pub struct ColliderMarker;
 #[cfg(feature = "default-collider")]
 fn init_collider_constructors(
     mut commands: Commands,
-    #[cfg(feature = "collider-from-mesh")] meshes: Res<Assets<Mesh>>,
+    #[cfg(feature = "collider-from-mesh")] meshes: Option<Res<Assets<Mesh>>>,
     #[cfg(feature = "collider-from-mesh")] mesh_handles: Query<&Mesh3d>,
     #[cfg(feature = "collider-from-mesh")] mut collider_cache: Option<ResMut<ColliderCache>>,
     constructors: Query<(
@@ -288,6 +288,10 @@ fn init_collider_constructors(
         }
         #[cfg(feature = "collider-from-mesh")]
         let collider = if constructor.requires_mesh() {
+            let Some(meshes) = meshes.as_deref() else {
+                // MeshPlugin has not been added yet.
+                continue;
+            };
             let mesh_handle = mesh_handles.get(entity).unwrap_or_else(|_| panic!(
                 "Tried to add a collider to entity {name} via {constructor:#?} that requires a mesh, \
                 but no mesh handle was found"));
@@ -325,7 +329,7 @@ fn init_collider_constructors(
 #[cfg(feature = "default-collider")]
 fn init_collider_constructor_hierarchies(
     mut commands: Commands,
-    #[cfg(feature = "collider-from-mesh")] meshes: Res<Assets<Mesh>>,
+    #[cfg(feature = "collider-from-mesh")] meshes: Option<Res<Assets<Mesh>>>,
     #[cfg(feature = "collider-from-mesh")] mesh_handles: Query<&Mesh3d>,
     #[cfg(feature = "collider-from-mesh")] mut collider_cache: Option<ResMut<ColliderCache>>,
     #[cfg(feature = "bevy_scene")] scene_spawner: If<Res<WorldInstanceSpawner>>,
@@ -400,6 +404,10 @@ fn init_collider_constructor_hierarchies(
 
             #[cfg(feature = "collider-from-mesh")]
             let collider = if constructor.requires_mesh() {
+                let Some(meshes) = meshes.as_deref() else {
+                    // MeshPlugin has not been added yet.
+                    continue;
+                };
                 let Ok(mesh_handle) = mesh_handles.get(child_entity) else {
                     // This child entity does not have a mesh, so we skip it.
                     continue;

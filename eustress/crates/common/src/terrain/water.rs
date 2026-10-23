@@ -533,15 +533,21 @@ impl Plugin for TerrainWaterPlugin {
     fn build(&self, app: &mut App) {
         // The ribbon's Water button writes this whatever the host draws.
         app.init_resource::<WaterConfig>().init_resource::<TerrainDirtyChunks>();
-        // A material plugin sets up its render side in `build`, so the render
-        // sub-app must exist by now (added after DefaultPlugins, as both
-        // hosts do). Water has no colliders, so without a renderer there is
-        // nothing to build.
-        if app.get_sub_app(bevy::render::RenderApp).is_none() {
-            debug!(target: "eustress::terrain::water", "no renderer: no water surfaces are built");
-            return;
-        }
-        // The height texture the water measures its depth against.
+        // The material waits for RenderApp. Mobile creates that later, from
+        // SurfaceGate; returning here used to skip water for the whole launch.
+        crate::render_later::when_render_app(app, install_terrain_water);
+    }
+}
+
+fn install_terrain_water(app: &mut App) {
+    if app.get_sub_app(bevy::render::RenderApp).is_none() {
+        debug!(target: "eustress::terrain::water", "no renderer: no water surfaces are built");
+        return;
+    }
+    if app.is_plugin_added::<MaterialPlugin<WaterSurfaceMaterial>>() {
+        return;
+    }
+    // The height texture the water measures its depth against.
         if !app.is_plugin_added::<TerrainSurfacePlugin>() {
             app.add_plugins(TerrainSurfacePlugin);
         }
@@ -565,7 +571,6 @@ impl Plugin for TerrainWaterPlugin {
                     .after(sync_river_water)
                     .after(sync_voxel_water),
             );
-    }
 }
 
 #[cfg(test)]

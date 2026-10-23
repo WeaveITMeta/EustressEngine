@@ -33,6 +33,8 @@
 //! ping contention) kept for server-authoritative physics, the next
 //! replication tier after avatars.
 
+#[cfg(all(feature = "fetch", not(target_arch = "wasm32")))]
+pub mod published;
 pub mod join_link;
 pub mod player_replica;
 pub mod repl;

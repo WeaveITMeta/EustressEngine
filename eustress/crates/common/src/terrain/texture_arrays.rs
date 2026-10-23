@@ -335,8 +335,10 @@ pub(crate) fn register(app: &mut App) {
         .init_resource::<TerrainTextureBuildState>();
 }
 
-/// After every plugin has built: without a render sub-app nothing would ever
-/// upload the arrays, so they are never built.
+/// After every plugin has cleaned up, which is after SurfaceGate has added
+/// RenderApp on mobile. Without a render sub-app nothing would ever upload
+/// the arrays, so they are never built. Marking that during `Plugin::finish`
+/// was too early: RenderApp did not exist yet and the mark stuck.
 pub(crate) fn finish(app: &mut App) {
     if app.get_sub_app(bevy::render::RenderApp).is_none() {
         app.world_mut().resource_mut::<TerrainTextureArrays>().status =

@@ -1324,7 +1324,9 @@ impl Plugin for TerrainMaterialSlotsPlugin {
         );
     }
 
-    fn finish(&self, app: &mut App) {
+    fn cleanup(&self, app: &mut App) {
+        // `finish` runs before SurfaceGate adds RenderApp. Cleanup runs
+        // after that, so a missing renderer here means this launch has none.
         super::texture_arrays::finish(app);
     }
 }

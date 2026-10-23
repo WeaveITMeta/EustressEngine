@@ -417,16 +417,20 @@ type DrawParticleCloud = (SetItemPipeline, SetParticleViewBindGroup<0>, DrawPart
 /// Draws every `ParticleSimulation` (editor and player; never headless).
 pub struct ParticleRenderPlugin;
 
+/// Set once the draw is installed, or once the GPU is known to be unable to
+/// draw it. Absent while RenderApp does not exist yet.
+#[derive(Resource)]
+struct ParticleDrawInstalled;
+
 impl Plugin for ParticleRenderPlugin {
     fn build(&self, app: &mut App) {
-        let shader: Handle<Shader> = {
-            let mut shaders = app.world_mut().resource_mut::<Assets<Shader>>();
-            shaders.add(Shader::from_wgsl(SHADER_WGSL, "particle_cloud.wgsl"))
-        };
-        app.insert_resource(ParticleCloudShader(shader.clone()))
-            .add_systems(PostUpdate, sync_particle_clouds_to_render_world);
-        let Some(render_app) = app.get_sub_app_mut(RenderApp) else { return };
-        render_app.insert_resource(ParticleCloudShader(shader));
+        app.add_systems(PostUpdate, sync_particle_clouds_to_render_world);
+        // Same ordering as the billboard shader: `Assets<Shader>` is inserted
+        // by RenderPlugin, which mobile adds later from SurfaceGate. Reading
+        // it here panics before any adapter is chosen.
+        if ensure_particle_shader(app) {
+            install_particle_draw(app);
+        }
     }
 
     /// The draw is set up here, once the GPU is known. A GPU that cannot read
@@ -434,25 +438,86 @@ impl Plugin for ParticleRenderPlugin {
     /// particle pipeline, buffers or draw: its simulations still run and are
     /// not drawn, where building the pipeline would stop the app on a wgpu
     /// validation error.
+    ///
+    /// Mobile adds this plugin before SurfaceGate creates RenderApp. `finish`
+    /// then runs too early and used to return forever. `cleanup` runs after
+    /// SurfaceGate::finish, so the draw is installed there instead.
     fn finish(&self, app: &mut App) {
-        let Some(render_app) = app.get_sub_app_mut(RenderApp) else { return };
-        if !vertex_storage_supported(render_app.world()) {
-            warn!("particles: this GPU cannot read storage buffers in the vertex stage, so particle simulations run without being drawn");
-            return;
+        if ensure_particle_shader(app) {
+            install_particle_draw(app);
         }
-        render_app
-            .init_resource::<ParticleCloudPipeline>()
-            .init_resource::<SpecializedRenderPipelines<ParticleCloudPipeline>>()
-            .add_render_command::<Transparent3d, DrawParticleCloud>()
-            .add_systems(ExtractSchedule, extract_particle_clouds)
-            .add_systems(
-                Render,
-                (
-                    queue_particle_clouds.in_set(RenderSystems::Queue),
-                    prepare_particle_clouds.in_set(RenderSystems::PrepareResources),
-                    prepare_particle_view_bind_groups.in_set(RenderSystems::PrepareBindGroups),
-                ),
-            );
+    }
+
+    fn cleanup(&self, app: &mut App) {
+        // After SurfaceGate::finish, so `Assets<Shader>` and RenderDevice exist.
+        if ensure_particle_shader(app) {
+            install_particle_draw(app);
+        }
+    }
+}
+
+/// Register the baked shader once `Assets<Shader>` exists. Returns whether
+/// [`ParticleCloudShader`] is stored.
+fn ensure_particle_shader(app: &mut App) -> bool {
+    if app.world().contains_resource::<ParticleCloudShader>() {
+        return true;
+    }
+    if !app.world().contains_resource::<Assets<Shader>>() {
+        return false;
+    }
+    let shader = {
+        let mut shaders = app.world_mut().resource_mut::<Assets<Shader>>();
+        shaders.add(Shader::from_wgsl(SHADER_WGSL, "particle_cloud.wgsl"))
+    };
+    app.insert_resource(ParticleCloudShader(shader));
+    true
+}
+
+fn install_particle_draw(app: &mut App) {
+    if app.world().contains_resource::<ParticleDrawInstalled>() {
+        return;
+    }
+    if app.get_sub_app(RenderApp).is_none() {
+        return;
+    }
+    let shader = app.world().resource::<ParticleCloudShader>().0.clone();
+    let outcome = {
+        let render_app = app.sub_app_mut(RenderApp);
+        if !render_app.world().contains_resource::<ParticleCloudShader>() {
+            render_app.insert_resource(ParticleCloudShader(shader));
+        }
+        let device_ready = render_app.world().get_resource::<RenderDevice>().is_some()
+            && render_app.world().get_resource::<RenderAdapter>().is_some();
+        if !device_ready {
+            None
+        } else if !vertex_storage_supported(render_app.world()) {
+            Some(false)
+        } else {
+            render_app
+                .init_resource::<ParticleCloudPipeline>()
+                .init_resource::<SpecializedRenderPipelines<ParticleCloudPipeline>>()
+                .add_render_command::<Transparent3d, DrawParticleCloud>()
+                .add_systems(ExtractSchedule, extract_particle_clouds)
+                .add_systems(
+                    Render,
+                    (
+                        queue_particle_clouds.in_set(RenderSystems::Queue),
+                        prepare_particle_clouds.in_set(RenderSystems::PrepareResources),
+                        prepare_particle_view_bind_groups.in_set(RenderSystems::PrepareBindGroups),
+                    ),
+                );
+            Some(true)
+        }
+    };
+    match outcome {
+        None => {}
+        Some(false) => {
+            warn!("particles: this GPU cannot read storage buffers in the vertex stage, so particle simulations run without being drawn");
+            app.insert_resource(ParticleDrawInstalled);
+        }
+        Some(true) => {
+            app.insert_resource(ParticleDrawInstalled);
+        }
     }
 }
 

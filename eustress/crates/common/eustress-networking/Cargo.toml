@@ -60,10 +60,17 @@ avian3d = { workspace = true }
 # exposes the QUIC transport settings, for the packet size cap in `native`.
 wtransport = { version = "0.6.1", default-features = false, features = ["self-signed", "ring", "dangerous-configuration", "quinn"], optional = true }
 tokio = { version = "1", features = ["rt", "sync", "time", "macros", "io-util"], optional = true }
+# Published-world download. The same calls the desktop Player makes, so the
+# mobile Player does not keep a second copy. Rustls, not the system TLS.
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "blocking"], optional = true }
+zstd = { version = "0.13", optional = true }
+tar = { version = "0.4", optional = true }
+toml = { version = "0.8", optional = true }
 
 [features]
 default = ["native"]
 native = ["dep:wtransport", "dep:tokio"]
+fetch = ["dep:reqwest", "dep:zstd", "dep:tar", "dep:toml"]
 
 [dev-dependencies]
 bevy = { workspace = true, features = ["bevy_winit", "bevy_pbr", "bevy_gizmos"] }

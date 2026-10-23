@@ -1,6 +1,4 @@
-// =============================================================================
-// Eustress Player Android - Root Build Configuration
-// =============================================================================
+// Phase 0 spike. Application plugin only; no Kotlin.
 
 buildscript {
     repositories {
@@ -9,7 +7,6 @@ buildscript {
     }
     dependencies {
         classpath 'com.android.tools.build:gradle:8.13.2'
-        classpath 'org.jetbrains.kotlin:kotlin-gradle-plugin:1.9.20'
     }
 }
 

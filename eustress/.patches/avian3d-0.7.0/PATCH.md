@@ -1,6 +1,6 @@
 # Patched avian3d 0.7.0
 
-A copy of avian3d 0.7.0 from crates.io with FIVE changes. The workspace points at it from
+A copy of avian3d 0.7.0 from crates.io with SIX changes. The workspace points at it from
 `[patch.crates-io]` in `eustress/Cargo.toml`.
 
 ## What changed
@@ -23,6 +23,10 @@ A copy of avian3d 0.7.0 from crates.io with FIVE changes. The workspace points a
    `collider_transform/plugin.rs`, `collider_hierarchy/mod.rs` and
    `src/dynamics/rigid_body/mass_properties/system_param.rs` such a collider is placed,
    weighed and released.
+6. Mesh colliders wait until `Assets<Mesh>` exists. `clear_unused_colliders` runs only
+   when `AssetEvent<Mesh>` is registered, and the two constructor systems take
+   `Option<Res<Assets<Mesh>>>`. Mobile adds `MeshPlugin` from `SurfaceGate::finish`,
+   after physics plugins have already built.
 
 Nothing else differs from the published crate. Changes 2 to 4 were measured together in
 headless labs (rustc only, against this crate, 60 Hz, 6 substeps, the engine's settings);

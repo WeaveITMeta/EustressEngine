@@ -448,6 +448,8 @@ pub(crate) fn drive_locomotion(
         // ── Jump buffering ──────────────────────────────────────────────────
         // With jumping switched off a press is dropped, not buffered, so it
         // cannot fire later when jumping comes back on.
+        let jump_pressed_this_frame = intent.jump_pressed;
+        let y_before_jump = tf.translation.y;
         if !abilities.jump {
             intent.jump_pressed = false;
             timers.jump_consumed = true;
@@ -457,6 +459,11 @@ pub(crate) fn drive_locomotion(
             timers.jump_consumed = false;
             // Edge-consumed here so no other system can double-read it.
             intent.jump_pressed = false;
+            eprintln!(
+                "phase0: jump event reached drive_locomotion y={y_before_jump:.3} grounded={grounded} since_grounded={:.3} abilities.jump={}",
+                timers.since_grounded,
+                abilities.jump,
+            );
         } else {
             timers.since_jump_press += dt;
         }
@@ -512,11 +519,13 @@ pub(crate) fn drive_locomotion(
         let can_jump = (grounded || timers.since_grounded <= COYOTE_TIME)
             && timers.since_jump_press <= JUMP_BUFFER
             && !timers.jump_consumed;
+        let mut jump_applied = false;
 
         if can_jump {
             v.y = motion.jump_velocity_under(g);
             timers.jump_consumed = true;
             timers.since_grounded = COYOTE_TIME + 1.0; // consume coyote window
+            jump_applied = true;
         } else if grounded && v.y <= 0.0 {
             // Ride the surface downhill.
             //
@@ -552,6 +561,15 @@ pub(crate) fn drive_locomotion(
             v.y -= g * dt;
             // Terminal velocity, so a long fall cannot tunnel.
             v.y = v.y.max(-55.0);
+        }
+        if jump_pressed_this_frame && !jump_applied {
+            eprintln!(
+                "phase0: jump rejected y={y_before_jump:.3} grounded={grounded} since_grounded={:.3} since_press={:.3} consumed={} buffer={JUMP_BUFFER} coyote={COYOTE_TIME} abilities.jump={}",
+                timers.since_grounded,
+                timers.since_jump_press,
+                timers.jump_consumed,
+                abilities.jump,
+            );
         }
 
         // ── Move and slide ──────────────────────────────────────────────────
@@ -848,6 +866,16 @@ pub(crate) fn drive_locomotion(
 
         tf.translation = new_pos;
         vel.0 = new_vel;
+        if jump_applied {
+            eprintln!(
+                "phase0: jump applied y {y_before_jump:.3} -> {:.3} delta {:.3} v.y={:.3} g={g:.5} apex={:.3} m takeoff={:.3} m/s",
+                new_pos.y,
+                new_pos.y - y_before_jump,
+                new_vel.y,
+                motion.jump_apex_m,
+                motion.jump_velocity_under(g),
+            );
+        }
 
         // ── The gait signal ─────────────────────────────────────────────────
         let planar = Vec3::new(new_vel.x, 0.0, new_vel.z);

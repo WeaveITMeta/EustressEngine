@@ -45,9 +45,16 @@ pub(crate) fn avatar_asset_sources_registered() -> bool {
 
 /// Candidate roots for the bundled common assets, best first.
 fn bundled_asset_candidates() -> Vec<PathBuf> {
-    // 0. The shipped common assets, wherever the one rule finds them (beside
+    // 0. A directory the shell already unpacked (the Android Player copies
+    //    the packaged character GLBs into its files dir and points here
+    //    before AssetPlugin freezes the source table).
+    let mut out = Vec::new();
+    if let Some(dir) = std::env::var_os("EUSTRESS_BUNDLED_ASSETS") {
+        out.push(PathBuf::from(dir));
+    }
+    // 1. The shipped common assets, wherever the one rule finds them (beside
     //    the executable, a macOS bundle's Resources, or the source tree).
-    let mut out = vec![crate::assets_dir()];
+    out.push(crate::assets_dir());
 
     // 1. Next to the executable — how a shipped build finds its assets.
     if let Ok(exe) = std::env::current_exe() {
@@ -115,10 +122,18 @@ fn resolve_bundled_root() -> PathBuf {
 /// the engine shell also registers `space://` for its own reasons, so this
 /// guards itself.
 pub fn register_avatar_asset_sources(app: &mut App) {
-    if REGISTERED.swap(true, Ordering::Relaxed) {
-        debug!("avatar: asset sources already registered, skipping");
+    // Per app, not per process. A second `App` in the same test binary used
+    // to see the flag and skip, then load `bundled://` from nothing.
+    let already = app
+        .world_mut()
+        .get_resource_mut::<bevy::asset::io::AssetSourceBuilders>()
+        .is_some_and(|mut builders| builders.get_mut("bundled").is_some());
+    if already {
+        REGISTERED.store(true, Ordering::Relaxed);
+        debug!("avatar: bundled source already on this app, skipping");
         return;
     }
+    REGISTERED.store(true, Ordering::Relaxed);
 
     let root = resolve_bundled_root();
     info!("avatar: bundled asset source -> {:?}", root);

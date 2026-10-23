@@ -379,6 +379,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "android-build"
+version = "0.1.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f9fc9904ad2ad097c3c1cfe2eacaaf0fc24710936fa9ed941cb310b7c6ed2ab7"
+dependencies = [
+ "windows-sys 0.52.0",
+]
+
+[[package]]
 name = "android-properties"
 version = "0.2.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7356,12 +7365,34 @@ dependencies = [
 ]
 
 [[package]]
+name = "eustress-bridge-android"
+version = "0.1.0"
+dependencies = [
+ "bevy_android 0.19.0",
+ "eustress-bridge-core",
+ "jni 0.21.1",
+ "ndk-context",
+]
+
+[[package]]
 name = "eustress-bridge-client"
 version = "0.1.0"
 dependencies = [
  "dirs 5.0.1",
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "eustress-bridge-core"
+version = "0.1.0"
+
+[[package]]
+name = "eustress-bridge-ios"
+version = "0.1.0"
+dependencies = [
+ "eustress-bridge-core",
+ "objc2 0.6.4",
 ]
 
 [[package]]
@@ -7872,13 +7903,17 @@ dependencies = [
  "eustress-common",
  "eustress-echk",
  "parking_lot 0.12.5",
+ "reqwest",
  "serde",
  "serde_json",
+ "tar",
  "thiserror 2.0.18",
  "tokio",
+ "toml 0.8.23",
  "tracing",
  "uuid",
  "wtransport",
+ "zstd",
 ]
 
 [[package]]
@@ -7918,12 +7953,38 @@ dependencies = [
 ]
 
 [[package]]
+name = "eustress-player-ios"
+version = "0.1.0"
+dependencies = [
+ "eustress-bridge-core",
+ "eustress-bridge-ios",
+]
+
+[[package]]
 name = "eustress-player-mobile"
 version = "0.1.0"
 dependencies = [
  "android_logger",
+ "avian3d",
  "bevy 0.19.0",
+ "bevy_render 0.19.0",
+ "ed25519-dalek",
+ "eustress-bridge-android",
+ "eustress-bridge-core",
+ "eustress-bridge-ios",
+ "eustress-common",
+ "eustress-networking",
+ "eustress-play-runtime",
+ "hex",
+ "i-slint-core",
  "log",
+ "serde",
+ "serde_json",
+ "slint",
+ "smol",
+ "spin_on",
+ "toml 0.8.23",
+ "ureq 2.12.1",
 ]
 
 [[package]]
@@ -8348,6 +8409,7 @@ dependencies = [
  "swash 0.2.9",
  "wasm-bindgen",
  "web-sys",
+ "wgpu 29.0.4",
 ]
 
 [[package]]
@@ -10573,6 +10635,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "i-slint-backend-android-activity"
+version = "1.17.1"
+source = "git+https://github.com/slint-ui/slint?branch=master#2447c697327e7f87c5044af229e0be6c18608fcc"
+dependencies = [
+ "android-build",
+ "i-slint-common",
+ "i-slint-core",
+ "i-slint-renderer-skia",
+ "jni 0.22.4",
+ "raw-window-handle",
+]
+
+[[package]]
 name = "i-slint-backend-linuxkms"
 version = "1.17.1"
 source = "git+https://github.com/slint-ui/slint?branch=master#2447c697327e7f87c5044af229e0be6c18608fcc"
@@ -10586,6 +10661,7 @@ dependencies = [
  "i-slint-common",
  "i-slint-core",
  "i-slint-renderer-femtovg",
+ "i-slint-renderer-skia",
  "i-slint-renderer-software",
  "input",
  "memmap2",
@@ -10608,6 +10684,7 @@ dependencies = [
  "i-slint-core",
  "i-slint-core-macros",
  "i-slint-renderer-femtovg",
+ "i-slint-renderer-skia",
 ]
 
 [[package]]
@@ -10618,6 +10695,7 @@ dependencies = [
  "cfg_aliases",
  "i-slint-common",
  "i-slint-core",
+ "i-slint-renderer-skia",
  "i-slint-renderer-software",
  "vtable",
 ]
@@ -10765,6 +10843,7 @@ dependencies = [
  "wasm-bindgen",
  "web-sys",
  "web-time",
+ "wgpu 29.0.4",
  "windows 0.62.2",
 ]
 
@@ -10797,6 +10876,7 @@ dependencies = [
  "rgb",
  "wasm-bindgen",
  "web-sys",
+ "wgpu 29.0.4",
 ]
 
 [[package]]
@@ -10804,6 +10884,7 @@ name = "i-slint-renderer-skia"
 version = "1.17.1"
 source = "git+https://github.com/slint-ui/slint?branch=master#2447c697327e7f87c5044af229e0be6c18608fcc"
 dependencies = [
+ "ash",
  "bytemuck",
  "cfg-if",
  "cfg_aliases",
@@ -10829,9 +10910,12 @@ dependencies = [
  "scoped-tls-hkt",
  "skia-safe",
  "softbuffer",
+ "spin_on",
  "unicode-segmentation",
  "vtable",
+ "wgpu 29.0.4",
  "windows 0.62.2",
+ "windows-core 0.62.2",
  "write-fonts",
 ]
 
@@ -18075,11 +18159,13 @@ version = "1.17.1"
 source = "git+https://github.com/slint-ui/slint?branch=master#2447c697327e7f87c5044af229e0be6c18608fcc"
 dependencies = [
  "const-field-offset",
+ "i-slint-backend-android-activity",
  "i-slint-backend-selector",
  "i-slint-common",
  "i-slint-core",
  "i-slint-core-macros",
  "i-slint-renderer-femtovg",
+ "i-slint-renderer-skia",
  "i-slint-renderer-software",
  "num-traits",
  "once_cell",
@@ -18087,6 +18173,7 @@ dependencies = [
  "slint-macros",
  "unicode-segmentation",
  "vtable",
+ "wgpu 29.0.4",
 ]
 
 [[package]]
@@ -18314,6 +18401,7 @@ checksum = "aac18da81ebbf05109ab275b157c22a653bb3c12cf884450179942f81bcbf6c3"
 dependencies = [
  "as-raw-xcb-connection",
  "bytemuck",
+ "drm",
  "fastrand",
  "js-sys",
  "memmap2",

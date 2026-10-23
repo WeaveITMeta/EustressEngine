@@ -38,6 +38,9 @@ pub struct InputService {
     pub mouse_delta: Vec2,
     /// Is any modal UI open (blocks game input)
     pub modal_open: bool,
+    /// Which device is driving the touch overlay. Hardware flags above stay
+    /// hardware-only; this is the live choice.
+    pub preferred_input: crate::input_actions::PreferredInput,
 }
 
 impl Default for InputService {
@@ -53,6 +56,7 @@ impl Default for InputService {
             mouse_position: Vec2::ZERO,
             mouse_delta: Vec2::ZERO,
             modal_open: false,
+            preferred_input: crate::input_actions::PreferredInput::KeyboardAndMouse,
         }
     }
 }
@@ -61,6 +65,9 @@ impl Default for InputService {
 // Input Actions
 // ============================================================================
 
+/// Flat name + primary/secondary binding. The typed contexts live in
+/// [`crate::input_actions`]. This map stays so older call sites still compile.
+///
 /// InputAction - a named input action with bindings
 #[derive(Clone, Debug, Reflect, Serialize, Deserialize)]
 pub struct InputAction {
