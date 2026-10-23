@@ -363,8 +363,6 @@ dependencies = [
 [[package]]
 name = "android-activity"
 version = "0.6.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0f2a1bb052857d5dd49572219344a7332b31b76405648eabac5bc68978251bcd"
 dependencies = [
  "android-properties",
  "bitflags 2.13.0",
@@ -2149,8 +2147,6 @@ dependencies = [
 [[package]]
 name = "bevy_app"
 version = "0.19.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "671ae6f3a8d84f9ed696c531a138558596e041231a8414b6efeafa8469e841f9"
 dependencies = [
  "bevy_derive 0.19.0",
  "bevy_ecs 0.19.0",
@@ -3169,8 +3165,6 @@ dependencies = [
 [[package]]
 name = "bevy_light"
 version = "0.19.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bd7b5009e9cc765c30b21daf2277ea4423cbd347b05280ea0943b50c5a80cd42"
 dependencies = [
  "bevy_app 0.19.0",
  "bevy_asset 0.19.0",
@@ -3738,8 +3732,6 @@ dependencies = [
 [[package]]
 name = "bevy_render"
 version = "0.19.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a89b2cc850a4c3fd12a6a088a4fc3e80118b2e1b569da8936f6d4d99ca1b6ee7"
 dependencies = [
  "async-channel",
  "bevy_app 0.19.0",
