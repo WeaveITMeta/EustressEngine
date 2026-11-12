@@ -43,3 +43,6 @@ lerna-debug.log*
 # OS
 Thumbs.db
 target-prof/
+
+# Build output captured from cargo
+build_out*.txt
