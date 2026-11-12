@@ -81,6 +81,9 @@ export const MAX_CHUNK_SCRIPT_BYTES = 16 * 1024 * 1024;
 export const MAX_CHUNK_FILES = 20000;
 /// What each record costs toward a call's `maxInflatedBytes`, beyond its bytes: parsing a record is work however small it is.
 export const RECORD_COST_BYTES = 4096;
+/// The most paths readPackageScripts carries for one source (Code v2.5 review): a source shipped at many paths keeps the first
+/// of them, in the order read, and `path_count`, so a duplicated file can never carry a huge path array.
+export const MAX_PATHS_PER_SOURCE = 50;
 const MAX_MANIFEST_BYTES = 16 * 1024 * 1024;
 const MAX_MANIFEST_CHUNKS = 65_536;
 const MAX_CHUNK_BYTES = 512 * 1024 * 1024;
@@ -132,6 +135,9 @@ export async function extractPackageScripts(env, sim, opts = {}) {
   // Optional: no new chunk is started once the chunks read have inflated to this many bytes (record streams). Decoding is the
   // CPU a call spends, so this is the bound a caller under a CPU limit (a sub-hourly cron's) sets.
   const maxInflatedBytes = positive(opts.maxInflatedBytes, Infinity);
+  // Optional: no new chunk is started once the package's entries (every script and supporting file at every path and
+  // audience, duplicates included) pass this many; the caller reads the counts and settles the package.
+  const maxEntries = positive(opts.maxEntries, Infinity);
   const started = Date.now();
 
   let { state, etag } = await readState(env, dir);
@@ -191,6 +197,7 @@ export async function extractPackageScripts(env, sim, opts = {}) {
     if (used > 0 && usedBytes + unit.size > maxBytes) break;
     if (used > 0 && Date.now() - started >= budgetMs) break;
     if (used > 0 && usedInflated >= maxInflatedBytes) break;
+    if (state.scripts_total + (state.support_total || 0) > maxEntries) break;
     used += 1;
     usedBytes += unit.size;
 
@@ -241,7 +248,8 @@ export async function extractPackageScripts(env, sim, opts = {}) {
 /// `code` `unsupported` or `not_complete`), so a caller can never mistake "not read yet" for "no scripts".
 ///
 /// One entry per distinct source, in a stable order: path, then audience. Each is the first place (in that order) that
-/// ships the source, plus `paths` (every distinct path that ships it, sorted) and `audiences`.
+/// ships the source, plus `paths` (the distinct paths that ship it, sorted; at most MAX_PATHS_PER_SOURCE, the first read),
+/// `path_count` (every entry that ships it) and `audiences`.
 export async function readPackageScripts(env, sim) {
   const located = await locate(env, sim);
   if (located.result) {
@@ -267,13 +275,15 @@ export async function readPackageScripts(env, sim) {
       const id = e.unread ? `unread:${e.path}\u0000${e.audience}` : kind === 'support' ? `support:${e.sha256}` : e.sha256;
       let kept = bySha.get(id);
       if (!kept) {
-        kept = { path: e.path, space: e.space, audience: e.audience, kind, language: e.language, bytes: e.bytes, sha256: e.sha256, source: undefined, paths: new Set(), audiences: new Set(), ...(e.unread ? { unread: e.unread } : {}) };
+        kept = { path: e.path, space: e.space, audience: e.audience, kind, language: e.language, bytes: e.bytes, sha256: e.sha256, source: undefined, paths: new Set(), path_count: 0, audiences: new Set(), ...(e.unread ? { unread: e.unread } : {}) };
         bySha.set(id, kept);
       } else if (before(e, kept)) {
         Object.assign(kept, { path: e.path, space: e.space, audience: e.audience, language: e.language });
       }
       if (typeof e.source === 'string') kept.source = e.source;
-      kept.paths.add(e.path);
+      // At most MAX_PATHS_PER_SOURCE paths per source; path_count counts every entry that ships it.
+      kept.path_count += 1;
+      if (kept.paths.size < MAX_PATHS_PER_SOURCE) kept.paths.add(e.path);
       kept.audiences.add(e.audience);
     }
   }

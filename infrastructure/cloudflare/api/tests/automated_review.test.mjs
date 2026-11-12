@@ -967,13 +967,12 @@ test('Code v2.5: in reader mode the script reader reads the supporting files too
   assert.ok(judgeText(d2.calls.judge[0]).includes('"why":"over_review_limit"'));
 });
 
-test('Code v2.5: a folder the description says ships and the package does not hold is not yet, naming it; prose with a slash is not a claim', async () => {
+test('Code v2.5 review: a path the description says ships and the package lacks is information for the judge, never a decision by itself', async () => {
   assert.deepEqual(claimedFiles(STATION_DESCRIPTION), ['src/station_generator']);
   assert.deepEqual(claimedFiles('Pick and/or drop; input/output; TCP/IP; km/h; 24/7; see https://example.com/src_x/a.py; mail a@b.c'), []);
-  // A claim is a code span, or a path a ships/includes/contains/is-in verb names; a name the prose merely mentions is not one.
+  // Narrow: a code span, or a path right after "ships (with it) in". Includes, contains, is in and lives in are prose.
   assert.deepEqual(claimedFiles('Run `tools/solve.py` or README.md, and data/rings.csv.'), ['tools/solve.py']);
-  assert.deepEqual(claimedFiles('It includes README.md, contains data/rings.csv, and the map lives in maps/station; the corpus is stored in `corpus/gutenberg.txt`.'), ['corpus/gutenberg.txt', 'README.md', 'data/rings.csv', 'maps/station']);
-  // The reviewer's false positives (v2.5 review): none is a claim, and none makes a listing not yet.
+  assert.deepEqual(claimedFiles('It includes README.md, contains data/rings.csv, and the map lives in maps/station; the corpus ships inside corpus/gutenberg.txt.'), ['corpus/gutenberg.txt']);
   const pkgPaths = ['Main/Workspace/Mind Map/_instance.toml#script', 'Main/src/map.luau', 'Main/data/nodes.json'];
   for (const prose of [
     'Compare assets/liabilities on a balance sheet and see equity move.',
@@ -984,30 +983,38 @@ test('Code v2.5: a folder the description says ships and the package does not ho
     'Built from the ghcn_daily/v3 station records published by NOAA.',
     'Learn the tools/techniques a project manager uses.',
     'Export your map as notes.md or a outline.txt file to keep.',
-    'The source ships at github.com/simbuilder/mind_map_tools and is in x.com/simbuilder/tools; the answer is in 3/4 of cases.',
+    'This map includes data/science topics and contains assets/liabilities examples.',
+    'The source ships at github.com/simbuilder/mind_map_tools and ships in x.com/simbuilder/tools; the answer is in 3/4 of cases.',
   ]) assert.deepEqual(claimedFilesCheck(prose, pkgPaths), { claimed: [], missing: [] }, prose);
-  // The real case: flagged when the folder is missing, passes when it ships.
   const real = 'the word list, the generator and a reference solver ship with it in src/station_generator.';
   assert.deepEqual(claimedFilesCheck(real, pkgPaths), { claimed: ['src/station_generator'], missing: ['src/station_generator'] });
   assert.deepEqual(claimedFilesCheck(real, [...pkgPaths, 'Main/src/station_generator/words.json']).missing, []);
-  assert.deepEqual(claimedFilesCheck('ships in src/station_generator', ['Station/src/station_generator/words.json']).missing, []);
   assert.deepEqual(claimedFilesCheck('ships in src/station_generator', ['Station/src/station_generatorX/words.json']).missing, ['src/station_generator'], 'segment by segment, never a prefix of a name');
+
+  // The pipeline: the judge is told, and its verdict decides. A judge that lists the Space lists it.
   const env = environment();
   await publish(env, { description: STATION_DESCRIPTION });
   const d = deps({ packageScripts: packageOf(STATION_SCRIPTS.filter(s => s.kind !== 'support')) });
   const rec = await runModerationCase(SIM, env, d);
-  assert.equal(rec.status, 'changes_requested');
-  assert.deepEqual(rec.decision.changes, ['claimed_files_missing']);
-  assert.deepEqual(rec.decision.reasons.find(r => r.code === 'claimed_files_missing').files, ['src/station_generator']);
-  assert.match(rec.decision.suggested_edit, /does not hold them: src\/station_generator\. Publish them with the Space/);
-  assert.ok(AUTHOR_COPY.claimed_files_missing.what_to_change);
-  // The judge was told what the system found.
-  assert.match(judgeText(d.calls.judge[0]), /FILES THE LISTING SAYS IT SHIPS \(system check[^)]*\): \{"claimed":\["src\/station_generator"\],"not_in_package":\["src\/station_generator"\]\}/);
-  // A rejection stands: the claim never softens it.
+  assert.equal(rec.status, 'approved', 'no deterministic not-yet on a claim');
+  assert.deepEqual(rec.claimed_files, { claimed: ['src/station_generator'], missing: ['src/station_generator'] });
+  assert.equal(rec.decision.reasons.some(r => r.code === 'claimed_files_missing'), false);
+  const text = judgeText(d.calls.judge[0]);
+  assert.ok(text.includes('The description says "src/station_generator" ships; the package has no such path.'), 'the judge receives the note');
+  assert.match(text, /it decides nothing by itself\): \{"claimed":\["src\/station_generator"\],"not_in_package":\["src\/station_generator"\]\}/);
+  assert.match(text, /You decide whether it matters: [^\n]*name each missing path in suggested_edit_to_publish/);
+  // A judge that finds it matters says so: its not yet names the path, through its own edit.
   const env2 = environment();
   await publish(env2, { description: STATION_DESCRIPTION });
-  const rec2 = await runModerationCase(SIM, env2, deps({ packageScripts: packageOf(STATION_SCRIPTS.filter(s => s.kind !== 'support')), judge: () => verdict({ scores: { objective: 0 } }) }));
-  assert.equal(rec2.status, 'rejected');
+  const named = 'The description says the generator ships in src/station_generator, and the package has no such folder: publish it with the Space, or take the claim out.';
+  const rec2 = await runModerationCase(SIM, env2, deps({ packageScripts: packageOf(STATION_SCRIPTS.filter(s => s.kind !== 'support')), judge: () => verdict({ scores: { real_world: 1 }, suggested_edit_to_publish: named }) }));
+  assert.deepEqual([rec2.status, rec2.decision.suggested_edit], ['changes_requested', named]);
+  // A path that ships is not called missing.
+  const env3 = environment();
+  await publish(env3, { description: STATION_DESCRIPTION });
+  const d3 = deps({ packageScripts: packageOf(STATION_SCRIPTS) });
+  await runModerationCase(SIM, env3, d3);
+  assert.equal(judgeText(d3.calls.judge[0]).includes('the package has no such path'), false);
 });
 
 test('Code v2.5: a rejection decided only by the retired T4 rule is reviewed once by the sweep under v2.5, Jev not asked again; other decisions are never touched', async () => {
@@ -1127,4 +1134,18 @@ test('Code v2.5 review: a stale read of the listing and the case cannot draw a s
   assert.equal(d.calls.judge.length, judged, 'no second judge run: the run re-checked the case under the lease');
   const now = await loadCase(env, SIM);
   assert.deepEqual([now.status, now.ai_verdicts?.length ?? 0, now.history.length], [after.status, after.ai_verdicts?.length ?? 0, after.history.length], 'and left it exactly as it was');
+});
+
+test('Code v2.5 review: entries past max_review_entries (one file at many paths) settle as too many files from the running count, before any model call', async () => {
+  assert.equal(DEFAULT_THRESHOLDS.max_review_entries, 50000);
+  const env = environment({ max_review_entries: 2500 });
+  await publish(env, { description: STATION_DESCRIPTION });
+  const seen = [];
+  const pkg = { extractPackageScripts: async (e, s, opts) => { seen.push(opts); return { supported: true, complete: false, key: 'k1', chunks_total: 40, chunks_read: 3, scripts_total: 0, distinct_scripts: 0, support_total: 2501, support_distinct: 1, support_unread: 0, errors: [] }; }, readPackageScripts: async () => { throw new Error('never read'); } };
+  const d = deps({ packageScripts: pkg });
+  const rec = await runModerationCase(SIM, env, d);
+  assert.equal(seen[0].maxEntries, 2500, 'the extractor stops at the cap');
+  const why = rec.decision.reasons.at(-1);
+  assert.deepEqual([rec.status, rec.decision.changes, why.code, why.detail.entries], ['changes_requested', ['too_much_script'], 'too_many_files', 2501]);
+  assert.equal(d.calls.judge.length + d.calls.reader.length, 0);
 });

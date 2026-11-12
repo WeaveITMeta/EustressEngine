@@ -9,7 +9,7 @@ import { createHash } from 'node:crypto';
 import zlib from 'node:zlib';
 import {
   extractPackageScripts, readPackageScripts, inlineScriptOf, chunkKeyOf, SCRIPT_EXTENSIONS, MAX_SCRIPT_BYTES, MAX_CHUNK_SCRIPT_BYTES,
-  SUPPORT_EXTENSIONS, MAX_SUPPORT_FILE_BYTES, MAX_CHUNK_SUPPORT_BYTES, EXTRACTOR_VERSION, MAX_CHUNK_FILES, RECORD_COST_BYTES,
+  SUPPORT_EXTENSIONS, MAX_SUPPORT_FILE_BYTES, MAX_CHUNK_SUPPORT_BYTES, EXTRACTOR_VERSION, MAX_CHUNK_FILES, RECORD_COST_BYTES, MAX_PATHS_PER_SOURCE,
 } from '../src/package_scripts.mjs';
 import { chunkKey, checkWorldManifest } from '../src/world.mjs';
 
@@ -803,4 +803,24 @@ test('Code v2.5 review: scripts and supporting files share one 16 MiB per chunk;
     assert.ok(unread.length >= 3, `supporting files past the shared bound are listed (${unread.length})`);
     assert.equal(all.filter((s) => s.kind === 'support').length, 7, 'none dropped');
   }
+});
+
+test('Code v2.5 review: one file copied to many paths stops at maxEntries, and a source keeps at most 50 paths and a path_count', async () => {
+  // The reviewer's shape, scaled down: chunks of identical tiny .txt files at distinct paths (one distinct source in all).
+  const b = bucket({ piece: 1 << 20 });
+  const same = (k, n) => Array.from({ length: n }, (_, i) => [`c${k}/f${i}.txt`, 'x\n']);
+  const sim = await listing(b, SIM, { spaces: [{ name: 'Main', chunks: Array.from({ length: 8 }, (_, k) => v2(same(k, 1000))) }] });
+  const r = await extractPackageScripts({ SCENES: b }, sim, { maxEntries: 2500 });
+  assert.equal(r.support_distinct, 1, 'one distinct source');
+  assert.equal(r.chunks_read, 3, 'no chunk is started once the entries pass the cap');
+  assert.equal(r.support_total, 3000);
+  assert.equal(r.complete, false);
+  // A source shipped at many paths carries the first MAX_PATHS_PER_SOURCE of them and the count of all.
+  const b2 = bucket({ piece: 1 << 20 });
+  const sim2 = await listing(b2, SIM, { spaces: [{ name: 'Main', chunks: [v2(same(0, 1000)), v2(same(1, 1000))] }] });
+  assert.equal((await extractPackageScripts({ SCENES: b2 }, sim2)).complete, true);
+  const all = await readPackageScripts({ SCENES: b2 }, sim2);
+  assert.equal(all.length, 1);
+  assert.equal(MAX_PATHS_PER_SOURCE, 50);
+  assert.deepEqual([all[0].paths.length, all[0].path_count], [50, 2000]);
 });

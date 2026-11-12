@@ -53,7 +53,7 @@ export const POLICY_VERSION = '2.5';
 // Recorded in docs/architecture/DECENTRALIZATION_PLAN.md section 5. The worker
 // hashes the policy text it actually ships and cites THAT; a mismatch with this
 // anchor is logged so an unreviewed policy edit cannot pass silently.
-export const POLICY_HASH_ANCHORED = 'sha256:e5c1cb8e6a0d53b54ad1eb4e5e8bbba80b18ed16eb6fb0780a712f60e0593c44';
+export const POLICY_HASH_ANCHORED = 'sha256:4716b47bfbbdfb573eebdaf78b129c91328c8e02073abf3b4398eecfc7889a02';
 // The shape of the Qualification Statement, tags and rating questionnaire a listing was reviewed under (Code Part VIII).
 // Recorded on every case and every listing. A later Code that changes that shape raises it: 2 is Code v2.2's questionnaire,
 // which asks about alcohol and tobacco, and about drugs, as two questions (rating_questionnaire.mjs QUESTIONNAIRE_VERSION 2).
@@ -296,6 +296,10 @@ export const DEFAULT_THRESHOLDS = Object.freeze({
   // files), decided before any model call.
   max_review_scripts: 5000,
   max_review_support_files: 2000,
+  // The most entries (every script and supporting file at every path, duplicates included) a listing may ship for review: one
+  // file copied to many paths is one distinct source but a path each to extract and read. Checked from the extraction's
+  // running count, which stops reading new chunks past it; past it the listing is not yet (too many files).
+  max_review_entries: 50000,
   // A judge request whose scripts are estimated above this many tokens is counted by the API before it is sent, and one counted
   // above judge_request_tokens goes to reader mode (the rest of the 1M context is the answer, up to judge_max_tokens).
   judge_count_tokens_above: 100000,
@@ -1869,31 +1873,20 @@ export function decideFinal(args) {
       out.reasons.push({ code: missing === 'republish_for_scripts' ? 'scripts_not_from_package' : 'scripts_coverage_incomplete', rule: 8, lane: 'quality', action: 'changes_requested', coverage: args.coverage ? { source: args.coverage.source ?? null, coverage_percent: args.coverage.coverage_percent ?? null } : null });
     }
   }
-  // Code v2.5: a file or folder the listing says it ships that the package does not hold (`files`: claimedFilesCheck, from
-  // the run's package paths). Never a listing: "not yet", naming each one. A rejection or a removal stands.
-  const missingFiles = Array.isArray(args.files?.missing) ? args.files.missing : [];
-  if (missingFiles.length && (out.outcome === 'approve' || (out.outcome === 'changes_requested' && out.lane !== 'legal'))) {
-    out.outcome = 'changes_requested'; out.lane = 'quality'; out.featured_candidate = false;
-    out.changes = [...new Set([...(out.changes || []), 'claimed_files_missing'])];
-    out.reasons.push({ code: 'claimed_files_missing', files: missingFiles, rule: 7, lane: 'quality', action: 'changes_requested' });
-    const named = `The description says these ship with the Space, and the published package does not hold them: ${missingFiles.join(', ')}. Publish them with the Space (turn on Share Source for server files), or take the claim out of the description.`;
-    out.suggested_edit = out.suggested_edit ? `${out.suggested_edit} ${named}` : named;
-  }
   if (out.lane === 'legal' || out.outcome === 'quarantine' || (out.outcome === 'reject' && out.lane === 'harm')) out.assigned_tags = [];
   return out;
 }
 
 // ── claimed files (Code v2.5) ─────────────────────────────────────────────────
-// A listing that says a file or folder ships with the Space ("the generator ships with it in src/station_generator") is
-// checked against what the package holds. A claim is only (Code v2.5 review):
+// What the description says ships ("the generator ships with it in src/station_generator"), checked against what the package
+// holds, as information for the judge: it decides whether a missing path matters, and names it in its suggested edit. Nothing
+// is decided on it by itself (v2.5 review: no extraction of prose is exact enough to settle a listing). Kept narrow:
 //   - a path-like token inside a code span (`backticks`), or
-//   - a path-like token right after a verb phrase that says it ships: ships (with it) in, includes, contains, is in, lives in,
-//     sits in, is stored in, is found in, is located in.
+//   - a path-like token right after "ships (with it) in", "shipped in", "ships inside" or "ships under".
 // Path-like is a path with a slash and a letter, or a file name ending in an extension the review reads. Never a URL, an email,
-// or a path through a dot-domain (github.com/..., x.com/...). Prose such as "assets/liabilities", "test/train" or "notes.md
-// or outline.txt" that no verb says ships is not a claim.
+// or a path through a dot-domain (github.com/..., x.com/...).
 const CLAIM_EXTENSIONS = /\.(?:luau|lua|rune|rn|soul|py|json|md|txt|csv|toml)$/i;
-const CLAIM_VERB = /\b(?:ships?|shipped|shipping|includes?|included|including|contains?|contained|containing|(?:is|are|lives?|living|sits?|stored|kept|found|located)\s+(?:in|under|at|inside|within))\b(?:\s+(?:with|it|them|this|the|its|space|alongside|along|in|under|at|inside|within|folder|directory|file|files)\b)*\s+(\S+)/gi;
+const CLAIM_VERB = /\b(?:ships?|shipped|shipping)\b(?:\s+(?:with|it|them|this|the|its|space|alongside|along|together)\b)*\s+(?:in|inside|under|within)\s+(\S+)/gi;
 function claimToken(raw) {
   const tok = String(raw || '').replace(/^[\s"'`(\[{<]+/, '').replace(/[\s"'`)\]}>.,;:!?]+$/, '').replace(/^\.\//, '');
   if (!tok || tok.length > 200 || /:\/\/|^www\.|@/i.test(tok) || !/^[\p{L}\p{N}_.\-/]+$/u.test(tok) || !/\p{L}/u.test(tok)) return null;
@@ -1911,8 +1904,8 @@ export function claimedFiles(text) {
   for (const m of t.matchAll(CLAIM_VERB)) { const c = claimToken(m[1]); if (c) out.push(c); }
   return [...new Set(out)].slice(0, 20);
 }
-/// The claims (claimedFiles) no path of the package holds: a folder claim is found when a path runs through it, a file claim
-/// when a path ends in it. Paths compare case-insensitively, segment by segment, under any Space.
+/// The claims (claimedFiles) no path of the package holds, for the judge's note: a folder claim is found when a path runs
+/// through it, a file claim when a path ends in it. Paths compare case-insensitively, segment by segment, under any Space.
 export function claimedFilesCheck(text, paths) {
   const claimed = claimedFiles(text);
   if (!claimed.length) return { claimed: [], missing: [] };
@@ -2187,7 +2180,7 @@ function decideOutcome({ triage, judge, thresholds, reader = [] }) {
 export function wouldList(rec, thresholds) {
   const triage = rec?.triage;
   if (!triage || (triage.outcome !== 'judge' && triage.outcome !== 'escalate')) return false;
-  return decideFinal({ triage: { ...triage, outcome: 'judge' }, judge: rec.judge, thresholds, reader: rec.reader_concerns || [], coverage: rec.scripts_review || null, files: rec.claimed_files || null }).outcome === 'approve';
+  return decideFinal({ triage: { ...triage, outcome: 'judge' }, judge: rec.judge, thresholds, reader: rec.reader_concerns || [], coverage: rec.scripts_review || null }).outcome === 'approve';
 }
 
 const testScores = judge => Object.fromEntries(CODE_TESTS.map(k => {
@@ -2994,7 +2987,10 @@ export function judgeScriptPayload(plan, { reports = null, dossierScripts = [], 
   parts.push(`Coverage (JSON): ${JSON.stringify(coverage)}`);
   if (source === 'dossier') parts.push('This listing\'s package format does not let the review extract its scripts: the scripts below are the dossier\'s, as the author\'s Studio sent them, each in full as sent.');
   if (fileList.length) parts.push(`SUPPORTING FILES IN THE PACKAGE: every .py, .json, .md, .txt and .csv file it ships, ${supportFiles.length} in all (JSON lines; "read" says how: in this request or by the script reader, or "not_read" with why). Check every claim the listing makes about files that ship against this list and the script paths.`, `<<<DATA-${nonce}>>>`, ...fileList, `<<<END-DATA-${nonce}>>>`);
-  if (claims?.claimed?.length) parts.push(`FILES THE LISTING SAYS IT SHIPS (system check of the description against every path in the package): ${JSON.stringify({ claimed: claims.claimed, not_in_package: claims.missing || [] })}. A claimed file or folder not in the package is "not yet" (the system names it); do not score a test on what the package does not hold.`);
+  if (claims?.claimed?.length) {
+    const missing = claims.missing || [];
+    parts.push(`FILES THE DESCRIPTION SAYS SHIP (information from a system check of the description against every path in the package; it decides nothing by itself): ${JSON.stringify({ claimed: claims.claimed, not_in_package: missing })}.${missing.map(p => ` The description says ${JSON.stringify(p)} ships; the package has no such path.`).join('')}${missing.length ? ' You decide whether it matters: when the listing relies on it, do not score a test on what the package does not hold, and name each missing path in suggested_edit_to_publish.' : ''}`);
+  }
   if (reportLines.length) parts.push(`SCRIPT READER REPORTS: one per script (or part) of the package, ${reports.length} in all, each from a reading of that script in full. JSON lines:`, `<<<DATA-${nonce}>>>`, ...reportLines, `<<<END-DATA-${nonce}>>>`);
   if (fullUnits.length) {
     const sup = fullUnits.filter(u => u.kind === 'support').length;
@@ -5921,6 +5917,7 @@ export const AUTHOR_COPY = {
   scripts_not_read: R('The review could not read every script',
     'Every listing is reviewed on every script it ships. The review could not read all of the scripts this listing ships.',
     'Publish again from the current Studio so the review can read every script.'),
+  // Read only in older records: since the v2.5 review a missing claimed path is the judge's to weigh, in its suggested edit.
   claimed_files_missing: R('Files the description says ship are not in the package',
     'The review checks every file and folder the description says ships with the Space against the published package.',
     'Publish the named files with the Space (turn on Share Source for server files), or take the claim out of the description, then publish again.'),
@@ -7757,8 +7754,8 @@ async function runLeased(simId, env, deps, opts, lease, meter = null) {
   const scriptStage = await scriptsStage({ env, deps, sim, rec, t, meter, dossier, tick: opts.tick === true, deadline: Number.isFinite(opts.deadline) ? opts.deadline : Infinity });
   if (scriptStage.wait) return scriptStage.wait;
   if (scriptStage.settle) return settleWithoutJudge(env, rec, base, triage, scriptStage.settle);
-  // Code v2.5: the files and folders the description says ship, checked against every path the package holds. Only a package
-  // the review read decides it (a legacy .pak is asked to republish by the coverage gate).
+  // Code v2.5: the files and folders the description says ship, checked against every path the package holds: information for
+  // the judge, never a decision by itself. Only a package the review read is checked (a legacy .pak is asked to republish).
   rec.claimed_files = scriptStage.source === 'package' ? claimedFilesCheck(sim?.description, scriptStage.packagePaths || scriptStage.scripts.map(s => s.path)) : null;
   // L2r: when every script does not fit in the judge's one request, the script reader reads them all first.
   let scriptReview = await scriptReaderStage({ env, deps, sim, rec, t, meter, dossier, epoch, triage, stage: scriptStage });
@@ -7819,7 +7816,7 @@ async function runLeased(simId, env, deps, opts, lease, meter = null) {
   // A judge's citation of A10, A12, A13 or A14 on a case the researcher did not look at: the findings are gathered now, for a
   // second reading and for the record. The judge is not asked again for them.
   if (!rec.research && researchTrigger(triage, facts, judge && !judge.malformed ? judge : null) === 'judge_group_a') rec.research = await research('judge_group_a');
-  const decisionArgs = () => ({ triage, judge, thresholds: t, reader: rec.reader_concerns || [], coverage: rec.scripts_review || null, files: rec.claimed_files || null });
+  const decisionArgs = () => ({ triage, judge, thresholds: t, reader: rec.reader_concerns || [], coverage: rec.scripts_review || null });
   let final = judge?.malformed && deterministicJudgeError(judge.error) ? settledByFailure(triage, judge) : decideFinal(decisionArgs());
   // Part IV rules 0 and 1: an unsure judge, or one that left a named signal unanswered, is asked once more at
   // SECOND_OPINION_EFFORT, with its first answer's concerns and every signal named. The checkpoint before it renews the lease,
@@ -7990,7 +7987,7 @@ async function scriptsStage({ env, deps, sim, rec, t, meter, dossier, tick = fal
     ? { budgetMs: Math.max(1, Math.min(t.tick_extract_budget_ms, deadline - Date.now())), checkpointChunks: t.tick_extract_checkpoint_chunks, maxChunks: t.tick_extract_max_chunks, maxBytes: t.tick_extract_max_bytes, maxInflatedBytes: t.tick_extract_max_inflated_bytes }
     : { budgetMs: t.scripts_extract_budget_ms };
   let ex;
-  try { ex = await ps.extractPackageScripts(env, sim, { ...budget, meter }); }
+  try { ex = await ps.extractPackageScripts(env, sim, { ...budget, maxEntries: t.max_review_entries, meter }); }
   catch (e) { console.error('moderation: script extraction failed', sim.id, e?.message); return transient([{ chunk: null, reason: `exception: ${clip(String(e?.message || ''), 180)}` }]); }
   if (!ex || ex.supported === false) {
     rec.scripts = { supported: false, source: 'dossier', dossier_scripts: dossierScripts.length, updated_at: new Date().toISOString() };
@@ -8005,9 +8002,9 @@ async function scriptsStage({ env, deps, sim, rec, t, meter, dossier, tick = fal
   // More distinct script than one review reads: not yet, publish fewer Spaces per Universe. Stops as soon as it is known.
   if ((ex.distinct_bytes ?? 0) > t.max_review_script_bytes) { rec.scripts = { ...prev, updated_at: new Date().toISOString() }; return { settle: { change: 'too_much_script', code: 'scripts_over_review_limit', detail: { distinct_bytes: ex.distinct_bytes, limit: t.max_review_script_bytes } } }; }
   // More files than one review reads (Code v2.5): known as soon as the extraction counts them, before any model call.
-  const tooMany = (scriptsN, supportN) => (scriptsN > t.max_review_scripts || supportN > t.max_review_support_files
-    ? { settle: { change: 'too_much_script', code: 'too_many_files', detail: { scripts: scriptsN, supporting_files: supportN, limits: { scripts: t.max_review_scripts, supporting_files: t.max_review_support_files } } } } : null);
-  const overCount = tooMany(ex.distinct_scripts ?? 0, (ex.support_distinct ?? 0) + (ex.support_unread ?? 0));
+  const tooMany = (scriptsN, supportN, entriesN = 0) => (scriptsN > t.max_review_scripts || supportN > t.max_review_support_files || entriesN > t.max_review_entries
+    ? { settle: { change: 'too_much_script', code: 'too_many_files', detail: { scripts: scriptsN, supporting_files: supportN, entries: entriesN, limits: { scripts: t.max_review_scripts, supporting_files: t.max_review_support_files, entries: t.max_review_entries } } } } : null);
+  const overCount = tooMany(ex.distinct_scripts ?? 0, (ex.support_distinct ?? 0) + (ex.support_unread ?? 0), (ex.scripts_total ?? 0) + (ex.support_total ?? 0));
   if (overCount) { rec.scripts = { ...prev, updated_at: new Date().toISOString() }; return overCount; }
   if (Array.isArray(ex.errors) && ex.errors.length) {
     const errors = ex.errors.map(x => ({ chunk: x?.chunk ?? null, reason: clip(String(x?.reason ?? 'error'), 200) }));

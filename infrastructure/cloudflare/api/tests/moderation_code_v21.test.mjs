@@ -61,7 +61,7 @@ const noulJev = answers => ({ answers: Object.fromEntries(Object.entries(answers
 test('the Code (v2.4, which carries v2.1) is anchored by its hash, and the Worker cites it', () => {
   assert.equal(POLICY_VERSION, '2.5');
   assert.equal('sha256:' + createHash('sha256').update(GUARDIAN_POLICY_TEXT).digest('hex'), POLICY_HASH_ANCHORED);
-  assert.equal(POLICY_HASH_ANCHORED, 'sha256:e5c1cb8e6a0d53b54ad1eb4e5e8bbba80b18ed16eb6fb0780a712f60e0593c44');
+  assert.equal(POLICY_HASH_ANCHORED, 'sha256:4716b47bfbbdfb573eebdaf78b129c91328c8e02073abf3b4398eecfc7889a02');
   for (const id of ['A12', 'A13', 'A14']) assert.match(GUARDIAN_POLICY_TEXT, new RegExp(`\\*\\*${id}\\. `), id);
   assert.equal(REVIEW_SCHEMA, 2);
 });

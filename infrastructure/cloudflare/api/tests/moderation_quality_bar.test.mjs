@@ -63,7 +63,7 @@ async function agentApproves(caseOver, args = {}) {
 test('the Code is version 2.5, and the text the judge reads is the one anchored', () => {
   assert.equal(POLICY_VERSION, '2.5');
   assert.equal('sha256:' + createHash('sha256').update(GUARDIAN_POLICY_TEXT).digest('hex'), POLICY_HASH_ANCHORED);
-  assert.equal(POLICY_HASH_ANCHORED, 'sha256:e5c1cb8e6a0d53b54ad1eb4e5e8bbba80b18ed16eb6fb0780a712f60e0593c44');
+  assert.equal(POLICY_HASH_ANCHORED, 'sha256:4716b47bfbbdfb573eebdaf78b129c91328c8e02073abf3b4398eecfc7889a02');
   assert.match(GUARDIAN_POLICY_TEXT, /^# Eustress Guardian Code v2\.5/);
   assert.match(GUARDIAN_POLICY_TEXT, /## Part IV\. Verdict Rules/);
   // Written with a code point, not an escape, so no tool that decodes an escape in this file can change what it means.

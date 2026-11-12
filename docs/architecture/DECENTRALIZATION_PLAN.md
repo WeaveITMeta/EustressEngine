@@ -195,10 +195,10 @@ uploaded to Eustress"): T4 is met by use (a working tool a visitor brings their 
 leaves with a usable result), and a map of real knowledge qualifies when its structure ships in
 the Space, the author's own framework needing no external citation; T4 at 1 with the statement
 present is "not yet" with the judge's change, no longer a rejection; the review reads the
-supporting files a package ships (.py, .json, .md, .txt, .csv), and a file or folder the listing
-says it ships that the package does not hold is "not yet", naming it; a rejection decided only by
+supporting files a package ships (.py, .json, .md, .txt, .csv), and the judge is told when a file
+or folder the description says ships is not in the package; a rejection decided only by
 the retired T4 rule is reviewed once more under v2.5.
-**Policy hash:** `sha256:e5c1cb8e6a0d53b54ad1eb4e5e8bbba80b18ed16eb6fb0780a712f60e0593c44`
+**Policy hash:** `sha256:4716b47bfbbdfb573eebdaf78b129c91328c8e02073abf3b4398eecfc7889a02`
 (computed over the stored file with its line endings normalized to LF, as the Worker ships it;
 recorded here because a self-referential hash inside the file would change the hash). Covers:
 Part 0 (purpose, principles and who reviews), the spatial intelligence review requirement

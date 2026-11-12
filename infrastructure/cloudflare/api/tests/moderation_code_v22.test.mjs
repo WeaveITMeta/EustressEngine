@@ -58,7 +58,7 @@ const b11Of = t => [...t.articles.system, ...t.articles.signals].filter(a => a.a
 test('the Code (v2.5, which carries v2.2) is anchored by its hash, with B11 in the founder\'s words and adult_21 as the top band', () => {
   assert.equal(POLICY_VERSION, '2.5');
   assert.equal('sha256:' + createHash('sha256').update(GUARDIAN_POLICY_TEXT).digest('hex'), POLICY_HASH_ANCHORED);
-  assert.equal(POLICY_HASH_ANCHORED, 'sha256:e5c1cb8e6a0d53b54ad1eb4e5e8bbba80b18ed16eb6fb0780a712f60e0593c44');
+  assert.equal(POLICY_HASH_ANCHORED, 'sha256:4716b47bfbbdfb573eebdaf78b129c91328c8e02073abf3b4398eecfc7889a02');
   assert.match(GUARDIAN_POLICY_TEXT, /^# Eustress Guardian Code v2\.5\n\*\*Version:\*\* 2\.5\n/);
   assert.match(GUARDIAN_POLICY_TEXT, /\n- v2\.2 \(founder direction, 2026-10-08\): /);
   assert.ok(GUARDIAN_POLICY_TEXT.includes('- **B11. Hard drugs.** *No hard drugs, ever.* Showing the use, sale, making or glamorising of opioids outside medical care, cocaine or crack, methamphetamine, or cannabis. Not B11: medical care (a nurse giving prescribed morphine); overdose first aid (naloxone); the science of addiction, its treatment and its prevention, taught accurately, rated `mature_17`. Psychedelics (psilocybin, LSD, DMT, mescaline, MDMA and ketamine) are not B11; showing their use is rated `adult_21`.\n'));
