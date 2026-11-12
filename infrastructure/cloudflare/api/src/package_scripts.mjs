@@ -11,10 +11,17 @@
 // `_instance.toml` record, under `[script] source`. A `source` that is one line naming a script file (a SoulScript's
 // `source = "StationMind.rune"`) is a reference to a sibling record, which is collected as a file of its own.
 //
+// Supporting files (Code v2.5): a record whose path ends in one of SUPPORT_EXTENSIONS (any case; never `_instance.toml` or
+// another `.toml`, which are records) is collected too, marked `kind: 'support'` (scripts are `kind: 'script'`): the word
+// lists, data, notes and tools an author ships. Each is read in full up to MAX_SUPPORT_FILE_BYTES; a larger one, or one past a
+// chunk's MAX_CHUNK_SUPPORT_BYTES, is listed with its size and `unread` (why), never silently dropped and never an error: a
+// supporting file never blocks a review.
+//
 // Resumable. A production listing can name hundreds of chunks and half a gigabyte, more than one invocation's R2 operations
 // and CPU allow. Each call reads chunks in a fixed order under a budget (`opts.maxChunks`, `opts.maxBytes`), and writes what
-// it found and how far it got under universes/{simId}/moderation/package_scripts/{key}/, where {key} is the SHA-256 of the
-// players' manifest, then `_` and the source manifest's SHA-256 when there is one. A republish names a new key and starts
+// it found and how far it got under universes/{simId}/moderation/package_scripts/v{EXTRACTOR_VERSION}/{key}/, where {key} is the
+// SHA-256 of the players' manifest, then `_` and the source manifest's SHA-256 when there is one. The extractor version is part
+// of the store's key, so a package extracted by an earlier extractor (one that collected less) is extracted again. A republish names a new key and starts
 // over; an unchanged package is read once. Nothing here writes, replaces or deletes anything under `chunks/` or `manifests/`:
 // an approval is bound to those objects' versions.
 //
@@ -44,6 +51,15 @@ import { Decompress } from 'fzstd';
 
 export const SCRIPT_EXTENSIONS = ['.luau', '.lua', '.rune', '.rn', '.soul'];
 const RUNE_EXTENSIONS = new Set(['.rune', '.rn', '.soul']);
+/// Supporting files the review reads beside the scripts (Code v2.5).
+export const SUPPORT_EXTENSIONS = ['.py', '.json', '.md', '.txt', '.csv'];
+/// The largest supporting file read in full. A larger one is listed (path and size) as present and not read.
+export const MAX_SUPPORT_FILE_BYTES = 1024 * 1024;
+/// The most supporting-file bytes one chunk holds in memory, inside MAX_CHUNK_SCRIPT_BYTES; files past it are listed as present
+/// and not read.
+export const MAX_CHUNK_SUPPORT_BYTES = 8 * 1024 * 1024;
+/// What this extractor collects. Raised whenever that changes; it names the store, so older extractions are not reused.
+export const EXTRACTOR_VERSION = 2;
 
 /// `eustress_echk::MAX_RAW_BYTES`: the largest record stream a version 2 chunk may inflate to.
 export const MAX_RAW_BYTES = 256 * 1024 * 1024;
@@ -55,9 +71,16 @@ export const MAX_WINDOW_BYTES = 32 * 1024 * 1024;
 /// The largest script, file or `_instance.toml`, the review reads. Over it is an error, never a cut: the rest would ship
 /// unread. Production's largest script is about 62 KB.
 export const MAX_SCRIPT_BYTES = 8 * 1024 * 1024;
-/// The most script bytes one chunk may hold, so one chunk cannot fill the isolate (16 MiB: a Worker isolate has 128 MB, and a
-/// chunk's scripts are held while they are hashed and written; Code v2.4 review, 2026-11-11).
+/// The most source one chunk holds in memory, scripts and supporting files together, so one chunk cannot fill the isolate
+/// (16 MiB: a Worker isolate has 128 MB, and a chunk's sources are held while they are hashed and written; Code v2.4 review,
+/// 2026-11-11, and v2.5). Scripts past it are an error; supporting files past it, held ones included, are listed as not read.
 export const MAX_CHUNK_SCRIPT_BYTES = 16 * 1024 * 1024;
+/// The most script and supporting files one chunk may hold (Code v2.5): every cap above is in bytes, and a chunk of many tiny
+/// files would otherwise cost CPU per file and a reader batch per hundred. Past it the chunk is an error that says so, and
+/// parsing stops at once: nothing after it is read or hashed.
+export const MAX_CHUNK_FILES = 20000;
+/// What each record costs toward a call's `maxInflatedBytes`, beyond its bytes: parsing a record is work however small it is.
+export const RECORD_COST_BYTES = 4096;
 const MAX_MANIFEST_BYTES = 16 * 1024 * 1024;
 const MAX_MANIFEST_CHUNKS = 65_536;
 const MAX_CHUNK_BYTES = 512 * 1024 * 1024;
@@ -79,7 +102,7 @@ const SIM_ID = /^[A-Za-z0-9_-]{1,128}$/;
 /// `chunkKey` in src/world.mjs, repeated so this module does not import world.mjs (which imports moderation.mjs, the module
 /// that imports this one). A test keeps the two equal.
 export const chunkKeyOf = (simId, hash) => `universes/${simId}/chunks/${hash}.echk`;
-const storePrefix = (simId, key) => `universes/${simId}/moderation/package_scripts/${key}/`;
+const storePrefix = (simId, key) => `universes/${simId}/moderation/package_scripts/v${EXTRACTOR_VERSION}/${key}/`;
 
 class ChunkError extends Error {}
 
@@ -89,8 +112,9 @@ class ChunkError extends Error {}
 
 /// Extract (or continue extracting) every script in sim's published package.
 ///
-/// `opts`: `maxChunks` (default 300) and `maxBytes` (default 200 MB, compressed) bound one call, and `budgetMs` (optional)
-/// stops it starting a new chunk once that much time has passed. A call always reads at least one chunk.
+/// `opts`: `maxChunks` (default 300) and `maxBytes` (default 200 MB, compressed) bound one call, `budgetMs` (optional)
+/// stops it starting a new chunk once that much time has passed, and `maxInflatedBytes` (optional) once the chunks read have
+/// inflated to that many bytes. A call always reads at least one chunk.
 ///
 /// Returns `{ supported, complete, key, chunks_total, chunks_read, scripts_total, script_bytes, distinct_scripts,
 /// distinct_bytes, errors: [{ chunk, reason }] }`. `scripts_total` and `script_bytes` count every script at every path and
@@ -105,6 +129,9 @@ export async function extractPackageScripts(env, sim, opts = {}) {
   // Optional: no new chunk is started once this many milliseconds have passed. In a Worker the clock moves on I/O, and every
   // chunk is a read, so this bounds a call's wall time to about the budget plus one chunk.
   const budgetMs = positive(opts.budgetMs, Infinity);
+  // Optional: no new chunk is started once the chunks read have inflated to this many bytes (record streams). Decoding is the
+  // CPU a call spends, so this is the bound a caller under a CPU limit (a sub-hourly cron's) sets.
+  const maxInflatedBytes = positive(opts.maxInflatedBytes, Infinity);
   const started = Date.now();
 
   let { state, etag } = await readState(env, dir);
@@ -136,6 +163,7 @@ export async function extractPackageScripts(env, sim, opts = {}) {
   let sinceCheckpoint = 0;
   let used = 0;
   let usedBytes = 0;
+  let usedInflated = 0;
 
   const checkpoint = async () => {
     if (batch.length) {
@@ -162,26 +190,38 @@ export async function extractPackageScripts(env, sim, opts = {}) {
     if (used >= maxChunks) break;
     if (used > 0 && usedBytes + unit.size > maxBytes) break;
     if (used > 0 && Date.now() - started >= budgetMs) break;
+    if (used > 0 && usedInflated >= maxInflatedBytes) break;
     used += 1;
     usedBytes += unit.size;
 
     const read = await readChunkScripts(env, simId, unit);
+    usedInflated += read.inflated ?? unit.size;
     if (read.ok) {
       delete state.failed[index];
       for (const found of await scriptsOfRecords(read.records)) {
         for (const ctx of unit.contexts) {
           const path = (ctx.space ? `${ctx.space}/` : '') + found.path;
-          const entry = { path, space: ctx.space, audience: ctx.audience, language: found.language, bytes: found.bytes, sha256: found.sha256 };
-          if (!seen.has(found.sha256)) {
-            seen.add(found.sha256);
+          const entry = { path, space: ctx.space, audience: ctx.audience, kind: found.kind, language: found.language, bytes: found.bytes, sha256: found.sha256 };
+          if (found.kind === 'support') {
+            state.support_total = (state.support_total || 0) + 1;
+            if (found.unread) {
+              entry.unread = found.unread;
+              state.support_unread = (state.support_unread || 0) + 1;
+              batch.push(entry);
+              continue;
+            }
+          }
+          // Scripts and supporting files are stored once per distinct source, each kind on its own.
+          const seenKey = found.kind === 'support' ? `support:${found.sha256}` : found.sha256;
+          if (!seen.has(seenKey)) {
+            seen.add(seenKey);
             entry.source = found.source;
             batchSourceBytes += found.bytes;
-            state.distinct_scripts += 1;
-            state.distinct_bytes += found.bytes;
+            if (found.kind === 'support') { state.support_distinct_bytes = (state.support_distinct_bytes || 0) + found.bytes; state.support_distinct = (state.support_distinct || 0) + 1; }
+            else { state.distinct_scripts += 1; state.distinct_bytes += found.bytes; }
           }
           batch.push(entry);
-          state.scripts_total += 1;
-          state.script_bytes += found.bytes;
+          if (found.kind !== 'support') { state.scripts_total += 1; state.script_bytes += found.bytes; }
         }
       }
     } else {
@@ -222,10 +262,13 @@ export async function readPackageScripts(env, sim) {
     if (!obj) throw new Error(`A part of the extracted scripts is missing (${id})`);
     const part = JSON.parse(await obj.text());
     for (const e of part.entries) {
-      let kept = bySha.get(e.sha256);
+      const kind = e.kind === 'support' ? 'support' : 'script';
+      // A supporting file too large to read is one entry per path, listed with its size and why it was not read.
+      const id = e.unread ? `unread:${e.path}\u0000${e.audience}` : kind === 'support' ? `support:${e.sha256}` : e.sha256;
+      let kept = bySha.get(id);
       if (!kept) {
-        kept = { path: e.path, space: e.space, audience: e.audience, language: e.language, bytes: e.bytes, sha256: e.sha256, source: undefined, paths: new Set(), audiences: new Set() };
-        bySha.set(e.sha256, kept);
+        kept = { path: e.path, space: e.space, audience: e.audience, kind, language: e.language, bytes: e.bytes, sha256: e.sha256, source: undefined, paths: new Set(), audiences: new Set(), ...(e.unread ? { unread: e.unread } : {}) };
+        bySha.set(id, kept);
       } else if (before(e, kept)) {
         Object.assign(kept, { path: e.path, space: e.space, audience: e.audience, language: e.language });
       }
@@ -236,6 +279,7 @@ export async function readPackageScripts(env, sim) {
   }
   const out = [];
   for (const kept of bySha.values()) {
+    if (kept.unread) { out.push({ ...kept, source: null, paths: [...kept.paths].sort(byCodeUnits), audiences: [...kept.audiences].sort(byCodeUnits) }); continue; }
     if (typeof kept.source !== 'string') throw new Error(`The extracted scripts lack the source of ${kept.sha256}`);
     out.push({ ...kept, paths: [...kept.paths].sort(byCodeUnits), audiences: [...kept.audiences].sort(byCodeUnits) });
   }
@@ -248,7 +292,7 @@ export async function readPackageScripts(env, sim) {
 
 const empty = (key = '') => ({
   supported: true, complete: false, key, chunks_total: 0, chunks_read: 0, scripts_total: 0, script_bytes: 0,
-  distinct_scripts: 0, distinct_bytes: 0, errors: [],
+  distinct_scripts: 0, distinct_bytes: 0, support_total: 0, support_distinct_bytes: 0, support_unread: 0, extractor: EXTRACTOR_VERSION, errors: [],
 });
 const failure = (key, error) => ({ ...empty(key), errors: [error] });
 
@@ -263,6 +307,11 @@ function summary(key, state) {
     script_bytes: state.script_bytes,
     distinct_scripts: state.distinct_scripts,
     distinct_bytes: state.distinct_bytes,
+    support_total: state.support_total || 0,
+    support_distinct_bytes: state.support_distinct_bytes || 0,
+    support_distinct: state.support_distinct || 0,
+    support_unread: state.support_unread || 0,
+    extractor: EXTRACTOR_VERSION,
     errors: Object.keys(state.failed).map(Number).sort((a, b) => a - b).map((i) => ({ chunk: state.failed[i].chunk, reason: state.failed[i].reason })),
   };
 }
@@ -274,7 +323,7 @@ async function summaryFromStore(env, dir, key) {
 
 const freshState = (key, total) => ({
   v: STATE_VERSION, key, chunks_total: total, cursor: 0, failed: {}, parts: [], seen: [],
-  scripts_total: 0, script_bytes: 0, distinct_scripts: 0, distinct_bytes: 0, complete: total === 0,
+  scripts_total: 0, script_bytes: 0, distinct_scripts: 0, distinct_bytes: 0, support_total: 0, support_distinct_bytes: 0, support_unread: 0, complete: total === 0,
 });
 
 /// The listing's package: its R2 store, or a `result` that ends the call (not an .echk listing, nothing committed, or a
@@ -431,9 +480,17 @@ async function readChunkScripts(env, simId, unit) {
   if (!obj) return { ok: false, reason: 'the chunk is missing from storage' };
   const sizes = unit.sizes || [unit.size];
   const reader = obj.body.getReader();
+  let decoder = null;
+  // What reading this chunk cost, for a caller's maxInflatedBytes: the bytes actually inflated (or parsed), whether or not the
+  // chunk then failed, plus RECORD_COST_BYTES for every record parsed.
+  const cost = () => {
+    const stream = decoder?.records;
+    const bytes = Math.max(decoder?.produced || 0, stream?.offset || 0);
+    return bytes + (stream?.read || 0) * RECORD_COST_BYTES;
+  };
   try {
     if (sizes.some((s) => s !== obj.size)) throw new ChunkError(`the stored chunk is ${obj.size} bytes, the manifest says ${sizes.join(' or ')}`);
-    const decoder = new ChunkDecoder(obj.size);
+    decoder = new ChunkDecoder(obj.size);
     for (;;) {
       const { done, value } = await reader.read();
       if (done) break;
@@ -441,9 +498,9 @@ async function readChunkScripts(env, simId, unit) {
       if (decoder.finished) break;
     }
     decoder.end();
-    return { ok: true, records: decoder.records.records };
+    return { ok: true, records: decoder.records.records, inflated: Math.max(cost(), decoder.records ? decoder.records.total : obj.size) };
   } catch (e) {
-    return { ok: false, reason: e instanceof ChunkError ? e.message : `bad compressed .echk: ${e?.message || e}` };
+    return { ok: false, reason: e instanceof ChunkError ? e.message : `bad compressed .echk: ${e?.message || e}`, inflated: cost() };
   } finally {
     reader.cancel().catch(() => {});
   }
@@ -665,6 +722,7 @@ class FrameCutter {
 
 const isScriptPath = (lower) => SCRIPT_EXTENSIONS.some((ext) => lower.endsWith(ext));
 const isInstanceToml = (lower) => lower === '_instance.toml' || lower.endsWith('/_instance.toml');
+const isSupportPath = (lower) => SUPPORT_EXTENSIONS.some((ext) => lower.endsWith(ext));
 const utf8 = new TextDecoder('utf-8');
 
 /// `parse_records`, pushed as it streams: `count` records in `total` bytes. Keeps the data of script files and
@@ -688,6 +746,11 @@ class RecordStream {
     this.data = null;
     this.dataFill = 0;
     this.toml = false;
+    this.support = false;
+    this.supportKept = 0;
+    this.files = 0;
+    this.unread = null;
+    this.size = 0;
   }
 
   get done() {
@@ -746,11 +809,27 @@ class RecordStream {
     const lower = this.path.toLowerCase();
     const script = isScriptPath(lower);
     this.toml = !script && isInstanceToml(lower);
+    this.support = !script && !this.toml && isSupportPath(lower);
     this.data = null;
-    if (script || this.toml) {
+    this.unread = null;
+    this.size = n;
+    if (script || this.support) {
+      this.files += 1;
+      if (this.files > MAX_CHUNK_FILES) throw new ChunkError(`the chunk holds over ${MAX_CHUNK_FILES} script and supporting files`);
+    }
+    if (this.support) {
+      // Over the file limit or past the chunk's share (8 MiB, and 16 MiB with the scripts): listed with its size, read no
+      // further, never an error.
+      if (n > MAX_SUPPORT_FILE_BYTES) this.unread = 'over_file_limit';
+      else if (this.supportKept + n > MAX_CHUNK_SUPPORT_BYTES || this.kept + this.supportKept + n > MAX_CHUNK_SCRIPT_BYTES) this.unread = 'over_chunk_limit';
+      else { this.supportKept += n; this.data = new Uint8Array(n); }
+    } else if (script || this.toml) {
       if (n > MAX_SCRIPT_BYTES) throw new ChunkError(`${this.path} is ${n} bytes, over the ${MAX_SCRIPT_BYTES} bytes a review reads in full`);
       this.kept += n;
       if (this.kept > MAX_CHUNK_SCRIPT_BYTES) throw new ChunkError(`the chunk holds over ${MAX_CHUNK_SCRIPT_BYTES} bytes of scripts`);
+      // Scripts come first: supporting files already held give way (listed as not read), so the chunk never holds more than
+      // MAX_CHUNK_SCRIPT_BYTES of source together.
+      this.evictSupport(this.kept + this.supportKept - MAX_CHUNK_SCRIPT_BYTES);
       this.data = new Uint8Array(n);
     }
     this.dataFill = 0;
@@ -759,8 +838,20 @@ class RecordStream {
     if (n === 0) this.endRecord();
   }
 
+  /// Lets go of the newest held supporting files until `over` bytes are freed; each is listed as not read.
+  evictSupport(over) {
+    for (let i = this.records.length - 1; i >= 0 && over > 0; i--) {
+      const r = this.records[i];
+      if (!r.support || !r.data) continue;
+      over -= r.data.length;
+      this.supportKept -= r.data.length;
+      Object.assign(r, { size: r.data.length, data: null, unread: 'over_chunk_limit' });
+    }
+  }
+
   endRecord() {
-    if (this.data) this.records.push({ path: this.path, data: this.data, toml: this.toml });
+    if (this.data) this.records.push({ path: this.path, data: this.data, toml: this.toml, support: this.support });
+    else if (this.unread) this.records.push({ path: this.path, data: null, toml: false, support: true, unread: this.unread, size: this.size });
     this.data = null;
     this.read += 1;
     this.phase = this.read === this.count ? 'done' : 'path_len';
@@ -784,8 +875,15 @@ function languageOfPath(lower) {
 async function scriptsOfRecords(records) {
   const out = [];
   for (const r of records) {
+    if (r.support) {
+      const lower = r.path.toLowerCase();
+      const language = lower.slice(lower.lastIndexOf('.') + 1);
+      if (r.unread) out.push({ path: r.path, kind: 'support', language, bytes: r.size, sha256: null, source: null, unread: r.unread });
+      else out.push({ path: r.path, kind: 'support', language, bytes: r.data.length, sha256: await sha256Hex(r.data), source: utf8.decode(r.data) });
+      continue;
+    }
     if (!r.toml) {
-      out.push({ path: r.path, language: languageOfPath(r.path.toLowerCase()), bytes: r.data.length, sha256: await sha256Hex(r.data), source: utf8.decode(r.data) });
+      out.push({ path: r.path, kind: 'script', language: languageOfPath(r.path.toLowerCase()), bytes: r.data.length, sha256: await sha256Hex(r.data), source: utf8.decode(r.data) });
       continue;
     }
     const text = utf8.decode(r.data);
@@ -794,7 +892,7 @@ async function scriptsOfRecords(records) {
     // Code that could not be read out of its TOML is read as the whole file, so nothing in it goes unread.
     const source = inline.kind === 'code' ? inline.source : text;
     const bytes = new TextEncoder().encode(source);
-    out.push({ path: `${r.path}#script`, language: inline.language || 'luau', bytes: bytes.length, sha256: await sha256Hex(bytes), source });
+    out.push({ path: `${r.path}#script`, kind: 'script', language: inline.language || 'luau', bytes: bytes.length, sha256: await sha256Hex(bytes), source });
   }
   return out;
 }

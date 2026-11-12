@@ -55,11 +55,11 @@ const b11Of = t => [...t.articles.system, ...t.articles.signals].filter(a => a.a
 
 // ── the Code ────────────────────────────────────────────────────────────────
 
-test('the Code (v2.4, which carries v2.2) is anchored by its hash, with B11 in the founder\'s words and adult_21 as the top band', () => {
-  assert.equal(POLICY_VERSION, '2.4');
+test('the Code (v2.5, which carries v2.2) is anchored by its hash, with B11 in the founder\'s words and adult_21 as the top band', () => {
+  assert.equal(POLICY_VERSION, '2.5');
   assert.equal('sha256:' + createHash('sha256').update(GUARDIAN_POLICY_TEXT).digest('hex'), POLICY_HASH_ANCHORED);
-  assert.equal(POLICY_HASH_ANCHORED, 'sha256:53e1204bc18506f099ac7fec69274dd5a47010432364eac01913026070f294e4');
-  assert.match(GUARDIAN_POLICY_TEXT, /^# Eustress Guardian Code v2\.4\n\*\*Version:\*\* 2\.4\n/);
+  assert.equal(POLICY_HASH_ANCHORED, 'sha256:e5c1cb8e6a0d53b54ad1eb4e5e8bbba80b18ed16eb6fb0780a712f60e0593c44');
+  assert.match(GUARDIAN_POLICY_TEXT, /^# Eustress Guardian Code v2\.5\n\*\*Version:\*\* 2\.5\n/);
   assert.match(GUARDIAN_POLICY_TEXT, /\n- v2\.2 \(founder direction, 2026-10-08\): /);
   assert.ok(GUARDIAN_POLICY_TEXT.includes('- **B11. Hard drugs.** *No hard drugs, ever.* Showing the use, sale, making or glamorising of opioids outside medical care, cocaine or crack, methamphetamine, or cannabis. Not B11: medical care (a nurse giving prescribed morphine); overdose first aid (naloxone); the science of addiction, its treatment and its prevention, taught accurately, rated `mature_17`. Psychedelics (psilocybin, LSD, DMT, mescaline, MDMA and ketamine) are not B11; showing their use is rated `adult_21`.\n'));
   assert.ok(GUARDIAN_POLICY_TEXT.includes('- `adult_21`: alcohol and tobacco, and showing the use of psychedelics. Shown only to an account that has turned on Adult content and whose verified age is 21 or over.'));
@@ -75,13 +75,13 @@ test('the Code (v2.4, which carries v2.2) is anchored by its hash, with B11 in t
   assert.match(GUARDIAN_POLICY_TEXT, /B11 is never a feature to remove: a Space whose subject is hard drugs is rejected, and a single removable hard-drug prop in a Space that otherwise qualifies is still B11\./);
   assert.match(GUARDIAN_POLICY_TEXT, /`review_schema`, 2 for this Code/);
   assert.equal(GUARDIAN_POLICY_TEXT.includes(EM_DASH), false);
-  assert.match(MODERATION_PLAYBOOK_TEXT, /^# Eustress Moderation Playbook v2\.4/);
+  assert.match(MODERATION_PLAYBOOK_TEXT, /^# Eustress Moderation Playbook v2\.5/);
   assert.match(MODERATION_PLAYBOOK_TEXT, /\| B11 \| `hard_drug_depiction`/);
   assert.equal(MODERATION_PLAYBOOK_TEXT.includes(EM_DASH), false);
   assert.equal(REVIEW_SCHEMA, 2);
   assert.deepEqual(RATINGS, ['all_ages', 'ages_10', 'teen_13', 'mature_17', 'adult_18', 'adult_21']);
   assert.deepEqual(JUDGE_OUTPUT_SCHEMA.properties.rating_floor.enum, RATINGS);
-  assert.deepEqual(JUDGE_OUTPUT_SCHEMA.properties.policy_version.enum, ['2.4']);
+  assert.deepEqual(JUDGE_OUTPUT_SCHEMA.properties.policy_version.enum, ['2.5']);
   assert.ok(GROUP_B.includes('B11'));
 });
 

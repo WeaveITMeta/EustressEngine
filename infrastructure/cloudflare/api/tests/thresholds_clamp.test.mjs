@@ -61,7 +61,7 @@ test('R-6: lease_seconds is at least 30 (and outlasts the judge, N-1), and each 
   assert.equal((await t({ lease_seconds: 29, judge_timeout_ms: 1 })).lease_seconds, DEFAULT_THRESHOLDS.lease_seconds, 'below the floor');
   // Code v2.4: the lease outlasts every bounded step a run takes (LEASED_STEPS): the judge, a script reader call, a share of the
   // extraction.
-  assert.equal((await t({ lease_seconds: 70, judge_timeout_ms: 1000, reader_timeout_ms: 1000, scripts_extract_budget_ms: 1000 })).lease_seconds, 70, 'above the floor and every leased step plus its margin');
+  assert.equal((await t({ lease_seconds: 70, judge_timeout_ms: 1000, reader_timeout_ms: 1000, scripts_extract_budget_ms: 1000, tick_extract_budget_ms: 1000 })).lease_seconds, 70, 'above the floor and every leased step plus its margin');
   assert.equal((await t({ lease_seconds: 70, judge_timeout_ms: 1000 })).lease_seconds, DEFAULT_THRESHOLDS.lease_seconds, 'the default reader bound is longer than 70 s');
   const crossed = await t({ guest_chat_refuse: 0.9, guest_chat_high: 0.6 });
   assert.deepEqual([crossed.guest_chat_refuse, crossed.guest_chat_high], [DEFAULT_THRESHOLDS.guest_chat_refuse, DEFAULT_THRESHOLDS.guest_chat_high], 'the guest chat pair');

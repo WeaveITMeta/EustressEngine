@@ -172,7 +172,7 @@ test('the judge is told whether the author gave tags, and the Code tells it what
   assert.equal(summary.listing.author_gave_tags, false);
   assert.equal('genre' in summary.listing, false);
   assert.match(GUARDIAN_POLICY_TEXT, /`suggested_tags` is always present\. Fill it only when the case summary says the author gave no tags/);
-  assert.match(GUARDIAN_POLICY_TEXT, /^# Eustress Guardian Code v2\.4/);
+  assert.match(GUARDIAN_POLICY_TEXT, /^# Eustress Guardian Code v2\.5/);
 });
 
 // ── the verdict rules ───────────────────────────────────────────────────────

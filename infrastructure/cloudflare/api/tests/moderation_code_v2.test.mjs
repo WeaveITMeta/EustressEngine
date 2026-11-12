@@ -188,9 +188,12 @@ test('rule 4: a B9 citation at 0.6 with T3 at 0 is rejected by rule 4, naming th
   assert.deepEqual([d.outcome, last(d).test, last(d).rule], ['reject', 'lesson', 4]);
 });
 
-test('rule 4: T4 at 1 with the statement present is rejected (Tower of Hell: a climb, a timer, a real-world theme as decoration)', () => {
+test('rule 4 (v2.5): T4 at 1 with the statement present is not yet under rule 7, with the judge\'s edit (Tower of Hell: a climb, a timer, a real-world theme as decoration)', () => {
   const d = decide({}, { scores: { real_world: 1 }, suggested_edit_to_publish: 'Connect the climb to something real.' });
-  assert.deepEqual([d.outcome, last(d).test, last(d).label, last(d).rule], ['reject', 'real_world', 'T4', 4]);
+  assert.deepEqual([d.outcome, last(d).test, last(d).label, last(d).rule, d.changes, d.suggested_edit], ['changes_requested', 'real_world', 'T4', 7, ['test_real_world'], 'Connect the climb to something real.']);
+  assert.equal(decide({}, { scores: { real_world: 0 } }).outcome, 'reject', 'T4 at 0 still rejects');
+  const two = decide({}, { scores: { real_world: 1, lesson: 1 } });
+  assert.deepEqual([two.outcome, last(two).rule], ['reject', 5], 'rule 5: two tests at 1 still reject');
 });
 
 test('rule 4 needs the statement present: T4 at 1 with no statement is not yet, naming the test and the statement', () => {
@@ -525,7 +528,8 @@ test('a rejection names the article or test the author has to change, and no cri
   const b1 = decide(withSystem(sys('B1', 'pursuing_entity')));
   const view = authorView({ status: 'rejected', decision: { reasons: b1.reasons, lane: b1.lane } }, {});
   assert.deepEqual(view.reasons.map(r => r.category), ['code_B1']);
-  const t4 = decide({}, { scores: { real_world: 1 } });
+  const t4 = decide({}, { scores: { real_world: 0 } });
+  assert.equal(t4.outcome, 'reject');
   assert.deepEqual(authorView({ status: 'rejected', decision: { reasons: t4.reasons, lane: t4.lane } }, {}).reasons.map(r => r.category), ['test_real_world']);
   for (const d of [b1, t4, decide({ statement: NO_STATEMENT }, { statement_check: 'missing' })]) for (const r of d.reasons) assert.equal('criterion' in r, false);
 });
@@ -538,10 +542,12 @@ test('moderation_reject citing a Code article or a test shows that copy to the a
   assert.deepEqual(authorView(JSON.parse(e.kv.get(`modcase:${SIM}`)), {}).reasons.map(r => r.category), ['code_B5']);
 });
 
-test('the Code and the playbook both name v2.4 and the same rules', () => {
+test('the Code and the playbook both name v2.5 and the same rules', () => {
   assert.match(GUARDIAN_POLICY_TEXT, /The first rule that applies decides/);
-  assert.match(GUARDIAN_POLICY_TEXT, /^# Eustress Guardian Code v2\.4/);
-  assert.match(MODERATION_PLAYBOOK_TEXT, /Guardian Code v2\.4/);
+  assert.match(GUARDIAN_POLICY_TEXT, /^# Eustress Guardian Code v2\.5/);
+  assert.match(MODERATION_PLAYBOOK_TEXT, /Guardian Code v2\.5/);
+  assert.match(GUARDIAN_POLICY_TEXT, /4\. Any test at 0: \*\*rejected\*\*/);
+  assert.match(MODERATION_PLAYBOOK_TEXT, /\| judge \| 4 \| any test at 0 \|/);
   assert.doesNotMatch(MODERATION_PLAYBOOK_TEXT, /decision C|criterion \d|rejected_low_effort/);
   assert.equal(MODERATION_PLAYBOOK_TEXT.includes(EM_DASH), false);
   assert.equal(Object.keys(buildJevQuestions()).filter(k => k in ARTICLE_SIGNALS).length, Object.keys(ARTICLE_SIGNALS).length);
@@ -639,7 +645,7 @@ test('pipeline control: a qualifying Space is approved, with featured left to a 
   await publish(env);
   const rec = await runModerationCase(SIM, env, pipelineDeps(judgeAnswer({ featured_candidate: true, tests: tests({ build_quality: 3, lesson: 3, real_world: 3 }) })));
   assert.equal(rec.status, 'approved');
-  assert.deepEqual([rec.decision.featured, rec.decision.featured_candidate, rec.policy_version, rec.review_schema], [false, true, '2.4', 2]);
+  assert.deepEqual([rec.decision.featured, rec.decision.featured_candidate, rec.policy_version, rec.review_schema], [false, true, '2.5', 2]);
   assert.equal(JSON.parse(env.SOCIAL.m.get(`sim:${SIM}`)).moderation.featured, false);
 });
 

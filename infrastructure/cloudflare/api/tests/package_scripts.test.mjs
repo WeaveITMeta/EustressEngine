@@ -9,6 +9,7 @@ import { createHash } from 'node:crypto';
 import zlib from 'node:zlib';
 import {
   extractPackageScripts, readPackageScripts, inlineScriptOf, chunkKeyOf, SCRIPT_EXTENSIONS, MAX_SCRIPT_BYTES, MAX_CHUNK_SCRIPT_BYTES,
+  SUPPORT_EXTENSIONS, MAX_SUPPORT_FILE_BYTES, MAX_CHUNK_SUPPORT_BYTES, EXTRACTOR_VERSION, MAX_CHUNK_FILES, RECORD_COST_BYTES,
 } from '../src/package_scripts.mjs';
 import { chunkKey, checkWorldManifest } from '../src/world.mjs';
 
@@ -192,7 +193,11 @@ test('reads every script from version 1 and version 2 chunks, and nothing else',
   assert.equal(r.chunks_total, 2);
   assert.equal(r.chunks_read, 2);
   assert.equal(r.scripts_total, 6);
-  const scripts = await readPackageScripts(env, sim);
+  const all = await readPackageScripts(env, sim);
+  // Code v2.5: notes.txt is a supporting file, read beside the scripts and marked as one; the mesh and the bare record are not read.
+  assert.deepEqual(all.filter((s) => s.kind === 'support').map((s) => [s.path, s.language, s.source]), [['Main/Workspace/notes.txt', 'txt', 'print("not a script")']]);
+  const scripts = all.filter((s) => s.kind === 'script');
+  assert.equal(all.length, 7);
   assert.deepEqual(scripts.map((s) => [s.path, s.language, s.audience, s.space]), [
     ['Main/Lib/Old.LUA', 'luau', 'players', 'Main'],
     ['Main/ServerScriptService/Boot.luau', 'luau', 'players', 'Main'],
@@ -275,7 +280,7 @@ test('nothing is written outside the package_scripts store, and nothing under ch
   await readPackageScripts(env, sim);
   const written = b.puts.slice(before);
   assert.ok(written.length > 0);
-  for (const key of written) assert.ok(key.startsWith(`universes/${SIM}/moderation/package_scripts/${sim.world.manifest_sha256}/`), key);
+  for (const key of written) assert.ok(key.startsWith(`universes/${SIM}/moderation/package_scripts/v${EXTRACTOR_VERSION}/${sim.world.manifest_sha256}/`), key);
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -648,4 +653,154 @@ test('the key comes from the manifests\' bytes when the record does not carry th
   const r = await extractPackageScripts(env, bare);
   assert.equal(r.complete, true);
   assert.equal(r.key, sha);
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Supporting files (Code v2.5)
+// ─────────────────────────────────────────────────────────────────────────────
+
+test('Code v2.5: supporting files (.py .json .md .txt .csv, any case) are read beside the scripts, marked kind support; .toml records are not', async () => {
+  const b = bucket();
+  const env = { SCENES: b };
+  assert.deepEqual(SUPPORT_EXTENSIONS, ['.py', '.json', '.md', '.txt', '.csv']);
+  const sim = await listing(b, SIM, {
+    spaces: [{
+      name: 'Station',
+      chunks: [
+        v2([
+          ['src/station_generator/generate.py', 'def build(words):\n    return rings(words)\n'],
+          ['src/station_generator/WORDS.JSON', '["light","water","time"]'],
+          ['src/station_generator/README.md', '# Super Station generator'],
+          ['data/rings.CSV', 'ring,cubes\n1,10\n'],
+          ['notes.Txt', 'measured by hand'],
+          ['Workspace/Cube/_instance.toml', '[metadata]\nclass_name = "Part"\n'],
+          ['config.toml', 'key = "value"'],
+          ['ServerScriptService/Trace.luau', 'trace()'],
+        ]),
+      ],
+    }],
+  });
+  const r = await extractPackageScripts(env, sim);
+  assert.equal(r.complete, true, JSON.stringify(r.errors));
+  assert.equal(r.extractor, EXTRACTOR_VERSION);
+  assert.equal(r.scripts_total, 1, 'supporting files are not counted as scripts');
+  assert.equal(r.support_total, 5);
+  assert.equal(r.support_unread, 0);
+  const all = await readPackageScripts(env, sim);
+  assert.deepEqual(all.filter((s) => s.kind === 'script').map((s) => s.path), ['Station/ServerScriptService/Trace.luau']);
+  assert.deepEqual(all.filter((s) => s.kind === 'support').map((s) => [s.path, s.language]), [
+    ['Station/data/rings.CSV', 'csv'],
+    ['Station/notes.Txt', 'txt'],
+    ['Station/src/station_generator/README.md', 'md'],
+    ['Station/src/station_generator/WORDS.JSON', 'json'],
+    ['Station/src/station_generator/generate.py', 'py'],
+  ]);
+  assert.equal(all.find((s) => s.path.endsWith('generate.py')).source, 'def build(words):\n    return rings(words)\n', 'read in full');
+  assert.equal(r.support_distinct_bytes, all.filter((s) => s.kind === 'support').reduce((n, s) => n + s.bytes, 0));
+});
+
+test('Code v2.5: a supporting file over 1 MiB, or past a chunk\'s 8 MiB share, is listed with its size as not read, never an error and never dropped', async () => {
+  const b = bucket();
+  const env = { SCENES: b };
+  const big = 'x'.repeat(MAX_SUPPORT_FILE_BYTES + 1);
+  const near = 'y'.repeat(MAX_SUPPORT_FILE_BYTES - 10);
+  const fill = [];
+  for (let i = 0; i < Math.floor(MAX_CHUNK_SUPPORT_BYTES / near.length); i++) fill.push([`d/f${String(i).padStart(2, '0')}.json`, near + String(i).padStart(2, '0')]);
+  const sim = await listing(b, SIM, {
+    spaces: [{ name: 'S', chunks: [v2([['huge.csv', big], ['A.luau', 'a()'], ...fill, ['d/zz_last.md', near + 'zz']])] }],
+  });
+  const r = await extractPackageScripts(env, sim);
+  assert.equal(r.complete, true, JSON.stringify(r.errors));
+  assert.deepEqual(r.errors, []);
+  const all = await readPackageScripts(env, sim);
+  const huge = all.find((s) => s.path === 'S/huge.csv');
+  assert.deepEqual([huge.kind, huge.unread, huge.bytes, huge.source], ['support', 'over_file_limit', MAX_SUPPORT_FILE_BYTES + 1, null]);
+  const last = all.find((s) => s.path === 'S/d/zz_last.md');
+  assert.deepEqual([last.unread, last.source], ['over_chunk_limit', null], 'past the chunk share: listed, not read');
+  assert.ok(all.filter((s) => s.kind === 'support' && !s.unread).length >= 7);
+  assert.equal(r.support_unread, 2);
+  assert.equal(all.find((s) => s.path === 'S/A.luau').source, 'a()');
+});
+
+test('Code v2.5: the extractor version names the store, so a package extracted by the earlier extractor is extracted again', async () => {
+  const b = bucket();
+  const env = { SCENES: b };
+  const sim = await listing(b, SIM, { spaces: [{ name: 'S', chunks: [v1([['A.luau', 'a()'], ['tools/solver.py', 'solve()']])] }] });
+  // What extractor 1 left: a complete state with the script and no supporting file, at the unversioned store.
+  const oldDir = `universes/${SIM}/moderation/package_scripts/${sim.world.manifest_sha256}/`;
+  await b.put(`${oldDir}state.json`, JSON.stringify({ v: 1, key: sim.world.manifest_sha256, chunks_total: 1, cursor: 1, failed: {}, parts: [], seen: [], scripts_total: 1, script_bytes: 3, distinct_scripts: 1, distinct_bytes: 3, complete: true }));
+  const before = b.chunkReads();
+  const r = await extractPackageScripts(env, sim);
+  assert.equal(b.chunkReads() - before, 1, 'the chunk is read again');
+  assert.equal(r.support_total, 1);
+  assert.ok((await readPackageScripts(env, sim)).some((s) => s.path === 'S/tools/solver.py' && s.source === 'solve()'));
+});
+
+test('Code v2.5: maxInflatedBytes stops a call starting a new chunk once the chunks read have inflated past it (the tick\'s CPU guard)', async () => {
+  const b = bucket();
+  const env = { SCENES: b };
+  const blob = new Uint8Array(100_000).fill(7);
+  const chunks = [0, 1, 2, 3, 4].map((i) => v2([[`S${i}.luau`, `s${i}()`], [`blob${i}.bin`, blob]]));
+  const sim = await listing(b, SIM, { spaces: [{ name: 'S', chunks }] });
+  const r = await extractPackageScripts(env, sim, { maxInflatedBytes: 150_000 });
+  assert.equal(r.chunks_read, 2, 'the second chunk passes the bound, so a third is not started');
+  assert.equal(r.complete, false);
+  const all = await extractPackageScripts(env, sim, { maxInflatedBytes: 1 });
+  assert.equal(all.chunks_read, 3, 'a call always reads at least one chunk');
+});
+
+test('Code v2.5 review: a chunk of 200,000 tiny distinct .txt files is an error at the 20,000th file, never a parse of the rest', async () => {
+  const b = bucket({ piece: 1 << 20 });
+  const env = { SCENES: b };
+  const recs = [];
+  for (let i = 0; i < 200_000; i++) recs.push([`d/${i}.txt`, `${i}\n`]);
+  const sim = await listing(b, SIM, { spaces: [{ name: 'Main', chunks: [v2(recs)] }] });
+  assert.equal(MAX_CHUNK_FILES, 20_000);
+  const r = await extractPackageScripts(env, sim, { maxInflatedBytes: 1e9 });
+  assert.equal(r.complete, false);
+  assert.equal(r.errors.length, 1);
+  assert.match(r.errors[0].reason, /the chunk holds over 20000 script and supporting files/);
+  assert.equal(r.support_total, 0, 'nothing of the chunk is kept');
+  // Scripts count toward the cap too.
+  const b2 = bucket();
+  const many = [];
+  for (let i = 0; i <= MAX_CHUNK_FILES; i++) many.push([`s/${i}.luau`, `return ${i}`]);
+  const sim2 = await listing(b2, SIM, { spaces: [{ name: 'Main', chunks: [v2(many)] }] });
+  assert.match((await extractPackageScripts({ SCENES: b2 }, sim2)).errors[0].reason, /over 20000 script and supporting files/);
+});
+
+test('Code v2.5 review: the CPU guard counts what a failed chunk inflated, and every record, toward maxInflatedBytes', async () => {
+  // Two chunks that each inflate 20 MB and then fail (they declare a record they do not hold).
+  const b = bucket({ piece: 1 << 20 });
+  const bad = (n) => v2([[`mesh${n}.bin`, Buffer.alloc(20 * 1024 * 1024, n)]], { count: 2 });
+  const sim = await listing(b, SIM, { spaces: [{ name: 'Main', chunks: [bad(1), bad(2)] }] });
+  const r = await extractPackageScripts({ SCENES: b }, sim, { maxInflatedBytes: 15 * 1024 * 1024 });
+  assert.equal(b.chunkReads(), 1, 'the failed chunk\'s 20 MB counted, so the second is not started');
+  assert.equal(r.errors.length, 1);
+  // Many tiny records the review does not collect: each costs RECORD_COST_BYTES.
+  const b2 = bucket({ piece: 1 << 20 });
+  const tiny = (n) => v2(Array.from({ length: 5000 }, (_, i) => [`m/${n}_${i}.bin`, 'x']));
+  const sim2 = await listing(b2, SIM, { spaces: [{ name: 'Main', chunks: [tiny(1), tiny(2)] }] });
+  assert.ok(5000 * RECORD_COST_BYTES > 10 * 1024 * 1024);
+  const r2 = await extractPackageScripts({ SCENES: b2 }, sim2, { maxInflatedBytes: 10 * 1024 * 1024 });
+  assert.equal(r2.chunks_read, 1, 'five thousand records count past the 10 MB bound');
+});
+
+test('Code v2.5 review: scripts and supporting files share one 16 MiB per chunk; scripts win and held supporting files give way', async () => {
+  const mib = 1024 * 1024;
+  const supportFiles = Array.from({ length: 7 }, (_, i) => [`docs/s${i}.md`, `${i}`.repeat(mib - 16)]);
+  const scripts = [['A.luau', '-- a\n'.repeat((6 * mib) / 5)], ['B.luau', '-- b\n'.repeat((6 * mib) / 5)]];
+  for (const order of [[...supportFiles, ...scripts], [...scripts, ...supportFiles]]) {
+    const b = bucket({ piece: 1 << 20 });
+    const sim = await listing(b, SIM, { spaces: [{ name: 'S', chunks: [v2(order)] }] });
+    const r = await extractPackageScripts({ SCENES: b }, sim);
+    assert.equal(r.complete, true, JSON.stringify(r.errors));
+    const all = await readPackageScripts({ SCENES: b }, sim);
+    const held = all.filter((s) => typeof s.source === 'string').reduce((n, s) => n + s.bytes, 0);
+    assert.ok(held <= MAX_CHUNK_SCRIPT_BYTES, `held ${held}`);
+    assert.equal(all.filter((s) => s.kind === 'script').length, 2, 'every script read');
+    const unread = all.filter((s) => s.unread === 'over_chunk_limit');
+    assert.ok(unread.length >= 3, `supporting files past the shared bound are listed (${unread.length})`);
+    assert.equal(all.filter((s) => s.kind === 'support').length, 7, 'none dropped');
+  }
 });

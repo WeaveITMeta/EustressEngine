@@ -151,8 +151,8 @@ overturn records.
 
 ### Constitution status
 
-**v2.3 is authored and stored**: `docs/architecture/AI_GUARDIAN_POLICY_v1.0.md`, the Eustress
-Guardian Code v2.3 (filename kept stable; internal `Version:` field is the source of truth). v1.0
+**v2.5 is authored and stored**: `docs/architecture/AI_GUARDIAN_POLICY_v1.0.md`, the Eustress
+Guardian Code v2.5 (filename kept stable; internal `Version:` field is the source of truth). v1.0
 harm lane authored by Grok 4.5 under founder direction (2026-07-12); v1.1 quality lane and v1.2
 spatial-intelligence review requirement added same day per the founder's decisions below; v1.3
 (2026-10-08) three tests and a person for every game. v2.0 (2026-10-08, founder direction):
@@ -190,7 +190,15 @@ article; a copy is rejected; a game is listed like any Space); nothing is listed
 script players receive was read in full from the published package; the rating questionnaire is
 not required; the judge drafts a missing Qualification Statement; only the legal lane and appeals
 go to a person, and a transient failure of the AI is retried by the system.
-**Policy hash:** `sha256:53e1204bc18506f099ac7fec69274dd5a47010432364eac01913026070f294e4`
+v2.5 (2026-11-11, founder direction: "it should allow for super complicated mind maps to be
+uploaded to Eustress"): T4 is met by use (a working tool a visitor brings their own input to and
+leaves with a usable result), and a map of real knowledge qualifies when its structure ships in
+the Space, the author's own framework needing no external citation; T4 at 1 with the statement
+present is "not yet" with the judge's change, no longer a rejection; the review reads the
+supporting files a package ships (.py, .json, .md, .txt, .csv), and a file or folder the listing
+says it ships that the package does not hold is "not yet", naming it; a rejection decided only by
+the retired T4 rule is reviewed once more under v2.5.
+**Policy hash:** `sha256:e5c1cb8e6a0d53b54ad1eb4e5e8bbba80b18ed16eb6fb0780a712f60e0593c44`
 (computed over the stored file with its line endings normalized to LF, as the Worker ships it;
 recorded here because a self-referential hash inside the file would change the hash). Covers:
 Part 0 (purpose, principles and who reviews), the spatial intelligence review requirement

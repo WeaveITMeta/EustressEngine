@@ -11,6 +11,8 @@
 //   - a cool listing is listed, a sloppy one rejected, an illegal one quarantined;
 //   - the five-minute cron runs only the moderation resumes;
 //   - the Code's text is the one anchored.
+//   - Code v2.5: T4 by use, rule 4 without "T4 at 1", supporting files, claimed files, the tick's larger share, and the one
+//     rerun of a rejection the retired rule decided.
 //
 // Source note: plain ASCII only.
 
@@ -24,6 +26,7 @@ import {
   READER_OUTPUT_SCHEMA, JUDGE_OUTPUT_SCHEMA, SECOND_OPINION_EFFORT, DEFAULT_THRESHOLDS, POLICY_HASH_ANCHORED, POLICY_VERSION, MODERATION_TICK_CRON,
   statementDraftOf, extractQualificationStatement, CODE_TESTS, LEASED_STEPS, LEASE_MARGIN_MS, thresholdsFrom, INFRASTRUCTURE_HOLD_CODES,
   readerRequest, TICK_SWEEP_CURSOR_KEY, MODERATION_TICK_BUDGET_MS,
+  claimedFiles, claimedFilesCheck, retiredRejection, RETIRED_T4_POLICY, AUTHOR_COPY, frameRule,
 } from '../src/moderation.mjs';
 import { GUARDIAN_POLICY_TEXT } from '../src/generated/policy_text.mjs';
 import { fakeClaude, questionnaireAnswers, apiError } from './helpers/claude_fake.mjs';
@@ -139,7 +142,7 @@ function packageOf(scripts, { completeAfter = 1, errors = null } = {}) {
       callsMade += 1;
       const complete = callsMade >= completeAfter;
       const err = typeof errors === 'function' ? errors(callsMade) : errors;
-      return { supported: true, complete: complete && !err?.length, key: 'k1', chunks_total: 10, chunks_read: complete ? 10 : 4, scripts_total: scripts.length, script_bytes: scripts.reduce((n, s) => n + s.source.length, 0), errors: err || [] };
+      return { supported: true, complete: complete && !err?.length, key: 'k1', chunks_total: 10, chunks_read: complete ? 10 : 4, scripts_total: scripts.length, script_bytes: scripts.reduce((n, s) => n + (s.source || '').length, 0), errors: err || [] };
     },
     readPackageScripts: async () => scripts.map(s => ({ ...s })),
   };
@@ -567,7 +570,7 @@ test('the five-minute cron runs only the moderation resumes; the hourly tick run
 test('the lease outlasts every bounded step a run takes, each renewed at its checkpoint', () => {
   const t = thresholdsFrom({});
   for (const k of LEASED_STEPS) assert.ok(t.lease_seconds * 1000 >= t[k] + LEASE_MARGIN_MS, k);
-  assert.deepEqual([...LEASED_STEPS].sort(), ['judge_timeout_ms', 'reader_timeout_ms', 'scripts_extract_budget_ms']);
+  assert.deepEqual([...LEASED_STEPS].sort(), ['judge_timeout_ms', 'reader_timeout_ms', 'scripts_extract_budget_ms', 'tick_extract_budget_ms'].sort());
   // A reader bound the lease cannot cover falls back to its default.
   const bad = thresholdsFrom({ MODERATION_THRESHOLDS: JSON.stringify({ reader_timeout_ms: 900000 }) });
   assert.equal(bad.reader_timeout_ms, DEFAULT_THRESHOLDS.reader_timeout_ms);
@@ -589,8 +592,8 @@ test('the planner never cuts a script it can hold, and budgets by characters at 
 
 // -- the Code ------------------------------------------------------------------------------------------------------------------
 
-test('the Code is v2.4, its text hashes to the anchor, and the anchor is the one DECENTRALIZATION_PLAN.md section 5 records', () => {
-  assert.equal(POLICY_VERSION, '2.4');
+test('the Code is v2.5, its text hashes to the anchor, and the anchor is the one DECENTRALIZATION_PLAN.md section 5 records', () => {
+  assert.equal(POLICY_VERSION, '2.5');
   assert.equal('sha256:' + createHash('sha256').update(GUARDIAN_POLICY_TEXT).digest('hex'), POLICY_HASH_ANCHORED);
   const plan = readFileSync(new URL('../../../../docs/architecture/DECENTRALIZATION_PLAN.md', import.meta.url), 'utf8');
   assert.ok(plan.includes(`**Policy hash:** \`${POLICY_HASH_ANCHORED}\``));
@@ -758,7 +761,14 @@ test('the five-minute tick extracts in small checkpointed shares and keeps its o
   await runModerationCase(SIM, env, d);
   assert.equal(seen[0].budgetMs, DEFAULT_THRESHOLDS.scripts_extract_budget_ms, 'a run of its own takes the larger share');
   await resumeModeration(env, d);
-  assert.deepEqual([seen[1].budgetMs, seen[1].checkpointChunks, seen[1].maxChunks], [15000, 10, 10], 'the tick takes a small one, checkpointed every 10 chunks');
+  // Code v2.5: a share that reads a ~650-chunk, ~480 MB package in about 30 minutes, checkpointed every 10 chunks, with the
+  // inflated-byte bound as the CPU guard, and never past the tick's own wall budget.
+  assert.deepEqual([seen[1].checkpointChunks, seen[1].maxChunks, seen[1].maxBytes, seen[1].maxInflatedBytes], [10, 120, 150_000_000, 1_000_000_000], 'the tick takes a share sized for a large package, its CPU guard at 1 GB inflated');
+  assert.ok(seen[1].budgetMs <= 150_000 && seen[1].budgetMs > 140_000, `wall share ${seen[1].budgetMs}`);
+  assert.ok(Math.ceil(650 / seen[1].maxChunks) * 5 <= 35 && Math.ceil(480e6 / seen[1].maxBytes) * 5 <= 35, 'about 30 minutes of ticks for 650 chunks and 480 MB');
+  // A tick with little of its wall budget left gives the extraction only what is left.
+  await resumeModeration(env, d, { budgetMs: 20_000 });
+  assert.ok(seen[2].budgetMs <= 20_000, `the share stops at the tick's deadline (${seen[2].budgetMs})`);
   assert.equal(TICK_SWEEP_CURSOR_KEY, 'modsweep:cursor:tick');
   assert.ok(MODERATION_TICK_BUDGET_MS < 4 * 60 * 1000);
 });
@@ -846,4 +856,275 @@ test('after the API says the judge request is too long, the refill is sized stri
   const rec2 = await runModerationCase(SIM, env2, d2);
   assert.deepEqual([rec2.status, rec2.scripts_review.reports_only, rec2.scripts_review.read_in_full_by_judge, rec2.scripts_review.coverage_percent], ['approved', true, 0, 100]);
   assert.equal(refusals, 2, 'the full request and the strict refill were refused; the reports-only request was not');
+});
+
+// -- Code v2.5 (McKale, 2026-11-11: "it should allow for super complicated mind maps to be uploaded to Eustress") -------------
+
+// Listing c9caf0e2 "The Super Station" as production saw it: a working question-decomposition tool on the author's own map.
+const STATION_DESCRIPTION = [
+  'The Super Station: type a question and it traces a reading through 260 word cubes and 25 rings.',
+  'Category: Tool',
+  'Objective: Type a question and trace how the station decomposes it into the concepts it rests on.',
+  'Lesson: How a question breaks into the concepts it depends on, ring by ring.',
+  'Real-world link: The author\'s own Super Station knowledge map, built by hand from 2020 to 2026 and measured part by part into this Space; the word list, the generator and a reference solver ship with it in src/station_generator.',
+].join('\n');
+const support = (space, path, source, extra = {}) => ({ ...script(space, path, source), kind: 'support', language: path.slice(path.lastIndexOf('.') + 1).toLowerCase(), ...extra });
+const STATION_SCRIPTS = [
+  script('Station', 'Station/ServerScriptService/Trace.luau', 'local reading = trace(question, rings)\nreturn reading'),
+  support('Station', 'Station/src/station_generator/words.json', '["light","water","time","orbit"]'),
+  support('Station', 'Station/src/station_generator/generate.py', 'def build(words):\n    return [ring(w) for w in words]\n'),
+  support('Station', 'Station/src/station_generator/solver.py', 'def solve(question, rings):\n    return trace(question, rings)\n'),
+];
+// c9caf0e2's verdict: T1 to T3 at 2, T4 at 1 for "no external source named", the statement matching, confidence 0.78.
+const T4_EVIDENCE = 'The real-world link cites the author\'s own hand-built knowledge map (2020 to 2026) with no external source named; the connection is the author\'s own framework.';
+const stationVerdict = (t4 = 1, extra = {}) => verdict({ scores: { real_world: t4 }, confidence: 0.78, suggested_edit_to_publish: t4 === 1 ? 'Show a visitor\'s own question traced to a usable reading in the screenshots, and say what a visitor leaves with in the Real-world link.' : null, ...extra });
+
+test('Code v2.5: c9caf0e2\'s shape (T1 to T3 at 2, T4 at 1, statement present) is not yet with the judge\'s edit and the T4 copy, never a rejection', async () => {
+  // The pure rule first: rule 4 no longer rejects T4 at 1; rule 7 names it.
+  const triage = { outcome: 'judge', reasons: [], lane: 'judge', rating: 'all_ages', statement: { present: true, category: 'Tool' } };
+  const judge = stationVerdict(1);
+  judge.tests.real_world.evidence = T4_EVIDENCE;
+  const pure = decideFinal({ triage, judge, thresholds: DEFAULT_THRESHOLDS, reader: [] });
+  assert.equal(pure.outcome, 'changes_requested');
+  assert.deepEqual(pure.changes, ['test_real_world']);
+  assert.deepEqual(pure.reasons.filter(r => r.code === 'test_real_world').map(r => [r.rule, r.score, r.action]), [[7, 1, 'changes_requested']]);
+  assert.match(pure.suggested_edit, /visitor's own question/);
+  // T4 at 0, any other test at 0, and two tests at 1 still reject.
+  assert.equal(decideFinal({ triage, judge: verdict({ scores: { real_world: 0 } }), thresholds: DEFAULT_THRESHOLDS }).outcome, 'reject');
+  assert.equal(decideFinal({ triage, judge: verdict({ scores: { objective: 0 } }), thresholds: DEFAULT_THRESHOLDS }).outcome, 'reject');
+  const two = decideFinal({ triage, judge: verdict({ scores: { real_world: 1, lesson: 1 } }), thresholds: DEFAULT_THRESHOLDS });
+  assert.deepEqual([two.outcome, two.reasons.filter(r => r.action === 'reject').map(r => r.rule)], ['reject', [5, 5]]);
+
+  // The pipeline, end to end, as production ran it.
+  const env = environment();
+  await publish(env, { description: STATION_DESCRIPTION });
+  const d = deps({ packageScripts: packageOf(STATION_SCRIPTS), judge: () => { const v = stationVerdict(1); v.tests.real_world.evidence = T4_EVIDENCE; return v; } });
+  const rec = await runModerationCase(SIM, env, d);
+  assert.equal(rec.status, 'changes_requested', 'not a rejection');
+  assert.deepEqual(rec.decision.changes, ['test_real_world']);
+  assert.match(rec.decision.suggested_edit, /visitor's own question/);
+  assert.equal((await simOf(env)).moderation.status, 'changes_requested');
+  const view = authorView(rec, await simOf(env));
+  assert.ok(JSON.stringify(view).includes(AUTHOR_COPY.test_real_world.title), 'the author sees the T4 copy');
+  assert.match(AUTHOR_COPY.test_real_world.what_to_change, /tool a visitor uses on their own question or data/);
+});
+
+test('Code v2.5: a working tool on the author\'s own framework can score T4 at 2 and lists; the Code says use connects and the author\'s framework is a source', async () => {
+  assert.match(GUARDIAN_POLICY_TEXT, /\(h\) \*\*Real use\*\*: the Space is a working tool\. A visitor brings their own real input \(a question, data, a plan, a design\) and leaves with a usable result/);
+  assert.match(GUARDIAN_POLICY_TEXT, /\*\*The author's own framework is a legitimate source\*\*: a map or method the author built is not unverifiable for lacking an external citation/);
+  assert.match(GUARDIAN_POLICY_TEXT, /A map that is only decoration, with nothing a visitor can do with it and no structure you can inspect, is theme only\./);
+  assert.match(GUARDIAN_POLICY_TEXT, /4\. Any test at 0: \*\*rejected\*\*, naming the test and what is missing\.\n5\. Two or more tests at 1: \*\*rejected\*\*/);
+  const env = environment();
+  await publish(env, { description: STATION_DESCRIPTION });
+  const d = deps({ packageScripts: packageOf(STATION_SCRIPTS), judge: () => stationVerdict(2, { confidence: 0.86 }) });
+  const rec = await runModerationCase(SIM, env, d);
+  assert.equal(rec.status, 'approved');
+  assert.deepEqual(rec.claimed_files, { claimed: ['src/station_generator'], missing: [] }, 'the generator the listing names ships');
+  // The judge read the Code with the T4 by use in it (the cached system block).
+  assert.ok(d.calls.judge[0].system[0].text.includes('(h) **Real use**'));
+});
+
+test('Code v2.5: supporting files reach the judge framed under the request\'s marker and labelled, with a list of every one; an unread one never blocks', async () => {
+  const env = environment();
+  await publish(env, { description: STATION_DESCRIPTION });
+  const unread = support('Station', 'Station/src/station_generator/corpus.csv', '', { source: null, bytes: 2_000_000, unread: 'over_file_limit', sha256: null });
+  const d = deps({ packageScripts: packageOf([...STATION_SCRIPTS, unread]) });
+  const rec = await runModerationCase(SIM, env, d);
+  assert.equal(rec.status, 'approved', 'a supporting file not read does not block the listing');
+  const text = judgeText(d.calls.judge[0]);
+  const nonce = /<<<SCRIPT-([0-9a-f]{24}) /.exec(text)[1];
+  for (const s of STATION_SCRIPTS.filter(x => x.kind === 'support')) {
+    assert.ok(text.includes(`kind="support" (a supporting file the author ships) path=${JSON.stringify(s.path)}`), `${s.path} is labelled`);
+    assert.ok(text.includes(`${s.source}\n<<<END-SCRIPT-${nonce} `), `${s.path} is in the request in full, inside its frame`);
+  }
+  assert.match(text, /EVERY SCRIPT AND SUPPORTING FILE IN THE PACKAGE, IN FULL \(4: 1 scripts, 3 supporting files\)/);
+  assert.ok(text.includes(frameRule(nonce)));
+  assert.match(frameRule(nonce), /every supporting file \(its header says kind="support"\)/);
+  // The list: every supporting file, the unread one with its size and why.
+  assert.ok(text.includes('SUPPORTING FILES IN THE PACKAGE'));
+  assert.ok(text.includes(JSON.stringify({ path: 'Station/src/station_generator/corpus.csv', bytes: 2_000_000, read: 'not_read', why: 'over_file_limit' })));
+  // Coverage is on scripts only; the supporting files are counted beside it.
+  const c = rec.scripts_review;
+  assert.deepEqual([c.scripts_total, c.units, c.read_in_full_by_judge, c.coverage_percent, c.support_files, c.support_read_in_full_by_judge, c.support_not_read], [1, 1, 1, 100, 4, 3, 1]);
+});
+
+test('Code v2.5: in reader mode the script reader reads the supporting files too, labelled, and they count inside the review\'s byte cap after the scripts', async () => {
+  const env = environment({ judge_script_tokens: 50, reader_batch_tokens: 1000 });
+  await publish(env, { description: STATION_DESCRIPTION });
+  const d = deps({ packageScripts: packageOf(STATION_SCRIPTS) });
+  const rec = await runModerationCase(SIM, env, d);
+  assert.equal(rec.status, 'approved');
+  const readerText = d.calls.reader.map(b => b.messages[0].content[0].text).join('\n');
+  assert.ok(readerText.includes('kind="support" (a supporting file the author ships) path="Station/src/station_generator/solver.py"'));
+  assert.equal(rec.scripts_review.support_read_in_full_by_reader, 3);
+  // A cap the scripts fit and the supporting files do not: they are listed as not read, and the listing is not settled for them.
+  const env2 = environment({ max_review_script_bytes: STATION_SCRIPTS[0].source.length + 40 });
+  await publish(env2, { description: STATION_DESCRIPTION });
+  const d2 = deps({ packageScripts: packageOf(STATION_SCRIPTS) });
+  const rec2 = await runModerationCase(SIM, env2, d2);
+  assert.equal(rec2.status, 'approved');
+  assert.ok(rec2.scripts.support_not_read >= 2, JSON.stringify(rec2.scripts));
+  assert.ok(judgeText(d2.calls.judge[0]).includes('"why":"over_review_limit"'));
+});
+
+test('Code v2.5: a folder the description says ships and the package does not hold is not yet, naming it; prose with a slash is not a claim', async () => {
+  assert.deepEqual(claimedFiles(STATION_DESCRIPTION), ['src/station_generator']);
+  assert.deepEqual(claimedFiles('Pick and/or drop; input/output; TCP/IP; km/h; 24/7; see https://example.com/src_x/a.py; mail a@b.c'), []);
+  // A claim is a code span, or a path a ships/includes/contains/is-in verb names; a name the prose merely mentions is not one.
+  assert.deepEqual(claimedFiles('Run `tools/solve.py` or README.md, and data/rings.csv.'), ['tools/solve.py']);
+  assert.deepEqual(claimedFiles('It includes README.md, contains data/rings.csv, and the map lives in maps/station; the corpus is stored in `corpus/gutenberg.txt`.'), ['corpus/gutenberg.txt', 'README.md', 'data/rings.csv', 'maps/station']);
+  // The reviewer's false positives (v2.5 review): none is a claim, and none makes a listing not yet.
+  const pkgPaths = ['Main/Workspace/Mind Map/_instance.toml#script', 'Main/src/map.luau', 'Main/data/nodes.json'];
+  for (const prose of [
+    'Compare assets/liabilities on a balance sheet and see equity move.',
+    'A mind map of data/science concepts, from statistics to machine learning.',
+    'Practise the test/train split and cross-validation on your own CSV.',
+    'Full source at github.com/simbuilder/mind_map_tools for anyone who wants it.',
+    'Covers TCP/IP, input/output and read/write locks.',
+    'Built from the ghcn_daily/v3 station records published by NOAA.',
+    'Learn the tools/techniques a project manager uses.',
+    'Export your map as notes.md or a outline.txt file to keep.',
+    'The source ships at github.com/simbuilder/mind_map_tools and is in x.com/simbuilder/tools; the answer is in 3/4 of cases.',
+  ]) assert.deepEqual(claimedFilesCheck(prose, pkgPaths), { claimed: [], missing: [] }, prose);
+  // The real case: flagged when the folder is missing, passes when it ships.
+  const real = 'the word list, the generator and a reference solver ship with it in src/station_generator.';
+  assert.deepEqual(claimedFilesCheck(real, pkgPaths), { claimed: ['src/station_generator'], missing: ['src/station_generator'] });
+  assert.deepEqual(claimedFilesCheck(real, [...pkgPaths, 'Main/src/station_generator/words.json']).missing, []);
+  assert.deepEqual(claimedFilesCheck('ships in src/station_generator', ['Station/src/station_generator/words.json']).missing, []);
+  assert.deepEqual(claimedFilesCheck('ships in src/station_generator', ['Station/src/station_generatorX/words.json']).missing, ['src/station_generator'], 'segment by segment, never a prefix of a name');
+  const env = environment();
+  await publish(env, { description: STATION_DESCRIPTION });
+  const d = deps({ packageScripts: packageOf(STATION_SCRIPTS.filter(s => s.kind !== 'support')) });
+  const rec = await runModerationCase(SIM, env, d);
+  assert.equal(rec.status, 'changes_requested');
+  assert.deepEqual(rec.decision.changes, ['claimed_files_missing']);
+  assert.deepEqual(rec.decision.reasons.find(r => r.code === 'claimed_files_missing').files, ['src/station_generator']);
+  assert.match(rec.decision.suggested_edit, /does not hold them: src\/station_generator\. Publish them with the Space/);
+  assert.ok(AUTHOR_COPY.claimed_files_missing.what_to_change);
+  // The judge was told what the system found.
+  assert.match(judgeText(d.calls.judge[0]), /FILES THE LISTING SAYS IT SHIPS \(system check[^)]*\): \{"claimed":\["src\/station_generator"\],"not_in_package":\["src\/station_generator"\]\}/);
+  // A rejection stands: the claim never softens it.
+  const env2 = environment();
+  await publish(env2, { description: STATION_DESCRIPTION });
+  const rec2 = await runModerationCase(SIM, env2, deps({ packageScripts: packageOf(STATION_SCRIPTS.filter(s => s.kind !== 'support')), judge: () => verdict({ scores: { objective: 0 } }) }));
+  assert.equal(rec2.status, 'rejected');
+});
+
+test('Code v2.5: a rejection decided only by the retired T4 rule is reviewed once by the sweep under v2.5, Jev not asked again; other decisions are never touched', async () => {
+  const env = environment();
+  await publish(env, { description: STATION_DESCRIPTION });
+  const d = deps({ packageScripts: packageOf(STATION_SCRIPTS) });
+  const first = await runModerationCase(SIM, env, d);
+  assert.equal(first.status, 'approved');
+  // Make it the case production holds: rejected under Code 2.4, rule 4, T4 at 1.
+  const retired = { outcome: 'reject', lane: 'quality', quality: 'rejected', reasons: [{ code: 'test_real_world', test: 'real_world', label: 'T4', score: 1, rule: 4, lane: 'quality', evidence: T4_EVIDENCE, action: 'reject' }] };
+  const rejected = { ...first, status: 'rejected', policy_version: RETIRED_T4_POLICY, decision: retired, ai_verdicts: [] };
+  await env.SOCIAL.put(`modcase:${SIM}`, JSON.stringify(rejected));
+  const s = await simOf(env); s.moderation = { ...s.moderation, status: 'rejected', policy_version: RETIRED_T4_POLICY }; await env.SOCIAL.put(`sim:${SIM}`, JSON.stringify(s));
+  assert.equal(retiredRejection(rejected), true);
+  // Never: a T4 at 0, a safety rejection, a person's decision, an appeal, another Code, a reason a person added, a rerun done.
+  for (const [why, other] of [
+    ['T4 at 0', { decision: { ...retired, reasons: [{ ...retired.reasons[0], score: 0 }] } }],
+    ['T4 at 1 with another test at 0', { decision: { ...retired, reasons: [{ ...retired.reasons[0], code: 'test_objective', test: 'objective', score: 0 }, retired.reasons[0]] } }],
+    ['the safety review', { decision: { outcome: 'reject', lane: 'harm', reasons: [{ code: 'safety_review', rule: 1, lane: 'harm', action: 'reject' }] } }],
+    ['a person decided', { decision: { ...retired, decided_by: 'admin-1' } }],
+    ['a person\'s reason', { decision: { ...retired, reasons: [...retired.reasons, { code: 'B5', lane: 'quality', action: 'reject', by: 'admin' }] } }],
+    ['an appeal', { appeal: { status: 'upheld' } }],
+    ['a person read it', { human: { decided_by: 'admin-1' } }],
+    ['under Code 2.3', { policy_version: '2.3' }],
+    ['already re-run', { retired_rejection_rerun: '2.5' }],
+    ['a legal hold', { legal_hold: { at: 'now' } }],
+  ]) assert.equal(retiredRejection({ ...rejected, ...other }), false, why);
+
+  const before = { judge: d.calls.judge.length, jev: d.calls.jev.length };
+  await resumeStalledPending(env, d);
+  const rec = await loadCase(env, SIM);
+  assert.equal(d.calls.judge.length, before.judge + 1, 'reviewed once');
+  assert.equal(d.calls.jev.length, before.jev, 'Jev is not asked again about the same content');
+  assert.deepEqual([rec.status, rec.policy_version, rec.retired_rejection_rerun], ['approved', POLICY_VERSION, POLICY_VERSION]);
+  assert.ok(rec.history.some(h => h.event === 'retired_rule_rerun'));
+  // Never twice: even rejected again, neither the sweep nor the tick runs it a second time.
+  await env.SOCIAL.put(`modcase:${SIM}`, JSON.stringify({ ...rec, status: 'rejected', policy_version: RETIRED_T4_POLICY, decision: retired }));
+  const s2 = await simOf(env); s2.moderation.status = 'rejected'; await env.SOCIAL.put(`sim:${SIM}`, JSON.stringify(s2));
+  await resumeStalledPending(env, d);
+  await resumeModeration(env, d);
+  assert.equal(d.calls.judge.length, before.judge + 1, 'the case is marked, and so is the listing');
+  // A safety rejection is read once by the sweep and passed over; its case is never re-run.
+  const env3 = environment();
+  await publish(env3, { description: STATION_DESCRIPTION });
+  await env3.SOCIAL.put(`modcase:${SIM}`, JSON.stringify({ ...rejected, decision: { outcome: 'reject', lane: 'harm', reasons: [{ code: 'safety_review', rule: 1, lane: 'harm', action: 'reject' }] } }));
+  const s3 = await simOf(env3); s3.moderation.status = 'rejected'; await env3.SOCIAL.put(`sim:${SIM}`, JSON.stringify(s3));
+  const d3 = deps({ packageScripts: packageOf(STATION_SCRIPTS) });
+  await resumeStalledPending(env3, d3);
+  assert.equal(d3.calls.judge.length, 0);
+  assert.equal((await loadCase(env3, SIM)).status, 'rejected');
+  assert.equal((await simOf(env3)).moderation.retired_rule_checked, POLICY_VERSION);
+});
+
+test('Code v2.5: a package read afresh by a new extractor (or under a new key) is measured against itself, never stalled by the old count', async () => {
+  const env = environment();
+  await publish(env, { description: STATION_DESCRIPTION });
+  let reads = [{ key: 'k1', chunks_read: 600 }];
+  const pkg = { extractPackageScripts: async () => { const r = reads.shift(); return { supported: true, complete: false, chunks_total: 650, errors: [], ...r }; }, readPackageScripts: async () => [] };
+  const d = deps({ packageScripts: pkg });
+  await runModerationCase(SIM, env, d);
+  assert.equal((await loadCase(env, SIM)).scripts.chunks_read, 600);
+  // The extractor version rises: the package is read again from chunk 0, ten chunks at a time.
+  reads = [10, 20, 30, 40].map(n => ({ key: 'k1', extractor: 2, chunks_read: n }));
+  await runModerationCase(SIM, env, d, { trigger: 'sweep' });
+  assert.equal((await loadCase(env, SIM)).scripts.stalled_attempts, 0, 'the first share of the fresh read is progress, though it read fewer chunks than the old count');
+  for (let i = 0; i < 3; i++) await runModerationCase(SIM, env, d, { trigger: 'sweep' });
+  const rec = await loadCase(env, SIM);
+  assert.deepEqual([rec.status, rec.stage, rec.scripts.stalled_attempts, rec.scripts.chunks_read, rec.scripts.extractor], ['classifying', 'scripts', 0, 40, 2], 'progress, not a stall');
+});
+
+test('Code v2.5 review: too many files settles as too much script before any model call: a chunk past its file cap, or a review past 5,000 scripts or 2,000 supporting files', async () => {
+  // A chunk past MAX_CHUNK_FILES: a package error, never a retry loop.
+  const env = environment();
+  await publish(env, { description: STATION_DESCRIPTION });
+  const d = deps({ packageScripts: packageOf([], { errors: [{ chunk: 'c1', reason: 'the chunk holds over 20000 script and supporting files' }] }) });
+  const rec = await runModerationCase(SIM, env, d);
+  assert.deepEqual([rec.status, rec.decision.changes, rec.decision.reasons.at(-1).code], ['changes_requested', ['too_much_script'], 'too_many_files']);
+  assert.deepEqual([d.calls.judge.length, d.calls.reader.length], [0, 0]);
+  assert.match(AUTHOR_COPY.too_much_script.why, /more files, than one review can read/);
+  assert.deepEqual([DEFAULT_THRESHOLDS.max_review_scripts, DEFAULT_THRESHOLDS.max_review_support_files], [5000, 2000]);
+  // Known while extracting: the count settles it at once, before the rest of the package is read.
+  const env2 = environment();
+  await publish(env2, { description: STATION_DESCRIPTION });
+  const counting = { extractPackageScripts: async () => ({ supported: true, complete: false, key: 'k1', chunks_total: 650, chunks_read: 40, distinct_scripts: 5001, support_distinct: 0, errors: [] }), readPackageScripts: async () => { throw new Error('not read'); } };
+  const d2 = deps({ packageScripts: counting });
+  const rec2 = await runModerationCase(SIM, env2, d2);
+  assert.deepEqual([rec2.status, rec2.decision.reasons.at(-1).code, rec2.decision.reasons.at(-1).detail.scripts], ['changes_requested', 'too_many_files', 5001]);
+  assert.equal(d2.calls.judge.length + d2.calls.reader.length, 0);
+  // And on the full read: 2,001 supporting files (a threshold, configurable) settle it the same way.
+  const env3 = environment({ max_review_support_files: 3 });
+  await publish(env3, { description: STATION_DESCRIPTION });
+  const d3 = deps({ packageScripts: packageOf([...STATION_SCRIPTS, support('Station', 'Station/notes.txt', 'n')]) });
+  const rec3 = await runModerationCase(SIM, env3, d3);
+  assert.deepEqual([rec3.status, rec3.decision.reasons.at(-1).code, rec3.decision.reasons.at(-1).detail.supporting_files], ['changes_requested', 'too_many_files', 4]);
+  assert.equal(d3.calls.judge.length + d3.calls.reader.length, 0);
+});
+
+test('Code v2.5 review: a stale read of the listing and the case cannot draw a second retired-rule rerun; the run re-checks under the lease', async () => {
+  const env = environment();
+  await publish(env, { description: STATION_DESCRIPTION });
+  const d = deps({ packageScripts: packageOf(STATION_SCRIPTS) });
+  const first = await runModerationCase(SIM, env, d);
+  const retired = { outcome: 'reject', lane: 'quality', quality: 'rejected', reasons: [{ code: 'test_real_world', test: 'real_world', label: 'T4', score: 1, rule: 4, lane: 'quality', evidence: T4_EVIDENCE, action: 'reject' }] };
+  const staleCase = JSON.stringify({ ...first, status: 'rejected', policy_version: RETIRED_T4_POLICY, decision: retired, ai_verdicts: [] });
+  await env.SOCIAL.put(`modcase:${SIM}`, staleCase);
+  const s = await simOf(env); s.moderation = { ...s.moderation, status: 'rejected' }; const staleSim = JSON.stringify(s); await env.SOCIAL.put(`sim:${SIM}`, staleSim);
+  await resumeStalledPending(env, d);
+  const judged = d.calls.judge.length;
+  const after = await loadCase(env, SIM);
+  assert.equal(after.retired_rejection_rerun, POLICY_VERSION);
+  // Another sweep that read the listing and the case before the rerun landed (a stale KV read) sees both as they were.
+  const get = env.SOCIAL.get;
+  const staleOnce = new Map([[`sim:${SIM}`, staleSim], [`modcase:${SIM}`, staleCase]]);
+  env.SOCIAL.get = async k => { if (staleOnce.has(k)) { const v = staleOnce.get(k); staleOnce.delete(k); return v; } return get(k); };
+  await resumeStalledPending(env, d);
+  env.SOCIAL.get = get;
+  assert.equal(d.calls.judge.length, judged, 'no second judge run: the run re-checked the case under the lease');
+  const now = await loadCase(env, SIM);
+  assert.deepEqual([now.status, now.ai_verdicts?.length ?? 0, now.history.length], [after.status, after.ai_verdicts?.length ?? 0, after.history.length], 'and left it exactly as it was');
 });

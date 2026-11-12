@@ -59,9 +59,9 @@ const noulJev = answers => ({ answers: Object.fromEntries(Object.entries(answers
 // ── policy ──────────────────────────────────────────────────────────────────
 
 test('the Code (v2.4, which carries v2.1) is anchored by its hash, and the Worker cites it', () => {
-  assert.equal(POLICY_VERSION, '2.4');
+  assert.equal(POLICY_VERSION, '2.5');
   assert.equal('sha256:' + createHash('sha256').update(GUARDIAN_POLICY_TEXT).digest('hex'), POLICY_HASH_ANCHORED);
-  assert.equal(POLICY_HASH_ANCHORED, 'sha256:53e1204bc18506f099ac7fec69274dd5a47010432364eac01913026070f294e4');
+  assert.equal(POLICY_HASH_ANCHORED, 'sha256:e5c1cb8e6a0d53b54ad1eb4e5e8bbba80b18ed16eb6fb0780a712f60e0593c44');
   for (const id of ['A12', 'A13', 'A14']) assert.match(GUARDIAN_POLICY_TEXT, new RegExp(`\\*\\*${id}\\. `), id);
   assert.equal(REVIEW_SCHEMA, 2);
 });
@@ -232,8 +232,9 @@ test('fiction: labelled fiction is listed; unlabelled fiction is not yet (rule 7
 
 test('T4 for Fiction: fiction is scored and named under it; while the label is missing a T4 of 0 asks for the label, not a rejection', () => {
   const fiction = { statement: statementAs('Fiction'), fiction_labelled: true };
+  // Code v2.5: T4 for Fiction at 1 is one test at 1, not yet under rule 7 with its own copy.
   const weak = decide(fiction, { is_fiction: true, scores: { real_world: 1 } });
-  assert.deepEqual([weak.outcome, last(weak).code, last(weak).label, last(weak).rule], ['reject', 'test_real_world_fiction', 'T4 for Fiction', 4]);
+  assert.deepEqual([weak.outcome, last(weak).code, last(weak).label, last(weak).rule, weak.changes], ['changes_requested', 'test_real_world_fiction', 'T4 for Fiction', 7, ['test_real_world_fiction']]);
   assert.ok(AUTHOR_COPY.test_real_world_fiction);
   assert.equal(decide(fiction, { is_fiction: true, scores: { real_world: 0 } }).outcome, 'reject', 'labelled, an idea absent is rejected');
   const unlabelled = decide({ statement: statementAs('Fiction') }, { is_fiction: true, scores: { real_world: 0 } });
