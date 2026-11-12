@@ -6,6 +6,7 @@
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { packageFrom } from './helpers/package_fake.mjs';
 import { createHash } from 'node:crypto';
 import {
   decideFinal, decideTriage, deterministicSignals, parseJudgeVerdict, buildJevState, buildJevQuestions, extractQualificationStatement,
@@ -57,22 +58,29 @@ const withSignals = (...signals) => ({ articles: { system: [], signals } });
 
 // ── rule 0 ──────────────────────────────────────────────────────────────────
 
-test('rule 0: a flagged, unsure or malformed answer is held for a person', () => {
-  assert.deepEqual([decide({}, { flagged_for_review: true }).outcome, last(decide({}, { flagged_for_review: true })).code], ['hold', 'judge_flagged']);
-  assert.equal(decide({}, { verdict: 'flag_for_human_review' }).outcome, 'hold');
+test('rule 0 (v2.4): a flagged or unsure answer is asked again, a second unsure answer is not yet, and a malformed one is the AI failing', () => {
+  assert.deepEqual([decide({}, { flagged_for_review: true }).outcome, last(decide({}, { flagged_for_review: true })).code], ['second_opinion', 'judge_unsure']);
+  assert.equal(decide({}, { verdict: 'flag_for_human_review' }).outcome, 'second_opinion');
   const unsure = decide({}, { confidence: 0.59 });
-  assert.deepEqual([unsure.outcome, last(unsure).rule], ['hold', 0]);
+  assert.deepEqual([unsure.outcome, last(unsure).rule], ['second_opinion', 0]);
+  const still = decide({}, { confidence: 0.59, second_opinion: true, suggested_edit_to_publish: 'Show the tide gauge readout in a screenshot.' });
+  assert.deepEqual([still.outcome, still.lane, last(still).code, last(still).rule], ['changes_requested', 'quality', 'review_unconfirmed', 0]);
+  assert.deepEqual([still.changes, still.suggested_edit], [['review_unconfirmed'], 'Show the tide gauge readout in a screenshot.']);
+  // A second unsure answer that fails a test is still rejected: doubt never lists, and never saves sloppy work.
+  assert.equal(decide({}, { confidence: 0.4, second_opinion: true, scores: { build_quality: 0 } }).outcome, 'reject');
   const malformed = decideFinal({ triage: triage(), judge: { malformed: true, error: 'judge_unknown_article' } });
   assert.deepEqual([malformed.outcome, last(malformed).code, last(malformed).rule], ['hold', 'judge_unknown_article', 0]);
   assert.equal(DEFAULT_THRESHOLDS.judge_min_confidence, 0.60);
 });
 
-test('rule 0 before rule 1: a flag that cites A1 or A11 is held in the legal lane (content locked), a flag that cites A4 is held, not rejected', () => {
+test('rule 0 before rule 1: a flag that cites A1 or A11 is held in the legal lane (content locked); a flag that cites A4 is asked again, and the second answer\'s citation decides', () => {
   const a1 = decide({}, { flagged_for_review: true, articles: [cite('A1', 0.6)] });
   assert.deepEqual([a1.outcome, a1.lane, last(a1).rule], ['hold', 'legal', 0]);
   assert.equal(decide({}, { verdict: 'flag_for_human_review', articles: [cite('A11')] }).lane, 'legal');
+  assert.equal(decide({}, { flagged_for_review: true, second_opinion: true, articles: [cite('A1', 0.6)] }).lane, 'legal', 'a second answer citing A1 is still the legal lane');
   const a4 = decide({}, { flagged_for_review: true, articles: [cite('A4')] });
-  assert.deepEqual([a4.outcome, a4.lane], ['hold', 'judge']);
+  assert.deepEqual([a4.outcome, a4.lane], ['second_opinion', 'judge']);
+  assert.deepEqual([decide({}, { flagged_for_review: true, second_opinion: true, articles: [cite('A4')] }).outcome], ['reject'], 'a confident A4 on the second reading rejects');
 });
 
 // ── rule 1 ──────────────────────────────────────────────────────────────────
@@ -85,12 +93,13 @@ test('rule 1: A1, A2, A3, A5 and A6 quarantine, through the hard category the le
   }
 });
 
-test('rule 1: A4, A7, A8 and A9 reject in the harm lane; A10 holds in the harm lane and A11 in the legal lane', () => {
+test('rule 1: A4, A7, A8 and A9 reject in the harm lane; A10 is not yet in the harm lane and A11 is held in the legal lane', () => {
   for (const id of ['A4', 'A7', 'A8', 'A9']) {
     const d = decide({}, { verdict: 'reject', articles: [cite(id)] });
     assert.deepEqual([d.outcome, d.lane, last(d).article], ['reject', 'harm', id], id);
   }
-  assert.deepEqual([decide({}, { articles: [cite('A10')] }).outcome, decide({}, { articles: [cite('A10')] }).lane], ['hold', 'harm']);
+  const a10 = decide({}, { articles: [cite('A10')] });
+  assert.deepEqual([a10.outcome, a10.lane, a10.changes], ['changes_requested', 'harm', ['harm_sensitive_place']]);
   assert.deepEqual([decide({}, { articles: [cite('A11')] }).outcome, decide({}, { articles: [cite('A11')] }).lane], ['hold', 'legal']);
 });
 
@@ -127,11 +136,13 @@ test('rule 2: B6 and a B9 wording fault are not yet; Jev\'s false teaching is no
   assert.deepEqual([falseTeaching.outcome, last(falseTeaching).article], ['reject', 'B9']);
 });
 
-test('rule 2: B7 is held for a person; B3 is held when Jev reads lawful decision training, and rejected otherwise', () => {
-  assert.deepEqual([decide({}, { articles: [cite('B7')] }).outcome, last(decide({}, { articles: [cite('B7')] })).article], ['hold', 'B7']);
-  assert.equal(decide({ lawful_decision_training: 0.7 }, { articles: [cite('B3')] }).outcome, 'hold');
+test('rule 2 (v2.4): B7 is rejected; B3 is not yet (score the decision) when Jev reads lawful decision training, and rejected otherwise', () => {
+  assert.deepEqual([decide({}, { articles: [cite('B7')] }).outcome, last(decide({}, { articles: [cite('B7')] })).article], ['reject', 'B7']);
+  const lawful = decide({ lawful_decision_training: 0.7 }, { articles: [cite('B3')] });
+  assert.deepEqual([lawful.outcome, lawful.changes], ['changes_requested', ['not_yet_B3_lawful']]);
   assert.equal(decide(withSystem(sys('B3', 'harm_scored')), {}).outcome, 'reject');
-  assert.equal(decide({ ...withSystem(sys('B3', 'harm_scored')), lawful_decision_training: 0.6 }, {}).outcome, 'hold');
+  assert.equal(decide({ ...withSystem(sys('B3', 'harm_scored')), lawful_decision_training: 0.6 }, {}).outcome, 'changes_requested');
+  assert.equal(decide({ ...withSystem(sys('B3', 'harm_scored')), lawful_decision_training: 0.6 }, { scores: { build_quality: 1 } }).outcome, 'reject', 'a failing test is not "not yet"');
 });
 
 test('rule 2: a system citation the judge did not cite still decides; the judge cannot clear it', () => {
@@ -141,15 +152,16 @@ test('rule 2: a system citation the judge did not cite still decides; the judge 
   for (const a of GROUP_B.filter(a => !['B3', 'B5', 'B6', 'B7', 'B9'].includes(a))) assert.equal(decide(withSystem(sys(a, 'k')), {}).outcome, 'reject', a);
 });
 
-test('rule 2: the judge\'s own Group B citation decides at 0.75; at 0.74 a person decides (rule 6)', () => {
+test('rule 2: the judge\'s own Group B citation decides at 0.75; at 0.74 it is not yet, naming its article\'s change (rule 6)', () => {
   assert.equal(decide({}, { articles: [cite('B4', 0.75)] }).outcome, 'reject');
   const unsure = decide({}, { articles: [cite('B4', 0.74)] });
-  assert.deepEqual([unsure.outcome, last(unsure).code, last(unsure).rule], ['hold', 'article_unsure', 6]);
+  assert.deepEqual([unsure.outcome, last(unsure).code, last(unsure).rule, unsure.changes], ['changes_requested', 'article_unsure', 6, ['code_B4']]);
 });
 
-test('rule 2, its own order: a citation that rejects beats one that holds, and one that holds beats a removable feature', () => {
+test('rule 2, its own order: a citation that rejects beats a removable feature', () => {
   assert.equal(decide({}, { articles: [cite('B7'), cite('B1')] }).outcome, 'reject');
-  assert.equal(decide({}, { articles: [cite('B7'), cite('B5')] }).outcome, 'hold');
+  assert.equal(decide({}, { articles: [cite('B7'), cite('B5')] }).outcome, 'reject');
+  assert.equal(decide({}, { articles: [cite('B1'), cite('B5')] }).outcome, 'reject');
 });
 
 test('rule 2 before rule 3: B1 with a contradicted statement is rejected under B1', () => {
@@ -201,26 +213,29 @@ test('rule 5: two or more tests at 1 are rejected, naming them, before a reason 
 
 // ── rule 6 ──────────────────────────────────────────────────────────────────
 
-test('rule 6: a test scored null is held for a person', () => {
+test('rule 6: a test scored null is not yet, asking the author to show it', () => {
   const d = decide({}, { scores: { lesson: null } });
-  assert.deepEqual([d.outcome, last(d).code, last(d).tests], ['hold', 'test_not_scored', ['lesson']]);
+  assert.deepEqual([d.outcome, last(d).code, last(d).tests, d.changes], ['changes_requested', 'test_not_scored', ['lesson'], ['confirm_lesson']]);
 });
 
-test('rule 6: a Jev article signal the judge did not cite is held; the same signal cited at 0.75 decides by rule 2', () => {
+test('rule 6: a Jev article signal the judge did not cite is noted and the case decided; the same signal cited at 0.75 decides by rule 2', () => {
   const signal = withSignals({ article: 'B5', key: 'accumulation_loop', p: 0.6 });
   const d = decide(signal, {});
-  assert.deepEqual([d.outcome, last(d).code, last(d).article, last(d).key], ['hold', 'article_signal_not_cited', 'B5', 'accumulation_loop']);
+  const noted = d.reasons.find(r => r.code === 'article_signal_not_cited');
+  assert.deepEqual([d.outcome, noted.article, noted.key, noted.action], ['approve', 'B5', 'accumulation_loop', 'noted']);
   assert.equal(decide(signal, { articles: [cite('B5', 0.8)] }).outcome, 'changes_requested');
 });
 
-test('rule 6: scripts Jev could not read in full, and judge confidence below 0.75, each hold', () => {
-  assert.equal(last(decide({ scripts_truncated: true }, {})).code, 'scripts_not_read_in_full');
-  assert.equal(last(decide({}, { confidence: 0.74 })).code, 'judge_unsure_to_list');
+test('rule 6 (v2.4): Jev\'s cut dossier holds nothing; judge confidence below 0.75 is not yet with the judge\'s own change', () => {
+  assert.equal(decide({ scripts_truncated: true }, {}).outcome, 'approve', 'the judge reads every script itself');
+  const low = decide({}, { confidence: 0.74, suggested_edit_to_publish: 'Label the basin depth readout in metres.' });
+  assert.deepEqual([low.outcome, last(low).code, low.suggested_edit, low.changes], ['changes_requested', 'judge_unsure_to_list', 'Label the basin depth readout in metres.', ['code_not_met']]);
+  assert.deepEqual(decide({}, { confidence: 0.74 }).changes, ['review_unconfirmed'], 'with no change of its own, the author is told what to show');
 });
 
-test('rule 6 before rule 7: a missing statement with a null test is held, not sent to the author', () => {
+test('rules 6 and 7 together: a missing statement with a null test names both changes at once', () => {
   const d = decide({ statement: NO_STATEMENT }, { statement_check: 'missing', scores: { objective: null } });
-  assert.deepEqual([d.outcome, last(d).rule], ['hold', 6]);
+  assert.deepEqual([d.outcome, d.changes], ['changes_requested', ['confirm_objective', 'statement_missing']]);
 });
 
 // ── rule 7 ──────────────────────────────────────────────────────────────────
@@ -232,25 +247,28 @@ test('rule 7: the statement missing is not yet, and the author is shown the four
   for (const label of ['Category: ', 'Objective: ', 'Lesson: ', 'Real-world link: ']) assert.ok(view.reasons[0].what_to_change.includes(label), label);
 });
 
-test('rule 7: one test at 1 and the statement missing name both changes; with no edit for the test, a person decides', () => {
+test('rule 7: one test at 1 and the statement missing name both changes; with no edit for the test, the Code\'s change for that test is named', () => {
   const both = decide({ statement: NO_STATEMENT }, { statement_check: 'missing', scores: { build_quality: 1 }, suggested_edit_to_publish: 'Replace the placeholder quay with the surveyed one.' });
   assert.deepEqual(both.changes, ['test_build_quality', 'statement_missing']);
   const noEdit = decide({ statement: NO_STATEMENT }, { statement_check: 'missing', scores: { build_quality: 1 } });
-  assert.deepEqual([noEdit.outcome, last(noEdit).code], ['hold', 'judge_not_yet_without_change']);
+  assert.deepEqual([noEdit.outcome, noEdit.changes, noEdit.suggested_edit], ['changes_requested', ['test_build_quality', 'statement_missing'], null]);
+  assert.ok(AUTHOR_COPY.test_build_quality.what_to_change.length > 20, 'the copy names the change');
 });
 
 // ── rules 8 and 9 ───────────────────────────────────────────────────────────
 
-test('rule 8: every test at 2 or above with a matching statement lists; a present statement the judge did not find matching is held', () => {
+test('rule 8: every test at 2 or above with a matching statement lists; a present statement the judge did not find matching is not yet, with its draft', () => {
   assert.equal(decide().outcome, 'approve');
-  const odd = decide({}, { statement_check: 'missing' });
-  assert.deepEqual([odd.outcome, last(odd).code], ['hold', 'judge_statement_inconsistent']);
+  const draft = { category: 'Simulation', objective: 'Set the tide and read the quay depth.', lesson: 'Tidal range sets harbour depth.', real_world_link: 'Published tide tables for the harbour.' };
+  const odd = decide({}, { statement_check: 'missing', suggested_statement: draft });
+  assert.deepEqual([odd.outcome, last(odd).code, odd.changes, odd.suggested_statement], ['changes_requested', 'judge_statement_inconsistent', ['statement_unclear'], draft]);
 });
 
-test('rule 8: game_mechanics alone makes a game, and a game is held for a person first', () => {
+test('rule 8: game_mechanics alone makes a game, and a game that passes every test is listed like any Space (v2.4)', () => {
   assert.equal(DEFAULT_THRESHOLDS.game_mechanics, 0.60);
   const game = decide({ content_kind: 'simulation', game_mechanics: 0.6 }, { is_game: false });
-  assert.deepEqual([game.outcome, last(game).code], ['hold', 'game_needs_a_person']);
+  assert.equal(game.outcome, 'approve');
+  assert.equal(game.reasons.some(r => r.code === 'game_needs_a_person'), false);
   assert.equal(isGame({ game_mechanics: 0.6 }, { is_game: false }), true);
   assert.equal(decide({ game_mechanics: 0.59 }).outcome, 'approve', 'below the threshold it is not a game');
 });
@@ -270,12 +288,15 @@ test('the rating is the higher of Jev\'s and the judge\'s rating_floor', () => {
   assert.equal(decide({ rating: null }, { rating_floor: 'adult_18' }).rating, 'adult_18');
 });
 
-test('escalate: a case the triage escalated is decided by the same rules (v2.1: no agent); its signals hold it unless the judge cites them', () => {
+test('escalate: a case the triage escalated is decided by the same rules (v2.1: no agent); a signal the judge does not cite is noted', () => {
   assert.equal(decide({ outcome: 'escalate', lane: 'harm' }).outcome, 'approve', 'an escalation with nothing behind it is the rules\' to list');
   const signalled = decide({ outcome: 'escalate', lane: 'harm', ...withSignals({ article: 'A4', key: 'real_crime_instructions', p: 0.55, group: 'A' }) });
-  assert.deepEqual([signalled.outcome, last(signalled).code, last(signalled).article], ['hold', 'article_signal_not_cited', 'A4']);
+  assert.deepEqual([signalled.outcome, last(signalled).code, last(signalled).signals], ['second_opinion', 'signal_check', ['A4']]);
+  const notRuledOut = decide({ outcome: 'escalate', lane: 'harm', ...withSignals({ article: 'A4', key: 'real_crime_instructions', p: 0.55, group: 'A' }) }, { second_opinion: true, signal_answers: [{ article: 'A4', finding: 'unsure', confidence: 0.5, evidence: 'the lab script lists reagents' }] });
+  assert.deepEqual([notRuledOut.outcome, last(notRuledOut).code], ['reject', 'safety_review']);
+  assert.equal(decide({ outcome: 'escalate', lane: 'harm', ...withSignals({ article: 'A4', key: 'real_crime_instructions', p: 0.55, group: 'A' }) }, { articles: [cite('A4')] }).outcome, 'reject', 'cited, it decides');
   assert.equal(decide({ outcome: 'escalate', lane: 'harm', ...withSystem(sys('B4', 'meme_content')) }).outcome, 'reject');
-  assert.equal(decide({ outcome: 'escalate', lane: 'harm' }, { scores: { lesson: null } }).outcome, 'hold');
+  assert.equal(decide({ outcome: 'escalate', lane: 'harm' }, { scores: { lesson: null } }).outcome, 'changes_requested');
   assert.equal(decideFinal({ triage: triage({ outcome: 'hold', reasons: [{ code: 'x', action: 'hold' }] }), judge: judge() }).outcome, 'hold', 'a triage decision is not reopened');
 });
 
@@ -367,7 +388,7 @@ test('B6: a payment link, a crypto address or a paid unlock code in the Space is
   assert.equal(decideFinal({ triage: t, judge: judge({ scores: { lesson: 1 } }) }).outcome, 'reject');
 });
 
-test('B1(c): the listing\'s own words for horror are an article signal, as whole words; the judge cites B1 or a person decides', () => {
+test('B1(c): the listing\'s own words for horror are an article signal, as whole words; the judge cites B1 or the signal is noted', () => {
   assert.deepEqual(deterministicSignals({ name: 'Haunted Mill' }, null).horror_terms, ['haunted']);
   assert.deepEqual(deterministicSignals({ description: 'One JUMP SCARE per room.' }, null).horror_terms, ['jump scare']);
   assert.deepEqual(deterministicSignals({ tags: ['horror-survival'], genre: 'Creepy' }, null).horror_terms.sort(), ['creepy', 'horror']);
@@ -375,7 +396,7 @@ test('B1(c): the listing\'s own words for horror are an article signal, as whole
   const t = decideTriage({ signals: deterministicSignals({ name: 'Haunted Mill', description: STATEMENT_TEXT }, null), jev: null });
   assert.deepEqual(t.articles.signals.map(s => [s.article, s.key]), [['B1', 'listing_horror_terms']]);
   assert.equal(t.outcome, 'judge', 'a signal does not end triage: the rules need the judge\'s scores');
-  assert.deepEqual([decideFinal({ triage: t, judge: judge() }).outcome, last(decideFinal({ triage: t, judge: judge() })).code], ['hold', 'article_signal_not_cited']);
+  assert.deepEqual([decideFinal({ triage: t, judge: judge() }).outcome, last(decideFinal({ triage: t, judge: judge() })).code], ['approve', 'article_signal_not_cited']);
   assert.equal(decideFinal({ triage: t, judge: judge({ articles: [cite('B1')] }) }).outcome, 'reject');
 });
 
@@ -386,25 +407,25 @@ test('triage: Jev at 0.85 on a Group B question is a system citation, at 0.50 an
   assert.deepEqual(t.articles.signals.map(s => [s.article, s.key]), [['B3', 'harm_scored'], ['B4', 'meme_content']].sort((a, b) => Object.keys(ARTICLE_SIGNALS).indexOf(a[1]) - Object.keys(ARTICLE_SIGNALS).indexOf(b[1])));
   assert.equal(t.outcome, 'judge');
   assert.deepEqual(decideTriage({ signals: {}, jev: jev({ lawful_decision_training: 0.95 }) }).articles, { system: [], signals: [{ article: 'B3', key: 'lawful_decision_training', p: 0.95 }], exempt: [] }, 'lawful decision training is a signal, never a citation');
-  // v2.1: A10 is a Group A signal. The researcher and the judge run, and the rules hold it for a person (rule 1 or rule 6).
+  // v2.1: A10 is a Group A signal. The researcher and the judge run. v2.4: cited at 0.75, not yet; uncited, the signal check.
   const place = decideTriage({ signals: {}, jev: jev({ sensitive_real_place: 0.5 }) });
   assert.deepEqual([place.outcome, place.lane, place.reasons.at(-1).article], ['escalate', 'harm', 'A10']);
   assert.deepEqual(place.articles.signals.map(s => [s.article, s.key, s.group]), [['A10', 'sensitive_real_place', 'A']]);
-  assert.equal(decideFinal({ triage: { ...place, statement: STATEMENT, questionnaire: ANSWERED }, judge: judge() }).outcome, 'hold', 'uncited, a person decides');
-  assert.equal(decideFinal({ triage: { ...place, statement: STATEMENT, questionnaire: ANSWERED }, judge: judge({ articles: [cite('A10')] }) }).outcome, 'hold', 'cited, a person decides');
+  assert.equal(decideFinal({ triage: { ...place, statement: STATEMENT, questionnaire: ANSWERED }, judge: judge() }).outcome, 'second_opinion', 'uncited, asked about by name');
+  assert.equal(decideFinal({ triage: { ...place, statement: STATEMENT, questionnaire: ANSWERED }, judge: judge({ articles: [cite('A10')] }) }).outcome, 'changes_requested', 'cited, not yet');
 });
 
-test('triage: a confident asset flip is cited under B7 and held for a person; empty and default-only are B8 rejects', () => {
+test('triage: a confident asset flip is cited under B7 and rejected (v2.4); empty and default-only are B8 rejects', () => {
   const band = level => ({ answers: { quality_band: { probabilities: { [level]: 0.9 }, confidence: 0.9 }, spatial_intent: { type: 'noul', p: 0.1 } } });
   const flip = decideTriage({ signals: {}, jev: band('unmodified_template_or_asset_flip') });
-  assert.deepEqual([flip.outcome, flip.reasons.at(-1).article, flip.reasons.at(-1).action], ['hold', 'B7', 'hold']);
+  assert.deepEqual([flip.outcome, flip.reasons.at(-1).article, flip.reasons.at(-1).action], ['reject', 'B7', 'reject']);
   assert.deepEqual(flip.articles.system.map(s => s.article), ['B7']);
   const empty = decideTriage({ signals: { empty: true }, jev: null });
   assert.deepEqual([empty.outcome, empty.reasons[0].article], ['reject', 'B8']);
   assert.equal(decideTriage({ signals: { default_only: true }, jev: null }).reasons[0].article, 'B8');
 });
 
-test('scripts not read in full: a script cut short, cut by the engine, or left out marks scripts_truncated; strings cut alone do not', () => {
+test('Jev\'s dossier excerpt: a script cut short, cut by the engine, or left out marks scripts_truncated; strings cut alone do not; v2.4 holds nothing for it', () => {
   const script = (n, source = 'local x = 1') => ({ path: `Soul/s${n}.luau`, language: 'luau', lines: 1, source });
   assert.equal(buildJevState({}, { scripts: [script(1)] }).scripts_truncated, false);
   assert.equal(buildJevState({}, { scripts: [script(1, 'x'.repeat(50_000))] }, { maxChars: 20_000 }).scripts_truncated, true);
@@ -412,7 +433,7 @@ test('scripts not read in full: a script cut short, cut by the engine, or left o
   assert.equal(buildJevState({}, { scripts: Array.from({ length: 40 }, (_, n) => script(n)) }).scripts_truncated, true, 'the engine sends at most 40 and names no others');
   const strings = buildJevState({}, { scripts: [script(1)], strings: Array.from({ length: 400 }, (_, i) => `glossary entry ${i} `.repeat(10)) }, { maxChars: 20_000 });
   assert.deepEqual([strings.truncated, strings.scripts_truncated], [true, false]);
-  assert.equal(decide({ scripts_truncated: true }).outcome, 'hold', 'held instead of listed');
+  assert.equal(decide({ scripts_truncated: true }).outcome, 'approve', 'the judge reads every script of the package itself');
 });
 
 test('strings: those with article terms come first, so a long glossary cannot push "Rebirth" out of the judge\'s sample', async () => {
@@ -449,7 +470,7 @@ function memEnv() {
 }
 async function approveAs(actor, caseOver = {}, args = {}) {
   const e = memEnv();
-  await e.SOCIAL.put(`modcase:${SIM}`, JSON.stringify({ sim_id: SIM, author_id: 'user-1', status: 'held', history: [], triage: triage({ outcome: 'escalate', lane: 'harm' }), judge: judge(), ...caseOver }));
+  await e.SOCIAL.put(`modcase:${SIM}`, JSON.stringify({ sim_id: SIM, author_id: 'user-1', status: 'held', history: [], triage: triage({ outcome: 'escalate', lane: 'harm' }), judge: judge(), scripts_review: { source: 'package', coverage_percent: 100 }, ...caseOver }));
   const run = makeToolExecutor(e, { auditLog: async () => {}, json: v => v }, { actor, actorId: actor === 'admin' ? 'admin-1' : 'grok-agent' });
   const res = await run('moderation_approve', { sim_id: SIM, rating: 'all_ages', rationale: 'Every test is shown and the statement matches the harbour.', ...args });
   return { res, rec: JSON.parse(e.kv.get(`modcase:${SIM}`)) };
@@ -462,7 +483,6 @@ test('the agent cannot approve a game or a cited Space, cannot set featured, and
   for (const [name, over] of [
     ['a system citation', { triage: triage({ outcome: 'escalate', ...withSystem(sys('B5', 'accumulation_loop')) }) }],
     ['a judge citation', { judge: judge({ articles: [cite('B1')] }) }],
-    ['an article signal', { triage: triage({ outcome: 'escalate', ...withSignals({ article: 'B4', key: 'meme_content', p: 0.6 }) }) }],
     ['the statement missing', { triage: triage({ outcome: 'escalate', statement: NO_STATEMENT }), judge: judge({ statement_check: 'missing' }) }],
   ]) {
     const { res, rec } = await approveAs('agent', over);
@@ -477,7 +497,8 @@ test('the agent cannot approve a game or a cited Space, cannot set featured, and
   assert.deepEqual([ok.res.ok, ok.rec.status, ok.rec.decision.featured], [true, 'approved', false]);
   const rated = await approveAs('agent', { decision: { rating: 'mature_17' } }, { rating: 'all_ages' });
   assert.deepEqual([rated.res.ok, rated.rec.decision.rating], [true, 'mature_17'], 'the agent cannot lower the decided rating');
-  assert.equal(wouldList({ triage: triage(), judge: judge() }), true);
+  assert.equal(wouldList({ triage: triage(), judge: judge(), scripts_review: { source: 'package', coverage_percent: 100 } }), true);
+  assert.equal(wouldList({ triage: triage(), judge: judge() }), false, 'Code v2.4: no listing without every script read from the package');
   assert.equal(wouldList({ triage: triage({ outcome: 'reject' }), judge: judge() }), false, 'a triage decision is not reopened');
 });
 
@@ -517,10 +538,10 @@ test('moderation_reject citing a Code article or a test shows that copy to the a
   assert.deepEqual(authorView(JSON.parse(e.kv.get(`modcase:${SIM}`)), {}).reasons.map(r => r.category), ['code_B5']);
 });
 
-test('the Code and the playbook both name v2.3 and the same rules', () => {
+test('the Code and the playbook both name v2.4 and the same rules', () => {
   assert.match(GUARDIAN_POLICY_TEXT, /The first rule that applies decides/);
-  assert.match(GUARDIAN_POLICY_TEXT, /^# Eustress Guardian Code v2\.3/);
-  assert.match(MODERATION_PLAYBOOK_TEXT, /Guardian Code v2\.3/);
+  assert.match(GUARDIAN_POLICY_TEXT, /^# Eustress Guardian Code v2\.4/);
+  assert.match(MODERATION_PLAYBOOK_TEXT, /Guardian Code v2\.4/);
   assert.doesNotMatch(MODERATION_PLAYBOOK_TEXT, /decision C|criterion \d|rejected_low_effort/);
   assert.equal(MODERATION_PLAYBOOK_TEXT.includes(EM_DASH), false);
   assert.equal(Object.keys(buildJevQuestions()).filter(k => k in ARTICLE_SIGNALS).length, Object.keys(ARTICLE_SIGNALS).length);
@@ -595,6 +616,8 @@ function pipelineDeps(judgeAnswer, jev = jevAnswers()) {
     grokFetch: async () => { calls.agent += 1; return { ok: false, status: 500, text: async () => '' }; },
     grokModel: 'grok-test',
     policyText: GUARDIAN_POLICY_TEXT, policyHash: POLICY_HASH_ANCHORED,
+    // Code v2.4: a listing is listed only on every script read from its package; these tests' packages read in full.
+    packageScripts: packageFrom(),
     fetch: async () => new Response(JSON.stringify(jev), { status: 200 }),
   };
 }
@@ -616,7 +639,7 @@ test('pipeline control: a qualifying Space is approved, with featured left to a 
   await publish(env);
   const rec = await runModerationCase(SIM, env, pipelineDeps(judgeAnswer({ featured_candidate: true, tests: tests({ build_quality: 3, lesson: 3, real_world: 3 }) })));
   assert.equal(rec.status, 'approved');
-  assert.deepEqual([rec.decision.featured, rec.decision.featured_candidate, rec.policy_version, rec.review_schema], [false, true, '2.3', 2]);
+  assert.deepEqual([rec.decision.featured, rec.decision.featured_candidate, rec.policy_version, rec.review_schema], [false, true, '2.4', 2]);
   assert.equal(JSON.parse(env.SOCIAL.m.get(`sim:${SIM}`)).moderation.featured, false);
 });
 
@@ -650,21 +673,22 @@ test('pipeline rule 2: a B5 loop is not yet, applied directly: the author gets c
   assert.deepEqual([view.status, view.reasons[0].category, view.suggested_edit], ['changes_requested', 'not_yet_B5', 'Remove the Rebirth button and the per-second coins.']);
 });
 
-test('pipeline rule 6: a Space whose scripts Jev could not read in full is held instead of listed', async () => {
+test('pipeline (v2.4): a Space whose dossier Jev read cut is not held for it: the judge reads the package\'s scripts, and the case is decided', async () => {
   const env = environment();
   await publish(env, { dossier: { scripts: [{ path: 'Soul/tide.luau', language: 'luau', lines: 900, source: 'local depth = basin + tide', truncated: true }] } });
   const rec = await runModerationCase(SIM, env, pipelineDeps(judgeAnswer()));
-  assert.equal(rec.status, 'held');
+  assert.equal(rec.status, 'approved');
   assert.equal(rec.jev.scripts_truncated, true);
-  assert.ok(rec.decision.reasons.some(r => r.code === 'scripts_not_read_in_full'));
+  assert.equal(rec.decision.reasons.some(r => r.code === 'scripts_not_read_in_full'), false);
+  assert.equal(rec.scripts_review.source, 'package');
 });
 
-test('pipeline triage: a confident asset flip is held as B7 before the judge runs', async () => {
+test('pipeline triage: a confident asset flip is rejected as B7 before the judge runs', async () => {
   const env = environment();
   await publish(env);
   const d = pipelineDeps(judgeAnswer(), jevAnswers({ quality_band: { probabilities: { unmodified_template_or_asset_flip: 0.9 }, confidence: 0.9 }, spatial_intent: 0.1 }));
   const rec = await runModerationCase(SIM, env, d);
-  assert.equal(rec.status, 'held');
+  assert.equal(rec.status, 'rejected');
   assert.equal(rec.decision.reasons.at(-1).article, 'B7');
   assert.equal(d.calls.judge, 0);
 });

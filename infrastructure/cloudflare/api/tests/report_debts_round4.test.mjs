@@ -316,7 +316,8 @@ test('N-1: lease_seconds must outlast judge_timeout_ms with a margin, or the def
   assert.equal((await t({ lease_seconds: 30 })).lease_seconds, DEFAULT_THRESHOLDS.lease_seconds, 'shorter than the judge');
   assert.equal((await t({ lease_seconds: 300 })).lease_seconds, DEFAULT_THRESHOLDS.lease_seconds, 'no margin');
   assert.equal((await t({ lease_seconds: 420 })).lease_seconds, 420);
-  assert.deepEqual([(await t({ lease_seconds: 120, judge_timeout_ms: 30_000 })).lease_seconds], [120], 'a short lease for a short judge');
+  assert.deepEqual([(await t({ lease_seconds: 120, judge_timeout_ms: 30_000, reader_timeout_ms: 30_000, scripts_extract_budget_ms: 30_000 })).lease_seconds], [120], 'a short lease for short steps');
+  assert.equal((await t({ lease_seconds: 120, judge_timeout_ms: 30_000 })).lease_seconds, DEFAULT_THRESHOLDS.lease_seconds, 'Code v2.4: the lease also outlasts a script reader call');
   const long = await t({ judge_timeout_ms: 600_000 });
   assert.deepEqual([long.lease_seconds, long.judge_timeout_ms], [DEFAULT_THRESHOLDS.lease_seconds, DEFAULT_THRESHOLDS.judge_timeout_ms], 'a judge the lease cannot cover keeps its default');
   assert.ok(LEASE_MARGIN_MS >= 30_000);

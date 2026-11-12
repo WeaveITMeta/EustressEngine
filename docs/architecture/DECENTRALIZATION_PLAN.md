@@ -179,7 +179,18 @@ v2.3 (2026-10-08, founder direction): tags are a listing's only categories and t
 is gone; an author may leave the tags empty, and the judge then chooses up to 5 that describe the
 Space honestly (`suggested_tags`), with `fiction` and a genre tag for fiction; tags that
 misdescribe the Space, or carry a slur, an insult or personal information, are a B9 wording fault.
-**Policy hash:** `sha256:99ced3f2e27e715a52483581375cb9eda9401944ca8f4412483da2f27e5f39b0`
+v2.4 (2026-11-11, founder direction: "no cut off scripts, no stuck review process, fully
+automated; reject illegal or sloppy spaces"): the judge reads every script in the published
+package in full, or a script reader's report on every one when they do not all fit in one
+request, and nothing is held because a script was long; every outcome outside the legal lane is
+automated (an unsure judge is asked once more, then the author is told what could not be
+confirmed and how to show it; doubt about a Group A article, an uncited Group A signal the judge
+cannot rule out with evidence, and a refusal are rejected under a safety review that names no
+article; a copy is rejected; a game is listed like any Space); nothing is listed unless every
+script players receive was read in full from the published package; the rating questionnaire is
+not required; the judge drafts a missing Qualification Statement; only the legal lane and appeals
+go to a person, and a transient failure of the AI is retried by the system.
+**Policy hash:** `sha256:53e1204bc18506f099ac7fec69274dd5a47010432364eac01913026070f294e4`
 (computed over the stored file with its line endings normalized to LF, as the Worker ships it;
 recorded here because a self-referential hash inside the file would change the hash). Covers:
 Part 0 (purpose, principles and who reviews), the spatial intelligence review requirement
@@ -188,7 +199,7 @@ II's four tests and T4 for Fiction, Part III's Qualification Statement, tags (th
 the author gives none), fiction tags, Product
 category and rating questionnaire, Part IV's ordered verdict rules, Part V ratings, content
 descriptors and the Adult content setting, Part VI games, Part VII's strict JSON answer with
-mandatory spatial evidence, per-article and per-test evidence and `suggested_tags`, and Part VIII's appeals, audit,
+mandatory spatial evidence, per-article and per-test evidence, `suggested_tags` and `suggested_statement`, and Part VIII's appeals, audit,
 versioning and review-schema loop.
 
 ### Quality Gate — RESOLVED: Option 1, hard gate

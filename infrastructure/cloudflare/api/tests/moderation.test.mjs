@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { packageFrom } from './helpers/package_fake.mjs';
 import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import {
@@ -10,6 +11,7 @@ import {
   MODERATION_TOOLS, AGENT_TOOL_NAMES, POLICY_HASH_ANCHORED, DOSSIER_MAX_BYTES, ARTICLE_SIGNALS, JEV_STATE_MAX_CHARS,
   authorView, authorStatusOf, safeAuthorText, AUTHOR_COPY, handleNotificationRoute, unsubscribeToken,
   sweepModeration, resumeStalledPending, sweepLocks, acquireLease, releaseLease, contentFingerprint, contentLockedFor, saveCase, LegalLockConflict, coverApproved, approvedCaptureKeys, simForServing, thumbnailApproved, sourceApproved, approvalMovement,
+  infrastructureHold, heldForPerson, POLICY_VERSION,
 } from '../src/moderation.mjs';
 import { render, TARGET } from '../scripts/sync-policy.mjs';
 import { claudeFromGrok, questionnaireAnswers } from './helpers/claude_fake.mjs';
@@ -137,6 +139,8 @@ function deps(env, { judge = verdict(), grok, admin = null, audits = [] } = {}) 
     grokModel: 'grok-test',
     extractGrokText,
     policyText: GUARDIAN_POLICY_TEXT, policyHash: POLICY_HASH_ANCHORED,
+    // Code v2.4: a listing is listed only on every script read from its package; these tests' packages read in full.
+    packageScripts: packageFrom(),
     fetch: jevFetch(jevAnswers()),
   };
 }
@@ -268,12 +272,12 @@ test('child-directed experiences with COPPA conflicts get changes requested, cle
   assert.equal(det.outcome, 'changes_requested');
 });
 
-test('quality lane: empties are Code B8 rejects, confident asset flips are B7 holds, shaky ones escalate, solid ones judge', () => {
+test('quality lane: empties are Code B8 rejects, confident asset flips are B7 rejects, shaky ones escalate, solid ones judge', () => {
   assert.deepEqual([triage({}, { empty: true }).outcome, triage({}, { empty: true }).reasons[0].article], ['reject', 'B8']);
   assert.deepEqual([triage({}, { default_only: true }).reasons[0].code, triage({}, { default_only: true }).reasons[0].article], ['no_discernible_intent_default_only', 'B8']);
   const flip = level => ({ quality_band: { probabilities: Object.fromEntries(QUALITY_BANDS.map(b => [b, b === level ? 0.8 : 0.04])), confidence: 0.9 }, spatial_intent: 0.1 });
   const r = triage(flip('unmodified_template_or_asset_flip'));
-  assert.equal(r.outcome, 'hold', 'a person decides B7'); assert.equal(r.lane, 'quality'); assert.equal(r.reasons[0].article, 'B7');
+  assert.equal(r.outcome, 'reject', 'Code v2.4: a confident copy is rejected, never held for a person'); assert.equal(r.lane, 'quality'); assert.equal(r.reasons[0].article, 'B7');
   assert.deepEqual([triage(flip('test_or_scratch_junk')).outcome, triage(flip('test_or_scratch_junk')).reasons[0].article], ['reject', 'B8']);
   for (const reason of [...triage({}, { empty: true }).reasons, ...r.reasons]) assert.equal('criterion' in reason, false, 'no v1.3 criterion numbers');
   const shaky = triage({ ...flip('unmodified_template_or_asset_flip'), quality_band: { ...flip('x').quality_band, probabilities: Object.fromEntries(QUALITY_BANDS.map(b => [b, b === 'unmodified_template_or_asset_flip' ? 0.5 : 0.1])), confidence: 0.4 } });
@@ -285,21 +289,30 @@ test('quality lane: empties are Code B8 rejects, confident asset flips are B7 ho
   assert.equal(triage({}, { rate_exceeded: true }).outcome, 'escalate');
 });
 
-test('the judge verdict finishes the case: a qualifying answer lists, flags hold, citations reject, failing tests reject, malformed holds', () => {
+test('the judge verdict finishes the case: a qualifying answer lists, doubt is asked again, citations reject, failing tests reject, malformed holds', () => {
   const base = triage({});
   assert.equal(decideFinal({ triage: base, judge: parseJudgeVerdict(JSON.stringify(verdict())) }).outcome, 'approve');
   const proposed = decideFinal({ triage: base, judge: parseJudgeVerdict(JSON.stringify(verdict({ featured_candidate: true, scores: { build_quality: 3, lesson: 3, real_world: 3 } }))) });
   assert.deepEqual([proposed.outcome, proposed.featured, proposed.featured_candidate], ['approve', false, true], 'featured is proposed for a person, never set');
-  assert.equal(decideFinal({ triage: base, judge: parseJudgeVerdict(JSON.stringify(verdict({ verdict: 'flag_for_human_review' }))) }).outcome, 'hold');
-  assert.equal(decideFinal({ triage: base, judge: parseJudgeVerdict(JSON.stringify(verdict({ confidence: 0.3 }))) }).outcome, 'hold');
+  // Code v2.4 rule 0: an unsure judge is asked once more; still unsure, the case is "not yet", never held for a person.
+  assert.equal(decideFinal({ triage: base, judge: parseJudgeVerdict(JSON.stringify(verdict({ verdict: 'flag_for_human_review' }))) }).outcome, 'second_opinion');
+  assert.equal(decideFinal({ triage: base, judge: parseJudgeVerdict(JSON.stringify(verdict({ confidence: 0.3 }))) }).outcome, 'second_opinion');
+  const still = decideFinal({ triage: base, judge: { ...parseJudgeVerdict(JSON.stringify(verdict({ confidence: 0.3 }))), second_opinion: true } });
+  assert.deepEqual([still.outcome, still.changes.includes('review_unconfirmed')], ['changes_requested', true]);
   assert.equal(decideFinal({ triage: base, judge: parseJudgeVerdict(JSON.stringify(rejectVerdict())) }).outcome, 'reject');
   assert.equal(decideFinal({ triage: base, judge: parseJudgeVerdict(JSON.stringify(verdict({ verdict: 'reject' }))) }).outcome, 'hold', 'a reject that cites no Group A article is malformed');
   const low = decideFinal({ triage: base, judge: parseJudgeVerdict(JSON.stringify(verdict({ scores: { build_quality: 0 }, suggested_edit_to_publish: 'Arrange the parts.' }))) });
   assert.equal(low.outcome, 'reject'); assert.equal(low.lane, 'quality'); assert.equal(low.reasons.at(-1).test, 'build_quality');
   assert.equal(decideFinal({ triage: base, judge: { malformed: true, error: 'judge_unavailable_500' } }).outcome, 'hold');
-  // v2.1: no agent takes the gray band. It is an A7 signal; a judge that does not cite it leaves the case to a person (rule 6).
+  // v2.1: no agent takes the gray band. It is an A7 signal; v2.4: a judge that does not cite it is asked about it by name, and
+  // only evidence that rules it out lets the case go on: anything else is the safety rejection, naming nothing.
   const esc = decideFinal({ triage: triage({ fraud_or_scam_facilitation: 0.5 }), judge: parseJudgeVerdict(JSON.stringify(verdict())) });
-  assert.deepEqual([esc.outcome, esc.reasons.at(-1).code, esc.reasons.at(-1).article, esc.reasons.at(-1).rule], ['hold', 'article_signal_not_cited', 'A7', 6]);
+  assert.deepEqual([esc.outcome, esc.signal_checks.map(c => c.article)], ['second_opinion', ['A7']]);
+  const ruledOut = decideFinal({ triage: triage({ fraud_or_scam_facilitation: 0.5 }), judge: { ...parseJudgeVerdict(JSON.stringify(verdict({ signal_answers: [{ article: 'A7', finding: 'absent', confidence: 0.9, evidence: 'The bank in capture-1 is a teaching mock-up with no real account data' }] }))), second_opinion: true } });
+  assert.equal(ruledOut.outcome, 'approve');
+  assert.ok(ruledOut.reasons.some(r => r.code === 'signal_cleared' && r.article === 'A7'));
+  const notOut = decideFinal({ triage: triage({ fraud_or_scam_facilitation: 0.5 }), judge: { ...parseJudgeVerdict(JSON.stringify(verdict())), second_opinion: true } });
+  assert.deepEqual([notOut.outcome, notOut.reasons.at(-1).code], ['reject', 'safety_review']);
 });
 
 test('parseJudgeVerdict refuses generic or missing spatial evidence and bad enums', () => {
@@ -353,7 +366,7 @@ test('a clean publish is approved, listed, and the judge saw the captures', asyn
   const after = await simOf(env, sim.id);
   assert.equal(isListable(after), true);
   assert.equal(after.moderation.status, 'approved');
-  assert.equal(after.moderation.policy_version, '2.3');
+  assert.equal(after.moderation.policy_version, POLICY_VERSION);
   assert.equal(after.moderation.review_schema, 2);
   assert.equal(after.moderation.featured, false, 'featured is a person\'s call');
   // The judge read the statement the system extracted, and the strings with article terms first.
@@ -492,16 +505,31 @@ test('a republish of an already decided .pak by the same author copies the decis
 // escalation it could leave undecided now all go to a person in the Review Workspace, whose members are told.
 const WORKSPACE = { space_id: 'b0b0b0b0-0000-4000-8000-00000000beef', members: ['admin-7', 'admin-8'] };
 
-test('the gray band is decided by the rules, never by a model: a judge that cites nothing leaves it to the Review Workspace, whose members are told', async () => {
+test('the gray band is decided by the rules, never by a model; the legal lane goes to the Review Workspace, whose members are told', async () => {
   const env = environment();
   await env.SOCIAL.put('workspace:review', JSON.stringify(WORKSPACE));
+  // Code v2.4: an A4 gray band the judge does not cite is asked about by name on a second reading. Not ruled out with evidence,
+  // the Space is rejected under the safety review, naming nothing; nothing waits for a person.
+  const gray = await publishedSim(env, { id: 'a1b2c3d4-0000-4000-8000-0000000000b7', pak: 'PAK-GRAY-B7' });
+  const grayDeps = { ...deps(env), fetch: jevFetch(jevAnswers({ real_crime_instructions: 0.55 })) };
+  const decided = await runModerationCase(gray.id, env, grayDeps);
+  assert.deepEqual([decided.status, decided.decision.reasons.at(-1).code, decided.decision.reasons.at(-1).suspected], ['rejected', 'safety_review', 'A4']);
+  assert.equal(grayDeps.calls.judge.length, 2, 'the signal check asked once more, by name');
+  assert.match(JSON.stringify(grayDeps.calls.judge[1].messages[0].content), /SIGNAL CHECK/);
+  assert.equal(decided.decision.suggested_edit, null, 'no edit that could name what was suspected');
+  assert.equal(env.SOCIAL.m.has(`wsq:hold:${gray.id}`), false, 'nothing waits for a person');
+  // Ruled out with evidence on the second reading, it is listed.
+  const clean = await publishedSim(env, { id: 'a1b2c3d4-0000-4000-8000-0000000000b8', pak: 'PAK-GRAY-B8' });
+  const answering = deps(env, { judge: verdict({ signal_answers: [{ article: 'A4', finding: 'absent', confidence: 0.9, evidence: 'The lab script Soul/lab/titrate.luau only animates a titration curve' }] }) });
+  assert.equal((await runModerationCase(clean.id, env, { ...answering, fetch: jevFetch(jevAnswers({ real_crime_instructions: 0.55 })) })).status, 'approved');
+  // The legal lane's gray band (a hard category between hard_hold and hard_quarantine) is still a person's.
   const sim = await publishedSim(env);
   const xai = [];
   const grok = async body => { if (body.tools) xai.push(body); return grokJudge(verdict())(body); };
-  const d = { ...deps(env, { grok }), fetch: jevFetch(jevAnswers({ real_crime_instructions: 0.55 })) };
+  const d = { ...deps(env, { grok }), fetch: jevFetch(jevAnswers({ terrorism_or_extremist_promotion: 0.5 })) };
   const rec = await runModerationCase(sim.id, env, d);
-  assert.equal(rec.status, 'held', 'the judge would publish; the rules hold an uncited Group A signal for a person');
-  assert.deepEqual([rec.decision.reasons.at(-1).code, rec.decision.reasons.at(-1).article, rec.decision.reasons.at(-1).rule], ['article_signal_not_cited', 'A4', 6]);
+  assert.equal(rec.status, 'held', 'the legal lane holds for a person');
+  assert.deepEqual([rec.decision.lane, rec.decision.reasons.at(-1).code, rec.decision.reasons.at(-1).article], ['legal', 'terrorism_or_extremist_promotion', 'A2']);
   assert.equal('agent' in rec && rec.agent !== null, false, 'no agent ran');
   assert.equal(xai.filter(b => !b.tools?.some(t => t.type === 'web_search')).length, 0, 'no model was handed a tool to decide with');
   const queued = JSON.parse(env.SOCIAL.m.get(`wsq:hold:${sim.id}`));
@@ -514,7 +542,7 @@ test('the gray band is decided by the rules, never by a model: a judge that cite
   const q = await admin('moderation_workspace_queue', {});
   assert.deepEqual(q.items.map(i => [i.kind, i.sim_id, i.status]), [['hold', sim.id, 'held']]);
   // A person decides; the case leaves the queue.
-  assert.equal((await admin('moderation_reject', { sim_id: sim.id, lane: 'harm', category: 'A4', rationale: 'The lab script is a usable synthesis route, not a lesson.' })).ok, true);
+  assert.equal((await admin('moderation_reject', { sim_id: sim.id, lane: 'harm', category: 'A2', rationale: 'The banner text recruits for a real violent group.' })).ok, true);
   assert.equal(env.SOCIAL.m.has(`wsq:hold:${sim.id}`), false);
   assert.deepEqual((await admin('moderation_workspace_queue', {})).items, []);
 });
@@ -539,16 +567,15 @@ test('an audit sample of approvals and of rejections goes to the Review Workspac
   assert.deepEqual((await admin('moderation_workspace_queue', { kind: 'audit' })).items.map(i => i.sim_id), [sim2.id]);
 });
 
-test('an escalated case calls no model past the judge: the gray band is held with the article named, and the researcher is not asked when nothing public is at stake', async () => {
+test('an escalated case calls no model past the judge: the gray band is noted with the article named, and the researcher is not asked when nothing public is at stake', async () => {
   const env = environment();
   const sim = await publishedSim(env);
   const xai = [];
   const grok = async body => { xai.push(body); return grokJudge(verdict())(body); };
   const d = { ...deps(env, { grok }), fetch: jevFetch(jevAnswers({ hate_incitement: 0.5 })) };
   const rec = await runModerationCase(sim.id, env, d);
-  assert.equal(rec.status, 'held');
-  assert.ok(rec.decision.reasons.some(r => r.code === 'article_signal_not_cited' && r.article === 'A9'));
-  assert.equal(xai.length, 1, 'one call: the judge');
+  assert.deepEqual([rec.status, rec.decision.reasons.at(-1).code], ['rejected', 'safety_review'], 'Code v2.4: an uncited Group A signal not ruled out');
+  assert.equal(xai.length, 2, 'two calls: the judge, and its signal check');
   assert.equal(rec.research, null);
 });
 
@@ -910,16 +937,17 @@ test('a listing stranded at pending is resumed by the sweep and its author is to
   assert.equal(d.calls.judge.length, 1);
 });
 
-test('a stranded listing with no dossier or captures is held for a person, not approved', async () => {
+test('a stranded listing with no dossier or captures is not approved: the author is told what the review could not see', async () => {
   const env = mailEnv();
   const sim = await strandedSim(env, 2, { withDossier: false });
   await env.SCENES.delete(`universes/${sim.id}/moderation/capture-0.png`);
   await env.SCENES.delete(`universes/${sim.id}/moderation/capture-1.png`);
   await sweepModeration(env, { ...deps(env), grokFetch: grokJudge(verdict({ verdict: 'flag_for_human_review', confidence: 0.3 })) }, { backfill: false });
   const rec = await loadCase(env, sim.id);
-  assert.equal(rec.status, 'held');
+  assert.equal(rec.status, 'changes_requested', 'Code v2.4: asked again, still unsure, so not yet');
+  assert.ok(rec.decision.changes.includes('review_unconfirmed'));
   assert.equal(isListable(await simOf(env, sim.id)), false);
-  assert.equal(feedOf(env).length, 0, 'held reads as in_review to the author, so nothing is announced');
+  assert.equal(feedOf(env).length, 1, 'the author is told what to change');
 });
 
 test('the stalled sweep leaves alone what it must', async () => {
@@ -990,6 +1018,100 @@ test('a run that throws uses up an attempt, and a half-claimed case is picked up
   assert.equal(env.SOCIAL.m.has(`modq:classifying:${half.id}`), false);
   assert.equal(await resumeStalledPending(env, d), 1);
   assert.equal((await loadCase(env, half.id)).status, 'approved');
+});
+
+// A judge whose key the vendor rejects (production 2026-11-10: judge_unavailable_401).
+const rejectedKey = async () => ({ ok: false, status: 401, text: async () => 'invalid x-api-key' });
+const backdate = async (env, id, ago) => {
+  const s = await simOf(env, id);
+  s.moderation.updated_at = iso(ago); s.moderation.submitted_at = iso(ago); s.updated_at = iso(ago); s.published_at = iso(ago);
+  await env.SOCIAL.put(`sim:${id}`, JSON.stringify(s));
+};
+
+test('a hold the AI caused by failing is tried again by the sweep once the failure clears, and then decided', async () => {
+  const env = mailEnv({ MODERATION_THRESHOLDS: '{"audit_rate":0}' });
+  const sim = await publishedSim(env, { id: SIM(60), pak: 'PAK-INFRA-60' });
+  const held = await runModerationCase(sim.id, env, { ...deps(env), grokFetch: rejectedKey });
+  assert.equal(held.status, 'held');
+  assert.equal(held.judge.error, 'judge_unavailable_401');
+  assert.equal((await simOf(env, sim.id)).moderation.status, 'held');
+
+  // Too soon: the first retry waits stuck_case_minutes.
+  const d = deps(env);
+  assert.equal(await resumeStalledPending(env, d), 0);
+  assert.equal(d.calls.judge.length, 0);
+
+  await backdate(env, sim.id, 20 * 60 * 1000);
+  assert.equal(await resumeStalledPending(env, d), 1);
+  const rec = await loadCase(env, sim.id);
+  assert.equal(rec.status, 'approved');
+  assert.equal(rec.trigger, 'sweep');
+  const after = await simOf(env, sim.id);
+  assert.equal(after.moderation.status, 'approved');
+  assert.equal(after.moderation.infra_retries, 0, 'a decision ends the retries');
+  assert.equal(isListable(after), true);
+});
+
+test('retries of a failed review are spaced, bounded, and never take a case a person was given', async () => {
+  const env = mailEnv({ MODERATION_THRESHOLDS: '{"audit_rate":0}' });
+  const sim = await publishedSim(env, { id: SIM(61), pak: 'PAK-INFRA-61' });
+  const failing = { ...deps(env), grokFetch: rejectedKey };
+  await runModerationCase(sim.id, env, failing);
+
+  await backdate(env, sim.id, 20 * 60 * 1000);
+  assert.equal(await resumeStalledPending(env, failing), 1);
+  assert.equal((await loadCase(env, sim.id)).status, 'held', 'still failing, still held');
+  assert.equal((await simOf(env, sim.id)).moderation.infra_retries, 1);
+  // The second retry waits four times as long.
+  await backdate(env, sim.id, 20 * 60 * 1000);
+  assert.equal(await resumeStalledPending(env, failing), 0);
+  await backdate(env, sim.id, 2 * HOUR);
+  assert.equal(await resumeStalledPending(env, failing), 1);
+  assert.equal((await simOf(env, sim.id)).moderation.infra_retries, 2);
+  // Never given up on: after many failures it is still tried once a day, and no sooner.
+  const s = await simOf(env, sim.id);
+  s.moderation.infra_retries = 40;
+  await env.SOCIAL.put(`sim:${sim.id}`, JSON.stringify(s));
+  await backdate(env, sim.id, 20 * HOUR);
+  const d = deps(env);
+  assert.equal(await resumeStalledPending(env, d), 0, 'not before a day has passed');
+  assert.equal(d.calls.judge.length, 0);
+  await backdate(env, sim.id, 25 * HOUR);
+  assert.equal(await resumeStalledPending(env, failing), 1, 'and still tried once a day');
+  assert.equal((await simOf(env, sim.id)).moderation.infra_retries, 41);
+
+  // The judge's doubt is decided (v2.4: asked again, then not yet): a decision, which the sweep never re-asks the AI about.
+  const doubt = await publishedSim(env, { id: SIM(62), pak: 'PAK-DOUBT-62' });
+  await runModerationCase(doubt.id, env, deps(env, { judge: verdict({ verdict: 'flag_for_human_review', confidence: 0.3 }) }));
+  assert.equal((await loadCase(env, doubt.id)).status, 'changes_requested');
+  await backdate(env, doubt.id, 2 * 24 * HOUR);
+  const watch = deps(env);
+  assert.equal(await resumeStalledPending(env, watch), 0);
+  assert.equal(watch.calls.judge.length, 0);
+  assert.equal((await loadCase(env, doubt.id)).status, 'changes_requested');
+});
+
+test('a judge cut off at its output ceiling gave no answer: the hold is retried, not handed to a person', () => {
+  // Production 2026-11-10: effort "max" spent all 64,000 tokens thinking and wrote no verdict.
+  const held = code => ({ status: 'held', decision: { reasons: [{ code, rule: 0, lane: 'judge', action: 'hold' }] } });
+  assert.equal(infrastructureHold(held('judge_max_tokens')), true);
+  assert.equal(heldForPerson(held('judge_max_tokens')), false);
+  assert.equal(infrastructureHold(held('judge_unavailable_401')), true);
+  assert.equal(infrastructureHold(held('judge_flagged')), false, 'the judge\'s own doubt still goes to a person');
+});
+
+test('the author can ask again for a review the AI failed to give', async () => {
+  const env = environment({ MODERATION_THRESHOLDS: '{"audit_rate":0}' });
+  const sim = await publishedSim(env);
+  await runModerationCase(sim.id, env, { ...deps(env), grokFetch: rejectedKey });
+  assert.equal((await simOf(env, sim.id)).moderation.status, 'held');
+  const d = deps(env);
+  const r = await submit(env, sim, d);
+  assert.equal(r.status, 200);
+  assert.notEqual((await r.json()).rerun, false, 'the review ran');
+  assert.equal(d.calls.judge.length, 1);
+  assert.equal((await loadCase(env, sim.id)).status, 'approved');
+  assert.equal((await simOf(env, sim.id)).moderation.status, 'approved');
 });
 
 test('the sweep scan is bounded and rotates through the listings', async () => {
@@ -1382,7 +1504,10 @@ test('a run whose lease was taken over cannot overwrite the verdict of the run t
 test('a case a person was asked to decide is not given back to the AI by a content change', async () => {
   const env = environment();
   const sim = await publishedSim(env);
-  await runModerationCase(sim.id, env, { ...deps(env), grokFetch: grokJudge(verdict({ verdict: 'flag_for_human_review', confidence: 0.4 })) });
+  await runModerationCase(sim.id, env, deps(env));
+  // Code v2.4: the rules hold nothing outside the legal lane, so the person's case here is one a person held themselves.
+  const person = makeToolExecutor(env, deps(env, { admin: 'admin-1' }), { actor: 'admin', actorId: 'admin-1' });
+  assert.equal((await person('moderation_hold', { sim_id: sim.id, reason: 'Checking the harbour data source myself.' })).ok, true);
   const held = await loadCase(env, sim.id);
   assert.equal(held.status, 'held');
   assert.notEqual(held.decision.lane, 'legal');
@@ -1406,7 +1531,7 @@ test('a hold caused by the AI failing, not by its doubt, can be drawn again', as
   assert.deepEqual([(await r.json()).rerun, (await loadCase(env, sim.id)).status], [true, 'approved']);
 });
 
-test('after three non-approved verdicts in a day the next change goes to a person, not the AI', async () => {
+test('after three non-approved verdicts in a day the next change is told to try again tomorrow, and nothing is held', async () => {
   const env = environment();
   const sim = await publishedSim(env);
   const reject = { ...deps(env), fetch: jevFetch(jevAnswers({ real_crime_instructions: 0.92, real_world_intent: 0.85 })) };
@@ -1417,10 +1542,18 @@ test('after three non-approved verdicts in a day the next change goes to a perso
   const calls = [];
   const r = await submit(env, sim, { ...deps(env), fetch: jevFetch(jevAnswers(), calls) });
   const body = await r.json();
-  assert.deepEqual([r.status, body.status, body.rerun, calls.length], [200, 'in_review', false, 0]);
+  assert.deepEqual([r.status, body.code, calls.length], [429, 'review_limit', 0]);
+  assert.ok(Number(r.headers.get('Retry-After')) > 0, 'Retry-After says when');
+  assert.match(body.error, /Try again tomorrow/);
   const rec = await loadCase(env, sim.id);
-  assert.equal(rec.status, 'held');
-  assert.ok(rec.decision.reasons.some(x => x.code === 'review_limit'));
+  assert.equal(rec.status, 'rejected', 'the case keeps its decision');
+  assert.equal(rec.decision.reasons.some(x => x.code === 'review_limit'), false);
+  assert.equal((await simOf(env, sim.id)).moderation.status, 'pending', 'the listing keeps its status');
+  // The sweep does not spend a review on it either until the day turns.
+  const s = await simOf(env, sim.id); s.moderation.updated_at = s.updated_at = s.moderation.submitted_at = new Date(Date.now() - 3600e3).toISOString(); await env.SOCIAL.put(`sim:${sim.id}`, JSON.stringify(s));
+  const swept = deps(env);
+  assert.equal(await resumeStalledPending(env, swept), 0);
+  assert.equal(swept.calls.judge.length, 0);
 });
 
 // ── leases, epochs and the budget, one level down ──
@@ -1609,7 +1742,9 @@ test('a verdict is not applied to a world swapped for another of the same size',
     await env.SOCIAL.put(`sim:${sim.id}`, JSON.stringify(s));
     return grokJudge(verdict())(body);
   };
-  const rec = await runModerationCase(sim.id, env, deps(env, { grok: swap }));
+  // The world here is a stand-in with no manifest in R2, so the scripts stage reads the dossier's scripts (as for a .pak).
+  const dossierOnly = { extractPackageScripts: async () => ({ supported: false }), readPackageScripts: async () => [] };
+  const rec = await runModerationCase(sim.id, env, { ...deps(env, { grok: swap }), packageScripts: dossierOnly });
   assert.equal(rec.status, 'pending', 'the approval drawn on world A is not applied to world B');
   assert.equal(isListable(await simOf(env, sim.id)), false);
 });
@@ -1760,7 +1895,8 @@ test('a person approving a case whose content changed after the review is told t
   const env = environment();
   const sim = await publishedSim(env);
   await runModerationCase(sim.id, env, { ...deps(env), grokFetch: grokJudge(verdict({ verdict: 'flag_for_human_review', confidence: 0.4 })) });
-  assert.equal((await loadCase(env, sim.id)).status, 'held');
+  // Code v2.4: an unsure judge is asked again, and a second unsure answer is not yet.
+  assert.equal((await loadCase(env, sim.id)).status, 'changes_requested');
   // The author uploads something else while the case waits for a person.
   const s = await simOf(env, sim.id);
   s.pak_etag = 'another-package'; s.moderation = { ...s.moderation, status: 'pending' };

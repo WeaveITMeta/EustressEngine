@@ -7,6 +7,7 @@
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { packageFrom } from './helpers/package_fake.mjs';
 import crypto from 'node:crypto';
 import zlib from 'node:zlib';
 import fs from 'node:fs';
@@ -151,6 +152,8 @@ function deps() {
     verifyAuth: async () => null, requireAdmin: async () => null, json, cors: {}, auditLog: async () => {},
     grokFetch: async () => { throw new Error('no research in these tests'); }, grokModel: 'grok-test', extractGrokText: () => '',
     policyText: GUARDIAN_POLICY_TEXT, policyHash: POLICY_HASH_ANCHORED,
+    // Code v2.4: a listing is listed only on every script read from its package; these tests' packages read in full.
+    packageScripts: packageFrom(),
     fetch: async () => new Response(JSON.stringify(jevAnswers()), { status: 200, headers: { 'Content-Type': 'application/json' } }),
   };
 }
@@ -241,11 +244,14 @@ test('a normal run with every image under the limit still approves, sends every 
   assert.equal((await call(env, 'GET', `/api/simulations/${SIM}/thumbnail`)).type, 'image/png');
 });
 
+// Code v2.4: a run that left an image out never lists the Space; it is "not yet", asking for images the review can read
+// (images_not_seen), never a hold for a person. The helper keeps its name for the cases below.
 async function assertHeldAndUnserved(env, rec, leftOut) {
-  assert.equal(rec.status, 'held');
+  assert.equal(rec.status, 'changes_requested');
   assert.notEqual(rec.decision.outcome, 'approve');
+  assert.ok(rec.decision.changes.includes('images_not_seen'), 'the author is asked for images the review can read');
   const reason = rec.decision.reasons.find(r => r.code === 'images_not_judged');
-  assert.ok(reason, 'held for a person because images were not judged');
+  assert.ok(reason, 'not listed because images were not judged');
   assert.deepEqual(reason.images, leftOut);
   assert.deepEqual(rec.judge.captures_left_out, leftOut);
   const sim = await record(env);
@@ -258,7 +264,7 @@ async function assertHeldAndUnserved(env, rec, leftOut) {
   assert.doesNotMatch(view, /images_not_judged|capture-\d\.png|listing thumbnail|listing cover/);
 }
 
-test('a capture stored over the judge limit (legacy data) is left out, and the case is held, never approved', async () => {
+test('a capture stored over the judge limit (legacy data) is left out, and the case is not yet, never approved', async () => {
   const env = await environment();
   await listing(env, { captures: { 0: pngOf(400), 1: pngOf(LEGACY_OVERSIZE) } });
   const d = deps();
@@ -268,7 +274,7 @@ test('a capture stored over the judge limit (legacy data) is left out, and the c
   assert.equal(sentImages(d), 2);
 });
 
-test('a thumbnail stored over the judge limit is left out, and the case is held', async () => {
+test('a thumbnail stored over the judge limit is left out, and the case is not yet', async () => {
   const env = await environment();
   await listing(env, { thumb: pngOf(LEGACY_OVERSIZE) });
   const rec = await runModerationCase(SIM, env, deps());
@@ -276,7 +282,7 @@ test('a thumbnail stored over the judge limit is left out, and the case is held'
   assert.deepEqual(rec.judge.captures_used, ['capture-0.png', 'capture-1.png']);
 });
 
-test('images under the per-image limit that overflow the request budget are left out, and the case is held', async () => {
+test('images under the per-image limit that overflow the request budget are left out, and the case is not yet', async () => {
   const env = await environment();
   // Five captures at the cap (each about 4.9 MB of base64): after the small thumbnail, sent first, four fit in the 24 MB budget and the fifth does not.
   const captures = Object.fromEntries([0, 1, 2, 3, 4].map(n => [n, pngOf(JUDGE_IMAGE_MAX_BYTES, n)]));
@@ -288,7 +294,7 @@ test('images under the per-image limit that overflow the request budget are left
   assert.equal(sentImages(d), 5);
 });
 
-test('a capture that is gone between the listing and the read, or of a type the judge cannot take, holds the case', async () => {
+test('a capture that is gone between the listing and the read, or of a type the judge cannot take, keeps the case from listing', async () => {
   const env = await environment();
   await listing(env);
   const get = env.SCENES.get.bind(env.SCENES);
@@ -316,7 +322,7 @@ test('an approval is copied to a republish of the same package only with the sam
   const second = await runModerationCase(SIM2, env, d);
   assert.equal(second.decision.dedup_of, undefined);
   assert.equal(d.judge.calls.length, 2);
-  assert.equal(second.status, 'held');
+  assert.equal(second.status, 'changes_requested');
   // The same images: the approval is copied, as before.
   const env2 = await environment();
   await listing(env2);
@@ -360,7 +366,7 @@ test('stray captures beside eight bound ones: the cover is still judged, and a h
   // The judge cites A2 only when it is shown the cover.
   const harmful = verdict();
   Object.assign(harmful, { verdict: 'reject', articles: [{ id: 'A2', confidence: 0.95, evidence: 'The listing cover (the box art the Gallery shows) is a recruitment poster for a named armed group, with its flag and a call to join' }], tests: Object.fromEntries(Object.entries(harmful.tests).map(([k, v]) => [k, { ...v, score: 0 }])) });
-  d.judge = fakeClaude((body) => (body.messages[0].content.find(c => c.type === 'text').text.split('\n')[0].includes(COVER_LABEL) ? harmful : verdict()), d.judge.calls);
+  d.judge = fakeClaude((body) => (body.messages[0].content.at(-1).text.split('\n')[0].includes(COVER_LABEL) ? harmful : verdict()), d.judge.calls);
   d.claude = d.judge;
   const rec = await runModerationCase(SIM, env, d);
   assert.ok(rec.judge.captures_used.includes(COVER_LABEL), JSON.stringify(rec.judge.captures_used));
@@ -591,7 +597,7 @@ for (const [what, key, label, extra] of [
 
 // -- S1: every stored capture reaches the judge's plan ------------------------------------------------------------------------------
 
-test('a capture past the eighth is named as left out, not cut silently, and the case is held', async () => {
+test('a capture past the eighth is named as left out, not cut silently, and the case is not yet', async () => {
   const env = await environment();
   const captures = Object.fromEntries([0, 1, 2, 3, 4, 5, 6, 7].map(n => [n, pngOf(400 + n)]));
   await listing(env, { captures });
@@ -696,16 +702,16 @@ test('the binding sweep binds the objects the review recorded when they are stil
   assert.equal((await loadCase(env, SIM)).status, 'approved');
 });
 
-test('the binding sweep holds for a person a listing whose stored art is not what the review recorded, and binds nothing', async () => {
+test('the binding sweep sends back to review a listing whose stored art is not what the review recorded, and binds nothing', async () => {
   const env = await environment();
   await approvedUnbound(env);
   // The thumbnail swapped while the listing had no binding (written straight to storage, as an unbound listing served it).
   await store(env, `thumbnails/${SIM}/thumb.png`, pngOf(901, 5));
   await sweepLocks(env);
   const rec = await loadCase(env, SIM);
-  assert.equal(rec.status, 'held');
+  assert.equal(rec.status, 'pending', 'Code v2.4: reviewed again, never held for a person');
   assert.ok(rec.decision.reasons.some(r => r.code === 'stored_objects_not_reviewed'));
-  assert.equal((await record(env)).moderation.status, 'held');
+  assert.equal((await record(env)).moderation.status, 'pending');
   const binding = JSON.parse(await (await env.SCENES.get(`locks/approved/${SIM}.json`)).text());
   assert.equal(binding.revoked, true, 'no approval is bound to what was never judged');
   assert.equal((await call(env, 'GET', `/api/simulations/${SIM}/thumbnail`)).status, 404);

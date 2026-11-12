@@ -6,6 +6,7 @@
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { packageFrom } from './helpers/package_fake.mjs';
 import { createHash } from 'node:crypto';
 import {
   decideFinal, decideTriage, deterministicSignals, parseJudgeVerdict, buildJevQuestions, extractQualificationStatement,
@@ -57,10 +58,10 @@ const noulJev = answers => ({ answers: Object.fromEntries(Object.entries(answers
 
 // ── policy ──────────────────────────────────────────────────────────────────
 
-test('the Code (v2.3, which carries v2.1) is anchored by its hash, and the Worker cites it', () => {
-  assert.equal(POLICY_VERSION, '2.3');
+test('the Code (v2.4, which carries v2.1) is anchored by its hash, and the Worker cites it', () => {
+  assert.equal(POLICY_VERSION, '2.4');
   assert.equal('sha256:' + createHash('sha256').update(GUARDIAN_POLICY_TEXT).digest('hex'), POLICY_HASH_ANCHORED);
-  assert.equal(POLICY_HASH_ANCHORED, 'sha256:99ced3f2e27e715a52483581375cb9eda9401944ca8f4412483da2f27e5f39b0');
+  assert.equal(POLICY_HASH_ANCHORED, 'sha256:53e1204bc18506f099ac7fec69274dd5a47010432364eac01913026070f294e4');
   for (const id of ['A12', 'A13', 'A14']) assert.match(GUARDIAN_POLICY_TEXT, new RegExp(`\\*\\*${id}\\. `), id);
   assert.equal(REVIEW_SCHEMA, 2);
 });
@@ -77,25 +78,40 @@ test('rule 1: A1, A2, A3, A5, A6 and A12 quarantine at any confidence; A12 throu
   assert.ok(HARD_CATEGORIES.includes('war_or_military_targeting'), 'moderation_quarantine accepts it');
 });
 
-test('rule 1: A4, A7, A8, A9, A13 and A14 reject at 0.75 or above, and are held below it', () => {
+test('rule 1: A4, A7, A8, A9, A13 and A14 reject at 0.75 or above; below it any Group A citation is the safety rejection, naming nothing', () => {
   assert.deepEqual(ARTICLES_REJECT_A, ['A4', 'A7', 'A8', 'A9', 'A13', 'A14']);
   for (const id of ARTICLES_REJECT_A) {
     const at = decide({}, { verdict: 'reject', articles: [cite(id, 0.75)] });
     assert.deepEqual([at.outcome, at.lane, last(at).article], ['reject', 'harm', id], `${id} at 0.75`);
     const below = decide({}, { verdict: 'reject', articles: [cite(id, 0.74)] });
-    assert.deepEqual([below.outcome, below.lane, last(below).article, last(below).rule, last(below).below], ['hold', 'harm', id, 1, 0.75], `${id} at 0.74`);
+    assert.deepEqual([below.outcome, below.lane, last(below).code, last(below).suspected, last(below).rule, last(below).article], ['reject', 'harm', 'safety_review', id, 1, undefined], `${id} at 0.74`);
+    const view = authorView({ status: 'rejected', decision: { reasons: below.reasons, lane: below.lane } }, {});
+    assert.deepEqual(view.reasons.map(r => r.category), ['safety_review'], `${id}: the author is told nothing of what was suspected`);
+    assert.doesNotMatch(JSON.stringify(view.reasons), /A\d|crime|fraud|harm|hate|self/i, `${id}: no article or harm named`);
   }
   assert.equal(DEFAULT_THRESHOLDS.group_a_reject, 0.75);
 });
 
-test('rule 1: a Group A citation against attested property is held; the attestation exempts A10, A13 and A14 only', () => {
+test('rule 1 (v2.4): only an A10 citation whose own evidence names the attested property is set aside; never A13 or A14, never on the author\'s text', () => {
   const attested = { account: { attested_properties: [HOME], verified_business: false, payment_connection: false } };
+  const onHome = (id, confidence = 0.95) => ({ id, confidence, evidence: `Code ${id}: the camera layout of 1428 Elm Street, Springwood in capture-2`, place: '1428 Elm Street, Springwood' });
   for (const id of ['A13', 'A14']) {
-    const d = decide(attested, { verdict: 'reject', articles: [cite(id, 0.95)] });
-    assert.deepEqual([d.outcome, last(d).article, last(d).attested_property], ['hold', id, true], id);
-    assert.equal(decide({}, { verdict: 'reject', articles: [cite(id, 0.95)] }).outcome, 'reject', `${id} without an attestation`);
+    const d = decide(attested, { verdict: 'reject', articles: [onHome(id)] });
+    assert.equal(d.outcome, 'reject', `${id} is never set aside by an attestation`);
+    assert.equal(d.reasons.some(r => r.attested_property), false, id);
   }
-  assert.deepEqual([decide(attested, { articles: [cite('A10')] }).outcome, last(decide(attested, { articles: [cite('A10')] })).attested_property], ['hold', true]);
+  assert.deepEqual([decide(attested, { articles: [onHome('A10')] }).outcome, decide({}, { articles: [onHome('A10')] }).outcome], ['approve', 'changes_requested']);
+  // The author's own Real-world link naming the property sets nothing aside: only the citation's evidence can.
+  const ownWords = { ...attested, statement: extractQualificationStatement('Category: Digital twin\nObjective: Walk the house.\nLesson: How a home is laid out.\nReal-world link: Models 1428 Elm Street, Springwood.') };
+  assert.equal(decide(ownWords, { articles: [cite('A10', 0.95)] }).outcome, 'changes_requested', 'the statement names the home; the citation does not');
+  // The reviewer's variant: the evidence quotes the author's line but describes another place. Only the place the judge names
+  // decides, compared whole, and evidence naming another facility is never set aside.
+  const quoted = 'the author\'s line "Models 1428 Elm Street" but the Space shows the guard posts, cameras and door control of Lincoln Elementary School';
+  assert.equal(decide(attested, { articles: [{ id: 'A10', confidence: 0.95, evidence: quoted }] }).outcome, 'changes_requested', 'no place named: no exemption');
+  assert.equal(decide(attested, { articles: [{ id: 'A10', confidence: 0.95, evidence: quoted, place: 'Lincoln Elementary School' }] }).outcome, 'changes_requested', 'the place is the school');
+  assert.equal(decide(attested, { articles: [{ id: 'A10', confidence: 0.95, evidence: quoted, place: '1428 Elm Street' }] }).outcome, 'changes_requested', 'the evidence names another facility');
+  assert.equal(decide(attested, { articles: [{ id: 'A10', confidence: 0.95, evidence: 'Code A10: the alarm panel inside the hall, capture-2', place: 'near 1428 Elm Street' }] }).outcome, 'changes_requested', 'a place that only contains the address is not it');
+  assert.equal(decide(attested, { articles: [{ id: 'A10', confidence: 0.95, evidence: 'Code A10: the alarm panel inside the hall, capture-2', place: '1428 elm street, springwood' }] }).outcome, 'approve', 'the attested home itself, compared whole');
   assert.equal(decide(attested, { verdict: 'reject', articles: [cite('A4', 0.95)] }).outcome, 'reject', 'A4 is never exempt');
   assert.equal(decide(attested, { verdict: 'reject', articles: [cite('A12', 0.95)] }).outcome, 'quarantine', 'A12 is never exempt');
   assert.equal(decide(attested, { verdict: 'reject', articles: [cite('A13', 0.95), cite('A7', 0.9)] }).outcome, 'reject', 'an exempt citation does not shield another article');
@@ -127,34 +143,38 @@ test('Jev asks A12, A13 and A14 in the Code\'s bright-line words, one question p
   assert.deepEqual(Object.keys(q.content_rating.criteria), RATINGS, 'Jev rates in the Code\'s bands, ages_10 included');
 });
 
-test('triage: Jev\'s A12 at 0.85 quarantines like A1 to A6; A13 and A14 signals escalate to the researcher and the judge; uncited, a person decides', () => {
+test('triage: Jev\'s A12 at 0.85 quarantines like A1 to A6; A13 and A14 signals escalate to the researcher and the judge; uncited, the judge is asked about them by name', () => {
   assert.equal(decideTriage({ signals: {}, jev: noulJev({ war_or_military_targeting: 0.9 }) }).outcome, 'quarantine');
   assert.deepEqual([decideTriage({ signals: {}, jev: noulJev({ war_or_military_targeting: 0.4 }) }).outcome, decideTriage({ signals: {}, jev: noulJev({ war_or_military_targeting: 0.4 }) }).lane], ['hold', 'legal']);
   for (const [key, article] of [['crime_rehearsal', 'A13'], ['stalking_private_person', 'A14']]) {
     const t = decideTriage({ signals: {}, jev: noulJev({ [key]: 0.6 }) });
     assert.deepEqual([t.outcome, t.lane, t.articles.signals[0].article, t.articles.signals[0].group], ['escalate', 'harm', article, 'A'], key);
     const d = decideFinal({ triage: { ...t, statement: STATEMENT, questionnaire: ANSWERED }, judge: judge() });
-    assert.deepEqual([d.outcome, last(d).code, last(d).article, last(d).rule], ['hold', 'article_signal_not_cited', article, 6], key);
+    assert.deepEqual([d.outcome, last(d).code, last(d).signals], ['second_opinion', 'signal_check', [article]], key);
+    const cleared = decideFinal({ triage: { ...t, statement: STATEMENT, questionnaire: ANSWERED }, judge: judge({ second_opinion: true, signal_answers: [{ article, finding: 'absent', confidence: 0.9, evidence: 'The twin is an invented warehouse with no security fixtures, capture-2' }] }) });
+    assert.equal(cleared.outcome, 'approve', `${key}: ruled out with evidence`);
+    const unanswered = decideFinal({ triage: { ...t, statement: STATEMENT, questionnaire: ANSWERED }, judge: judge({ second_opinion: true }) });
+    assert.deepEqual([unanswered.outcome, last(unanswered).code, last(unanswered).suspected], ['reject', 'safety_review', article], `${key}: not ruled out`);
   }
 });
 
 // ── B6, the fair economy ────────────────────────────────────────────────────
 
-test('B6: each sub-item at the system threshold is a B6 citation, not yet when every test is 2 or above, held when a test is null', () => {
+test('B6: each sub-item at the system threshold is a B6 citation, not yet when every test is 2 or above, and not yet with the unscored test asked for when one is null', () => {
   for (const key of Object.keys(ARTICLE_SIGNALS).filter(k => ARTICLE_SIGNALS[k] === 'B6')) {
     const t = decideTriage({ signals: {}, jev: noulJev({ [key]: 0.9 }) });
     assert.deepEqual(t.articles.system.map(s => [s.article, s.key]), [['B6', key]], key);
     const d = decideFinal({ triage: { ...t, statement: STATEMENT, questionnaire: ANSWERED }, judge: judge() });
     assert.deepEqual([d.outcome, d.changes], ['changes_requested', ['not_yet_B6']], key);
     const unscored = decideFinal({ triage: { ...t, statement: STATEMENT, questionnaire: ANSWERED }, judge: judge({ scores: { lesson: null } }) });
-    assert.deepEqual([unscored.outcome, last(unscored).rule, last(unscored).tests_not_scored], ['hold', 2, ['lesson']], `${key} with a null test`);
+    assert.deepEqual([unscored.outcome, last(unscored).rule, last(unscored).tests_not_scored, unscored.changes], ['changes_requested', 2, ['lesson'], ['not_yet_B6', 'confirm_lesson']], `${key} with a null test`);
   }
 });
 
-test('rule 2: B5, B6 or a B9 wording fault with a test null is held for a person (v2.0 rejected it)', () => {
+test('rule 2: B5, B6 or a B9 wording fault with a test null is not yet, naming the change and the test to show (v2.0 rejected it, v2.1 held it)', () => {
   for (const id of ['B5', 'B6', 'B9']) {
     const d = decide({}, { articles: [cite(id, 0.8)], scores: { objective: null } });
-    assert.deepEqual([d.outcome, last(d).article, last(d).rule], ['hold', id, 2], id);
+    assert.deepEqual([d.outcome, last(d).article, last(d).rule, d.changes.includes('confirm_objective')], ['changes_requested', id, 2, true], id);
   }
   assert.equal(decide({}, { articles: [cite('B6', 0.8)], scores: { objective: 1 } }).outcome, 'reject', 'a test below 2 and none null still rejects');
 });
@@ -274,14 +294,15 @@ test('the rating is the highest of the questionnaire, Jev and the judge\'s floor
   assert.equal(decideFinal({ triage: triage({ rating: 'all_ages', questionnaire: asked({ language: 'mild' }) }), judge: judge({ rating_floor: 'all_ages' }) }).rating, 'ages_10', 'ages_10 from the questionnaire alone');
 });
 
-test('rule 7: an unanswered questionnaire is not yet; rule 8 lists only when it is answered', () => {
+test('v2.4: the rating questionnaire is not required (no form asks it yet); an answered one is a floor', () => {
   const d = decide({ questionnaire: UNANSWERED });
-  assert.deepEqual([d.outcome, d.changes, last(d).code, last(d).rule], ['changes_requested', ['questionnaire_unanswered'], 'questionnaire_unanswered', 7]);
-  assert.deepEqual(decide({ questionnaire: UNANSWERED, statement: extractQualificationStatement('A harbour.') }, { statement_check: 'missing' }).changes, ['statement_missing', 'questionnaire_unanswered'], 'each change named');
-  assert.equal(decide({ questionnaire: UNANSWERED }, { scores: { lesson: null } }).outcome, 'hold', 'rule 6 first');
+  assert.deepEqual([d.outcome, d.changes], ['approve', null]);
+  assert.deepEqual(decide({ questionnaire: UNANSWERED, statement: extractQualificationStatement('A harbour.') }, { statement_check: 'missing' }).changes, ['statement_missing'], 'only the statement is asked for');
+  assert.equal(decide({ questionnaire: UNANSWERED }, { scores: { lesson: null } }).outcome, 'changes_requested');
   assert.equal(decide({ questionnaire: ANSWERED }).outcome, 'approve');
-  assert.equal(decide({ questionnaire: undefined }).outcome, 'changes_requested', 'a triage without one is unanswered');
-  assert.match(authorView({ status: 'changes_requested', decision: { changes: d.changes, lane: 'quality' } }, {}).reasons[0].what_to_change, /rating questionnaire/);
+  assert.equal(decide({ questionnaire: undefined }).outcome, 'approve', 'a triage without one lists on Jev and the judge');
+  // The copy stays, so an older decision that named it still reads.
+  assert.match(authorView({ status: 'changes_requested', decision: { changes: ['questionnaire_unanswered'], lane: 'quality' } }, {}).reasons[0].what_to_change, /rating questionnaire/);
 });
 
 test('an answer the evidence disproves is a B9 wording fault: not yet, the change is the answer', () => {
@@ -396,7 +417,7 @@ function closedEverywhere(schema) {
   if (schema.type === 'array') return closedEverywhere(schema.items);
   return true;
 }
-const PART_VII = { ...judge(), malformed: undefined, policy_version: POLICY_VERSION, policy_hash: POLICY_HASH_ANCHORED, articles: [cite('B6', 0.8)], descriptors: ['in-Space purchases'], tests: tests({ lesson: null }), suggested_tags: [] };
+const PART_VII = { ...judge(), malformed: undefined, policy_version: POLICY_VERSION, policy_hash: POLICY_HASH_ANCHORED, articles: [{ ...cite('B6', 0.8), place: null }], descriptors: ['in-Space purchases'], tests: tests({ lesson: null }), suggested_tags: [], suggested_statement: null, signal_answers: [] };
 delete PART_VII.malformed;
 
 test('the judge\'s answer is schema-valid Part VII JSON: the schema structured outputs enforce, and the parser agree', () => {
@@ -409,18 +430,19 @@ test('the judge\'s answer is schema-valid Part VII JSON: the schema structured o
   assert.equal(closedEverywhere(JUDGE_OUTPUT_SCHEMA), true, 'every object closed and every field required');
 });
 
-test('the judge\'s request: Haiku 5.5 at effort "max", adaptive thinking, structured outputs, the cached Code first, base64 captures, no prefill', async () => {
+test('the judge\'s request: Haiku 5.5 at effort "high", adaptive thinking, structured outputs, the cached Code first, base64 captures, no prefill', async () => {
   const sent = [];
   const captures = [{ contentType: 'image/png', base64: 'AAAA', label: 'capture-0.png' }, { contentType: 'image/jpeg', base64: 'BBBB', label: 'capture-1.jpg' }];
   const out = await claudeJudge({ sim: { name: 'Harbour' }, dossier: null, jev: { answers: {} }, triage: triage(), captures, policyText: GUARDIAN_POLICY_TEXT, policyHash: POLICY_HASH_ANCHORED, env: { ANTHROPIC_API_KEY: 'sk-test' }, deps: { claude: fakeClaude(PART_VII, sent) } });
   assert.equal(out.malformed, false);
   const { body, options } = sent[0];
-  assert.deepEqual([body.model, JUDGE_MODEL, DEFAULT_JUDGE_EFFORT], ['claude-haiku-5-5', 'claude-haiku-5-5', 'max']);
-  assert.equal(body.output_config.effort, 'max');
+  // Effort "high" (2026-11-11): at "max" the judge spent its whole output ceiling thinking and answered nothing.
+  assert.deepEqual([body.model, JUDGE_MODEL, DEFAULT_JUDGE_EFFORT], ['claude-haiku-5-5', 'claude-haiku-5-5', 'high']);
+  assert.equal(body.output_config.effort, 'high');
   assert.deepEqual(body.output_config.format, { type: 'json_schema', schema: JUDGE_OUTPUT_SCHEMA });
   assert.deepEqual(body.thinking, { type: 'adaptive' });
-  assert.equal(body.max_tokens, 64000);
-  assert.equal(DEFAULT_THRESHOLDS.judge_max_tokens, 64000);
+  assert.equal(body.max_tokens, 128000);
+  assert.equal(DEFAULT_THRESHOLDS.judge_max_tokens, 128000, 'Haiku 5.5\'s most, streamed');
   assert.equal(DEFAULT_THRESHOLDS.judge_timeout_ms, 300000);
   for (const k of ['temperature', 'top_p', 'top_k']) assert.equal(k in body, false, `${k} is not sent (the model refuses it)`);
   assert.deepEqual(body.system, [{ type: 'text', text: judgeSystemPrompt(GUARDIAN_POLICY_TEXT, POLICY_HASH_ANCHORED), cache_control: { type: 'ephemeral' } }]);
@@ -431,10 +453,10 @@ test('the judge\'s request: Haiku 5.5 at effort "max", adaptive thinking, struct
     { type: 'image', source: { type: 'base64', media_type: 'image/jpeg', data: 'BBBB' } },
   ]);
   assert.ok(options.signal instanceof AbortSignal, 'bounded by the judge\'s time limit');
-  // JUDGE_EFFORT tunes it without a code change; a value the API does not take falls back to max.
-  await claudeJudge({ sim: {}, dossier: null, jev: {}, triage: triage(), captures: [], policyText: 'P', policyHash: 'h', env: { JUDGE_EFFORT: 'high' }, deps: { claude: fakeClaude(PART_VII, sent) } });
+  // JUDGE_EFFORT tunes it without a code change; a value the API does not take falls back to high.
+  await claudeJudge({ sim: {}, dossier: null, jev: {}, triage: triage(), captures: [], policyText: 'P', policyHash: 'h', env: { JUDGE_EFFORT: 'medium' }, deps: { claude: fakeClaude(PART_VII, sent) } });
   await claudeJudge({ sim: {}, dossier: null, jev: {}, triage: triage(), captures: [], policyText: 'P', policyHash: 'h', env: { JUDGE_EFFORT: 'extreme' }, deps: { claude: fakeClaude(PART_VII, sent) } });
-  assert.deepEqual([sent[1].body.output_config.effort, sent[2].body.output_config.effort], ['high', 'max']);
+  assert.deepEqual([sent[1].body.output_config.effort, sent[2].body.output_config.effort], ['medium', 'high']);
 });
 
 test('the judge\'s system block is byte-identical across calls; only the user turn carries the case', async () => {
@@ -480,11 +502,11 @@ test('through the real @anthropic-ai/sdk: the request reaches /v1/messages strea
   const anthropicFetch = async (url, init) => { wire.push({ url: String(url), headers: new Headers(init.headers), body: JSON.parse(init.body) }); return sse(JSON.stringify(PART_VII)); };
   const out = await claudeJudge({ sim: { name: 'Harbour' }, dossier: null, jev: { answers: {} }, triage: triage(), captures: [{ contentType: 'image/png', base64: 'AAAA', label: 'capture-0.png' }], policyText: 'P', policyHash: 'h', env: { ANTHROPIC_API_KEY: 'sk-ant-test-not-real' }, deps: { anthropicFetch } });
   assert.equal(out.malformed, false, JSON.stringify(out));
-  assert.deepEqual([out.stop_reason, out.effort, out.model], ['end_turn', 'max', 'claude-haiku-5-5']);
+  assert.deepEqual([out.stop_reason, out.effort, out.model], ['end_turn', 'high', 'claude-haiku-5-5']);
   assert.equal(wire.length, 1);
   assert.match(wire[0].url, /\/v1\/messages$/);
   assert.equal(wire[0].headers.get('x-api-key'), 'sk-ant-test-not-real');
-  assert.deepEqual([wire[0].body.stream, wire[0].body.model, wire[0].body.output_config.effort, wire[0].body.output_config.format.type, wire[0].body.thinking.type], [true, 'claude-haiku-5-5', 'max', 'json_schema', 'adaptive']);
+  assert.deepEqual([wire[0].body.stream, wire[0].body.model, wire[0].body.output_config.effort, wire[0].body.output_config.format.type, wire[0].body.thinking.type], [true, 'claude-haiku-5-5', 'high', 'json_schema', 'adaptive']);
   const refused = await claudeJudge({ sim: {}, dossier: null, jev: {}, triage: triage(), captures: [], policyText: 'P', policyHash: 'h', env: { ANTHROPIC_API_KEY: 'sk-ant-test-not-real' }, deps: { anthropicFetch: async () => sse('', { stop_reason: 'refusal' }) } });
   assert.equal(refused.error, 'judge_refusal');
 });
@@ -531,6 +553,8 @@ function pipelineDeps({ judgeAnswer = judge(), jev = jevAnswers(), shadow = null
     },
     grokModel: 'grok-test',
     policyText: GUARDIAN_POLICY_TEXT, policyHash: POLICY_HASH_ANCHORED,
+    // Code v2.4: a listing is listed only on every script read from its package; these tests' packages read in full.
+    packageScripts: packageFrom(),
     fetch: async () => new Response(JSON.stringify(jev), { status: 200 }),
   };
 }
@@ -658,12 +682,14 @@ test('review_schema and the case reference: on every case and listing, from the 
   assert.ok(mail.html.includes(rec.reference));
 });
 
-test('an unanswered questionnaire at publish is not yet; answering it reopens the listing for review', async () => {
+test('v2.4: a listing with no questionnaire answered is listed on Jev\'s and the judge\'s rating; answers given later are a floor at its next review', async () => {
   const env = environment();
   await publish(env, { answers: null });
   const d = pipelineDeps();
   const rec = await runModerationCase(SIM, env, d);
-  assert.deepEqual([rec.status, rec.decision.changes], ['changes_requested', ['questionnaire_unanswered']]);
+  assert.deepEqual([rec.status, rec.decision.rating], ['approved', 'all_ages']);
+  // A changes_requested listing is reopened by its answers; this one is listed, and keeps that status until its next review.
+  { const s = JSON.parse(env.SOCIAL.m.get(`sim:${SIM}`)); s.moderation.status = 'changes_requested'; env.SOCIAL.m.set(`sim:${SIM}`, JSON.stringify(s)); }
   const post = (token, answers) => handleModerationRoute(new Request(`https://api.eustress.dev/api/simulations/${SIM}/rating-questionnaire`, { method: 'POST', headers: { Authorization: `Bearer ${token}` }, body: JSON.stringify({ answers }) }), new URL(`https://api.eustress.dev/api/simulations/${SIM}/rating-questionnaire`), env, null, d);
   assert.equal((await post('user-2', questionnaireAnswers())).status, 403, 'the author only');
   assert.equal((await post('user-1', { violence: 'none' })).status, 400, 'a partial set is refused');
@@ -678,16 +704,19 @@ test('an unanswered questionnaire at publish is not yet; answering it reopens th
   assert.deepEqual([form.answered, form.questions.length, 'band' in form.questions[0].options[0]], [true, QUESTIONS.length, false]);
 });
 
-test('an attested owner\'s home twin cited under A13 is held for a person, not rejected', async () => {
+test('an attested owner\'s home twin cited under A10 is listed (the article does not apply to it); cited under A13 it is rejected like any listing', async () => {
   const env = environment();
   await env.USERS.put('property-attestation:user-1', JSON.stringify([HOME]));
   await publish(env);
-  const rec = await runModerationCase(SIM, env, pipelineDeps({ judgeAnswer: judge({ verdict: 'reject', articles: [cite('A13', 0.95)] }) }));
-  assert.deepEqual([rec.status, rec.decision.reasons.at(-1).article, rec.decision.reasons.at(-1).attested_property], ['held', 'A13', true]);
-  assert.ok(env.SOCIAL.m.has(`wsq:hold:${SIM}`), 'queued for the Review Workspace');
+  const onHome = id => ({ id, confidence: 0.95, evidence: `Code ${id}: the alarm panel and cameras of 1428 Elm Street, Springwood in capture-2`, place: '1428 Elm Street, Springwood' });
+  const rec = await runModerationCase(SIM, env, pipelineDeps({ judgeAnswer: judge({ verdict: 'flag_for_human_review', articles: [onHome('A10')], confidence: 0.9 }) }));
+  assert.ok(rec.decision.reasons.some(r => r.article === 'A10' && r.attested_property === true));
+  assert.notEqual(rec.status, 'held');
+  assert.equal(env.SOCIAL.m.has(`wsq:hold:${SIM}`), false, 'nothing waits for a person');
   const env2 = environment();
+  await env2.USERS.put('property-attestation:user-1', JSON.stringify([HOME]));
   await publish(env2);
-  assert.equal((await runModerationCase(SIM, env2, pipelineDeps({ judgeAnswer: judge({ verdict: 'reject', articles: [cite('A13', 0.95)] }) }))).status, 'rejected', 'control: no attestation');
+  assert.equal((await runModerationCase(SIM, env2, pipelineDeps({ judgeAnswer: judge({ verdict: 'reject', articles: [onHome('A13')] }) }))).status, 'rejected', 'A13 is never set aside');
 });
 
 test('an appeal goes to the Review Workspace and its members are told; no model is asked', async () => {

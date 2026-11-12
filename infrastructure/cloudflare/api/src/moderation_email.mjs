@@ -60,6 +60,8 @@ export function renderModerationEmail({ view, kind, simName, username, reviewUrl
     lines.push("");
   }
   if (view.suggested_edit) lines.push(`Suggested edit: ${view.suggested_edit}`, "");
+  // Code v2.4: the four statement lines the review drafted, ready to paste into the description.
+  if (view.suggested_statement?.text) lines.push("Suggested statement (paste into your description):", view.suggested_statement.text, "");
   // The tags the review chose because the author gave none: one line (Guardian Code v2.3 Part III).
   if (view.tags_chosen) lines.push(oneLine(view.tags_chosen, 300), "");
   if (view.note) lines.push(view.note, "");
@@ -92,6 +94,7 @@ export function renderModerationEmail({ view, kind, simName, username, reviewUrl
       ${rating ? block(`<span style="font-size:14px;color:#c9d1d9;">Age rating: <strong style="color:#f0f6fc;">${esc(rating)}</strong></span>`) : ""}
       ${reasonsHtml}
       ${view.suggested_edit ? block(`<div style="${label}">Suggested edit</div><div style="font-size:14px;line-height:1.55;color:#c9d1d9;">${esc(view.suggested_edit)}</div>`) : ""}
+      ${view.suggested_statement?.text ? block(`<div style="${label}">Suggested statement (paste into your description)</div><div style="font-size:14px;line-height:1.55;color:#c9d1d9;white-space:pre-line;">${esc(view.suggested_statement.text)}</div>`) : ""}
       ${view.tags_chosen ? block(`<div style="font-size:14px;line-height:1.55;color:#c9d1d9;">${esc(oneLine(view.tags_chosen, 300))}</div>`) : ""}
       ${view.note ? block(`<div style="font-size:14px;line-height:1.55;color:#c9d1d9;">${esc(view.note)}</div>`) : ""}
       ${view.can_appeal ? block(`<div style="font-size:14px;line-height:1.55;color:#c9d1d9;">${esc(appealHint)}</div>`) : ""}

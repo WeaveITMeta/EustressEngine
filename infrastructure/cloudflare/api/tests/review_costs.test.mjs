@@ -3,6 +3,7 @@
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { packageFrom } from './helpers/package_fake.mjs';
 import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import {
@@ -157,6 +158,8 @@ function deps({ jev = jevAnswers(), jevImpl = null, grok = null, judge, usage, j
     grokFetch: grok ? grok(calls.grok) : researcherFake(calls.grok),
     grokModel: 'grok-4.7',
     policyText: GUARDIAN_POLICY_TEXT, policyHash: POLICY_HASH_ANCHORED,
+    // Code v2.4: a listing is listed only on every script read from its package; these tests' packages read in full.
+    packageScripts: packageFrom(),
     fetch: jevImpl ? jevImpl(calls.jev) : jevFetch(jev, calls.jev),
   };
 }
@@ -649,7 +652,8 @@ function normalized(value) {
     if (k === 'ai_verdicts') return Array.isArray(v) ? v.length : v;
     // A case reference is 100 random bits (src/case_reference.mjs): present or not is what the two runs share.
     if (k === 'reference') return v ? '<reference>' : v;
-    if (typeof v === 'string') return v.replace(TIME, '<time>').replace(MS, '"ms":0');
+    // Code v2.4: the frames around scripts carry a marker that is random for each request.
+    if (typeof v === 'string') return v.replace(TIME, '<time>').replace(MS, '"ms":0').replace(/(SCRIPT|DATA)-[0-9a-f]{24}/g, '$1-<nonce>').replace(/marker [0-9a-f]{24}/g, 'marker <nonce>');
     return v;
   }));
 }

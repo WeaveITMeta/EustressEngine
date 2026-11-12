@@ -1,8 +1,8 @@
-# Eustress Moderation Playbook v2.3
+# Eustress Moderation Playbook v2.4
 
 **Scope:** every Universe submitted for public listing on the Eustress Gallery.
 **Readers:** the people who work the Review Workspace, administrators driving the `moderation_*` tools from the admin route or an MCP session, and anyone who needs to know what the pipeline does with a case.
-**Constitution:** `docs/architecture/AI_GUARDIAN_POLICY_v1.0.md` (the Eustress Guardian Code v2.3). This playbook operationalizes it; where the two disagree, the Code wins.
+**Constitution:** `docs/architecture/AI_GUARDIAN_POLICY_v1.0.md` (the Eustress Guardian Code v2.4). This playbook operationalizes it; where the two disagree, the Code wins.
 **Architecture:** `docs/architecture/MODERATION_PIPELINE.md`.
 
 ## 1. The shape of a case
@@ -12,17 +12,21 @@ A case is one published Universe moving through these layers. Each layer decides
 | Layer | Who | Input | Output |
 |---|---|---|---|
 | L0 deterministic | Worker code | R2 object identity, publish rate, digest facts, the listing text and tags, the Space's strings and URLs, the author's rating questionnaire, the account's attested property and verified business | dedup hit, rate flag, Code B8 empty or default-only reject, the Qualification Statement, the B1 listing words, a B6(h) payment link, the fiction label check, a Product category from an unverified account (B9) |
-| L1 triage | Jev (TypeSafe) | the text dossier the engine built at publish, scripts' source included | calibrated answers per question, including one per Code article signal |
+| L1 triage | Jev (TypeSafe) | a budgeted excerpt of the text dossier the engine built at publish, scripts' source included | calibrated answers per question, including one per Code article signal; its cut decides nothing |
 | L2a researcher | Grok, web search | ONLY the public facts the case depends on (place names, addresses, business names, patent numbers from the listing text and the statement) | findings, each with a public source URL, given to the judge as untrusted data |
-| L2b judge | Claude Haiku 5.5, vision | the capture set, the case summary, the research findings, the Guardian Code | the Code's Part VII JSON: article citations, four test scores, rating floor, descriptors, `is_game`, `is_fiction`, and `suggested_tags` when the author gave no tags |
-| L3 person | the Review Workspace | the full case, captures, research, appeal text | release, resolve, uphold, list a game, confirm featured, audit |
+| L2s scripts | Worker code (src/package_scripts.mjs) | the published `.echk` package in R2 (the players' package, and the source package when Share Source is on) | every script, in full, never cut; resumable across runs (the case waits at stage `scripts`); a legacy `.pak` listing uses the dossier's scripts, each in full as sent |
+| L2r script reader | Claude Haiku 5.5 | one batch of scripts (at most 80K tokens, so a request with the Code stays under 100K), the listing's claims, the Guardian Code | a report per script: what it does, endpoints, data collected, article concerns with evidence, whether it implements the listing's claims |
+| L2b judge | Claude Haiku 5.5, vision | the capture set, every script in full (or every reader report and as many scripts in full as fit), the dossier's excerpts, the case summary, the research findings, the Guardian Code | the Code's Part VII JSON: article citations, four test scores, rating floor, descriptors, `is_game`, `is_fiction`, `suggested_tags` when the author gave no tags, and `suggested_statement` when the statement is missing or does not match |
+| L3 person | the Review Workspace | the full case, captures, research, appeal text | the legal lane (release, report), appeals, confirm featured, audit |
 
-The judge does not decide the outcome. The Worker applies the Code's Part IV verdict rules to the triage and the judge's answer, in order, and the first rule that applies decides (section 7). No model takes any action through the tools: the Grok agent of earlier versions is retired, and what the rules send to a person goes to the Review Workspace.
+The judge does not decide the outcome. The Worker applies the Code's Part IV verdict rules to the triage and the judge's answer, in order, and the first rule that applies decides (section 7). Every outcome outside the legal lane is automated (Code v2.4): listed, not yet with the change named, rejected, or removed. No model takes any action through the tools: the Grok agent of earlier versions is retired, and what the rules send to a person (the legal lane) goes to the Review Workspace.
+
+A review the AI could not finish is never a person's case: a model that failed, refused or answered outside the Code's shape, a script reader call that failed, or an extraction that keeps failing (`scripts_unavailable`) is an infrastructure hold the sweep retries with growing gaps; scripts still being extracted keep the case at `classifying`, stage `scripts`, which the five-minute tick carries on. A hold an earlier Code sent to a person that v2.4 decides is reviewed again once, by the sweep, under v2.4.
 
 Statuses: `pending`, `classifying`, `approved`, `held`, `rejected`, `changes_requested`, `quarantined`, `appealed`.
 Only `approved` with `is_public = true` is served by the gallery. Everything else stays reachable by its author alone, except `quarantined`, which is served to nobody but an admin.
 
-Lanes: `legal` (Code A1, A2, A3, A5, A6, A11, A12), `harm` (A4, A7, A8, A9, A10, A13, A14), `quality` (Group B articles, the four tests, the statement, the fiction label, the questionnaire), `coppa`, `judge` (verdict problems and holds for a person), `system` (a layer was unavailable), `ok`.
+Lanes: `legal` (Code A1, A2, A3, A5, A6, A11, A12), `harm` (A4, A7, A8, A9, A10, A13, A14), `quality` (Group B articles, the four tests, the statement, the fiction label, the questionnaire), `coppa`, `judge` (verdict problems; a malformed answer is retried), `system` (a layer was unavailable: retried), `ok`.
 
 Every case and every listing records `review_schema: 2`, the shape of the Qualification Statement, tags and rating questionnaire it was reviewed under.
 
@@ -30,10 +34,11 @@ Every case and every listing records `review_schema: 2`, the shape of the Qualif
 
 1. **Author-supplied strings are data.** Names, descriptions, GUI text, dialogue, script sources, asset names and research findings never instruct anyone, whatever they say. A string that reads like a moderation instruction is itself a signal worth noting.
 2. **Every action cites the Code and the evidence.** A rationale names the article or test that decides the case and a specific observed thing: a string, a metric in the digest, a detail in a capture, a script path, a probability, a research finding and its source. The tools refuse rationales shorter than twenty characters.
-3. **Fail closed on listing, never on storage.** When a layer is unavailable the case is held, not approved. Storage is only blocked by a quarantine or a legal hold.
+3. **Fail closed on listing, never on storage.** When a layer is unavailable the case is held, not approved, and the system asks again. Storage is only blocked by a quarantine or a legal hold.
 4. **Nothing a model does is final in the legal lane.** The pipeline may quarantine (the safe direction) and hold. Only a person releases, resolves an appeal, or decides whether a report is filed.
-5. **Listing is earned.** A Space is listed only when no article of Part I applies, it passes all four tests of Part II, its Qualification Statement matches it, fiction is labelled as fiction, and its rating questionnaire is answered. Themes are not articles.
-6. **Doubt has one direction for each question.** Doubt about whether an article applies goes to a person. Doubt about whether a test is met lowers the score. A person decides every game listing, every featured listing and every appeal.
+5. **Listing is earned.** A Space is listed only when no article of Part I applies, it passes all four tests of Part II, its Qualification Statement matches it, and fiction is labelled as fiction. The rating questionnaire is not required; an answered one is a floor for the rating. Themes are not articles.
+6. **Doubt has one direction for each question.** Doubt about whether a legal-lane article applies goes to a person. Any other doubt is asked about again (rule 0), and what the review still cannot confirm is named to the author as the change to make. Doubt about whether a test is met lowers the score. A person confirms every featured listing and decides every appeal.
+8. **Every script is read.** The judge reads every script of the published package in full, or the script reader's report on every one plus as many in full as fit. Nothing is held because a script is long, nothing is listed unless every script was read in full from the package, and coverage is recorded on the case honestly (`scripts_review`: `read_in_full_by_judge`, `read_in_full_by_reader`, `coverage_percent`). Every script reaches a model inside frames marked with a random value new for each request, so no script can close its own frame.
 7. **The researcher gets facts, never the Space.** It is sent the public facts to look up and a fixed instruction: never a capture, a script, a string, the dossier or the package. Its failure is not fatal; the judge runs without findings and the case records why.
 
 ## 3. Hard categories (legal lane, Code A1, A2, A3, A5, A6, A12)
@@ -67,12 +72,12 @@ The test, from the Code: is this a story, simulation, artwork or critique **abou
 | Condition | Action |
 |---|---|
 | A4, A7, A8 or A9 at or above `soft_reject` (0.80), `real_world_intent` at or above 0.50 and `needs_human_context` below 0.50 | automatic `rejected` (appealable), with a suggested edit that keeps the fiction and removes the real-world part |
-| A4, A7, A8 or A9 at or above `soft_escalate` (0.40), or above 0.80 with fiction-leaning intent or ambiguity | a Group A signal: the judge runs; it cites the article (rule 1) or the case is held for a person (rule 6) |
-| A10, A13 or A14 at or above `article_signal` (0.50) | a Group A signal: the researcher looks up the place, then the judge runs; it cites the article or the case is held for a person |
+| A4, A7, A8 or A9 at or above `soft_escalate` (0.40), or above 0.80 with fiction-leaning intent or ambiguity | a Group A signal: the judge runs; it cites the article (rule 1), or the signal check names it on a second reading and the judge must rule it out with evidence at 0.75 or above, else `rejected` (`safety_review`, no article named) |
+| A10, A13 or A14 at or above `article_signal` (0.50) | a Group A signal: the researcher looks up the place, then the judge runs; it cites the article, or the signal check decides as above |
 | a judge citation of A4, A7, A8, A9, A13 or A14 at 0.75 or above | `rejected`, harm (rule 1) |
-| a judge citation of one of them below 0.75 | `held` (rule 1: an uncertain Group A citation is held, not rejected) |
-| a judge citation of A10 | `held` |
-| a judge citation of A10, A13 or A14 when the author carries a property-ownership attestation | `held`: a person checks whether the citation is about the attested property |
+| any Group A citation below 0.75 (the judge's or a script reader's) | `rejected` (`safety_review`): the author is told only that parts of the Space did not pass the safety review, and may appeal |
+| a judge citation of A10 at 0.75 or above | `changes_requested`: remove the interior security detail or move to an invented place |
+| a judge citation of A10 whose `place` is the author's attested property and whose evidence names no other facility | the article does not apply; noted. Never A13 or A14, never on the author's text, never on an address the evidence only quotes |
 
 **Property-ownership attestation.** An author who proved they own, lease or protect a property carries an attestation (`property-attestation:{accountId}`, set by an administrator through `/api/admin/moderation/property-attestation/{accountId}` until its own flow exists). A10, A13 and A14 never apply to the author's own attested property. The judge sees the attestations in the case summary.
 
@@ -81,7 +86,7 @@ Guidance for a person in the gray band:
 - A heist in an invented place is fiction, not A13. The same heist in a named real bank, with its cameras and vault, is A13.
 - Weapons as props, crime as narrative: not A4. Synthesis steps, quantities, sourcing: reject with a suggested edit. Hard drugs shown at all are B11, whatever A4 says (section 5).
 - Hate: depicted-and-condemned is not A9; advocacy is.
-- When the reading is genuinely unclear, keep the case held and write down the specific ambiguity. Never resolve ambiguity by rejecting.
+- When the reading is genuinely unclear (an appeal, an audit), write down the specific ambiguity and request the change that resolves it. Never resolve ambiguity by rejecting.
 
 ## 5. What Eustress does not carry (Code Part I, Group B)
 
@@ -91,7 +96,7 @@ Each Group B article is a bright line: if its words describe the Space, it appli
 |---|---|
 | B1 | `scripted_startle`, `pursuing_entity`, `horror_framing`, and `fear_level` "frightening" at confidence 0.55 or above |
 | B2 | `playable_victims` |
-| B3 | `harm_scored`; `lawful_decision_training` marks the case a person decides |
+| B3 | `harm_scored`; `lawful_decision_training` makes a B3 citation "not yet: score the decision" |
 | B4 | `meme_content` |
 | B5 | `accumulation_loop`, `return_reward` |
 | B6 | one per sub-item: `b6a_paid_progress`, `b6b_paid_chance`, `b6c_paid_skip`, `b6d_unasked_prompt`, `b6e_sales_pressure`, `b6f_hidden_prices`, `b6g_social_reach_reward`, `b6h_offsite_payment` |
@@ -101,27 +106,27 @@ Each Group B article is a bright line: if its words describe the Space, it appli
 | B10 | `distasteful` |
 | B11 | `hard_drug_depiction`; `drug_education` is its exception |
 
-A Jev answer at `article_system_cite` (0.85) is a **system citation**: it decides under rule 2 whatever the judge says, and only a person can clear it. A Jev answer at `article_signal` (0.50) is an **article signal**: the judge must cite the article, or the case is held for a person (rule 6). The judge's own Group B citation decides at `article_judge_cite` (0.75); below it, the case is held.
+A Jev answer at `article_system_cite` (0.85) is a **system citation**: it decides under rule 2 whatever the judge says, and only a person can clear it. A Jev answer at `article_signal` (0.50) is an **article signal**: the judge, who reads every script, cites the article or the signal is noted (rule 6). The judge's own Group B citation decides at `article_judge_cite` (0.75); below it, the case is not yet, naming the change the article asks for.
 
 **B6(h), payment off Eustress.** Allowed only through a verified business connection registered with Eustress (`verified-business:{accountId}` with a `payment_connection`), and never in an Adult listing. With such a connection on a listing that is not Adult, Jev's `b6h_offsite_payment` answer is recorded and not cited; if the rating turns out `adult_18` or `adult_21`, it is cited after all.
 
-**B11, hard drugs.** No hard drugs, ever: the use, sale, making or glamorising of opioids outside medical care, cocaine or crack, methamphetamine, or cannabis. It decides under rule 2 like any rejecting Group B article and is never a feature to remove: a Space whose subject is hard drugs is rejected, and a single hard-drug prop in a Space that otherwise qualifies is still B11. Its exception is teaching that saves lives: medical care (a nurse giving prescribed morphine), overdose first aid (naloxone), and the science of addiction, its treatment and its prevention, taught accurately, rated `mature_17`. When Jev's `drug_education` answer is at `substance_rating` (0.60), it lowers Jev's B11 answer one step: a system citation becomes a signal the judge or a person decides, and a signal is dropped. The judge's own B11 citation is never lowered. Psychedelics (psilocybin, LSD, DMT, mescaline, MDMA, ketamine) are not B11; showing their use is rated `adult_21`. An author who answers the questionnaire's drugs question with hard drugs is told at once that such a Space cannot be listed, and the answer is a B11 signal. A raw payment or donation link, a cryptocurrency address or an unlock code sold off Eustress is always a B6 system citation, whatever the account.
+**B11, hard drugs.** No hard drugs, ever: the use, sale, making or glamorising of opioids outside medical care, cocaine or crack, methamphetamine, or cannabis. It decides under rule 2 like any rejecting Group B article and is never a feature to remove: a Space whose subject is hard drugs is rejected, and a single hard-drug prop in a Space that otherwise qualifies is still B11. Its exception is teaching that saves lives: medical care (a nurse giving prescribed morphine), overdose first aid (naloxone), and the science of addiction, its treatment and its prevention, taught accurately, rated `mature_17`. When Jev's `drug_education` answer is at `substance_rating` (0.60), it lowers Jev's B11 answer one step: a system citation becomes a signal the judge decides, and a signal is dropped. The judge's own B11 citation is never lowered. Psychedelics (psilocybin, LSD, DMT, mescaline, MDMA, ketamine) are not B11; showing their use is rated `adult_21`. An author who answers the questionnaire's drugs question with hard drugs is told at once that such a Space cannot be listed, and the answer is a B11 signal. A raw payment or donation link, a cryptocurrency address or an unlock code sold off Eustress is always a B6 system citation, whatever the account.
 
 Deterministic findings:
 
 - **B1(c):** the listing's name, description or tags contain horror, scary, creepy, haunted, jumpscare or jump scare. An article signal.
 - **B6(h):** a payment or donation link (ko-fi.com, patreon.com, paypal.me, buymeacoffee.com, cash.app, venmo.com), a Bitcoin or Ethereum address, or an unlock code offered for money. A system citation.
 - **B8(a):** an entity count of zero, or default material, colour and name on every part with no scripts and no text. Rejected at triage.
-- **B8 and B7 by band:** Jev's `quality_band` at `empty_or_broken` or `test_or_scratch_junk`, with confidence at or above 0.70 and `spatial_intent` below 0.30, is rejected under B8; at `unmodified_template_or_asset_flip` it is cited under B7 and held for a person. A shakier band, mass-produced filler, or a publish rate past the daily limit is a B8 (or B7) signal.
+- **B8 and B7 by band:** Jev's `quality_band` at `empty_or_broken` or `test_or_scratch_junk`, with confidence at or above 0.70 and `spatial_intent` below 0.30, is rejected under B8; at `unmodified_template_or_asset_flip` it is cited under B7 and rejected (appealable). A shakier band, mass-produced filler, or a publish rate past the daily limit is a B8 (or B7) signal.
 - **B9, Product:** the Category line says Product and the account has no verified business. A wording fault: the change is the category.
 
 **B9, the author's tags.** Jev answers two questions about tags the author chose: `tag_fit` (do the tags describe what the Space contains?) and `tag_content` (is any tag a slur, an insult aimed at a person or group, or personal information about a real person?). A `tag_fit` of "no" at `article_system_cite` (0.85), or a `tag_content` of "yes" at 0.85, is a B9 system citation and a wording fault: **not yet**, "Fix your tags" (`not_yet_tags`). Neither is read when the review chooses the tags. Below 0.85 they decide nothing: tags are for finding a Space, and they never set its rating. A phone number, an email address or a handle is refused as a tag before any review (src/tags.mjs).
 
-What a citation does (rule 2): B7, and B3 training whose score is a lawful decision, are held for a person. B5, B6 and a B9 wording fault (a mislabel, a questionnaire answer the evidence disproves, a missing fiction label, the author's tags), when every test is 2 or above, are **not yet**: the author is told the feature to remove or the wording to fix. When a test is `null`, they are held for a person. Every other citation is rejected, citing the article. Jev's `false_teaching` is never a wording fault.
+What a citation does (rule 2): B5, B6, a B9 wording fault (a mislabel, a questionnaire answer the evidence disproves, a missing fiction label, the author's tags) and B3 training whose score is a lawful decision, when every test is 2 or above or `null`, are **not yet**: the author is told the feature to remove, the wording to fix or the decision to score, and what to show for a `null` test. B7 and every other citation are rejected, citing the article. Jev's `false_teaching` is never a wording fault.
 
 ## 6. The four tests, the statement, fiction and the questionnaire (Code Parts II, III and V)
 
-The judge scores each test 0 to 3, or `null` when the captures and Jev's answers cannot decide it: **T1 build quality**, **T2 objective**, **T3 lesson**, **T4 real-world effect** (`build_quality`, `objective`, `lesson`, `real_world`). For fiction, T4 is **T4 for Fiction**: the idea the Space carries and its label.
+The judge scores each test 0 to 3, or `null` when the captures and the scripts cannot decide it: **T1 build quality**, **T2 objective**, **T3 lesson**, **T4 real-world effect** (`build_quality`, `objective`, `lesson`, `real_world`). For fiction, T4 is **T4 for Fiction**: the idea the Space carries and its label.
 
 Every listing carries a **Qualification Statement**: four labelled lines in its description.
 
@@ -138,7 +143,9 @@ The Worker extracts it from the whole description. It is missing when any line i
 
 **Tags the review chooses.** Tags are a listing's only categories. When the author gives none (or the ones the listing has are the review's own), the judge chooses up to 5 (`suggested_tags`). The Worker normalizes each like an author's tag and drops what is not a valid tag, personal information included. For fiction it puts `fiction` first and keeps the judge's first genre tag, and the fiction label is checked on the chosen tags, after they are assigned. They are written to the listing with `tags_source: "judge"` when the case is decided, for every outcome except a quarantine, a harm (Group A) rejection and any other legal-lane outcome, and the author is told in one line, "Tags chosen for your Space: a, b, c", in the review email and the case history. The author may send them back as they are (they stay the judge's, and nothing is reviewed again) or change them (they become the author's, and the listing is reviewed again).
 
-**The rating questionnaire.** The author answers ten questions about what the Space contains (violence, blood, language, romance and sexual material, nudity, alcohol and tobacco, drugs, games of chance, purchases, players together) through `POST /api/simulations/{id}/rating-questionnaire`. Each answer maps to a band and to the Code's content descriptors: alcohol or tobacco is `adult_21` with the `alcohol` or `tobacco` descriptor; psychedelic use shown is `adult_21` with `psychedelics`; drugs only as life-saving teaching is `mature_17`; hard drugs name B11, and the route answers with a notice that such a Space cannot be listed. Unanswered, the listing gets **not yet**.
+**The rating questionnaire.** The author answers ten questions about what the Space contains (violence, blood, language, romance and sexual material, nudity, alcohol and tobacco, drugs, games of chance, purchases, players together) through `POST /api/simulations/{id}/rating-questionnaire`. Each answer maps to a band and to the Code's content descriptors: alcohol or tobacco is `adult_21` with the `alcohol` or `tobacco` descriptor; psychedelic use shown is `adult_21` with `psychedelics`; drugs only as life-saving teaching is `mature_17`; hard drugs name B11, and the route answers with a notice that such a Space cannot be listed. It is not required (Code v2.4: no publish form asks it yet): unanswered, the rating comes from Jev and the judge, and an answered questionnaire is a floor.
+
+**The statement draft.** When the statement is missing or does not match, the judge drafts the four lines from what it saw and read (`suggested_statement`), and the author's review shows them ready to paste (`authorView`), each checked to be author-safe.
 
 ## 7. The decision table (Code Part IV)
 
@@ -150,26 +157,35 @@ The Worker extracts it from the whole description. It is missing when any line i
 | hold | | (judge not run) | `held`, Review Workspace |
 | reject | | (judge not run) | `rejected`, appealable |
 | changes_requested | | (judge not run) | `changes_requested`, author (COPPA) |
-| judge | 0 | malformed (including a refusal, an answer cut off at max_tokens, no ANTHROPIC_API_KEY), `flag_for_human_review`, `flagged_for_review`, or confidence below 0.60 | `held` (legal lane when it cites A1, A2, A3, A5, A6, A11 or A12) |
+| judge | 0 | a transient failure (any HTTP status, a 404 for a model and a 400 not about length included; a timeout; the network; an empty, non-JSON or cut-off answer) | `held`, an infrastructure hold the sweep retries with growing gaps, then daily (Jev and the research are kept, nobody is told, no daily review is spent) |
+| judge | 0 | a refusal, or a whole answer not usable under the Code | asked once more at `xhigh`; a second refusal: `rejected` (`safety_review`); any other second failure: `changes_requested` (`review_undecided`) |
+| judge | 0 | a request counted (messages.countTokens) or refused as too long | read again in reader mode at once; still too long: `changes_requested` (`too_much_script`) |
+| judge | 0 | `flag_for_human_review`, `flagged_for_review`, or confidence below 0.60, citing A1, A2, A3, A5, A6, A11 or A12 | `held`, legal lane |
+| judge | 0 | any other flag or confidence below 0.60 | asked once more at effort `xhigh` with its first concerns; the second answer goes through rules 1 to 8, and where they would list it, `changes_requested` (`review_unconfirmed`) |
 | judge | 1 | A1, A2, A3, A5, A6 or A12 cited | `quarantined` |
-| judge | 1 | A10, A13 or A14 cited, and the author has attested property | `held` |
-| judge | 1 | A4, A7, A8, A9, A13 or A14 cited at 0.75 or above | `rejected`, harm |
-| judge | 1 | one of those below 0.75; A10 or A11 cited | `held` |
-| judge | 2 | a system citation, or a Group B citation at 0.75 or above | B7 or lawful-decision B3: `held`; B5, B6 or a B9 wording fault with every test 2 or above: `changes_requested`; with a test `null`: `held`; otherwise `rejected` |
+| judge | 1 | A11 cited | `held`, legal lane |
+| judge | 1 | A10 cited, its `place` the author's attested property and no other facility in its evidence | noted; the rules go on |
+| judge | 1 | A4, A7, A8, A9, A13 or A14 cited at 0.75 or above (or a script reader's concern at 0.75) | `rejected`, harm |
+| judge | 1 | any Group A citation below 0.75 | `rejected` (`safety_review`, no article named) |
+| judge | 1 | A10 at 0.75 or above | `changes_requested`, naming the detail |
+| judge | 1 | a Group A signal not cited (Jev gray band, reader concern below 0.75) | the signal check on a second reading: ruled out with evidence at 0.75, noted; otherwise `rejected` (`safety_review`) |
+| judge | 2 | a system citation, or a Group B citation at 0.75 or above | B5, B6, a B9 wording fault or lawful-decision B3 with every test 2 or above or `null`: `changes_requested`; B7 and otherwise: `rejected` |
 | judge | 3 | `statement_check` is `contradicted` | `rejected` under B9 |
 | judge | 4 | any test at 0, or T4 at 1 with the statement present | `rejected`, naming the test |
 | judge | 5 | two or more tests at 1 | `rejected`, naming them |
-| judge | 6 | a Group B citation below 0.75; an article signal the judge did not cite; a test scored `null`; scripts Jev could not read in full; judge confidence below 0.75 | `held` |
-| judge | 7 | exactly one of T1, T2, T3 at 1, the statement missing, the fiction label missing, or the questionnaire unanswered | `changes_requested`, naming each change; a test at 1 with no suggested edit is `held` |
-| judge | 8 | every test at 2 or above, the statement matches, the questionnaire answered | a game: `held` (`game_needs_a_person`); otherwise `approved` |
+| judge | 6 | a Group B citation below 0.75 (`article_unsure`); a test scored `null` (`test_not_scored`); judge confidence below 0.75 (`judge_unsure_to_list`); a second answer still unsure (`review_unconfirmed`) | `changes_requested`, naming each change with rule 7's; an article signal the judge did not cite is noted |
+| judge | 7 | exactly one of T1, T2, T3 at 1, the statement missing (with the judge's draft), or the fiction label missing | `changes_requested`, naming each change |
+| judge | 8 | every test at 2 or above and the statement matches | `approved`, a game like any listing, only when every script was read in full from the package; a .pak listing: `changes_requested` (`republish_for_scripts`); reading short: `scripts_not_read`; a present statement the judge did not find matching: `changes_requested` (`statement_unclear`, with the draft) |
+| scripts | | over `max_review_script_bytes` (12 MB) of distinct script, or a package that cannot be read | `changes_requested` (`too_much_script`, `republish_package`), no model spent |
+| any | | an image the judge could not be sent | `changes_requested` (`images_not_seen`) in place of a listing |
 
-**The rating.** The highest of three: the questionnaire's band, Jev's rating, and the judge's `rating_floor`, in Eustress's own bands `all_ages`, `ages_10`, `teen_13`, `mature_17`, `adult_18`, `adult_21`. Jev's rating is its `content_rating`, raised to the floor its drug and substance answers set at `substance_rating` (0.60): `drug_education` to `mature_17`, `psychedelic_use` and `alcohol_tobacco` to `adult_21`. The listing also records the descriptors of the questionnaire and the judge together.
+**The rating.** The highest of Jev's rating, the judge's `rating_floor` and, when answered, the questionnaire's band, in Eustress's own bands `all_ages`, `ages_10`, `teen_13`, `mature_17`, `adult_18`, `adult_21`. Jev's rating is its `content_rating`, raised to the floor its drug and substance answers set at `substance_rating` (0.60): `drug_education` to `mature_17`, `psychedelic_use` and `alcohol_tobacco` to `adult_21`. The listing also records the descriptors of the questionnaire and the judge together.
 
-**Games (Code Part VI).** A case is a game when Jev's `content_kind` is `interactive_experience`, the judge sets `is_game`, or Jev's `game_mechanics` is at or above 0.60. A person decides every game listing.
+**Games (Code Part VI).** A case is a game when Jev's `content_kind` is `interactive_experience`, the judge sets `is_game`, or Jev's `game_mechanics` is at or above 0.60. A game is decided by the rules like any listing (Code v2.4); `is_game` is recorded on the decision.
 
-**Featured (rule 9).** Never set automatically. When the judge proposes it and every test is 2 or above, with T1, T3 and T4 at 3, and the rating is below `adult_18`, the case records `featured_candidate` for a person, who sets `featured` through `moderation_approve`.
+**Featured (rule 9).** Never set automatically. When the judge proposes it and every test is 2 or above, with T1, T3 and T4 at 3, and the rating is below `adult_18`, the case records `featured_candidate` for a person, who sets `featured` through `moderation_approve`. It never holds the listing.
 
-**Held reasons a person sees.** `judge_flagged`, `judge_refusal`, `judge_max_tokens` and the judge's malformed codes (rule 0); A10, A11 and uncertain or attested-property Group A citations (rule 1); `code_B7`, a lawful-decision `code_B3`, and a removable article with an unscored test (rule 2); `article_unsure`, `article_signal_not_cited`, `test_not_scored`, `scripts_not_read_in_full` and `judge_unsure_to_list` (rule 6); `judge_not_yet_without_change` (rule 7); `game_needs_a_person` (rule 8); `judge_statement_inconsistent`; `review_limit`. The author of a held case is told only that a person is reviewing it.
+**Held reasons a person sees.** The legal lane only: a triage hold in the legal lane, `judge_flagged` citing a legal-lane article (rule 0), and A11 (rule 1); and a person's own `held_by_admin`. Infrastructure holds (`classifier_unavailable`, `judge_unavailable_*`, `judge_timeout`, `judge_max_tokens`, `judge_refusal` and the judge's malformed codes, `script_reader_*`, `scripts_unavailable`) are retried by the sweep and need nobody. Codes an earlier Code held for a person (`article_unsure`, `article_signal_not_cited`, `test_not_scored`, `scripts_not_read_in_full`, `judge_unsure_to_list`, `judge_not_yet_without_change`, `game_needs_a_person`, `judge_statement_inconsistent`, `no_rule_applies`, `images_not_judged`, `review_limit`, `code_B7`, a lawful-decision `code_B3`, harm-lane holds) still read in old records; such a case is reviewed again once under v2.4. `review_limit` now answers the author 429 "try again tomorrow" and changes nothing. The author of a held case is told only that it is still being reviewed.
 
 ## 8. The Review Workspace
 

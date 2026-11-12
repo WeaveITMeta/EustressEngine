@@ -345,8 +345,20 @@ namespace_id = "2006"
 # does nothing) and sweeps moderation (resumes stalled reviews); the midnight
 # run also refreshes the model catalog and the legacy backfill. See
 # scheduled() in src/index.js.
+# Every five minutes but :00: the moderation resumes only (Guardian Code v2.4,
+# no review is left stuck): cases a dropped run left classifying, the scripts
+# stage carried on in small shares, listings stranded at pending, and holds the
+# AI caused by failing. Written as a list of minutes so it never fires beside the
+# hourly tick. scheduled() branches on event.cron, which must equal
+# MODERATION_TICK_CRON in src/moderation.mjs.
 [triggers]
-crons = ["0 * * * *"]
+crons = ["0 * * * *", "5,10,15,20,25,30,35,40,45,50,55 * * * *"]
+
+# CPU time per invocation, raised from the 30 s default to the most the Paid
+# plan allows: a review parses every script of a package and builds requests of
+# up to about 2 MB of script text. Wall time (model calls) is not CPU time.
+[limits]
+cpu_ms = 300000
 
 # Keep Worker logs. Without this a failed background run (the moderation
 # pipeline, a cron tick) leaves nothing to read afterwards: `wrangler tail`

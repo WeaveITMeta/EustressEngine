@@ -55,11 +55,11 @@ const b11Of = t => [...t.articles.system, ...t.articles.signals].filter(a => a.a
 
 // ── the Code ────────────────────────────────────────────────────────────────
 
-test('the Code (v2.3, which carries v2.2) is anchored by its hash, with B11 in the founder\'s words and adult_21 as the top band', () => {
-  assert.equal(POLICY_VERSION, '2.3');
+test('the Code (v2.4, which carries v2.2) is anchored by its hash, with B11 in the founder\'s words and adult_21 as the top band', () => {
+  assert.equal(POLICY_VERSION, '2.4');
   assert.equal('sha256:' + createHash('sha256').update(GUARDIAN_POLICY_TEXT).digest('hex'), POLICY_HASH_ANCHORED);
-  assert.equal(POLICY_HASH_ANCHORED, 'sha256:99ced3f2e27e715a52483581375cb9eda9401944ca8f4412483da2f27e5f39b0');
-  assert.match(GUARDIAN_POLICY_TEXT, /^# Eustress Guardian Code v2\.3\n\*\*Version:\*\* 2\.3\n/);
+  assert.equal(POLICY_HASH_ANCHORED, 'sha256:53e1204bc18506f099ac7fec69274dd5a47010432364eac01913026070f294e4');
+  assert.match(GUARDIAN_POLICY_TEXT, /^# Eustress Guardian Code v2\.4\n\*\*Version:\*\* 2\.4\n/);
   assert.match(GUARDIAN_POLICY_TEXT, /\n- v2\.2 \(founder direction, 2026-10-08\): /);
   assert.ok(GUARDIAN_POLICY_TEXT.includes('- **B11. Hard drugs.** *No hard drugs, ever.* Showing the use, sale, making or glamorising of opioids outside medical care, cocaine or crack, methamphetamine, or cannabis. Not B11: medical care (a nurse giving prescribed morphine); overdose first aid (naloxone); the science of addiction, its treatment and its prevention, taught accurately, rated `mature_17`. Psychedelics (psilocybin, LSD, DMT, mescaline, MDMA and ketamine) are not B11; showing their use is rated `adult_21`.\n'));
   assert.ok(GUARDIAN_POLICY_TEXT.includes('- `adult_21`: alcohol and tobacco, and showing the use of psychedelics. Shown only to an account that has turned on Adult content and whose verified age is 21 or over.'));
@@ -75,13 +75,13 @@ test('the Code (v2.3, which carries v2.2) is anchored by its hash, with B11 in t
   assert.match(GUARDIAN_POLICY_TEXT, /B11 is never a feature to remove: a Space whose subject is hard drugs is rejected, and a single removable hard-drug prop in a Space that otherwise qualifies is still B11\./);
   assert.match(GUARDIAN_POLICY_TEXT, /`review_schema`, 2 for this Code/);
   assert.equal(GUARDIAN_POLICY_TEXT.includes(EM_DASH), false);
-  assert.match(MODERATION_PLAYBOOK_TEXT, /^# Eustress Moderation Playbook v2\.3/);
+  assert.match(MODERATION_PLAYBOOK_TEXT, /^# Eustress Moderation Playbook v2\.4/);
   assert.match(MODERATION_PLAYBOOK_TEXT, /\| B11 \| `hard_drug_depiction`/);
   assert.equal(MODERATION_PLAYBOOK_TEXT.includes(EM_DASH), false);
   assert.equal(REVIEW_SCHEMA, 2);
   assert.deepEqual(RATINGS, ['all_ages', 'ages_10', 'teen_13', 'mature_17', 'adult_18', 'adult_21']);
   assert.deepEqual(JUDGE_OUTPUT_SCHEMA.properties.rating_floor.enum, RATINGS);
-  assert.deepEqual(JUDGE_OUTPUT_SCHEMA.properties.policy_version.enum, ['2.3']);
+  assert.deepEqual(JUDGE_OUTPUT_SCHEMA.properties.policy_version.enum, ['2.4']);
   assert.ok(GROUP_B.includes('B11'));
 });
 
@@ -136,13 +136,14 @@ test('B11 rejects the depiction of each hard drug the Code names, cannabis inclu
     assert.deepEqual([d.outcome, last(d).code, last(d).rule, last(d).source], ['reject', 'code_B11', 2, 'judge'], drug);
     assert.equal(parseJudgeVerdict(JSON.stringify({ ...judge({ articles: [cite('B11', evidence)] }), malformed: undefined, policy_version: '2.2', policy_hash: POLICY_HASH_ANCHORED })).malformed, false, `${drug}: B11 is an article the judge may cite`);
   }
-  // Below article_judge_cite, a person decides; a Jev signal the judge leaves uncited does too.
+  // Below article_judge_cite it is not yet, naming B11's change (v2.4); a Jev signal the judge, who read every script, leaves
+  // uncited is noted.
   const unsure = decideFinal({ triage: review({}).triage, judge: judge({ articles: [cite('B11', shown.cannabis, 0.6)] }) });
-  assert.deepEqual([unsure.outcome, last(unsure).code, last(unsure).article, last(unsure).rule], ['hold', 'article_unsure', 'B11', 6]);
+  assert.deepEqual([unsure.outcome, last(unsure).code, last(unsure).article, last(unsure).rule, unsure.changes], ['changes_requested', 'article_unsure', 'B11', 6, ['code_B11']]);
   const signal = review({ hard_drug_depiction: 0.6 });
   assert.deepEqual(b11Of(signal.triage).map(a => a.key), ['hard_drug_depiction']);
   assert.equal(signal.triage.articles.system.some(a => a.article === 'B11'), false);
-  assert.deepEqual([signal.final.outcome, last(signal.final).code, last(signal.final).article], ['hold', 'article_signal_not_cited', 'B11']);
+  assert.deepEqual([signal.final.outcome, last(signal.final).code, last(signal.final).article], ['approve', 'article_signal_not_cited', 'B11']);
   // Thresholds are the other Group B articles': 0.85 cites, 0.50 signals.
   assert.equal(review({ hard_drug_depiction: 0.85 }).triage.articles.system.some(a => a.article === 'B11'), true);
   assert.equal(b11Of(review({ hard_drug_depiction: 0.49 }).triage).length, 0);
@@ -184,8 +185,8 @@ test('B11 never fires on naloxone training, medical morphine or addiction scienc
 test('the exception lowers a confident hard-drug answer to a signal, never to nothing, and never lowers the judge', () => {
   const { triage, final } = review({ hard_drug_depiction: 0.95, drug_education: 0.9 });
   assert.equal(triage.articles.system.some(a => a.article === 'B11'), false, 'not a system citation');
-  assert.deepEqual(b11Of(triage).map(a => [a.key, a.drug_education]), [['hard_drug_depiction', true]], 'a signal the judge or a person decides');
-  assert.deepEqual([final.outcome, last(final).code, last(final).article], ['hold', 'article_signal_not_cited', 'B11']);
+  assert.deepEqual(b11Of(triage).map(a => [a.key, a.drug_education]), [['hard_drug_depiction', true]], 'a signal the judge decides');
+  assert.deepEqual([final.outcome, last(final).code, last(final).article], ['approve', 'article_signal_not_cited', 'B11']);
   const cited = decideFinal({ triage, judge: judge({ articles: [cite('B11', 'a cocaine line on the mirror beside the naloxone poster, capture-2')] }) });
   assert.deepEqual([cited.outcome, last(cited).code], ['reject', 'code_B11'], 'the judge\'s own citation still rejects');
 });
@@ -288,12 +289,12 @@ test('the questionnaire: alcohol, tobacco and psychedelic use map to adult_21, d
   assert.equal(JSON.stringify(QUESTIONS).includes(EM_DASH), false);
 });
 
-test('a questionnaire answer of hard drugs is a B11 signal: the judge cites it, or a person decides', () => {
+test('a questionnaire answer of hard drugs is a B11 signal: the judge cites it, or it is noted', () => {
   const q = questionnaireOf({ rating_questionnaire: questionnaireRecord(questionnaireAnswers({ drugs: 'hard_drugs' })) });
   assert.deepEqual([q.answered, q.articles], [true, ['B11']]);
   const { triage, final } = review({}, {}, { questionnaire: q });
   assert.deepEqual(b11Of(triage).map(a => [a.key, a.deterministic]), [['questionnaire_answer', true]]);
-  assert.deepEqual([final.outcome, last(final).code, last(final).article], ['hold', 'article_signal_not_cited', 'B11']);
+  assert.deepEqual([final.outcome, last(final).code, last(final).article], ['approve', 'article_signal_not_cited', 'B11']);
   const cited = decideFinal({ triage, judge: judge({ articles: [cite('B11', 'cannabis plants under grow lights in the shed, capture-3')] }) });
   assert.deepEqual([cited.outcome, last(cited).code], ['reject', 'code_B11']);
 });

@@ -76,7 +76,7 @@ import { corsHeaders, siteOrigin } from './cors.mjs';
 import { imagePart, textPart, userMessage } from './xai.mjs';
 import { prepareUserImage, sha256Hex as sha256OfBytes } from './user_images.mjs';
 import {
-  handleModerationRoute, sweepModeration, isListable, canServe, publicModeration,
+  handleModerationRoute, sweepModeration, resumeModeration, MODERATION_TICK_CRON, isListable, canServe, publicModeration,
   handleNotificationRoute, authorStatusOf, contentLockedFor, inReview,
   simWithLegalLock, legalLockedIds, withLegalLockFrom, simForServing, thumbnailApproved, objectMatchesBinding, JUDGE_IMAGE_MAX_BYTES, overJudgeImageLimit, sendBackToReview, publicImageBody, recordUploadedImage,
   POLICY_HASH_ANCHORED, MODERATION_VERSION, POLICY_VERSION, RATINGS, REVIEW_SCHEMA,
@@ -644,6 +644,14 @@ export default {
   // writes the night's record for /api/admin/cron-health.
   async scheduled(event, env, ctx) {
     ctx.waitUntil((async () => {
+      // The five-minute tick (wrangler.toml [triggers]): only the moderation resumes, so no review waits on the hourly sweep:
+      // cases a dropped run left classifying, the scripts stage carried on, listings stranded at pending, and holds the AI
+      // caused by failing (resumeModeration). Everything below runs on the hourly tick alone, as before.
+      if (event?.cron === MODERATION_TICK_CRON) {
+        try { await resumeModeration(env, await moderationDeps({}, env)); }
+        catch (e) { console.error('moderation five-minute tick failed:', e); }
+        return;
+      }
       const at = new Date(event?.scheduledTime || Date.now());
       const scoreDate = new Date(at.getTime() - 86400 * 1000).toISOString().split('T')[0];
       let settlement = null;

@@ -277,8 +277,8 @@ more, and only for tags the author chose:
 Either is **not yet**, `not_yet_tags`: "Not yet: fix your tags (Code B9)", with
 the change "Fix your tags so each one describes what the Space contains...". It
 follows the Code's rule 2 for every B9 wording fault: not yet when every test is
-2 or above, held for a person when a test is `null`, and rejected under B9 when
-a test is below 2.
+2 or above or `null` (with the unscored test asked for; Code v2.4), and rejected
+under B9 when a test is below 2.
 
 ## Who builds what
 

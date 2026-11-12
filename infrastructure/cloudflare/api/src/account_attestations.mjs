@@ -8,7 +8,7 @@
 //   - Property-ownership attestation (Part I, after A14). An author who proved
 //     they own, lease or protect a property carries an attestation. A10, A13 and
 //     A14 never apply to the author's own attested property; a citation of one of
-//     them against attested property is held for a person (Part IV rule 1).
+//     them whose evidence names attested property does not apply (Part IV rule 1, v2.4).
 //   - A verified business (B6(h), Part III "Product"). Payment off Eustress is
 //     allowed only through a verified business connection, and never in an
 //     Adult listing; the Product category is for a verified business.

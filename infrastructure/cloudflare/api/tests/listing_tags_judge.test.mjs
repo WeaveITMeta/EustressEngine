@@ -14,6 +14,7 @@
 
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { packageFrom } from './helpers/package_fake.mjs';
 import { createHash } from 'node:crypto';
 import { loadWorker, mintToken, fakeEnv, fakeDoNamespace, ctx } from './helpers/load_worker.mjs';
 import { fakeClaude, questionnaireAnswers } from './helpers/claude_fake.mjs';
@@ -171,7 +172,7 @@ test('the judge is told whether the author gave tags, and the Code tells it what
   assert.equal(summary.listing.author_gave_tags, false);
   assert.equal('genre' in summary.listing, false);
   assert.match(GUARDIAN_POLICY_TEXT, /`suggested_tags` is always present\. Fill it only when the case summary says the author gave no tags/);
-  assert.match(GUARDIAN_POLICY_TEXT, /^# Eustress Guardian Code v2\.3/);
+  assert.match(GUARDIAN_POLICY_TEXT, /^# Eustress Guardian Code v2\.4/);
 });
 
 // ── the verdict rules ───────────────────────────────────────────────────────
@@ -231,7 +232,7 @@ test('no judge tags on a quarantine, a harm (Group A) rejection or a legal-lane 
   assert.deepEqual([legalHold.outcome, legalHold.lane, legalHold.assigned_tags], ['hold', 'legal', []]);
   const quality = decideFinal({ triage: triage(), judge: parsedJudge({ ...suggest, tests: { ...scores(), objective: { score: 0, evidence: 'objective: nothing to do anywhere in capture-1' } } }) });
   assert.deepEqual([quality.outcome, quality.lane, quality.assigned_tags], ['reject', 'quality', ['harbour', 'tides']]);
-  const notYet = decideFinal({ triage: triage({ questionnaire: questionnaireOf({}) }), judge: parsedJudge(suggest) });
+  const notYet = decideFinal({ triage: triage(), judge: parsedJudge({ ...suggest, tests: { ...scores(), lesson: { score: null, evidence: 'lesson: no panel or readout names it in capture-1' } } }) });
   assert.deepEqual([notYet.outcome, notYet.assigned_tags], ['changes_requested', ['harbour', 'tides']]);
 });
 
@@ -366,6 +367,8 @@ function pipelineDeps({ judge = judgeAnswer(), jev = jevAnswers() } = {}) {
     grokFetch: async () => ({ ok: true, status: 200, json: async () => ({ output: [] }), text: async () => '' }),
     grokModel: 'grok-test',
     policyText: GUARDIAN_POLICY_TEXT, policyHash: POLICY_HASH_ANCHORED,
+    // Code v2.4: a listing is listed only on every script read from its package; these tests' packages read in full.
+    packageScripts: packageFrom(),
     fetch: async () => new Response(JSON.stringify(jev), { status: 200 }),
   };
 }

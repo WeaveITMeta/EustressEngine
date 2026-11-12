@@ -54,17 +54,17 @@ function env() {
 }
 async function agentApproves(caseOver, args = {}) {
   const e = env();
-  await e.SOCIAL.put(`modcase:${SIM}`, JSON.stringify({ sim_id: SIM, author_id: 'user-1', status: 'held', history: [], triage: triage(), judge: judge(), ...caseOver }));
+  await e.SOCIAL.put(`modcase:${SIM}`, JSON.stringify({ sim_id: SIM, author_id: 'user-1', status: 'held', history: [], triage: triage(), judge: judge(), scripts_review: { source: 'package', coverage_percent: 100 }, ...caseOver }));
   const run = makeToolExecutor(e, { auditLog: async () => {}, json: v => v }, { actor: 'agent', actorId: 'grok-agent' });
   const res = await run('moderation_approve', { sim_id: SIM, rating: 'all_ages', rationale: 'The judge scored every test and the statement matches the Space.', ...args });
   return { res, status: JSON.parse(e.kv.get(`modcase:${SIM}`)).status };
 }
 
-test('the Code is version 2.3, and the text the judge reads is the one anchored', () => {
-  assert.equal(POLICY_VERSION, '2.3');
+test('the Code is version 2.4, and the text the judge reads is the one anchored', () => {
+  assert.equal(POLICY_VERSION, '2.4');
   assert.equal('sha256:' + createHash('sha256').update(GUARDIAN_POLICY_TEXT).digest('hex'), POLICY_HASH_ANCHORED);
-  assert.equal(POLICY_HASH_ANCHORED, 'sha256:99ced3f2e27e715a52483581375cb9eda9401944ca8f4412483da2f27e5f39b0');
-  assert.match(GUARDIAN_POLICY_TEXT, /^# Eustress Guardian Code v2\.3/);
+  assert.equal(POLICY_HASH_ANCHORED, 'sha256:53e1204bc18506f099ac7fec69274dd5a47010432364eac01913026070f294e4');
+  assert.match(GUARDIAN_POLICY_TEXT, /^# Eustress Guardian Code v2\.4/);
   assert.match(GUARDIAN_POLICY_TEXT, /## Part IV\. Verdict Rules/);
   // Written with a code point, not an escape, so no tool that decodes an escape in this file can change what it means.
   assert.equal(GUARDIAN_POLICY_TEXT.includes(String.fromCharCode(0x2014)), false, 'no em dashes in the Code');
@@ -77,9 +77,9 @@ test('a Space that passes all four tests with a matching statement is approved; 
   assert.deepEqual([proposed.outcome, proposed.featured, proposed.featured_candidate], ['approve', false, true]);
 });
 
-test('a listing is earned: a qualifying answer below the listing confidence is held for a person (rule 6)', () => {
+test('a listing is earned: a qualifying answer below the listing confidence is not yet, with what to show (rule 6)', () => {
   const d = decideFinal({ triage: triage(), judge: judge({ confidence: DEFAULT_THRESHOLDS.listing_confidence - 0.01 }) });
-  assert.equal(d.outcome, 'hold');
+  assert.equal(d.outcome, 'changes_requested');
   assert.equal(d.reasons.at(-1).code, 'judge_unsure_to_list');
   assert.equal(d.reasons.at(-1).rule, 6);
   assert.equal(DEFAULT_THRESHOLDS.listing_confidence, 0.75);
@@ -102,16 +102,17 @@ test('not yet on a case the triage escalated stands, and the rules decide its li
   const listing = decideFinal({ triage: triage({ outcome: 'escalate', lane: 'harm' }), judge: judge() });
   assert.equal(listing.outcome, 'approve', 'nothing cited and nothing signalled: the rules list it');
   const signalled = decideFinal({ triage: triage({ outcome: 'escalate', lane: 'harm', articles: { system: [], signals: [{ article: 'A9', key: 'hate_incitement', p: 0.5, group: 'A' }] } }), judge: judge() });
-  assert.equal(signalled.outcome, 'hold', 'a gray-band signal the judge did not cite goes to a person');
+  assert.equal(signalled.outcome, 'second_opinion', 'a gray-band Group A signal the judge did not cite is asked about by name (v2.4)');
+  assert.deepEqual(signalled.signal_checks.map(c => c.article), ['A9']);
 });
 
-test('a game is never listed automatically: a qualifying answer holds it for a person (rule 8)', () => {
+test('a game that passes every test is listed like any Space (v2.4, rule 8); a featured proposal is recorded for a person', () => {
   assert.deepEqual(GAME_KINDS, ['interactive_experience']);
   for (const featured_candidate of [false, true]) {
     const d = decideFinal({ triage: triage({ content_kind: 'interactive_experience' }), judge: judge({ featured_candidate, scores: { build_quality: 3, lesson: 3, real_world: 3 } }) });
-    assert.equal(d.outcome, 'hold');
-    assert.equal(d.reasons.at(-1).code, 'game_needs_a_person');
-    assert.equal(d.featured_candidate, featured_candidate, 'the person who takes the game sees the proposal');
+    assert.equal(d.outcome, 'approve');
+    assert.equal(d.reasons.some(r => r.code === 'game_needs_a_person'), false);
+    assert.equal(d.featured_candidate, featured_candidate, 'the proposal is recorded, never blocking');
   }
 });
 
@@ -148,10 +149,10 @@ test('the agent cannot list a game: the approval is refused before anything is w
   assert.equal(status, 'held', 'the case is still held');
 });
 
-test('a Space the judge calls a game is held for a person, whatever Jev filed it as', () => {
+test('a Space the judge calls a game is decided like any Space, whatever Jev filed it as (v2.4)', () => {
   const d = decideFinal({ triage: triage({ content_kind: 'simulation' }), judge: judge({ is_game: true }) });
-  assert.equal(d.outcome, 'hold');
-  assert.equal(d.reasons.at(-1).code, 'game_needs_a_person');
+  assert.equal(d.outcome, 'approve');
+  assert.equal(decideFinal({ triage: triage({ content_kind: 'simulation' }), judge: judge({ is_game: true, scores: { lesson: 0 } }) }).outcome, 'reject', 'a sloppy game is still rejected');
   assert.equal(decideFinal({ triage: triage({ content_kind: 'simulation' }), judge: judge() }).outcome, 'approve', 'not a game when nothing says so');
 });
 
@@ -181,12 +182,12 @@ test('the agent cannot approve what the rules would not list: a test at 1, or an
   assert.equal((await agentApproves({ triage: triage({ outcome: 'escalate' }) })).res.ok, true, 'control: a case the rules would list');
 });
 
-test('a test at 1 with no change named is held for a person, never sent to the author as an instruction with nothing in it', () => {
+test('a test at 1 with no change named is not yet with the Code\'s own change for that test, never an instruction with nothing in it (v2.4)', () => {
   const d = decideFinal({ triage: triage(), judge: judge({ scores: { lesson: 1 }, suggested_edit_to_publish: null }) });
-  assert.equal(d.outcome, 'hold');
-  assert.equal(d.reasons.at(-1).code, 'judge_not_yet_without_change');
+  assert.deepEqual([d.outcome, d.changes, d.suggested_edit], ['changes_requested', ['test_lesson'], null]);
+  assert.ok(AUTHOR_COPY.test_lesson.what_to_change.length > 20, 'the copy names the change');
   const blank = decideFinal({ triage: triage(), judge: judge({ scores: { lesson: 1 }, suggested_edit_to_publish: '  ' }) });
-  assert.equal(blank.outcome, 'hold', 'an empty edit counts as none');
+  assert.deepEqual([blank.outcome, blank.suggested_edit], ['changes_requested', null], 'an empty edit counts as none');
   const named = decideFinal({ triage: triage(), judge: judge({ scores: { lesson: 1 }, suggested_edit_to_publish: 'Let the visitor change the basin shape.' }) });
   assert.equal(named.outcome, 'changes_requested');
 });
@@ -248,7 +249,7 @@ test('fear: with no content rating answer, frightening material leaves the ratin
   const d = decideTriage({ signals: {}, jev: withFear(null, { none: 0.1, mild: 0.1, frightening: 0.8 }, 0.8) });
   assert.equal(d.rating, null);
   assert.equal(fearSignals(d).length, 1);
-  // A signal the judge did not cite holds the case for a person (rule 6).
+  // A signal the judge did not cite is noted on the case (rule 6, v2.4).
   const held = decideFinal({ triage: { ...d, statement: STATEMENT }, judge: judge() });
-  assert.deepEqual([held.outcome, held.reasons.at(-1).code, held.reasons.at(-1).article], ['hold', 'article_signal_not_cited', 'B1']);
+  assert.deepEqual([held.outcome, held.reasons.at(-1).code, held.reasons.at(-1).article], ['approve', 'article_signal_not_cited', 'B1']);
 });
