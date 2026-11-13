@@ -87,6 +87,7 @@ import {
 import { handleWorldRoute, WORLD_FORMAT, PAK_FORMAT, DEFAULT_MAX_PLAYERS, checkMaxPlayers } from './world.mjs';
 import { checkTags, listingTags, tagFilter, queryMatchesTag, genreTag, listingTagFields, setAuthorTags, withTagsWrittenBack, genreAliasValues } from './tags.mjs';
 import { handleIdentityRoute } from './identity.mjs';
+import { handlePlayPassRoute, withPlayPass } from './play_pass.mjs';
 import { handleEconomicsRoute } from './economics.mjs';
 import { handleBooksRoute } from './books.mjs';
 import { handleHolderAdminRoute, handleHoldings, holderLedgerCall } from './holder_ledger.mjs';
@@ -1139,8 +1140,8 @@ export default {
         const world = await handleWorldRoute(request, url, env, cors, {
           verifyAuth, requireAdmin, json, isListable, canServe, readSpaceNames,
           MODERATION_VERSION, POLICY_VERSION,
-          // The Player fetching a world to play it is a visit.
-          onLaunch: async (req, sim) => { await countVisit(env, sim, await viewerKey(env, req, await verifyAuth(req, env))); },
+          // The Player fetching a world to play it is a visit: by the account its play pass names, else by its session.
+          onLaunch: async (req, sim, passAccount) => { await countVisit(env, sim, await viewerKey(env, req, passAccount || await verifyAuth(req, env))); },
         });
         if (world) return world;
       }
@@ -1192,6 +1193,11 @@ export default {
       if (coverRoute) return coverRoute;
       if (url.pathname.match(/^\/api\/simulations\/[a-f0-9-]+\/download$/) && request.method === 'GET')
         return handleDownloadPak(request, url.pathname.split('/')[3], env, cors);
+      // Solo play passes: the website's sign-in carried to the Player for one listing (src/play_pass.mjs).
+      if (/^\/api\/simulations\/[a-f0-9-]+\/(play-ticket|play-pass)$/.test(url.pathname)) {
+        const played = await handlePlayPassRoute(request, url, env, cors, { verifyAuth, requireAdmin, json, isListable });
+        if (played) return played;
+      }
       if (url.pathname.match(/^\/api\/simulations\/[a-f0-9-]+\/play$/) && request.method === 'POST')
         return handlePlaySimulation(request, url.pathname.split('/')[3], env, cors);
       // Live hosts: Studio's heartbeat while it hosts a simulation, and the
@@ -5939,27 +5945,30 @@ async function handleGetSimulation(request, simId, env, cors) {
   const data = await env.SOCIAL.get(`sim:${simId}`);
   if (!data) return json({ error: 'Simulation not found' }, 404, cors);
   const sim = await simWithLegalLock(env, JSON.parse(data));
+  // A Player opened from the website's Play button shows a play pass for this listing instead of a session
+  // (src/play_pass.mjs); it stands for the website's account here and nowhere else.
+  const authenticate = withPlayPass(verifyAuth, simId);
   if (isListable(sim)) {
     // Adult content: shown to a viewer who turned it on, and to its author; anyone else is told why (src/adult_content.mjs).
     // An adult listing is only ever served to a signed-in viewer, so its answer is never cached, and its images are
     // signed URLs, the only ones its image routes serve.
-    const refused = await refuseAdult(request, env, sim, { authenticate: verifyAuth, json, cors });
+    const refused = await refuseAdult(request, env, sim, { authenticate, json, cors });
     if (refused) return refused;
     const adult = isAdultListing(sim);
     const headers = adult ? { ...cors, 'Cache-Control': 'private, no-store' } : cors;
     const view = galleryView(sim, new URL(request.url).origin);
-    const shown = adult ? await withSignedImages(env, view, sim, await viewerOf(request, env, verifyAuth)) : view;
+    const shown = adult ? await withSignedImages(env, view, sim, await viewerOf(request, env, authenticate)) : view;
     return json({ ...shown, play_count: await playCountOf(env, sim) }, 200, headers);
   }
   // Unlisted: the author sees their own record with the moderation summary,
   // an admin sees the same, everyone else sees nothing distinguishable from
   // a missing id (a 404 does not confirm that a held listing exists).
-  const auth = await verifyAuth(request, env);
+  const auth = await authenticate(request, env);
   const admin = auth ? await requireAdmin(request, env) : null;
   if (!auth || (auth !== sim.author_id && !admin)) return json({ error: 'Simulation not found' }, 404, cors);
   const rec = await env.SOCIAL.get(`modcase:${simId}`);
   // An adult listing's images are signed for its author, and for an admin who turned Adult content on.
-  const view = isAdultListing(sim) ? await withSignedImages(env, galleryView(sim, new URL(request.url).origin), sim, await viewerOf(request, env, verifyAuth)) : galleryView(sim, new URL(request.url).origin);
+  const view = isAdultListing(sim) ? await withSignedImages(env, galleryView(sim, new URL(request.url).origin), sim, await viewerOf(request, env, authenticate)) : galleryView(sim, new URL(request.url).origin);
   return json({ ...view, play_count: await playCountOf(env, sim), is_public: sim.is_public !== false, listable: false, moderation: rec ? publicModeration(JSON.parse(rec), sim) : { status: authorStatusOf(sim.moderation?.status, sim.is_public !== false) } }, 200, isAdultListing(sim) ? { ...cors, 'Cache-Control': 'private, no-store' } : cors);
 }
 
@@ -5973,12 +5982,14 @@ async function handleDownloadPak(request, simId, env, cors) {
   // other writers rewrite whole, and so does an approval whose reviewed package
   // is no longer the one stored (see simForServing in moderation.mjs).
   const sim = await simForServing(env, JSON.parse(simData), 'content');
+  // The Player's play pass for this listing stands for the website's account, as a session would (src/play_pass.mjs).
+  const authenticate = withPlayPass(verifyAuth, simId);
 
   // Approved public listings are open. Anything else is the author's alone,
   // and a quarantined .pak is served to nobody but an admin: the legal lane
   // applies to storage, not only to the gallery index.
   if (!isListable(sim)) {
-    const auth = await verifyAuth(request, env);
+    const auth = await authenticate(request, env);
     const admin = auth ? await requireAdmin(request, env) : null;
     // One answer for every refusal, quarantined included: a distinct status
     // would tell a suspected uploader that a legal hold exists.
@@ -5986,8 +5997,8 @@ async function handleDownloadPak(request, simId, env, cors) {
       return json({ error: 'Simulation not available' }, 403, cors);
   } else {
     // Adult content is served to a viewer who turned it on, and to its author (src/adult_content.mjs). The Player sends its
-    // session with the download (crates/client space_fetch.rs), so a signed-in Player is judged by its own setting.
-    const refused = await refuseAdult(request, env, sim, { authenticate: verifyAuth, json, cors });
+    // session or its play pass with the download (crates/client space_fetch.rs), so it is judged by that account's setting.
+    const refused = await refuseAdult(request, env, sim, { authenticate, json, cors });
     if (refused) return refused;
   }
 
@@ -6007,7 +6018,7 @@ async function handleDownloadPak(request, simId, env, cors) {
   // the same one: an upload between the two reads is not served unreviewed (only
   // its author and an admin are given it).
   if (isListable(sim) && !(await objectMatchesBinding(env, sim, 'content', object))) {
-    const auth = await verifyAuth(request, env);
+    const auth = await authenticate(request, env);
     const admin = auth ? await requireAdmin(request, env) : null;
     if (auth !== sim.author_id && !admin) {
       await object.body?.cancel?.();
@@ -6016,7 +6027,7 @@ async function handleDownloadPak(request, simId, env, cors) {
   }
 
   // The world is being fetched to be played: a visit.
-  await countVisit(env, sim, await viewerKey(env, request, await verifyAuth(request, env)));
+  await countVisit(env, sim, await viewerKey(env, request, await authenticate(request, env)));
 
   return new Response(object.body, {
     headers: {

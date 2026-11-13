@@ -27,7 +27,7 @@
 // write by a minute, long enough to hand out a link that no longer answers.
 // =============================================================================
 
-import { inspectIdentityTicket } from './identity.mjs';
+import { inspectIdentityTicket, isTicketId } from './identity.mjs';
 import {
   GUEST_NAME, RETENTION_MS, barGuest, beatGuestLease, bodyObject, dayOf, dayStart, guestPlayOn, inspectGuestJoin, isGuestJoinTicket,
   isGuestRating, leaseHeld, leaseIsLive, nextMidnight,
@@ -306,9 +306,29 @@ function keptUntil(key, value) {
     const start = Date.parse(`${key.slice(key.indexOf(':') + 1)}T00:00:00.000Z`);
     return Number.isFinite(start) ? start + RETENTION_MS : 0;
   }
+  // A redeemed play ticket's id `ptk:<id>`, and a minted one `ptm:<account>:<id>`, hold the ticket's expiry in seconds, and
+  // are kept through that whole second.
+  if (key.startsWith('ptk:') || key.startsWith('ptm:')) return typeof value === 'number' ? (value + 1) * 1000 : 0;
   return null;
 }
-const KEPT_PREFIXES = ['gbar:', 'gbarg:', 'gbarq:', 'hostref:', 'caps:', 'hostbar'];
+const KEPT_PREFIXES = ['gbar:', 'gbarg:', 'gbarq:', 'hostref:', 'caps:', 'hostbar', 'ptk:', 'ptm:'];
+
+/// Move the object's alarm forward to `at` (milliseconds) when none is set or the one set is later.
+async function alarmBy(storage, at) {
+  const alarm = await storage.getAlarm();
+  if (alarm === null || alarm === undefined || alarm > at) await storage.setAlarm(at);
+}
+
+/// Most play ticket ids one listing remembers (spend_play_ticket). A full table refuses (`busy`) and never forgets an id
+/// early, since forgetting would let a ticket be redeemed twice. A backstop: MAX_PLAY_TICKETS_PER_ACCOUNT keeps one account
+/// from filling it.
+export const MAX_PLAY_TICKETS = 5000;
+/// Most unexpired play tickets one account holds for one listing, spent or not (note_play_ticket). Every redeemed ticket
+/// was minted and lasts as long as its mint record, so this also caps one account's share of the spent table: filling it
+/// takes MAX_PLAY_TICKETS / this many accounts at once (Security review M1, 2026-11-13).
+export const MAX_PLAY_TICKETS_PER_ACCOUNT = 20;
+/// An account id as a key part: a UUID, or anything else of letters, digits and dashes.
+const isAccountKeyPart = (v) => typeof v === 'string' && /^[A-Za-z0-9-]{1,64}$/.test(v);
 
 /// Drop every kept record whose time is over, and answer when the next one is due (null when none is left), so an
 /// object whose host is gone still forgets them on time (alarm).
@@ -691,6 +711,51 @@ const LIVE_OPS = {
     };
   },
 
+  /// Spend one solo play ticket (src/play_pass.mjs): each id once. Runs only in a listing's play object
+  /// (playTicketObjectName), never in a hosting session's, whose admitted ids a new session clears. An id is kept until its
+  /// ticket has expired, then dropped here or by the alarm (expireKept).
+  async spend_play_ticket({ id, expires, now }) {
+    const refuse = (status, code, error) => ({ ok: false, status, code, error });
+    if (!isTicketId(id) || !Number.isSafeInteger(expires) || !Number.isFinite(now)) return refuse(400, 'bad_request', 'bad play ticket');
+    const nowS = Math.floor(now / 1000);
+    if (expires < nowS) return refuse(401, 'expired', 'This Play link has expired. Play again from the gallery.');
+    let count = 0;
+    for (const [key, until] of await this.storage.list({ prefix: 'ptk:', limit: MAX_PLAY_TICKETS + 1 })) {
+      if (typeof until === 'number' && until < nowS) await this.storage.delete(key);
+      else count++;
+    }
+    if ((await this.storage.get(`ptk:${id}`)) !== undefined) {
+      return refuse(403, 'used', 'This Play link was already used. Play again from the gallery for a new one.');
+    }
+    if (count >= MAX_PLAY_TICKETS) return refuse(503, 'busy', 'The gallery could not open this right now. Try again in a minute.');
+    await this.storage.put(`ptk:${id}`, expires);
+    await alarmBy(this.storage, (expires + 1) * 1000);
+    return { ok: true };
+  },
+
+  /// Record one solo play ticket minted for `account` (src/play_pass.mjs), unless the account already holds
+  /// MAX_PLAY_TICKETS_PER_ACCOUNT unexpired ones for this listing (`too_many_play_tickets`). Runs in the listing's play
+  /// object. The record is kept until the ticket has expired, then dropped here or by the alarm (expireKept).
+  async note_play_ticket({ id, account, expires, now }) {
+    const refuse = (status, code, error) => ({ ok: false, status, code, error });
+    if (!isTicketId(id) || !isAccountKeyPart(account) || !Number.isSafeInteger(expires) || !Number.isFinite(now)) {
+      return refuse(400, 'bad_request', 'bad play ticket');
+    }
+    const nowS = Math.floor(now / 1000);
+    const prefix = `ptm:${account}:`;
+    let held = 0;
+    for (const [key, until] of await this.storage.list({ prefix, limit: MAX_PLAY_TICKETS_PER_ACCOUNT + 64 })) {
+      if (typeof until === 'number' && until < nowS) await this.storage.delete(key);
+      else held++;
+    }
+    if (held >= MAX_PLAY_TICKETS_PER_ACCOUNT) {
+      return refuse(429, 'too_many_play_tickets', 'Too many Play links for this listing. Try again in two minutes.');
+    }
+    await this.storage.put(`${prefix}${id}`, expires);
+    await alarmBy(this.storage, (expires + 1) * 1000);
+    return { ok: true };
+  },
+
   /// The host asks whether one joining player may be admitted. A ticket is
   /// admitted once per hosting session: the Durable Object is single-threaded
   /// and its writes are atomic, which is why this lives here and not in KV.
@@ -915,6 +980,24 @@ export async function livePlayInfo(env, simId, { signedIn, lease, now }) {
 export async function holdGuestTicket(env, simId, args) {
   if (!env.LIVE_HOSTS) return { ok: false, status: 409, code: 'not_live', error: 'This simulation is not hosted at that session right now' };
   return liveCall(env, guestSessionName(simId), 'hold_guest_ticket', args);
+}
+
+/// The LiveHost object that remembers which solo play tickets of a listing were redeemed (src/play_pass.mjs). Its own
+/// object: a listing id is hex and dashes, so `play:<id>` is never a hosting session's name (sessionName).
+export const playTicketObjectName = (simId) => `play:${simId}`;
+
+/// Spend a play ticket's id once (the object's op spend_play_ticket): `{ ok: true }`, or a refusal with status and code
+/// (`used`, `expired`, `busy`). Without the live registry nothing can be spent once, so nothing is.
+export async function spendPlayTicket(env, simId, { id, expires, now }) {
+  if (!env.LIVE_HOSTS) return { ok: false, status: 503, code: 'play_pass_unavailable', error: 'Play passes are not configured on this deployment' };
+  return liveCall(env, playTicketObjectName(simId), 'spend_play_ticket', { id, expires, now });
+}
+
+/// Record a play ticket just minted for `account` (the object's op note_play_ticket): `{ ok: true }`, or a refusal with
+/// status and code (`too_many_play_tickets`). Without the live registry nothing is recorded, so nothing is minted.
+export async function notePlayTicket(env, simId, { id, account, expires, now }) {
+  if (!env.LIVE_HOSTS) return { ok: false, status: 503, code: 'play_pass_unavailable', error: 'Play passes are not configured on this deployment' };
+  return liveCall(env, playTicketObjectName(simId), 'note_play_ticket', { id, account, expires, now });
 }
 
 /// Whether a guest (no account, so no age is known and the person may be a child) may be in a session of listing `sim`

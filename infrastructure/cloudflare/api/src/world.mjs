@@ -258,6 +258,7 @@ import { contentLockedFor, inReview, simForServing, sourceApproved, REVIEW_SCHEM
 import { checkTags, listingTags, genreTag, setAuthorTags, withTagsWrittenBack, listingTagFields } from './tags.mjs';
 import { refuseAdult } from './adult_content.mjs';
 import { authorFromServerCredential, bearerOf } from './live.mjs';
+import { accountFromPlayPass } from './play_pass.mjs';
 import { refuseBlockedUpload } from './takedown.mjs';
 
 /// A listing its author may publish into.
@@ -287,19 +288,24 @@ async function servableListing(request, simId, env, cors, deps, kind = 'content'
   // A dedicated server's credential stands for the author on this listing
   // (src/live.mjs). It is not a session, so it is resolved before verifyAuth.
   const serverAuthor = await authorFromServerCredential(env, bearerOf(request), simId, sim.author_id);
-  const authenticate = async (request, env) => serverAuthor || deps.verifyAuth(request, env);
+  // A Player opened from the website's Play button shows a play pass for this listing (`Authorization: PlayPass`,
+  // src/play_pass.mjs) and stands for the account the website is signed in to. Also resolved before verifyAuth, which
+  // reads only `Bearer `. A pass for another listing, expired or forged, is no credential at all.
+  const passAccount = serverAuthor ? null : await accountFromPlayPass(env, request, simId);
+  const authenticate = async (request, env) => serverAuthor || passAccount || deps.verifyAuth(request, env);
   if (deps.isListable(sim)) {
     // Adult content goes to a viewer who turned it on, and to its author (src/adult_content.mjs). The manifest, every
-    // chunk and the source world all pass here; the Player sends its session with each (crates/client space_fetch.rs).
+    // chunk and the source world all pass here; the Player sends its session or its play pass with each (crates/client
+    // space_fetch.rs).
     const refused = await refuseAdult(request, env, sim, { authenticate, json: deps.json, cors });
     if (refused) return { error: refused };
-    return { sim, listable: true };
+    return { sim, listable: true, passAccount };
   }
   const auth = await authenticate(request, env);
-  const admin = serverAuthor ? null : auth ? await deps.requireAdmin(request, env) : null;
+  const admin = serverAuthor || passAccount ? null : auth ? await deps.requireAdmin(request, env) : null;
   if (!deps.canServe(sim, auth, !!admin))
     return { error: deps.json({ error: 'Simulation not available' }, 403, cors) };
-  return { sim, listable: false };
+  return { sim, listable: false, passAccount };
 }
 
 /// Listing text sent with a commit. Returns whether anything changed. `tags` is the commit's already-checked tag list, or
@@ -554,7 +560,7 @@ async function handleGetManifest(request, simId, env, cors, deps) {
   const obj = await env.SCENES.get(sim.world.manifest_key);
   if (!obj) return deps.json({ error: 'The manifest is missing from storage' }, 404, cors);
   // A Player fetching the world to play it is a visit (once a day per person: src/visits.mjs). Never fails the read.
-  if (deps.onLaunch) await deps.onLaunch(request, sim).catch((e) => console.error('onLaunch failed:', e?.message || e));
+  if (deps.onLaunch) await deps.onLaunch(request, sim, gate.passAccount || null).catch((e) => console.error('onLaunch failed:', e?.message || e));
   const headers = {
     ...cors,
     'Content-Type': 'application/json',

@@ -71,10 +71,12 @@ export const isAudience = (v) => typeof v === 'string' && /^[0-9a-f]{64}$/.test(
 /// A ticket id: 16 random bytes as 32 lowercase hex characters.
 export const isTicketId = (v) => typeof v === 'string' && /^[0-9a-f]{32}$/.test(v);
 
-/// A ticket for `accountId` to show on the host connection `audience`.
-export async function makeIdentityTicket(env, { accountId, username = '', audience, now = nowS() }) {
+/// A ticket for `accountId` to show on the host connection `audience`. `ttl`: how many seconds it lasts, TICKET_TTL_S
+/// unless the caller asks for less (a solo play ticket lasts PLAY_TICKET_TTL_S, play_pass.mjs). It is never longer.
+export async function makeIdentityTicket(env, { accountId, username = '', audience, now = nowS(), ttl = TICKET_TTL_S }) {
+  if (!Number.isSafeInteger(ttl) || ttl <= 0 || ttl > TICKET_TTL_S) throw new Error('ticket ttl must be 1 to TICKET_TTL_S seconds');
   const id = [...crypto.getRandomValues(new Uint8Array(16))].map((b) => b.toString(16).padStart(2, '0')).join('');
-  const payload = { a: accountId, u: username, h: audience, e: now + TICKET_TTL_S, j: id };
+  const payload = { a: accountId, u: username, h: audience, e: now + ttl, j: id };
   const body = b64url(encoder.encode(JSON.stringify(payload)));
   const sig = await hmac(await ticketKey(env), `${PREFIX}.${body}`);
   return { ticket: `${PREFIX}.${body}.${b64url(sig)}`, expires: payload.e, id };
