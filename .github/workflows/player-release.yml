@@ -36,7 +36,7 @@ name: Player Release
 # Windows signing, Azure Trusted Signing (required for any publish to R2,
 # staging included; a build-only run goes ahead unsigned and says so):
 #   secrets   AZURE_TENANT_ID, AZURE_CLIENT_ID, AZURE_CLIENT_SECRET
-#             (an app registration with the "Trusted Signing Certificate
+#             (an app registration with the "Artifact Signing Certificate
 #             Profile Signer" role on the signing account)
 #   variables TRUSTED_SIGNING_ENDPOINT (the account's region endpoint, e.g.
 #             https://wus2.codesigning.azure.net/), TRUSTED_SIGNING_ACCOUNT,
@@ -71,6 +71,10 @@ on:
         options:
           - staging
           - production
+      unsigned_staging:
+        description: "One-off, staging only: publish UNSIGNED Windows and Linux builds and leave macOS out (not built, not in latest.json). Every downloader sees an unknown-publisher warning. Refused with channel=production."
+        type: boolean
+        default: false
 
 permissions:
   contents: write
@@ -108,6 +112,7 @@ jobs:
       default_api_url: ${{ steps.channel.outputs.default_api_url }}
       sign_windows: ${{ steps.signing.outputs.sign_windows }}
       sign_macos: ${{ steps.signing.outputs.sign_macos }}
+      include_macos: ${{ steps.signing.outputs.include_macos }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -174,6 +179,8 @@ jobs:
           HAS_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID != '' }}
           HAS_API_ISSUER: ${{ secrets.APPLE_API_ISSUER_ID != '' }}
           HAS_API_KEY: ${{ secrets.APPLE_API_KEY_P8 != '' }}
+          UNSIGNED_STAGING: ${{ inputs.unsigned_staging }}
+          INPUT_CHANNEL: ${{ inputs.channel }}
         run: |
           win=""
           [ -n "$TS_ENDPOINT" ] || win="$win variable TRUSTED_SIGNING_ENDPOINT,"
@@ -202,6 +209,18 @@ jobs:
             echo "sign_macos=false" >> "$GITHUB_OUTPUT"
             echo "::warning::macOS signing is not configured (missing:${mac%,})."
           fi
+          # The one exception McKale allowed (2026-11-13): a staging publish
+          # of unsigned Windows and Linux builds, with macOS left out.
+          if [ "$UNSIGNED_STAGING" = "true" ]; then
+            if [ "$EVENT_NAME" = "push" ] || [ "$INPUT_CHANNEL" != "staging" ]; then
+              echo "::error::unsigned_staging is for channel=staging only. Production is always signed."
+              exit 1
+            fi
+            echo "include_macos=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::UNSIGNED staging publish: Windows and Linux only, unsigned; macOS is not built and not listed."
+            exit 0
+          fi
+          echo "include_macos=true" >> "$GITHUB_OUTPUT"
           if [ -n "$win$mac" ] && { [ "$EVENT_NAME" = "push" ] || [ "$PUBLISH" = "true" ]; }; then
             echo "::error::Refusing to publish an unsigned Player. Missing:${win}${mac%,}. Set them in the repository's Actions settings, then run again."
             exit 1
@@ -425,6 +444,7 @@ jobs:
   # ─────────────────────────────────────────────────────────────────────
   build-macos-arm64:
     needs: version
+    if: needs.version.outputs.include_macos != 'false'
     runs-on: macos-15 # Apple Silicon; GitHub retired the macos-14 arm64 runner
     timeout-minutes: 90
     env:
@@ -812,7 +832,15 @@ jobs:
     needs: [version, build-windows, build-macos-arm64, build-linux]
     # A tag push publishes. A dispatched run publishes only when asked, so a
     # manual run can prove the three builds before anything goes public.
-    if: github.event_name == 'push' || inputs.publish
+    # macOS may be skipped only by an unsigned_staging run, which leaves it out.
+    if: >-
+      !cancelled() &&
+      (github.event_name == 'push' || inputs.publish) &&
+      needs.version.result == 'success' &&
+      needs.build-windows.result == 'success' &&
+      needs.build-linux.result == 'success' &&
+      (needs.build-macos-arm64.result == 'success' ||
+       (needs.build-macos-arm64.result == 'skipped' && needs.version.outputs.include_macos == 'false'))
     runs-on: ubuntu-latest
     env:
       VERSION: ${{ needs.version.outputs.version }}
@@ -834,6 +862,8 @@ jobs:
       # Same shape as Studio's latest.json, so one parser reads both.
       - name: Build latest.json
         working-directory: dist
+        env:
+          INCLUDE_MACOS: ${{ needs.version.outputs.include_macos }}
         run: |
           sha()  { grep " $1\$" checksums.txt | awk '{print $1}'; }
           size() { stat -c%s "$1"; }
@@ -853,6 +883,14 @@ jobs:
             CHANGELOG_URL="https://github.com/WeaveITMeta/EustressEngine/releases/tag/player-v${VERSION}"
           fi
 
+          # macOS is listed unless an unsigned_staging run left it out; a
+          # missing DMG on any other run still fails the check below.
+          if [ "$INCLUDE_MACOS" = "false" ]; then
+            MAC_LINE=""
+          else
+            MAC_LINE="\"macos-arm64\": { \"file\": \"${MAC}\", \"url\": \"${BASE}/${MAC}\", \"sha256\": \"$(sha "$MAC")\", \"size_bytes\": $(size "$MAC" 2>/dev/null || echo 0), \"installer\": true },"
+          fi
+
           cat > latest.json <<JSON
           {
             "version": "${VERSION}",
@@ -862,7 +900,7 @@ jobs:
             "platforms": {
               "windows-x64":           { "file": "${WIN}",   "url": "${BASE}/${WIN}",   "sha256": "$(sha "$WIN")",   "size_bytes": $(size "$WIN"),   "installer": false },
               "windows-x64-installer": { "file": "${SETUP}", "url": "${BASE}/${SETUP}", "sha256": "$(sha "$SETUP")", "size_bytes": $(size "$SETUP"), "installer": true },
-              "macos-arm64":           { "file": "${MAC}",   "url": "${BASE}/${MAC}",   "sha256": "$(sha "$MAC")",   "size_bytes": $(size "$MAC"),   "installer": true },
+              ${MAC_LINE}
               "linux-x64":             { "file": "${LIN}",   "url": "${BASE}/${LIN}",   "sha256": "$(sha "$LIN")",   "size_bytes": $(size "$LIN"),   "installer": false }
             }
           }

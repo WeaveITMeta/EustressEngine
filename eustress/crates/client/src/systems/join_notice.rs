@@ -163,6 +163,20 @@ pub fn fetch_failed(error: &str, signed_in: bool) -> PlainNotice {
     let error = error.trim();
     let status = error.split_whitespace().next().and_then(|w| w.parse::<u16>().ok());
     match status {
+        // A listing rated above what signed-out players may see answers
+        // `{"code":"sign_in_required", ...}`: it is open to this person once
+        // signed in, so say that rather than "private". A Player that sent a
+        // sign-in still gets this when the server did not accept it (an
+        // expired sign-in, or one made for the other Eustress service).
+        Some(401 | 403) if error.contains("sign_in_required") => notice(
+            "This simulation is rated for older players",
+            "Eustress shows it only to players who are signed in.",
+            Some(if signed_in {
+                "This Player's sign-in was not accepted. Sign in again with Eustress Studio on this computer, then press Play again."
+            } else {
+                "Sign in with Eustress Studio on this computer, then press Play again."
+            }),
+        ),
         Some(401 | 403) => notice(
             "This simulation is not open to you",
             "Eustress did not let this Player download it.",
@@ -295,6 +309,16 @@ mod tests {
         let private = fetch_failed(&format!("403 Forbidden from {url}: no"), false);
         assert_eq!(private.title, "This simulation is not open to you");
         assert!(private.hint.unwrap().contains("Sign in"));
+        // A rated listing says why, signed out or with a sign-in the server
+        // did not accept, and never calls itself private.
+        let rated = r#"403 Forbidden from https://api-staging.eustress.dev/api/simulations/07d0: {"code":"sign_in_required","error":"This listing is rated for older players. Sign in to see it."}"#;
+        for signed_in in [false, true] {
+            let n = fetch_failed(rated, signed_in);
+            assert_eq!(n.title, "This simulation is rated for older players");
+            let hint = n.hint.unwrap();
+            assert!(hint.contains("Sign in") && hint.contains("Eustress Studio"), "{hint}");
+            assert!(!hint.contains("private"), "{hint}");
+        }
         assert_eq!(fetch_failed(&format!("503 Service Unavailable from {url}"), true).title, "Eustress is having trouble");
         assert_eq!(fetch_failed(&format!("GET {url}: error sending request"), true).title, "Could not reach Eustress");
         assert_eq!(fetch_failed("empty .pak", true).title, "The simulation could not be downloaded");
