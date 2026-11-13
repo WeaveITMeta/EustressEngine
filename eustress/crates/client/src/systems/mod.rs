@@ -8,6 +8,7 @@ pub mod commerce;
 pub mod frame_capture;
 pub mod join_notice;
 pub mod link_handler;
+pub mod player_update;
 pub mod window_icon;
 pub mod scene_loader;
 pub mod live_world;

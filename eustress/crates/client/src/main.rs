@@ -255,6 +255,16 @@ impl Launch {
         }
     }
 
+    /// The version the launching link's `min=` asks for, when `this` Player
+    /// is older than it. `None` without a link, without a minimum, or when
+    /// this Player meets it.
+    fn needs_newer_than(&self, this: [u32; 3]) -> Option<[u32; 3]> {
+        match self {
+            Launch::Join { extras, .. } | Launch::Published { extras, .. } => extras.needs_newer_than(this),
+            Launch::Local { .. } => None,
+        }
+    }
+
     /// The API the launching link names (`?api=` / `&api=`), if any.
     fn link_api(&self) -> Option<&'static str> {
         match self {
@@ -500,6 +510,9 @@ pub fn build_app(launch: Launch) -> App {
         // Published-content fetch: a simulation's .echk chunks (or an older
         // .pak) from R2.
         .add_plugins(systems::space_fetch::SpaceFetchPlugin)
+        // Is a newer Player published, or is this one too old? Checked off
+        // the main thread; U on its notice updates.
+        .add_plugins(systems::player_update::PlayerUpdatePlugin)
         // Open a real Eustress Space (Movement/Climbing by default) instead of
         // the two hardcoded demo primitives. A network launch opens its world
         // when it arrives instead.
@@ -565,7 +578,14 @@ pub fn build_app(launch: Launch) -> App {
     if let Some(live) = live {
         app.insert_resource(live);
     }
+    // A link whose `min=` is above this Player neither joins nor fetches: the
+    // window opens on a notice that asks to update (systems::player_update).
+    let needs_newer = systems::player_update::this_version().and_then(|this| launch.needs_newer_than(this));
+    if let Some(min) = needs_newer {
+        app.insert_resource(systems::player_update::LinkNeedsNewer(min));
+    }
     match launch {
+        _ if needs_newer.is_some() => {}
         Launch::Join { link, name, mut extras } => {
             // The identity the host is told: the ticket the gallery's Play
             // page put in the link, else, for a signed-in player, one minted
@@ -717,11 +737,18 @@ fn main() {
 }
 
 /// Register this exe for `eustress-player://` links, for the current user
-/// (`systems::link_handler`). Unchanged values are left alone.
+/// (`systems::link_handler`). Unchanged values are left alone. A debug build
+/// registers only with `EUSTRESS_PLAYER_REGISTER=1`, so a dev run leaves the
+/// links with the installed Player.
 fn register_link_handler() {
     use systems::link_handler;
-    if !link_handler::enabled(std::env::var(link_handler::REGISTER_VAR).ok().as_deref()) {
-        info!("eustress-player:// links: left as they are ({}=0)", link_handler::REGISTER_VAR);
+    let var = std::env::var(link_handler::REGISTER_VAR).ok();
+    if !link_handler::should_register(var.as_deref(), cfg!(debug_assertions)) {
+        if cfg!(debug_assertions) {
+            info!("eustress-player:// links: left as they are (a debug build registers only with {}=1)", link_handler::REGISTER_VAR);
+        } else {
+            info!("eustress-player:// links: left as they are ({}=0)", link_handler::REGISTER_VAR);
+        }
         return;
     }
     #[cfg(windows)]
@@ -910,6 +937,30 @@ mod launch_link_tests {
             Launch::Published { sim_id, .. } => assert_eq!(sim_id, SIM),
             other => panic!("expected a published simulation, got {other:?}"),
         }
+    }
+
+    /// `min=` rides on a play link and a join link alike: the simulation id
+    /// and the join stay what they were, and a Player older than the minimum
+    /// is told the version it needs.
+    #[test]
+    fn a_links_minimum_player_version_stays_with_the_launch() {
+        let play = from_link(&format!("eustress-player://play/{SIM}?min=0.3.0&api=staging")).expect("a play link with min");
+        match &play {
+            Launch::Published { sim_id, extras } => assert_eq!((sim_id.as_str(), extras.min), (SIM, Some([0, 3, 0]))),
+            other => panic!("expected a published simulation, got {other:?}"),
+        }
+        assert_eq!(play.needs_newer_than([0, 2, 0]), Some([0, 3, 0]));
+        assert_eq!(play.needs_newer_than([0, 3, 0]), None);
+        let join = from_link(&gallery_join("&min=0.3.0")).expect("a join link with min");
+        match &join {
+            Launch::Join { link, .. } => assert_eq!((link.host.as_str(), link.port), ("203.0.113.7", 7777)),
+            other => panic!("expected a join, got {other:?}"),
+        }
+        assert_eq!(join.needs_newer_than([0, 2, 9]), Some([0, 3, 0]));
+        assert_eq!(join.needs_newer_than([1, 0, 0]), None);
+        assert!(from_link(&format!("eustress-player://play/{SIM}?min=0.3")).is_err(), "a malformed min refuses the link");
+        let local = Launch::from_args(&args(&["eustress-client"])).expect("no arguments");
+        assert_eq!(local.needs_newer_than([0, 0, 0]), None);
     }
 
     /// A link with a trailing slash opens the same simulation.

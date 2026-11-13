@@ -71,6 +71,10 @@ on:
         options:
           - staging
           - production
+      min_version:
+        description: "Optional X.Y.Z: the oldest Player still allowed to play. Written to latest.json as min_version; older Players ask to update. Empty: no minimum."
+        required: false
+        default: ""
       unsigned_staging:
         description: "One-off, staging only: publish UNSIGNED Windows and Linux builds and leave macOS out (not built, not in latest.json). Every downloader sees an unknown-publisher warning. Refused with channel=production."
         type: boolean
@@ -864,7 +868,22 @@ jobs:
         working-directory: dist
         env:
           INCLUDE_MACOS: ${{ needs.version.outputs.include_macos }}
+          MIN_VERSION: ${{ inputs.min_version }}
         run: |
+          # The oldest Player still allowed to play, when this run names one.
+          # It may not be above the version being released.
+          MIN_LINE=""
+          if [ -n "$MIN_VERSION" ]; then
+            if ! printf '%s' "$MIN_VERSION" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+              echo "::error::min_version '${MIN_VERSION}' is not X.Y.Z."
+              exit 1
+            fi
+            if [ "$(printf '%s\n%s\n' "$MIN_VERSION" "$VERSION" | sort -V | tail -1)" != "$VERSION" ]; then
+              echo "::error::min_version ${MIN_VERSION} is above the version being released (${VERSION})."
+              exit 1
+            fi
+            MIN_LINE="\"min_version\": \"${MIN_VERSION}\","
+          fi
           sha()  { grep " $1\$" checksums.txt | awk '{print $1}'; }
           size() { stat -c%s "$1"; }
 
@@ -894,6 +913,7 @@ jobs:
           cat > latest.json <<JSON
           {
             "version": "${VERSION}",
+            ${MIN_LINE}
             "date": "$(date -u +%Y-%m-%d)",
             "channel": "${RELEASE_CHANNEL}",
             "changelog_url": "${CHANGELOG_URL}",

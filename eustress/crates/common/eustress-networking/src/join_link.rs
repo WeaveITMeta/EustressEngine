@@ -204,9 +204,40 @@ pub struct LinkExtras {
     /// The base of the API the link belongs to, from `api=production` or
     /// `api=staging`.
     pub api: Option<&'static str>,
+    /// The oldest Player that can open the link, from `min=X.Y.Z`
+    /// ([`parse_version`]). A Player older than this neither fetches nor
+    /// joins; it asks to be updated.
+    pub min: Option<[u32; 3]>,
+}
+
+/// A Player version, `X.Y.Z`: three whole numbers of 1 to 9 digits each, and
+/// nothing else (no `v`, no pre-release or build suffix). Arrays compare
+/// part by part, so `a < b` is semver order.
+pub fn parse_version(text: &str) -> Option<[u32; 3]> {
+    let mut out = [0u32; 3];
+    let mut parts = text.split('.');
+    for slot in &mut out {
+        let part = parts.next()?;
+        if part.is_empty() || part.len() > 9 || !part.bytes().all(|b| b.is_ascii_digit()) {
+            return None;
+        }
+        *slot = part.parse().ok()?;
+    }
+    parts.next().is_none().then_some(out)
+}
+
+/// `[X, Y, Z]` as `X.Y.Z`.
+pub fn version_text(v: [u32; 3]) -> String {
+    format!("{}.{}.{}", v[0], v[1], v[2])
 }
 
 impl LinkExtras {
+    /// The link's `min`, when `this` Player is older than it: the version it
+    /// needs. `None` when the link names no minimum or this Player meets it.
+    pub fn needs_newer_than(&self, this: [u32; 3]) -> Option<[u32; 3]> {
+        self.min.filter(|min| this < *min)
+    }
+
     /// A link names the API it belongs to, and a Player takes it only from
     /// that API: `player_api` is the one this Player is set up for (its
     /// `--api-url`, else production). A link for another refuses, so no web
@@ -226,7 +257,7 @@ impl LinkExtras {
     }
 }
 
-/// The `ticket` and `api` of an `eustress-player://` (or `eustress://`) link,
+/// The `ticket`, `api` and `min` of an `eustress-player://` (or `eustress://`) link,
 /// a join or a `play/<id>` one; any other form carries none. See
 /// [`split_link_extras`].
 pub fn link_extras(input: &str) -> Result<LinkExtras, String> {
@@ -236,8 +267,9 @@ pub fn link_extras(input: &str) -> Result<LinkExtras, String> {
 /// [`link_extras`], and the link with its ticket taken out: parse that, so
 /// no error a later step reports can quote the ticket. Refuses an API name
 /// other than `production` and `staging`, a ticket that is not 1 to
-/// [`MAX_TICKET_CHARS`] characters of `A-Z a-z 0-9 . _ -`, and a link that
-/// names either twice. No error quotes the ticket.
+/// [`MAX_TICKET_CHARS`] characters of `A-Z a-z 0-9 . _ -`, a `min` that is
+/// not `X.Y.Z`, and a link that names any of them twice. No error quotes the
+/// ticket.
 pub fn split_link_extras(input: &str) -> Result<(String, LinkExtras), String> {
     let s = input.trim();
     let scheme = ["eustress-player://", "eustress://"].into_iter().find(|p| s.starts_with(p));
@@ -270,6 +302,17 @@ pub fn split_link_extras(input: &str) -> Result<(String, LinkExtras), String> {
                     format!("this link is for an API this Player does not know ({shown:?}); it knows production and staging")
                 })?;
                 extras.api = Some(base);
+                kept.push(pair);
+            }
+            // Kept in the link, as `api` is: `JoinLink::parse` ignores it and
+            // a `play/<id>` link's id is the path alone.
+            "min" => {
+                if extras.min.is_some() {
+                    return Err("the link names its minimum Player version twice".into());
+                }
+                let min = parse_version(v)
+                    .ok_or_else(|| "the link's minimum Player version is not X.Y.Z (three numbers)".to_string())?;
+                extras.min = Some(min);
                 kept.push(pair);
             }
             _ => kept.push(pair),
@@ -504,6 +547,50 @@ mod tests {
         let twice = link_extras("eustress-player://join/h:1?ticket=aaaa&ticket=bbbb").unwrap_err();
         assert!(!twice.contains("aaaa") && !twice.contains("bbbb"), "{twice}");
         assert!(link_extras("eustress-player://play/abc?api=staging&api=production").is_err());
+    }
+
+    /// A Player version is exactly three whole numbers, and compares in
+    /// semver order.
+    #[test]
+    fn a_version_is_three_numbers() {
+        assert_eq!(parse_version("0.2.0"), Some([0, 2, 0]));
+        assert_eq!(parse_version("10.0.123456789"), Some([10, 0, 123_456_789]));
+        for bad in ["", "1", "1.2", "1.2.3.4", "v1.2.3", "1.2.3-rc.1", "1.2.3+b", "1..3", "1.2.x", " 1.2.3", "1.2.-3", "1234567890.0.0"] {
+            assert_eq!(parse_version(bad), None, "{bad:?}");
+        }
+        assert!(parse_version("0.10.0") > parse_version("0.9.9"), "numeric, not text, order");
+        assert!(parse_version("1.0.0") > parse_version("0.99.99"));
+        assert_eq!(version_text([1, 20, 3]), "1.20.3");
+    }
+
+    /// `min=X.Y.Z` is read on a join link and a play link alike, stays in the
+    /// link (where `JoinLink::parse` and the play id ignore it), and is
+    /// refused when malformed or named twice.
+    #[test]
+    fn a_links_minimum_player_version_is_read() {
+        let pin = "ab".repeat(32);
+        let join = format!("eustress-player://join/203.0.113.7:7777?key=abcdef&pin={pin}&min=0.3.0&api=staging");
+        let (rest, extras) = split_link_extras(&join).unwrap();
+        assert_eq!((extras.min, extras.api), (Some([0, 3, 0]), Some("https://api-staging.eustress.dev")));
+        let parsed = parse_join_link(&rest).expect("a join link with min still parses");
+        assert_eq!((parsed.port, parsed.key.as_deref(), parsed.pin), (7777, Some("abcdef"), Some([0xab; 32])));
+        let play = link_extras("eustress-player://play/07d084d8-1c2b?min=1.2.3").unwrap();
+        assert_eq!(play.min, Some([1, 2, 3]));
+        assert_eq!(link_extras("eustress-player://play/abc").unwrap().min, None);
+
+        for bad in ["", "1.2", "v1.2.3", "1.2.3-rc", "x"] {
+            let e = link_extras(&format!("eustress-player://play/abc?min={bad}")).unwrap_err();
+            assert!(e.contains("X.Y.Z"), "{bad:?}: {e}");
+        }
+        let twice = link_extras("eustress-player://join/h:1?min=1.0.0&min=1.0.0").unwrap_err();
+        assert!(twice.contains("twice"), "{twice}");
+
+        // Older than the minimum needs the minimum; equal or newer needs nothing.
+        assert_eq!(play.needs_newer_than([1, 2, 2]), Some([1, 2, 3]));
+        assert_eq!(play.needs_newer_than([0, 9, 9]), Some([1, 2, 3]));
+        assert_eq!(play.needs_newer_than([1, 2, 3]), None);
+        assert_eq!(play.needs_newer_than([1, 10, 0]), None);
+        assert_eq!(LinkExtras::default().needs_newer_than([0, 0, 1]), None);
     }
 
     /// A link for a server other than the Player's own is refused, so no web

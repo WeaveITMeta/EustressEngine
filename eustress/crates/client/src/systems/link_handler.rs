@@ -11,8 +11,10 @@
 //! carries `--api-url`, so a link opened afterwards stays on that server.
 //!
 //! Each value is read first and written only when it differs, so a second
-//! start changes nothing. `EUSTRESS_PLAYER_REGISTER=0` skips it. Linux
-//! registers through `install.sh` (xdg-mime), so this is Windows only.
+//! start changes nothing. `EUSTRESS_PLAYER_REGISTER=0` skips it. A debug
+//! build registers only with `EUSTRESS_PLAYER_REGISTER=1`, so a dev run
+//! never takes the scheme from the installed Player ([`should_register`]).
+//! Linux registers through `install.sh` (xdg-mime), so this is Windows only.
 #![cfg_attr(not(windows), allow(dead_code))]
 
 /// The scheme's key under the current user.
@@ -72,6 +74,19 @@ pub fn apply(store: &mut dyn Store, entries: &[Entry]) -> Result<usize, String> 
 /// Whether `EUSTRESS_PLAYER_REGISTER` leaves registration on (unset is on).
 pub fn enabled(var: Option<&str>) -> bool {
     !matches!(var.map(|v| v.trim().to_ascii_lowercase()).as_deref(), Some("0" | "false" | "no" | "off"))
+}
+
+/// Whether this run registers: a release build unless
+/// `EUSTRESS_PLAYER_REGISTER` turns it off ([`enabled`]); a debug build only
+/// when it is set to `1` (or `true`, `yes`, `on`). A dev build run from
+/// `target\debug` would otherwise take `eustress-player://` from the
+/// installed Player, and every gallery link would open the dev build.
+pub fn should_register(var: Option<&str>, debug_build: bool) -> bool {
+    if debug_build {
+        matches!(var.map(|v| v.trim().to_ascii_lowercase()).as_deref(), Some("1" | "true" | "yes" | "on"))
+    } else {
+        enabled(var)
+    }
 }
 
 /// The current user's registry, under `HKEY_CURRENT_USER`.
@@ -171,6 +186,22 @@ mod tests {
         assert!(enabled(None) && enabled(Some("1")) && enabled(Some("")));
         for off in ["0", "false", "No", " off "] {
             assert!(!enabled(Some(off)), "{off}");
+        }
+    }
+
+    /// A release build registers as before; a debug build leaves the scheme
+    /// to the installed Player unless asked to take it.
+    #[test]
+    fn a_dev_build_registers_only_when_asked() {
+        assert!(should_register(None, false), "a release build registers by default");
+        assert!(should_register(Some(""), false));
+        assert!(!should_register(Some("0"), false));
+        assert!(!should_register(None, true), "a debug build leaves the scheme alone by default");
+        for not_asked in ["", "0", "off", "2", "maybe"] {
+            assert!(!should_register(Some(not_asked), true), "{not_asked:?}");
+        }
+        for asked in ["1", " true ", "YES", "on"] {
+            assert!(should_register(Some(asked), true), "{asked:?}");
         }
     }
 

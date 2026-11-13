@@ -81,6 +81,9 @@ Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; Tasks: de
 
 [Run]
 Filename: "{app}\{#MyAppExeName}"; Description: "{cm:LaunchProgram,{#StringChange(MyAppName, '&', '&&')}}"; Flags: nowait postinstall skipifsilent
+; The Player's own update runs this installer silently with /RELAUNCH=1, so
+; the new Player starts once it is installed.
+Filename: "{app}\{#MyAppExeName}"; Flags: nowait; Check: RelaunchAfterUpdate
 
 [Registry]
 ; URL protocol handler for eustress-player://. The browser hands the whole link
@@ -90,3 +93,11 @@ Root: HKA; Subkey: "Software\Classes\{#MyAppScheme}"; ValueType: string; ValueNa
 Root: HKA; Subkey: "Software\Classes\{#MyAppScheme}"; ValueType: string; ValueName: "URL Protocol"; ValueData: ""
 Root: HKA; Subkey: "Software\Classes\{#MyAppScheme}\DefaultIcon"; ValueType: string; ValueName: ""; ValueData: "{app}\{#MyAppExeName},0"
 Root: HKA; Subkey: "Software\Classes\{#MyAppScheme}\shell\open\command"; ValueType: string; ValueName: ""; ValueData: """{app}\{#MyAppExeName}"" ""%1"""
+
+[Code]
+// True only for the Player's own silent update (/RELAUNCH=1), so it starts
+// the new Player; a silent install a person runs starts nothing.
+function RelaunchAfterUpdate: Boolean;
+begin
+  Result := WizardSilent and (ExpandConstant('{param:RELAUNCH|0}') = '1');
+end;
