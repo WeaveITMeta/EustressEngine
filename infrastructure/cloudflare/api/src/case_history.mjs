@@ -49,8 +49,14 @@ import { loadTakedown, takedownStatusView, takedownEntriesFor, takedownPartyOf, 
 
 export const HISTORY_PAGE_DEFAULT = 20;
 export const HISTORY_PAGE_MAX = 50;
-/// How many of the account's listings are read for their reviews (the projects page reads the same number).
-const LISTINGS_READ = 100;
+/// How many of the account's listings are read for their reviews (the projects page reads the same number,
+/// AUTHOR_LISTINGS_READ in index.js). Each costs three KV reads, and an invocation may make 1,000 KV operations in all.
+const LISTINGS_READ = 200;
+/// The most list calls one read of the account's listings makes.
+const LIST_PAGES_MAX = 20;
+/// How many listings removed for good (their tombstones, src/space_delete.mjs) are read for their reviews. Each costs two KV
+/// reads; with LISTINGS_READ at its bound the request stays under the 1,000 operations.
+const DELETED_LISTINGS_READ = 40;
 
 const DECIDED_REVIEW = ['listed', 'approved_private', 'not_listed', 'changes_requested', 'removed'];
 // The Code a catalogue title cites: "Hollow loop (Code B5)", "Objective (Code T2)", "(Code Part III)".
@@ -188,6 +194,23 @@ export function forumNoticeEntry(rec) {
   };
 }
 
+/// The account's `sim-author:` keys, read a page at a time until KV says the list is complete (a page can hold fewer keys
+/// than asked for, so its length never says the list ended), stopping at LISTINGS_READ keys or LIST_PAGES_MAX list calls. A
+/// list cut short is logged rather than read on. `prefix` and `max` read another index of the account the same way (the
+/// tombstones of listings removed for good).
+async function listingKeysOf(env, auth, prefix = `sim-author:${auth}:`, max = LISTINGS_READ) {
+  const keys = [];
+  let cursor;
+  for (let pages = 0; pages < LIST_PAGES_MAX && keys.length < max; pages++) {
+    const page = await env.SOCIAL.list({ prefix, limit: Math.min(1000, max - keys.length), ...(cursor ? { cursor } : {}) });
+    keys.push(...(page?.keys || []));
+    if (page?.list_complete || !page?.cursor) return keys.slice(0, max);
+    cursor = page.cursor;
+  }
+  console.warn(`case history: an account's listings cut at ${Math.min(keys.length, max)}`);
+  return keys.slice(0, max);
+}
+
 async function accountCases(request, url, env, cors, deps) {
   const headers = { ...cors, 'Cache-Control': 'private, no-store' };
   const auth = await deps.verifyAuth(request, env);
@@ -199,7 +222,7 @@ async function accountCases(request, url, env, cors, deps) {
 
   // Each row is sorted by when it last changed, and only the page asked for is built (a review gets its reference then).
   const rows = [];
-  const mine = await env.SOCIAL.list({ prefix: `sim-author:${auth}:`, limit: LISTINGS_READ });
+  const mine = { keys: await listingKeysOf(env, auth) };
   for (const k of mine?.keys || []) {
     const simId = await env.SOCIAL.get(k.name);
     if (!simId) continue;
@@ -208,6 +231,18 @@ async function accountCases(request, url, env, cors, deps) {
     const rec = await loadCase(env, simId);
     if (!rec) continue;
     rows.push({ at: rec.updated_at || rec.created_at || '', build: async () => reviewEntry(await assignCaseReference(env, 'moderation', simId), rec, { ...sim, id: simId }) });
+  }
+  // A listing removed for good keeps its review here: its tombstone names it (src/space_delete.mjs), and the case is kept.
+  for (const k of await listingKeysOf(env, auth, `simgone-author:${auth}:`, DELETED_LISTINGS_READ)) {
+    const simId = k.name.slice(`simgone-author:${auth}:`.length);
+    const tomb = parse(await env.SOCIAL.get(`simgone:${simId}`));
+    if (!tomb || tomb.author_id !== auth) continue;
+    const rec = await loadCase(env, simId);
+    if (!rec) continue;
+    rows.push({ at: rec.updated_at || rec.created_at || '', build: async () => {
+      const entry = reviewEntry(await assignCaseReference(env, 'moderation', simId), rec, { id: simId, name: tomb.name, author_id: auth });
+      return { ...entry, listing: { ...entry.listing, deleted_at: tomb.deleted_at || null } };
+    } });
   }
   for (const entry of await takedownEntriesFor(env, auth)) rows.push({ at: entry.updated_at || entry.opened_at || '', build: async () => entry });
   // Forum cases: the reports this account filed, and the cases about its own posts.

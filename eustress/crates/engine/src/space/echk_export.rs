@@ -157,18 +157,20 @@ pub struct ExportStats {
     pub soul_key_left_out: bool,
 }
 
-/// Services players never receive, as in Roblox, where neither replicates to
-/// a client: only the host runs or reads them. They are also where a game
-/// keeps what must stay private, webhook URLs included.
+/// The services only a server runs or reads. Since 2026-11-12 every player
+/// world carries them too, with all server code (McKale's option A): a Player
+/// playing a world alone is its server. A joined Player runs none of it.
+/// Publishing still refuses any downloadable file holding a webhook URL.
 pub const SERVER_ONLY_SERVICES: &[&str] = &["ServerScriptService", "ServerStorage"];
 
 /// Which of a Space's records an export takes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Audience {
-    /// What every player receives: everything but [`SERVER_ONLY_SERVICES`],
+    /// What every player receives: the whole Space, server code included,
     /// plus the Universe's shared assets.
     Players,
-    /// Only [`SERVER_ONLY_SERVICES`]: what a host has besides.
+    /// The [`SERVER_ONLY_SERVICES`] and every server Script's code: the
+    /// source world a Share Source listing offers to Edit.
     Server,
 }
 
@@ -366,6 +368,7 @@ fn space_records(
     if let Some(live) = terrain {
         stats.live_terrain = replace_terrain(&mut records, live);
     }
+    leave_out_workshop(&mut records, &mut stats);
     // The shared meshes its parts use travel with the Space, and a part
     // naming a mesh it may not is left out (`ship_shared_meshes`).
     let folder = match &space.source {
@@ -375,13 +378,18 @@ fn space_records(
     let roots = folder.map(super::space_asset_source::AssetRoots::of);
     ship_shared_meshes(&mut records, roots.as_ref(), CARRY_SHARED_MESHES, &mut stats);
     let before = records.len();
-    // Players get everything but the server-only services, and of the
-    // rest, every server Script's instance but not its code.
-    let (server_side, rest): (Vec<Record>, Vec<Record>) = records.into_iter().partition(|(path, _)| is_server_only(path));
-    let (for_players, withheld_code) = withhold_server_code(rest, &mut stats);
+    // Players get the whole Space, server code included, so a Player playing
+    // a world alone runs its server the way Studio's Play does (McKale,
+    // 2026-11-12: option A, every listing). The host's source world is still
+    // the server-only services plus the server code, for Share Source.
     let mut records = match audience {
-        Audience::Players => for_players,
-        Audience::Server => server_side.into_iter().chain(withheld_code).collect(),
+        Audience::Players => records,
+        Audience::Server => {
+            let (server_side, rest): (Vec<Record>, Vec<Record>) =
+                records.into_iter().partition(|(path, _)| is_server_only(path));
+            let (_, withheld_code) = withhold_server_code(rest, &mut stats);
+            server_side.into_iter().chain(withheld_code).collect()
+        }
     };
     records.sort_by(|a, b| a.0.cmp(&b.0));
     stats.files = records.len();
@@ -1095,6 +1103,31 @@ fn skip_name(name: &str) -> bool {
         || name.ends_with(".tmp")
         || name.ends_with(".lock")
         || matches!(name, "Thumbs.db" | "desktop.ini")
+}
+
+/// Where the Workshop keeps a Space's conversations with the Studio AI: the
+/// author's messages, the replies, what they cost and any picture attached.
+/// They stay in the Space so a session picks up where it stopped, and a
+/// publish carries them to no one, players or host.
+const WORKSHOP_DIR: [&str; 2] = ["SoulService", "Workshop"];
+
+fn is_workshop(path: &str) -> bool {
+    let mut parts = path.split('/');
+    WORKSHOP_DIR.iter().all(|want| parts.next().is_some_and(|part| part.eq_ignore_ascii_case(want)))
+}
+
+/// Take the Workshop's conversations out of a Space's records, whichever way
+/// they were collected (the tree, the folder, files only on disk).
+fn leave_out_workshop(records: &mut Vec<Record>, stats: &mut ExportStats) {
+    let before = records.len();
+    records.retain(|(path, _)| !is_workshop(path));
+    let left_out = before - records.len();
+    if left_out > 0 {
+        stats.skipped.push(format!(
+            "{}: {left_out} files of the Workshop's conversations, which a publish never carries",
+            WORKSHOP_DIR.join("/")
+        ));
+    }
 }
 
 fn publishable(key: &str) -> bool {
@@ -2113,6 +2146,75 @@ mod provider_key_tests {
         let dir = std::env::temp_dir().join(format!("eustress_keys_{tag}_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         dir
+    }
+
+    /// Every player world carries the whole Space, the server-only services
+    /// and a server Script's code outside them included, so a Player playing
+    /// it alone can run its server. The source world is still the server side
+    /// only.
+    #[test]
+    fn a_player_world_carries_the_server_and_its_code() {
+        let server_script = b"[metadata]\nclass_name = \"LuauScript\"\n\n[script]\nrun_context = \"Server\"\n".to_vec();
+        let space = view_space(
+            "Arena",
+            "",
+            vec![
+                ("ServerScriptService/Director/_instance.toml".into(), server_script.clone()),
+                ("ServerScriptService/Director/Director.luau".into(), b"print('director')\n".to_vec()),
+                ("Workspace/Door/_instance.toml".into(), server_script),
+                ("Workspace/Door/Door.luau".into(), b"print('door')\n".to_vec()),
+                ("ServerStorage/Loot/_instance.toml".into(), b"[metadata]\nclass_name = \"Folder\"\n".to_vec()),
+            ],
+        );
+        let players = space_records(&space, None, usize::MAX, Audience::Players).expect("the player world");
+        let paths: Vec<&str> = players.records.iter().map(|(p, _)| p.as_str()).collect();
+        for want in [
+            "ServerScriptService/Director/Director.luau",
+            "Workspace/Door/Door.luau",
+            "ServerStorage/Loot/_instance.toml",
+            "Workspace/Pad/_instance.toml",
+        ] {
+            assert!(paths.contains(&want), "{want} is missing from the player world: {paths:?}");
+        }
+        let server = space_records(&space, None, usize::MAX, Audience::Server).expect("the source world");
+        let paths: Vec<&str> = server.records.iter().map(|(p, _)| p.as_str()).collect();
+        assert!(paths.contains(&"ServerScriptService/Director/Director.luau"), "{paths:?}");
+        assert!(paths.contains(&"Workspace/Door/Door.luau"), "{paths:?}");
+        assert!(!paths.contains(&"Workspace/Pad/_instance.toml"), "the source world is the server side only: {paths:?}");
+    }
+
+    /// The Workshop's conversations reach neither world, whether the tree
+    /// holds them or only the folder does, while the Space's other files
+    /// found only on disk still go.
+    #[test]
+    fn workshop_conversations_are_never_published() {
+        let folder = temp("workshop");
+        let session = folder.join("SoulService").join("Workshop").join("9e9aaf0a");
+        std::fs::create_dir_all(session.join("attachments")).unwrap();
+        std::fs::write(session.join("entries.json"), b"{\"entries\":[{\"content\":\"my notes\"}]}").unwrap();
+        std::fs::write(session.join("attachments").join("msg_1.png"), b"PNG").unwrap();
+        std::fs::create_dir_all(folder.join("Workspace").join("Pad")).unwrap();
+        std::fs::write(folder.join("Workspace").join("Pad").join("skin.png"), b"PNG").unwrap();
+        let mut space = view_space(
+            "Station",
+            "",
+            vec![(
+                "SoulService/Workshop/9e9aaf0a/_instance.toml".into(),
+                b"[metadata]\nclass_name = \"WorkshopConversation\"\n".to_vec(),
+            )],
+        );
+        space.folder = Some(folder.clone());
+        for audience in [Audience::Players, Audience::Server] {
+            let out = space_records(&space, None, usize::MAX, audience).expect("the world");
+            let paths: Vec<&str> = out.records.iter().map(|(p, _)| p.as_str()).collect();
+            assert!(!paths.iter().any(|p| p.contains("Workshop")), "{audience:?} carries the Workshop: {paths:?}");
+            if audience == Audience::Players {
+                assert!(paths.contains(&"Workspace/Pad/skin.png"), "a file only on disk still goes: {paths:?}");
+                assert!(out.stats.skipped.iter().any(|s| s.contains("Workshop")), "{:?}", out.stats.skipped);
+            }
+        }
+        assert!(!is_workshop("SoulService/WorkshopTools/a.luau") && is_workshop("soulservice/workshop/x/entries.json"));
+        let _ = std::fs::remove_dir_all(&folder);
     }
 
     /// What `collect_from_disk` reads goes through the same screen as the

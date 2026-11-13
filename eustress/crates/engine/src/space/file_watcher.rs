@@ -1240,49 +1240,18 @@ fn handle_file_modified(
                                                 .ok()
                                                 .map(super::file_loader::folder_load);
                                             if matches!(arm, Some(FolderLoad::GuiLeaf | FolderLoad::GuiContainer)) {
-                                                let display = if arm == Some(FolderLoad::GuiContainer) {
-                                                    super::gui_loader::gui_display_from_props(
-                                                        &gui_def.gui,
-                                                        gui_def.text.as_ref(),
-                                                        &gui_class.to_lowercase(),
-                                                    )
-                                                } else {
-                                                    let mut gui = gui_def.gui.clone();
-                                                    gui.size = gui.resolved_size();
-                                                    match gui_class {
-                                                        // Its picture: `[asset].path`, else
-                                                        // `[image].image`, against its folder
-                                                        // (`spawn_image_element`).
-                                                        "ImageLabel" | "ImageButton" => {
-                                                            let mut d = super::gui_loader::gui_display_from_props(&gui, None, gui_class);
-                                                            let picture = gui_def
-                                                                .asset
-                                                                .as_ref()
-                                                                .and_then(|a| a.get("path"))
-                                                                .and_then(|p| p.as_str())
-                                                                .map(str::to_string)
-                                                                .or_else(|| gui_def.image.as_ref().map(|i| i.image.clone()))
-                                                                .filter(|s| !s.is_empty());
-                                                            if let (Some(rel), Some(dir)) = (picture, event.path.parent()) {
-                                                                d.image_path = dir.join(rel).to_string_lossy().to_string();
-                                                            }
-                                                            d
-                                                        }
-                                                        // Drawn as its class name until it renders.
-                                                        "ViewportFrame" => {
-                                                            let label = super::gui_loader::GuiTomlText {
-                                                                text: "[ViewportFrame]".to_string(),
-                                                                text_color: [0.5, 0.5, 0.5, 0.8],
-                                                                font_size: 12.0,
-                                                                text_x_alignment: "Center".to_string(),
-                                                                text_y_alignment: "Center".to_string(),
-                                                                ..Default::default()
-                                                            };
-                                                            super::gui_loader::gui_display_from_props(&gui, Some(&label), gui_class)
-                                                        }
-                                                        _ => super::gui_loader::gui_display_from_props(&gui, gui_def.text.as_ref(), gui_class),
+                                                // `gui_display_for_class`, the builder Space
+                                                // open and a Player's reader use; an image's
+                                                // picture is `[asset].path`, else
+                                                // `[image].image`, against its folder.
+                                                let mut display = super::gui_loader::gui_display_for_class(gui_class, &gui_def);
+                                                if let (Some(rel), Some(dir)) =
+                                                    (super::gui_loader::gui_image_source(&gui_def), event.path.parent())
+                                                {
+                                                    if matches!(gui_class, "ImageLabel" | "ImageButton") {
+                                                        display.image_path = dir.join(rel).to_string_lossy().to_string();
                                                     }
-                                                };
+                                                }
                                                 if let Ok(mut ec) = commands.get_entity(entity) {
                                                     ec.insert(display);
                                                 }
@@ -1318,9 +1287,7 @@ fn handle_file_modified(
                                         // is `units_offset`, matching cold-load).
                                         if let Ok(gui_def) = super::gui_loader::load_gui_definition(&event.path) {
                                             if gui_def.metadata.class_name == "BillboardGui" {
-                                                let mut gui_props = gui_def.gui.clone();
-                                                gui_props.size = gui_props.resolved_size();
-                                                let bb_class = super::gui_loader::billboard_class_from_props(&gui_props);
+                                                let bb_class = super::gui_loader::billboard_class_from_def(&gui_def);
                                                 if let Ok(mut ec) = commands.get_entity(entity) {
                                                     ec.insert(bb_class);
                                                 }
@@ -1393,12 +1360,8 @@ fn handle_file_modified(
                 };
                 match super::gui_loader::load_gui_definition_from_str(&text) {
                     Ok(gui_def) => {
-                        let gui_type = super::gui_loader::gui_class_from_extension(&event.path);
-                        let display = super::gui_loader::gui_display_from_props(
-                            &gui_def.gui,
-                            gui_def.text.as_ref(),
-                            gui_type,
-                        );
+                        let gui_type = super::gui_loader::gui_class_of(&event.path, &gui_def);
+                        let display = super::gui_loader::gui_display_for_class(gui_type, &gui_def);
                         // The registry entry can outlive the entity in two
                         // ways: (a) the entity got despawned + replaced
                         // mid-frame (the spawn-replace pattern in the GUI
@@ -1784,13 +1747,8 @@ fn handle_file_created(
                 let mut bb_tags: Vec<String> = Vec::new();
                 if let Ok(gui_def) = super::gui_loader::load_gui_definition(&event.path) {
                     bb_tags = gui_def.tags.clone();
-                    let mut g_native = gui_def.gui.clone();
-                    super::gui_loader::billboard_lengths_to_native(&mut g_native, gui_def.metadata.unit.as_deref());
-                    let g = &g_native;
-                    bb_class.size = g.resolved_size();
-                    bb_class.max_distance = g.max_distance.unwrap_or(bb_class.max_distance);
-                    bb_class.always_on_top = g.always_on_top.unwrap_or(bb_class.always_on_top);
-                    if let Some(v) = g.units_offset { bb_class.units_offset = v; }
+                    // The builder Space open and a Player's reader use.
+                    bb_class = super::gui_loader::billboard_class_from_def(&gui_def);
                     bb_max_distance = bb_class.max_distance;
                     bb_always_on_top = bb_class.always_on_top;
                     bb_offset = bevy::math::Vec3::new(
@@ -2249,12 +2207,8 @@ fn handle_file_created(
             // Hot-load new GUI element TOML (TextLabel, TextButton, Frame, etc.)
             match super::gui_loader::load_gui_definition(&event.path) {
                 Ok(gui_def) => {
-                    let gui_type = super::gui_loader::gui_class_from_extension(&event.path);
-                    let display = super::gui_loader::gui_display_from_props(
-                        &gui_def.gui,
-                        gui_def.text.as_ref(),
-                        gui_type,
-                    );
+                    let gui_type = super::gui_loader::gui_class_of(&event.path, &gui_def);
+                    let display = super::gui_loader::gui_display_for_class(gui_type, &gui_def);
                     let name = if !gui_def.instance.name.is_empty() {
                         gui_def.instance.name.clone()
                     } else {

@@ -14167,6 +14167,7 @@ fn drain_slint_actions(
                                 text_x_alignment: "Center".to_string(),
                                 text_y_alignment: "Center".to_string(),
                                 text_scaled: false,
+                                text_wrapped: true,
                                 // Compile scaffold (serde-default stroke) — co-agent finalizes wiring.
                                 text_transparency: 0.0,
                                 text_stroke_color: [0.0, 0.0, 0.0, 1.0],
@@ -21063,7 +21064,7 @@ fn init_services_browser_to_slint(
             icon_color: hex(0x33, 0x99, 0x66),
             class_name: "Chat".into(),
             category: "Core".into(),
-            summary: "Manages in-game text chat, bubble chat, and message filtering.".into(),
+            summary: "Manages in-session text chat, bubble chat, and message filtering.".into(),
             description: "The Chat service provides the default text chat system with support for bubble chat (speech bubbles above characters), message filtering for safety, and customizable chat windows. It can be extended with ChatModules for custom commands and behaviors.\n\nKey responsibilities:\n• BubbleChatEnabled — speech bubbles above characters\n• LoadDefaultChat — whether the built-in chat GUI loads\n• FilteringEnabled — server-side text filtering for safety\n• Custom ChatModules for slash commands and formatting".into(),
             learn_url: "/learn/services/chat".into(),
             property_count: 3,
@@ -21152,7 +21153,7 @@ fn init_services_browser_to_slint(
             icon_color: hex(0x33, 0x66, 0xCC),
             class_name: "Teams".into(),
             category: "Player".into(),
-            summary: "Team management for multiplayer games with colored team assignments.".into(),
+            summary: "Team management for multiplayer simulations with colored team assignments.".into(),
             description: "The Teams service holds Team objects that players can be assigned to. Each Team has a TeamColor and AutoAssignable flag. When teams exist, player names appear in their team color and the leaderboard shows team groupings.\n\nKey responsibilities:\n• Create Team children with distinct TeamColor values\n• AutoAssignable — whether new players auto-join this team\n• Balanced or manual team assignment via scripts\n• Team-colored nametags and leaderboard groups".into(),
             learn_url: "/learn/services/teams".into(),
             property_count: 0,
@@ -33817,9 +33818,11 @@ mod gui_rect_bound_tests {
             text_y_align: String::new(),
             text_stroke_color: [0.0; 4],
             text_scaled: false,
+            text_wrapped: true,
             image_path: String::new(),
             class_type: "Frame".into(),
             mouse_filter: "stop".into(),
+            active: false,
         }
     }
 

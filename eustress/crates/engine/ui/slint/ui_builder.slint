@@ -161,7 +161,7 @@ export global UiBuilderUi {
     in-out property <string> export-name: "";
     in-out property <bool> server-script: false;
     in property <[UbExportRow]> export-rows;
-    in property <string> insert-label: "Insert into game";
+    in property <string> insert-label: "Insert into simulation";
     in property <bool> inserted: false;
     in property <string> inserted-title: "";
     in property <string> inserted-meta: "";
@@ -544,7 +544,7 @@ component CreateTab inherits VerticalLayout {
     // Describe your game
     Card {
         icon: "cursor";
-        title: "Describe your game";
+        title: "Describe your simulation";
         subtitle: "One line is enough to start.";
 
         VerticalLayout {
@@ -630,7 +630,7 @@ component CreateTab inherits VerticalLayout {
             width: 100%;
             height: 100%;
             text <=> UiBuilderUi.prompt;
-            placeholder-text: "A cozy farming game with coins, a crop shop and daily quests";
+            placeholder-text: "A farming simulation with coins, a crop shop and daily quests";
             wrap: word-wrap;
             font-size: 13px;
             edited(t) => { UiBuilderUi.action("prompt", t); }
@@ -1564,7 +1564,7 @@ component ExportTab inherits VerticalLayout {
                 VerticalLayout {
                     horizontal-stretch: 1;
                     Text {
-                        text: "Insert into game";
+                        text: "Insert into simulation";
                         color: Theme.text-primary;
                         font-size: Theme.font-md;
                         font-weight: 600;
@@ -1895,7 +1895,7 @@ component ExportTab inherits VerticalLayout {
             padding: 12px;
             spacing: 8px;
             Text {
-                text: "Using it in your game";
+                text: "Using it in your simulation";
                 color: Theme.text-primary;
                 font-size: Theme.font-md;
                 font-weight: 600;

@@ -47,6 +47,15 @@ pub mod toon;
 pub mod rune_runtime;
 pub mod vm_pool;
 pub mod rune_gui_module;
+/// `eustress::Vector3`, the Rune value type every shell shares.
+#[cfg(feature = "realism-scripting")]
+pub mod rune_values;
+/// `eustress::dm`: Rune on the live Play DataModel, for Studio and the Player.
+#[cfg(feature = "realism-scripting")]
+pub mod rune_datamodel;
+/// Running a Player's Play tree's Rune scripts as Studio's Play runs them.
+#[cfg(feature = "realism-scripting")]
+pub mod rune_play;
 
 pub use ast::*;
 pub use context::*;

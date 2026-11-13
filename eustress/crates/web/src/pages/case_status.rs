@@ -14,7 +14,7 @@
 use leptos::prelude::*;
 use leptos::task::spawn_local;
 
-use super::take_it_down::CopyReference;
+use super::take_it_down::{CaseDate, CaseTimeline, CopyReference, StatusIcon};
 use super::takedown_wire::*;
 use crate::components::{CentralNav, Footer};
 
@@ -104,7 +104,8 @@ pub fn CaseStatusPage() -> impl IntoView {
     }
 }
 
-/// A case that was found: its reference, its status in words, and its dates.
+/// A case that was found: its full reference with a Copy button, its status as a word with an icon, its progress in steps, and
+/// its dates. Only the public fields are used; the page knows nothing of who looked at the case or why.
 #[component]
 fn CaseFound(case: CaseStatus) -> impl IntoView {
     let (title, sentence) = status_words(&case.status);
@@ -114,16 +115,18 @@ fn CaseFound(case: CaseStatus) -> impl IntoView {
         ("Decided", case.decided_at.as_deref()),
     ]
     .into_iter()
-    .filter_map(|(label, raw)| raw.map(|r| (label, stamp_words(r))))
+    .filter_map(|(label, raw)| raw.map(|r| (label, r.to_string())))
     .collect();
+    let steps = status_timeline(&case);
     view! {
         <section class="legal-section tid-case">
             <p class="tid-label">{kind_words(&case.kind)}</p>
             <CopyReference reference=case.reference.clone() id="tid-case-ref" />
-            <h2 class="tid-status">{title}</h2>
+            <h2 class="tid-status"><StatusIcon status=case.status.clone() />{title}</h2>
             <p>{sentence}</p>
+            <CaseTimeline steps=steps />
             <dl class="tid-dates">
-                {dates.into_iter().map(|(label, when)| view! { <dt>{label}</dt><dd>{when}</dd> }).collect_view()}
+                {dates.into_iter().map(|(label, when)| view! { <dt>{label}</dt><dd><CaseDate raw=when /></dd> }).collect_view()}
             </dl>
             <p><a href="/take-it-down">"About removal requests"</a></p>
         </section>
@@ -195,7 +198,19 @@ mod tests {
         assert!(page.contains("Removed") && page.contains("has been removed"), "{page}");
         assert!(page.contains("Oct 8, 2026, 7:00 PM UTC"), "{page}");
         assert!(page.contains("Removal request"));
-        assert!(!page.contains("Decided"), "a date the case does not have is not shown");
+        assert!(!page.contains("<dt>Decided</dt>"), "a date the case does not have is not shown");
+    }
+
+    #[test]
+    fn case_card_status_page_shows_the_icon_the_steps_and_the_full_copyable_reference() {
+        let mut open = found("under_review");
+        open.removed_at = None;
+        let page = html(|| view! { <CaseFound case=open /> });
+        assert!(page.contains("tid-icon") && page.contains("Under review"), "{page}");
+        assert!(page.contains("tid-timeline") && page.contains("In review") && page.contains("(done)") && page.matches("(current step)").count() == 1, "{page}");
+        assert!(page.contains("value=\"EC-7K2M-9QXD-4TPF-HJ3W-5XRZ\"") && page.contains(">Copy<"), "{page}");
+        assert!(!page.contains("Appealed"), "the public page carries no appeal: {page}");
+        assert!(page.contains("datetime=\"2026-10-08T19:00:00Z\""), "dates go through the one date component: {page}");
     }
 
     #[test]

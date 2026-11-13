@@ -18,8 +18,15 @@
 //!   Player's `Character` or that holds a Humanoid, so another player's
 //!   character (with or without a Humanoid) and an NPC both run nothing here.
 //!
-//! A `Script` never runs here: the host owns the server, and a `Script`'s
-//! `Source` is never replicated anyway. ModuleScripts start through `require`.
+//! A `Script` runs here only when this Player is the session's
+//! [`PlayRole::Authority`], playing a world alone with nobody hosting it.
+//! Then the start follows Studio's Play: every server `Script` first (in
+//! Workspace, ServerScriptService and SoulService), then the local player
+//! joins `Players` and `PlayerAdded` fires, then the LocalScripts, and the
+//! `Script`s inside a character start when the character arrives. Joined to a
+//! host (a [`PlayRole::Replica`]), no `Script` runs: the host owns the
+//! server, and a `Script`'s `Source` is never replicated anyway.
+//! ModuleScripts start through `require`.
 //!
 //! Scripts that arrive later start later. The host owns each player's
 //! `PlayerGui` and replicates it once they have joined, so the launch list is
@@ -78,6 +85,8 @@ pub struct TreeScripts {
     /// character in the key, a respawn whose `Character` write lands a frame
     /// after the model would leave the new character's scripts unstarted.
     seen: (u64, Option<InstanceId>),
+    /// The session's server scripts have started (only ever on the Authority).
+    server_started: bool,
 }
 
 impl TreeScripts {
@@ -231,7 +240,7 @@ fn run_tree_scripts(
         let built = PlayMlua::new(tree.dm.clone());
         match built {
             Ok(vm) => {
-                commands.insert_resource(TreeScripts { vm, seen: (u64::MAX, None) });
+                commands.insert_resource(TreeScripts { vm, seen: (u64::MAX, None), server_started: false });
             }
             Err(e) => {
                 *gave_up_on = Some(this_tree);
@@ -251,12 +260,17 @@ fn run_tree_scripts(
 
     // Rebuild the launch list only when the tree's shape moved. The lock is
     // released before the VM runs, because the VM takes it itself.
-    let key = {
-        let mut g = tree.dm.lock();
+    let authority = role.as_deref().is_some_and(|r| *r == PlayRole::Authority);
+    if role.is_some() {
         // The role decides it: a Replica is not the server, the Authority is.
-        if let Some(role) = &role {
-            g.is_server = matches!(**role, PlayRole::Authority);
-        }
+        tree.dm.lock().is_server = authority;
+    }
+    if authority && !scripts.server_started {
+        scripts.server_started = true;
+        start_authority_session(&mut scripts.vm, &tree.dm, &raycast);
+    }
+    let key = {
+        let g = tree.dm.lock();
         let character = g.local_player.and_then(|p| g.get_prop(p, "Character")).and_then(|v| v.as_instance());
         (g.structure_version, character)
     };
@@ -264,7 +278,11 @@ fn run_tree_scripts(
         scripts.seen = key;
         let launches = {
             let g = tree.dm.lock();
-            collect_client_launches(&g)
+            let mut launches = collect_client_launches(&g);
+            if authority {
+                launches.extend(character_server_launches(&g));
+            }
+            launches
         };
         if !launches.is_empty() {
             scripts.vm.run_scripts(launches, &raycast, &no_terrain);
@@ -322,6 +340,100 @@ fn cast_ray(
         terrain: colliders.get(hit.entity).map_or(false, |(_, _, terrain)| terrain),
         material: None,
     })
+}
+
+/// Start a session this Player runs itself, in Studio's order: the server
+/// scripts, then the local player joins `Players` and `PlayerAdded` fires,
+/// and its handlers run, before any LocalScript starts (the LocalScripts
+/// start right after, in the frame's launch pass). The player was put in
+/// `Players` when the world opened; it leaves while the server scripts start,
+/// so a script that sets up `GetPlayers()` and also listens to `PlayerAdded`
+/// sets the player up once, as in Studio.
+fn start_authority_session(
+    vm: &mut PlayMlua,
+    dm: &crate::datamodel::SharedDataModel,
+    raycast: &dyn Fn(&RayQuery) -> Option<RayHit>,
+) {
+    let (server, player, players) = {
+        let mut g = dm.lock();
+        let server = collect_server_launches(&g);
+        let player = g.local_player.filter(|p| g.exists(*p));
+        let players = g.find_service("Players");
+        if let (Some(p), Some(_)) = (player, players) {
+            if g.parent(p) == players {
+                let _ = g.set_parent(p, None);
+            }
+        }
+        (server, player, players)
+    };
+    vm.run_scripts(server, raycast, &no_terrain);
+    if let (Some(player), Some(players)) = (player, players) {
+        let mut g = dm.lock();
+        if let Err(e) = g.set_parent(player, Some(players)) {
+            g.print(OutputLevel::Error, "Players", format!("the local player could not join: {e}"));
+        }
+        g.push_event(crate::datamodel::DmEvent::PlayerAdded { player });
+    }
+    // The `PlayerAdded` handlers run before any LocalScript starts.
+    vm.run_scripts(Vec::new(), raycast, &no_terrain);
+}
+
+/// The server `Script`s a session starts with, by Studio's rule (its seed's
+/// `collect_launches`): in Workspace (outside a character, whose scripts
+/// start with it), ServerScriptService and SoulService, ordered by full name.
+fn collect_server_launches(g: &DataModel) -> Vec<ScriptLaunch> {
+    let characters = player_characters(g);
+    let mut out = Vec::new();
+    for id in g.descendants(g.root()) {
+        if g.class_of(id) != Some("Script") || !enabled(g, id) {
+            continue;
+        }
+        let service = g.service_of(id).and_then(|s| g.class_of(s).map(str::to_string)).unwrap_or_default();
+        let runs = match service.as_str() {
+            "Workspace" => character_of(g, id, &characters).is_none(),
+            "ServerScriptService" | "SoulService" => true,
+            _ => false,
+        };
+        if let (true, Some(source)) = (runs, source_of(g, id)) {
+            out.push(ScriptLaunch { instance: id, source, chunk_name: g.full_name(id) });
+        }
+    }
+    out.sort_by(|a, b| a.chunk_name.cmp(&b.chunk_name));
+    out
+}
+
+/// The server `Script`s inside players' characters, which start when the
+/// character arrives (Studio's `character_launches`). The VM skips any that
+/// already run.
+fn character_server_launches(g: &DataModel) -> Vec<ScriptLaunch> {
+    let mut out = Vec::new();
+    for character in player_characters(g) {
+        if !g.exists(character) {
+            continue;
+        }
+        for id in g.descendants(character) {
+            if g.class_of(id) != Some("Script") || !enabled(g, id) {
+                continue;
+            }
+            if let Some(source) = source_of(g, id) {
+                out.push(ScriptLaunch { instance: id, source, chunk_name: g.full_name(id) });
+            }
+        }
+    }
+    out.sort_by(|a, b| a.chunk_name.cmp(&b.chunk_name));
+    out
+}
+
+/// A script that is neither `Disabled` nor switched off (`Enabled = false`).
+fn enabled(g: &DataModel, id: InstanceId) -> bool {
+    !g.get_prop(id, "Disabled").and_then(|v| v.as_bool()).unwrap_or(false)
+        && g.get_prop(id, "Enabled").and_then(|v| v.as_bool()).unwrap_or(true)
+}
+
+/// A script's code, when it has any.
+fn source_of(g: &DataModel, id: InstanceId) -> Option<String> {
+    let source = g.get_prop(id, "Source").and_then(|v| v.as_str().map(str::to_string)).unwrap_or_default();
+    (!source.trim().is_empty()).then_some(source)
 }
 
 /// This shell hands the VM no terrain, so a read sees none.
@@ -502,6 +614,67 @@ mod tests {
 
         updates(&mut app, 2);
         assert!(printed(&b_dm, "world B"), "the new world's script ran");
+    }
+
+    /// A world with a server `Script` that sets the player up from both the
+    /// `GetPlayers()` sweep and `PlayerAdded`, as Roblox scripts do, and a
+    /// LocalScript that reports what it finds when it starts.
+    fn world_with_a_server() -> PlayDataModel {
+        let mut dm = DataModel::new();
+        let sss = dm.get_service("ServerScriptService").unwrap();
+        let server = dm.create("Script");
+        let code = r#"
+local Players = game:GetService("Players")
+local function setup(p)
+    p:SetAttribute("Setups", (p:GetAttribute("Setups") or 0) + 1)
+end
+for _, p in ipairs(Players:GetPlayers()) do setup(p) end
+Players.PlayerAdded:Connect(setup)
+workspace:SetAttribute("ServerRan", true)
+"#;
+        dm.set_prop(server, "Source", DmValue::String(code.into())).unwrap();
+        dm.set_parent(server, Some(sss)).unwrap();
+        let first = dm.get_service("ReplicatedFirst").unwrap();
+        let client = dm.create("LocalScript");
+        let code = r#"print("client saw " .. tostring(game:GetService("Players").LocalPlayer:GetAttribute("Setups")))"#;
+        dm.set_prop(client, "Source", DmValue::String(code.into())).unwrap();
+        dm.set_parent(client, Some(first)).unwrap();
+        world(dm)
+    }
+
+    /// Played alone, this Player is the Authority and runs the server too, in
+    /// Studio's order: the server script starts, then the player joins and its
+    /// `PlayerAdded` handler sets it up exactly once, then the LocalScript
+    /// starts and sees it set up. Joined to a host, the same world runs no
+    /// `Script`: the host owns the server.
+    #[test]
+    fn the_authority_runs_server_scripts_in_studios_order_and_a_replica_does_not() {
+        let run = |role: PlayRole| {
+            let mut app = app();
+            app.insert_resource(role);
+            let w = world_with_a_server();
+            let dm = w.dm.clone();
+            app.insert_resource(w);
+            updates(&mut app, 3);
+            dm
+        };
+
+        let solo = run(PlayRole::Authority);
+        let g = solo.lock();
+        let ws = g.find_service("Workspace").unwrap();
+        let me = g.local_player.unwrap();
+        let out: Vec<String> = g.output.iter().map(|l| l.text.clone()).collect();
+        assert_eq!(g.get_attribute(ws, "ServerRan"), Some(DmValue::Bool(true)), "the server script ran: {out:?}");
+        assert_eq!(g.get_attribute(me, "Setups"), Some(DmValue::Number(1.0)), "set up once: {out:?}");
+        assert!(out.iter().any(|l| l == "client saw 1"), "the LocalScript started after the setup: {out:?}");
+        assert_eq!(g.parent(me), g.find_service("Players"), "the player is back in Players");
+        drop(g);
+
+        let joined = run(PlayRole::Replica);
+        let g = joined.lock();
+        let ws = g.find_service("Workspace").unwrap();
+        assert_eq!(g.get_attribute(ws, "ServerRan"), None, "a replica runs no Script");
+        assert!(g.output.iter().any(|l| l.text == "client saw nil"), "the LocalScript still runs");
     }
 
     #[test]

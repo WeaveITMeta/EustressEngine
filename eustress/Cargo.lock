@@ -7423,7 +7423,7 @@ dependencies = [
 
 [[package]]
 name = "eustress-client"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "avian3d",
  "base64 0.21.7",
@@ -8185,6 +8185,7 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror 2.0.18",
+ "unicode-normalization",
  "urlencoding",
  "uuid",
  "wasm-bindgen",

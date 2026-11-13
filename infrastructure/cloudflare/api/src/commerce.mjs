@@ -331,6 +331,8 @@ export function publishedSpaces(sim) {
 export function commerceBlockedReason(sim) {
   if (!sim) return 'Simulation not found';
   const status = sim.moderation?.status;
+  // A deleted Space (its R2 mark, read through loadSimulation's legal-lock read; src/space_delete_mark.mjs) sells nothing.
+  if (sim.deletion) return 'This Space is deleted and cannot sell anything';
   if (status === 'quarantined') return 'This simulation is under review and cannot sell anything';
   if (status === 'rejected') return 'This simulation was rejected in review and cannot sell anything';
   if (!sim.r2_key && publishedSpaces(sim).size === 0) {

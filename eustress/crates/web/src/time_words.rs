@@ -5,7 +5,7 @@
 // locale's clock, the way the browser's Intl.DateTimeFormat does: en-US gives
 // "Oct 31, 2026, 2:14 PM MST", a German browser a 24-hour clock. The zone's name
 // is always shown, so a time never reads as the wrong zone. Where there is no
-// browser (the prerender, the unit tests) the time is written in UTC, in the
+// browser (the prerender, native unit tests) the time is written in UTC, in the
 // en-US shape, with "UTC" after it.
 // =============================================================================
 
@@ -19,8 +19,8 @@ pub fn utc_words(ms: f64) -> Option<String> {
 
 /// The browser's rendering of `ms` in its own zone and locale, with the zone's short name. `None` when the browser has
 /// no answer for the value.
-#[cfg(not(feature = "ssr"))]
-fn browser_words(ms: f64) -> Option<String> {
+#[cfg(all(not(feature = "ssr"), target_arch = "wasm32"))]
+fn browser_words(ms: f64, zone: Option<&str>) -> Option<String> {
     let date = js_sys::Date::new(&wasm_bindgen::JsValue::from_f64(ms));
     if date.get_time().is_nan() {
         return None;
@@ -30,16 +30,37 @@ fn browser_words(ms: f64) -> Option<String> {
         let _ = js_sys::Reflect::set(&options, &key.into(), &value.into());
     }
     let locale = web_sys::window().and_then(|w| w.navigator().language()).filter(|l| !l.is_empty()).unwrap_or_else(|| "en-US".to_string());
+    if let Some(zone) = zone.filter(|z| !z.is_empty()) {
+        // A zone name the browser does not know makes toLocaleString throw; Reflect::apply catches that, and the reader's own zone is used.
+        let _ = js_sys::Reflect::set(&options, &"timeZone".into(), &zone.into());
+        use wasm_bindgen::JsCast;
+        let call = js_sys::Reflect::get(&date, &"toLocaleString".into()).ok().and_then(|f| f.dyn_into::<js_sys::Function>().ok());
+        if let Some(call) = call {
+            let args = js_sys::Array::of2(&locale.as_str().into(), &options);
+            if let Some(text) = js_sys::Reflect::apply(&call, &date, &args).ok().and_then(|v| v.as_string()).filter(|t| !t.is_empty()) {
+                return Some(text);
+            }
+        }
+        let _ = js_sys::Reflect::delete_property(&options, &"timeZone".into());
+    }
     let text: String = date.to_locale_string(&locale, &options).into();
     (!text.is_empty()).then_some(text)
 }
 
 /// A time in the reader's zone: from milliseconds since 1970.
 pub fn when_ms(ms: f64) -> String {
-    #[cfg(not(feature = "ssr"))]
-    if let Some(text) = browser_words(ms) {
+    when_ms_in(ms, None)
+}
+
+/// A time in the named zone (`America/Phoenix`) when the browser knows it, else in the reader's own zone. The zone's short name
+/// is always shown. Without a browser it is UTC, whatever the zone asked for.
+pub fn when_ms_in(ms: f64, zone: Option<&str>) -> String {
+    #[cfg(all(not(feature = "ssr"), target_arch = "wasm32"))]
+    if let Some(text) = browser_words(ms, zone) {
         return text;
     }
+    #[cfg(not(all(not(feature = "ssr"), target_arch = "wasm32")))]
+    let _ = zone;
     utc_words(ms).unwrap_or_default()
 }
 
@@ -58,13 +79,13 @@ pub fn when_iso(iso: &str) -> String {
 
 /// The reader's time zone as the browser names it (`America/Phoenix`), or `None` where there is no browser or it says nothing.
 pub fn browser_zone() -> Option<String> {
-    #[cfg(not(feature = "ssr"))]
+    #[cfg(all(not(feature = "ssr"), target_arch = "wasm32"))]
     {
         let options = js_sys::Intl::DateTimeFormat::new(&js_sys::Array::new(), &js_sys::Object::new()).resolved_options();
         let zone = js_sys::Reflect::get(&options, &"timeZone".into()).ok()?.as_string()?;
         return (!zone.is_empty()).then_some(zone);
     }
-    #[cfg(feature = "ssr")]
+    #[cfg(not(all(not(feature = "ssr"), target_arch = "wasm32")))]
     None
 }
 

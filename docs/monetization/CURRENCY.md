@@ -100,7 +100,7 @@ and scored as `weight x minutes x node_bonus`:
 | QualityAssurance | 1.8x | Testing, repro'd bug reports |
 | Moderation | 1.5x | Community safety |
 | Documentation | 1.5x | Docs, guides, translation |
-| ActiveTime | 1.0x | Focused, input-active session time |
+| ActiveTime | 0.1x | Input-active session time with nothing made (navigating, inspecting, testing) |
 
 Full-node operators earn +10%.
 

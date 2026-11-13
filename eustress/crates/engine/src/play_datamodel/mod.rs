@@ -222,6 +222,8 @@ impl Plugin for PlayDataModelPlugin {
             .add_systems(Update, remote_players::hide_joined_player_guis.after(PlayScriptSet::Apply))
             // Who sits where: the host decides (docs/networking/SEATS.md).
             .add_plugins(seats::SeatPlugin)
+            // Joined players' characters are in the tree before anyone sits.
+            .configure_sets(Update, seats::SeatSystems::Seat.after(remote_players::pull_remote_characters))
             .add_systems(
                 PreUpdate,
                 pull::apply_injected_buttons.after(bevy::input::InputSystems).run_if(playing.clone()),

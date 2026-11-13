@@ -160,9 +160,11 @@ fn element(
         text_y_align: "Center".into(),
         text_stroke_color: [0.0; 4],
         text_scaled: false,
+        text_wrapped: true,
         image_path: String::new(),
         class_type: if text.is_empty() { "Frame" } else { "TextLabel" }.into(),
         mouse_filter: "ignore".into(),
+        active: false,
     }
 }
 

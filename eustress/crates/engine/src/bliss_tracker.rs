@@ -17,7 +17,7 @@
 //! |-----------------------------------------------|---------------|--------|
 //! | Script editor content changed                 | `Development` | 3.0x   |
 //! | Undoable scene edit (`UndoStack` push)        | `Creation`    | 2.5x   |
-//! | Input only (navigating, inspecting, testing)  | `ActiveTime`  | 1.0x   |
+//! | Input only (navigating, inspecting, testing)  | `ActiveTime`  | 0.1x   |
 //!
 //! Weights are applied by the **witness**, not here — the client only reports
 //! type + duration. The witness also applies the +10% Full-node bonus and
@@ -81,7 +81,7 @@ const IDX_DEVELOPMENT: usize = 2;
 
 /// Client-side weight mirror — used ONLY for the badge's local pending
 /// estimate. The witness's weight table is authoritative.
-const LOCAL_WEIGHTS: [f64; 3] = [1.0, 2.5, 3.0];
+const LOCAL_WEIGHTS: [f64; 3] = [0.1, 2.5, 3.0];
 
 // ---------------------------------------------------------------------------
 // Persistent state file

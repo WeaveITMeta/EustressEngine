@@ -1814,8 +1814,8 @@ fn prepare_export(world: &mut World) -> Result<PendingExport, String> {
             }];
             // The Universe's shared assets travel too: a Space's meshes and
             // textures can live there.
-            // Players get what Roblox would replicate to them: the
-            // server-only services stay on this machine.
+            // Players get the whole Space, server code included (every
+            // world does since 2026-11-12); a joined Player runs none of it.
             let result = export_world(
                 &universe,
                 inputs,

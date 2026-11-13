@@ -906,12 +906,12 @@ mod tests {
             since_flush: 0.0,
             notice_shown: true,
             session_counts: std::collections::HashMap::new(),
-            session_mode: "ai".into(),
+            session_mode: "si".into(),
             last_dream_tool: String::new(),
         };
-        t.record("hub:export_dataset", "ai", "publishing", false);
-        t.record("hub:export_dataset", "ai", "publishing", false);
-        t.record("rl:reward_designer", "ai", "reinforcement", false);
+        t.record("hub:export_dataset", "si", "publishing", false);
+        t.record("hub:export_dataset", "si", "publishing", false);
+        t.record("rl:reward_designer", "si", "reinforcement", false);
 
         t.checkpoint_outbox();
         assert_eq!(
@@ -931,7 +931,7 @@ mod tests {
 
         // A second checkpoint overwrites rather than accumulating, otherwise
         // one session would be counted once per flush.
-        t.record("rl:reward_designer", "ai", "reinforcement", false);
+        t.record("rl:reward_designer", "si", "reinforcement", false);
         t.checkpoint_outbox();
         let after = files(&outbox);
         assert_eq!(after.len(), 1, "checkpoints must overwrite one stable filename");

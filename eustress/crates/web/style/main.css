@@ -20269,11 +20269,31 @@ a.experience-card {
     .hero-buttons     { animation-delay: 0.18s; }
     .metric-strip     { animation-delay: 0.26s; }
     .hero-visual-new  { animation: rise-in 0.8s cubic-bezier(0.16, 1, 0.3, 1) 0.12s both; }
+
+    /* The headline, its paragraph and the Studio capture rise without fading in. The browser
+       measures a page's largest paint only from what it can see, so a fade from opacity 0 hid
+       the hero from that measurement and it fell to whatever painted later. */
+    .hero-text > h1,
+    .hero-text > p,
+    .hero-visual-new { animation-name: rise-solid; }
+
+    /* The live app replaces the prerendered page once it has loaded (assets/loader.js adds
+       .app-live then); the hero already arrived once, so it does not arrive again. */
+    .app-live .hero-text > h1,
+    .app-live .hero-text > p,
+    .app-live .hero-buttons,
+    .app-live .metric-strip,
+    .app-live .hero-visual-new { animation: none; }
 }
 
 @keyframes rise-in {
     from { opacity: 0; transform: translateY(18px); }
     to   { opacity: 1; transform: none; }
+}
+
+@keyframes rise-solid {
+    from { transform: translateY(18px); }
+    to   { transform: none; }
 }
 
 /* --------------------------------------------------------------------------

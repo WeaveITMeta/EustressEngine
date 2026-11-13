@@ -181,6 +181,7 @@ pub fn company_from_actual(s: &AdminStatement) -> Company {
         tickets_usd: tickets.gross_usd,
         delta_usd: delta.gross_usd,
         gifts_usd: gifts.gross_usd,
+        sponsors_usd: kind(s, "engine_sponsor").gross_usd,
         actual: true,
         daily_players: 0.0,
         subscribers: t.plan_invoices as f64,

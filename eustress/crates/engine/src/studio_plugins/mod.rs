@@ -1205,6 +1205,8 @@ fn process_plugin_actions(
                     background_transparency: 1.0, // Transparent background
                     // Pure-pixel canvas (Scale=0).
                     size: eustress_common::ui_types::UDim2::from_pixels(200.0, 50.0),
+                    // A note label wraps at its canvas width.
+                    text_wrapped: true,
                     ..Default::default()
                 };
                 
@@ -1279,6 +1281,7 @@ fn process_plugin_actions(
                                 position: eustress_common::ui_types::UDim2::from_pixels(position_offset[0], position_offset[1]),
                                 size: eustress_common::ui_types::UDim2::from_pixels(size_offset[0], size_offset[1]),
                                 background_transparency: *background_transparency,
+                                text_wrapped: true,
                                 ..Default::default()
                             };
                             let entity = spawn_text_label(commands, instance, label);

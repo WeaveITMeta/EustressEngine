@@ -1,4 +1,4 @@
-# Eustress Mode - "AI".
+# Eustress Mode - "Super Intelligence".
 #
 # Eustress as a DATA PLATFORM for machine learning: acquire a corpus (from the
 # simulation itself, from live feeds, or synthesized), curate and label it,
@@ -26,8 +26,8 @@
 # defeat the entire point of that layer.
 
 [mode]
-id = "ai"
-name = "AI"
+id = "si"
+name = "Super Intelligence"
 icon = "brain"
 # Mode-selection-menu color - matches [theme] accent below, per the rule that
 # the dropdown swatch and the in-editor selection highlight are the same hue.

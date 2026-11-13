@@ -2,7 +2,8 @@
 //!
 //! ## Table of Contents
 //!
-//! 1. GuiTomlDefinition — deserialization structs for GUI TOML files
+//! 1. The GUI TOML schema and its builders, re-exported from
+//!    `eustress_common::gui::gui_record`, which a Player's reader shares
 //! 2. load_gui_definition — parse a GUI TOML file from disk
 //! 3. spawn_gui_element — spawn a Bevy UI entity with proper rendering components
 //!
@@ -19,7 +20,6 @@
 //! child elements (Frame, TextLabel, TextButton) are positioned absolutely within it.
 
 use bevy::prelude::*;
-use serde::{Deserialize, Serialize};
 use std::path::Path;
 
 use crate::spawn::{TextLabelMarker, TextBoxMarker};
@@ -30,446 +30,22 @@ pub use eustress_common::gui::billboard_renderer::{BillboardGuiMarker, SurfaceGu
 pub use eustress_common::gui::billboard_renderer::GuiElementDisplay;
 
 // ============================================================================
-// 1. TOML deserialization structs
+// 1. The file's structs and builders, shared with a Player's reader
 // ============================================================================
 
-/// Top-level GUI TOML file structure
-#[derive(Debug, Deserialize, Serialize, Default)]
-pub struct GuiTomlFile {
-    #[serde(default)]
-    pub instance: GuiTomlInstance,
-    #[serde(default)]
-    pub metadata: GuiTomlMetadata,
-    #[serde(default)]
-    pub gui: GuiTomlProperties,
-    #[serde(default)]
-    pub text: Option<GuiTomlText>,
-    /// `[image]` — ImageLabel / ImageButton tint + scale (image SOURCE is in
-    /// `[asset].path`, not here).
-    #[serde(default)]
-    pub image: Option<GuiTomlImage>,
-    /// `[scrolling]` — ScrollingFrame canvas / scrollbar config.
-    #[serde(default)]
-    pub scrolling: Option<GuiTomlScrolling>,
-    /// `[viewport]` — ViewportFrame ambient/light config (data round-trip only;
-    /// no offscreen render yet).
-    #[serde(default)]
-    pub viewport: Option<GuiTomlViewport>,
-    // ScreenGui files may use instance_loader format with [asset], [transform], [properties]
-    #[serde(default)]
-    pub asset: Option<toml::Value>,
-    #[serde(default)]
-    pub transform: Option<toml::Value>,
-    #[serde(default)]
-    pub properties: Option<toml::Value>,
-    /// `CollectionService` tags for this GUI instance — written from
-    /// `MluaCreatedInstance.tags` and hydrated into the ECS
-    /// [`Tags`](eustress_common::attributes::Tags) component on space load.
-    /// Same shape and semantics as `instance_loader::InstanceDefinition.tags`,
-    /// so MCP `add_tag` / `get_tagged_entities` see GUI tags identically to
-    /// Part tags.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub tags: Vec<String>,
-}
-
-/// [instance] section
-#[derive(Debug, Deserialize, Serialize, Default)]
-pub struct GuiTomlInstance {
-    #[serde(default)]
-    pub name: String,
-}
-
-/// [metadata] section
-#[derive(Debug, Deserialize, Serialize, Default)]
-pub struct GuiTomlMetadata {
-    #[serde(default)]
-    pub class_name: String,
-    #[serde(default)]
-    pub archivable: bool,
-    /// Authored unit symbol (`"m"`, `"cm"`, `"mm"`, `"ft"`, `"in"`,
-    /// `"studs"`). `None` means the file was authored without a unit
-    /// declaration → treat as engine-native meters.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub unit: Option<String>,
-}
-
-/// [gui] section — shared visual properties
-///
-/// **Roblox parity, no legacy paths.** `position` and `size` are
-/// strictly `UDim2` (4-float `[scale_x, offset_x, scale_y, offset_y]`).
-/// The previous `Vec<f32>` accept-anything form has been removed —
-/// older TOML files using `[x, y]` / `[w, h]` will fail to load and
-/// must be migrated to the 4-tuple form.
-#[derive(Debug, Deserialize, Serialize, Default, Clone)]
-pub struct GuiTomlProperties {
-    #[serde(default)]
-    pub position: eustress_common::ui_types::UDim2,
-    #[serde(default = "default_size_udim2")]
-    pub size: eustress_common::ui_types::UDim2,
-    #[serde(default)]
-    pub anchor_point: [f32; 2],
-    #[serde(default = "default_bg_color", deserialize_with = "de_color_rgb_or_rgba")]
-    pub background_color: [f32; 4],
-    /// `None` when the TOML has no explicit `background_transparency` key.
-    /// Distinguishing that from an authored `0.0` matters: some content
-    /// (hand-authored or AI-generated, not Roblox-imported) puts the
-    /// intended transparency in `background_color`'s 4th channel instead
-    /// of this dedicated field. Use `resolved_background_transparency()`
-    /// to fall back to that alpha channel; reading this field directly
-    /// silently treats such content as fully opaque.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub background_transparency: Option<f32>,
-    #[serde(default)]
-    pub border_size: f32,
-    #[serde(default = "default_border_color", deserialize_with = "de_color_rgb_or_rgba")]
-    pub border_color: [f32; 4],
-    #[serde(default)]
-    pub corner_radius: f32,
-    #[serde(default = "default_true")]
-    pub visible: bool,
-    #[serde(default)]
-    pub z_index: i32,
-
-    // ── BillboardGui-specific properties ──────────────────────────────────
-    // Behaviour flags
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub active: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub enabled: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub always_on_top: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub clips_descendants: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub reset_on_spawn: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub stiffness_by_distance: Option<bool>,
-
-    // Distance
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub max_distance: Option<f32>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub distance_lower_limit: Option<f32>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub distance_upper_limit: Option<f32>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub distance_step: Option<f32>,
-
-    // Appearance
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub brightness: Option<f32>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub light_influence: Option<f32>,
-
-    // Offsets — skip-if-none so files don't bloat with zeroes.
-    /// Roblox `SizeOffset` — `Vector2` `[offset_x, offset_y]` in pixels.
-    /// Lenient deserialize accepts BOTH the new 2-tuple and the older
-    /// 4-tuple UDim2 shape `[scale_x, offset_x, scale_y, offset_y]` —
-    /// when migrating from a previous version the existing offset
-    /// components survive even though Scale is discarded (Roblox parity
-    /// makes Scale meaningless for `SizeOffset`).
-    #[serde(default, deserialize_with = "deserialize_size_offset_lenient", skip_serializing_if = "Option::is_none")]
-    pub size_offset: Option<[f32; 2]>,
-    /// The `Scale` component of `Size` (a UDim2). The importer writes
-    /// `size_scale` + `size_offset` as a pair instead of a combined `size`
-    /// key, so `size` on its own always fell back to its 100x30px default.
-    /// Use `resolved_size()` to get the real, combined value.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub size_scale: Option<[f32; 2]>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub extents_offset: Option<[f32; 3]>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub extents_offset_world_space: Option<[f32; 3]>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub units_offset: Option<[f32; 3]>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub units_offset_world_space: Option<[f32; 3]>,
-
-    // Sorting
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub z_index_behavior: Option<String>,  // "Sibling" | "Global"
-
-    // Adornee — instance name reference; resolved to entity at load time.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub adornee: Option<String>,
-
-    // ── SurfaceGui-specific properties ────────────────────────────────────
-    // Face of the parent part the GUI draws on, a `NormalId` name ("Front").
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub face: Option<String>,
-    // Virtual canvas `[width, height]` in pixels.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub canvas_size: Option<[f32; 2]>,
-    // Canvas pixels per unit of the face (the importer writes per metre).
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub pixels_per_unit: Option<f32>,
-}
-
-impl GuiTomlProperties {
-    /// Resolves the real size across the two conventions this data set
-    /// mixes: the Roblox importer's split `size_scale` + `size_offset`
-    /// pair (never a combined `size` key), and content that computes and
-    /// writes the combined `size` 4-tuple directly, leaving `size_scale`/
-    /// `size_offset` as stale zero/placeholder leftovers from an earlier
-    /// generation pass. Priority:
-    ///   1. `size_scale` is non-zero — a real scale signal, the importer's
-    ///      convention. Pair it with `size_offset` (defaulting to zero).
-    ///   2. `size` differs from the hard default — explicitly authored,
-    ///      even though `size_scale` had nothing to say.
-    ///   3. Only `size_offset` was ever recorded — pure pixel-offset
-    ///      content (Roblox parity: Scale is meaningless for SizeOffset).
-    ///   4. Nothing — the hard default.
-    pub fn resolved_size(&self) -> eustress_common::ui_types::UDim2 {
-        if let Some(scale) = self.size_scale {
-            if scale != [0.0, 0.0] {
-                let [ox, oy] = self.size_offset.unwrap_or([0.0, 0.0]);
-                return eustress_common::ui_types::UDim2::new(scale[0], ox, scale[1], oy);
-            }
-        }
-        if self.size != default_size_udim2() {
-            return self.size;
-        }
-        if let Some([ox, oy]) = self.size_offset {
-            return eustress_common::ui_types::UDim2::new(0.0, ox, 0.0, oy);
-        }
-        self.size
-    }
-
-    /// The real transparency: the explicit field if set, else derived from
-    /// `background_color`'s alpha channel. Roblox-imported content always
-    /// has alpha=1.0 here (3-element RGB padded opaque by `de_color_rgb_or_rgba`),
-    /// so this is a no-op for the common case — it only changes behavior
-    /// for content that authored a 4-element RGBA color without also
-    /// setting `background_transparency`.
-    pub fn resolved_background_transparency(&self) -> f32 {
-        self.background_transparency
-            .unwrap_or_else(|| (1.0 - self.background_color[3]).clamp(0.0, 1.0))
-    }
-}
-
-/// [text] section — text-specific properties for TextLabel, TextButton, TextBox
-#[derive(Debug, Deserialize, Serialize, Default)]
-pub struct GuiTomlText {
-    #[serde(default)]
-    pub text: String,
-    #[serde(default = "default_text_color", deserialize_with = "de_color_rgb_or_rgba")]
-    pub text_color: [f32; 4],
-    #[serde(default)]
-    pub text_transparency: f32,
-    #[serde(default = "default_text_stroke_color", deserialize_with = "de_color_rgb_or_rgba")]
-    pub text_stroke_color: [f32; 4],
-    #[serde(default = "default_text_stroke_transparency")]
-    pub text_stroke_transparency: f32,
-    #[serde(default = "default_font_size")]
-    pub font_size: f32,
-    #[serde(default)]
-    pub font_family: String,
-    /// Font family variant — e.g. "GothamBold", "SourceSans", "RobotoMono".
-    /// Feeds font_weight derivation: names containing "Bold" → 700, else 400.
-    #[serde(default)]
-    pub font: String,
-    #[serde(default = "default_left")]
-    pub text_x_alignment: String,
-    #[serde(default = "default_center")]
-    pub text_y_alignment: String,
-    /// Roblox `TextScaled`. When `true` the renderer ignores `font_size`
-    /// and auto-fits the text to the element's rect (binary search).
-    /// `skip_serializing_if = false` keeps TOMLs that haven't opted in
-    /// from carrying a redundant `text_scaled = false` line.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub text_scaled: bool,
-}
-
-/// `[image]` section — ImageLabel / ImageButton appearance. The image
-/// SOURCE path lives in `[asset].path` (the importer routes the `Image`
-/// asset_ref through the asset resolver); `image` here is only a fallback.
-/// Every color field MUST use `de_color_rgb_or_rgba` so a 3-element 0-255
-/// integer RGB array doesn't fail the whole gui parse.
-#[derive(Debug, Deserialize, Serialize, Default)]
-pub struct GuiTomlImage {
-    /// Fallback image path (importer normally writes the source to [asset].path).
-    #[serde(default)]
-    pub image: String,
-    #[serde(default = "default_image_color", deserialize_with = "de_color_rgb_or_rgba")]
-    pub image_color: [f32; 4],
-    #[serde(default)]
-    pub image_transparency: f32,
-    #[serde(default)]
-    pub scale_type: String,
-    #[serde(default)]
-    pub slice_center: Vec<f32>,
-    #[serde(default)]
-    pub slice_scale: f32,
-    #[serde(default)]
-    pub tile_size: Vec<f32>,
-    /// ImageButton-only: hover/pressed swap images (stored, not yet wired).
-    #[serde(default)]
-    pub hover_image: String,
-    #[serde(default)]
-    pub pressed_image: String,
-}
-
-/// `[scrolling]` section — ScrollingFrame canvas + scrollbar config.
-#[derive(Debug, Deserialize, Serialize, Default)]
-pub struct GuiTomlScrolling {
-    #[serde(default)]
-    pub scrolling_enabled: bool,
-    #[serde(default)]
-    pub scroll_bar_thickness: i32,
-    #[serde(default)]
-    pub canvas_size: Vec<f32>,
-    #[serde(default)]
-    pub canvas_position: Vec<f32>,
-    #[serde(default)]
-    pub scrolling_direction: String,
-    #[serde(default = "default_scrollbar_color", deserialize_with = "de_color_rgb_or_rgba")]
-    pub scroll_bar_image_color: [f32; 4],
-    #[serde(default)]
-    pub scroll_bar_image_transparency: f32,
-    #[serde(default)]
-    pub elastic_behavior: String,
-    #[serde(default)]
-    pub top_image: String,
-    #[serde(default)]
-    pub mid_image: String,
-    #[serde(default)]
-    pub bottom_image: String,
-}
-
-/// `[viewport]` section — ViewportFrame ambient/light config. Data
-/// round-trip only; the offscreen-render subsystem is a deferred FEATURE.
-#[derive(Debug, Deserialize, Serialize, Default)]
-pub struct GuiTomlViewport {
-    #[serde(default = "default_viewport_ambient", deserialize_with = "de_color_rgb_or_rgba")]
-    pub ambient: [f32; 4],
-    #[serde(default = "default_viewport_light_color", deserialize_with = "de_color_rgb_or_rgba")]
-    pub light_color: [f32; 4],
-    #[serde(default)]
-    pub light_direction: Vec<f32>,
-    #[serde(default = "default_image_color", deserialize_with = "de_color_rgb_or_rgba")]
-    pub image_color: [f32; 4],
-    #[serde(default)]
-    pub image_transparency: f32,
-}
-
-fn default_image_color() -> [f32; 4] { [1.0, 1.0, 1.0, 1.0] }
-fn default_scrollbar_color() -> [f32; 4] { [0.3, 0.3, 0.3, 1.0] }
-fn default_viewport_ambient() -> [f32; 4] { [0.78, 0.78, 0.78, 1.0] }
-fn default_viewport_light_color() -> [f32; 4] { [1.0, 1.0, 1.0, 1.0] }
-
-/// Map a font name to a CSS-style weight. Conservative: anything with "Bold"
-/// becomes 700, "Light" becomes 300, otherwise 400. Slint's software renderer
-/// uses the weight to pick the right variant when multiple are registered.
-pub fn font_weight_from_name(name: &str) -> i32 {
-    let lower = name.to_lowercase();
-    // Black / Heavy faces, and the single-weight display faces (Fredoka One,
-    // Luckiest Guy, Bangers) are heavy type: bold is the nearest the
-    // overlay's default font can draw.
-    let heavy = ["bold", "black", "heavy", "fredoka", "luckiest", "bangers"];
-    if heavy.iter().any(|w| lower.contains(w)) { 700 }
-    else if lower.contains("light") || lower.contains("thin") { 300 }
-    else { 400 }
-}
-
-fn default_size_udim2() -> eustress_common::ui_types::UDim2 {
-    eustress_common::ui_types::UDim2::from_pixels(100.0, 30.0)
-}
-fn default_bg_color() -> [f32; 4] { [0.2, 0.2, 0.2, 0.8] }
-fn default_border_color() -> [f32; 4] { [0.5, 0.5, 0.5, 1.0] }
-fn default_text_color() -> [f32; 4] { [1.0, 1.0, 1.0, 1.0] }
-fn default_text_stroke_color() -> [f32; 4] { [0.0, 0.0, 0.0, 1.0] }
-fn default_text_stroke_transparency() -> f32 { 1.0 }
-fn default_font_size() -> f32 { 14.0 }
-fn default_left() -> String { "Left".to_string() }
-fn default_center() -> String { "Center".to_string() }
-fn default_true() -> bool { true }
-
-/// Accept the new 2-element `[offset_x, offset_y]` form for `size_offset`.
-/// Legacy 4-element UDim2 shapes are treated as missing (default `[0, 0]`):
-/// an earlier code path wrote `size_offset` as a UDim2 carrying the same
-/// values as `size`, so naively extracting `[arr[1], arr[3]]` would
-/// migrate stale duplicate data into the Vector2 field. Roblox's
-/// `SizeOffset` default is `(0, 0)`; resetting on migration matches that
-/// and the save-on-change pass writes the cleaned value back to disk on
-/// the first edit. Users with legitimately-set non-zero values will need
-/// to re-enter them once after upgrade — acceptable since the field is
-/// rarely used and the cleanup eliminates a confusing redundancy.
-fn deserialize_size_offset_lenient<'de, D>(de: D) -> Result<Option<[f32; 2]>, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    use serde::Deserialize;
-    let v: Option<Vec<f32>> = Option::deserialize(de)?;
-    Ok(v.and_then(|arr| match arr.len() {
-        2 => Some([arr[0], arr[1]]),
-        // Legacy 4-tuple → reset to default. See doc above.
-        _ => None,
-    }))
-}
-
-/// Lenient RGBA color deserialize for the `[gui]` / `[text]` color
-/// fields. Accepts BOTH a 3-element `[r, g, b]` (Roblox `Color3`, alpha
-/// padded to opaque) AND a 4-element `[r, g, b, a]`, in EITHER the
-/// 0-255 integer encoding the GUI schema templates author or the
-/// 0.0-1.0 float encoding the runtime panel writes. Always yields a
-/// normalised 0.0-1.0 `[f32; 4]` RGBA.
-///
-/// **Why this exists.** Roblox GUI color properties (`BackgroundColor3`,
-/// `BorderColor3`, `TextColor3`) are 3-float `Color3` values with no
-/// alpha channel, and the class-schema GUI templates
-/// (`class_schema/{Frame,TextLabel,…}/_instance.toml`) likewise author
-/// `background_color` / `border_color` / `text_color` as 3-element
-/// 0-255 integer arrays (e.g. `[255, 255, 255]`). The strict `[f32; 4]`
-/// field previously rejected every one of these with *"invalid length
-/// 3, expected an array of length 4"* — ~8038 such failures when
-/// loading an imported Vehicle Simulator place (StarterGui / SurfaceGui
-/// leaves: ColorOption-N, Hitbox, ColorText, race-checkpoint arrows…).
-///
-/// This is the same logic the Part `color` field uses
-/// (`instance_loader::deserialize_color_flexible`) and matches the
-/// runtime edit path (`slint_ui::route_property` → `color_255_to_01` /
-/// `color_01`), so GUI colors round-trip consistently no matter which
-/// surface authored them. Existing 0.0-1.0 *float* RGBA data (the only
-/// 4-element form the loader's own 0-1 defaults and runtime path ever
-/// produced) deserialises identically — floats are passed through
-/// unchanged; only integer arrays are divided by 255.
-fn de_color_rgb_or_rgba<'de, D>(de: D) -> Result<[f32; 4], D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    let values: Vec<toml::Value> = serde::Deserialize::deserialize(de)?;
-    if values.len() != 3 && values.len() != 4 {
-        return Err(serde::de::Error::invalid_length(
-            values.len(),
-            &"a color array of length 3 ([r, g, b]) or 4 ([r, g, b, a])",
-        ));
-    }
-
-    // 0-255 integer encoding (schema templates) vs 0.0-1.0 float
-    // encoding (runtime panel / loader defaults). All-integer ⇒ divide
-    // by 255; otherwise read as floats (coercing any stray integer).
-    let all_integers = values.iter().all(|v| v.is_integer());
-    let channel = |v: &toml::Value, fallback: f32| -> f32 {
-        if all_integers {
-            v.as_integer().map(|i| i as f32 / 255.0).unwrap_or(fallback)
-        } else {
-            v.as_float()
-                .or_else(|| v.as_integer().map(|i| i as f64))
-                .map(|f| f as f32)
-                .unwrap_or(fallback)
-        }
-    };
-
-    let r = channel(&values[0], 0.0);
-    let g = channel(&values[1], 0.0);
-    let b = channel(&values[2], 0.0);
-    let a = if values.len() == 4 {
-        channel(&values[3], 1.0)
-    } else {
-        1.0
-    };
-    Ok([r, g, b, a])
-}
+// The GUI file's schema and every builder from it (what a GUI object draws
+// as, a BillboardGui's and a SurfaceGui's class) live in
+// `eustress_common::gui::gui_record`, which a Player's reader uses too, so
+// Studio and a Player never read one file two ways.
+pub use eustress_common::gui::gui_record::{
+    billboard_class_from_def, billboard_class_from_props, billboard_lengths_to_native, font_weight_from_name,
+    gui_display_for_class, gui_display_from_props, gui_image_source, screen_gui_display, surface_class_from_props,
+    GuiTomlFile, GuiTomlImage, GuiTomlInstance, GuiTomlMetadata, GuiTomlProperties, GuiTomlScrolling, GuiTomlText,
+    GuiTomlViewport,
+};
+use eustress_common::gui::gui_record::{
+    default_bg_color, default_border_color, default_font_size, default_size_udim2, default_text_color,
+};
 
 // ============================================================================
 // 2. Create / Write GUI TOML files
@@ -504,6 +80,7 @@ pub fn create_default_gui_toml(class_name: &str, display_name: &str) -> GuiTomlF
             text_transparency: 0.0,
             text_stroke_color: [0.0, 0.0, 0.0, 1.0],
             text_stroke_transparency: 1.0,
+            text_wrapped: true,
         })
     } else {
         None
@@ -670,14 +247,7 @@ pub(crate) fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
 /// SpaceSource-threaded loader uses this so GUI entities load from a
 /// Fjall-authoritative world with zero disk reads.
 pub fn load_gui_definition_from_str(content: &str) -> Result<GuiTomlFile, String> {
-    let mut value: toml::Value = content
-        .parse()
-        .map_err(|e: toml::de::Error| format!("Failed to parse GUI TOML: {}", e))?;
-    eustress_common::class_schema::normalise_keys(&mut value);
-    let parsed: GuiTomlFile = value
-        .try_into()
-        .map_err(|e: toml::de::Error| format!("Failed to deserialize GUI TOML: {}", e))?;
-    Ok(parsed)
+    eustress_common::gui::gui_record::gui_definition_from_str(content)
 }
 
 /// Load and parse a GUI TOML file from disk
@@ -716,21 +286,10 @@ pub fn load_gui_definition(path: &Path) -> Result<GuiTomlFile, String> {
 /// Returns `"Frame"` when neither the extension nor the TOML
 /// metadata yields a recognized class — the old default.
 pub fn gui_class_from_extension(path: &Path) -> &'static str {
+    if let Some(class) = compound_extension_class(path) {
+        return class;
+    }
     let path_str = path.to_string_lossy();
-    if path_str.ends_with(".screengui.toml")      { return "ScreenGui"; }
-    if path_str.ends_with(".textlabel.toml")      { return "TextLabel"; }
-    if path_str.ends_with(".textbutton.toml")     { return "TextButton"; }
-    if path_str.ends_with(".frame.toml")          { return "Frame"; }
-    if path_str.ends_with(".imagelabel.toml")     { return "ImageLabel"; }
-    if path_str.ends_with(".imagebutton.toml")    { return "ImageButton"; }
-    if path_str.ends_with(".scrollingframe.toml") { return "ScrollingFrame"; }
-    if path_str.ends_with(".textbox.toml")        { return "TextBox"; }
-    if path_str.ends_with(".viewportframe.toml")  { return "ViewportFrame"; }
-    if path_str.ends_with(".videoframe.toml")     { return "VideoFrame"; }
-    if path_str.ends_with(".documentframe.toml")  { return "DocumentFrame"; }
-    if path_str.ends_with(".webframe.toml")       { return "WebFrame"; }
-    if path_str.ends_with(".surfacegui.toml")     { return "SurfaceGui"; }
-    if path_str.ends_with(".billboardgui.toml")   { return "BillboardGui"; }
 
     // Folder convention: `Name/_instance.toml` — peek the metadata
     // class_name and map it back to our `&'static str` universe.
@@ -756,28 +315,65 @@ pub fn gui_class_from_extension(path: &Path) -> &'static str {
                 })
         });
         if let Some(cn) = class_name {
-            {
-                return match cn.as_str() {
-                    "ScreenGui"      => "ScreenGui",
-                    "TextLabel"      => "TextLabel",
-                    "TextButton"     => "TextButton",
-                    "Frame"          => "Frame",
-                    "ImageLabel"     => "ImageLabel",
-                    "ImageButton"    => "ImageButton",
-                    "ScrollingFrame" => "ScrollingFrame",
-                    "TextBox"        => "TextBox",
-                    "ViewportFrame"  => "ViewportFrame",
-                    "VideoFrame"     => "VideoFrame",
-                    "DocumentFrame"  => "DocumentFrame",
-                    "WebFrame"       => "WebFrame",
-                    "SurfaceGui"     => "SurfaceGui",
-                    "BillboardGui"   => "BillboardGui",
-                    _                => "Frame",
-                };
-            }
+            return known_gui_class(&cn).unwrap_or("Frame");
         }
     }
     "Frame" // default
+}
+
+/// The class a legacy flat GUI file's compound extension names
+/// (`Name.textlabel.toml`), if it has one.
+fn compound_extension_class(path: &Path) -> Option<&'static str> {
+    let path_str = path.to_string_lossy();
+    const EXTENSIONS: [(&str, &str); 14] = [
+        (".screengui.toml", "ScreenGui"),
+        (".textlabel.toml", "TextLabel"),
+        (".textbutton.toml", "TextButton"),
+        (".frame.toml", "Frame"),
+        (".imagelabel.toml", "ImageLabel"),
+        (".imagebutton.toml", "ImageButton"),
+        (".scrollingframe.toml", "ScrollingFrame"),
+        (".textbox.toml", "TextBox"),
+        (".viewportframe.toml", "ViewportFrame"),
+        (".videoframe.toml", "VideoFrame"),
+        (".documentframe.toml", "DocumentFrame"),
+        (".webframe.toml", "WebFrame"),
+        (".surfacegui.toml", "SurfaceGui"),
+        (".billboardgui.toml", "BillboardGui"),
+    ];
+    EXTENSIONS.iter().find(|(ext, _)| path_str.ends_with(ext)).map(|(_, class)| *class)
+}
+
+/// A GUI class name as the loader's `&'static str`, or `None` for a name
+/// that is no GUI class.
+fn known_gui_class(name: &str) -> Option<&'static str> {
+    Some(match name {
+        "ScreenGui" => "ScreenGui",
+        "TextLabel" => "TextLabel",
+        "TextButton" => "TextButton",
+        "Frame" => "Frame",
+        "ImageLabel" => "ImageLabel",
+        "ImageButton" => "ImageButton",
+        "ScrollingFrame" => "ScrollingFrame",
+        "TextBox" => "TextBox",
+        "ViewportFrame" => "ViewportFrame",
+        "VideoFrame" => "VideoFrame",
+        "DocumentFrame" => "DocumentFrame",
+        "WebFrame" => "WebFrame",
+        "SurfaceGui" => "SurfaceGui",
+        "BillboardGui" => "BillboardGui",
+        _ => return None,
+    })
+}
+
+/// The GUI class a parsed file loads as: a flat file's compound extension,
+/// else the class its `[metadata]` names, else what
+/// [`gui_class_from_extension`] finds. Reading the parsed metadata first
+/// spares a folder element a second read of its own file.
+pub fn gui_class_of(path: &Path, def: &GuiTomlFile) -> &'static str {
+    compound_extension_class(path)
+        .or_else(|| known_gui_class(&def.metadata.class_name))
+        .unwrap_or_else(|| gui_class_from_extension(path))
 }
 
 /// Map GUI type string to ClassName enum
@@ -810,49 +406,6 @@ pub fn gui_display_name(path: &Path) -> String {
         .to_string()
 }
 
-/// Convert a BillboardGui's 3D length fields from the file's authored unit to
-/// engine-native meters (when `units_v1` is on): the stud offsets and the
-/// distance limits (`max_distance`, `distance_lower_limit`,
-/// `distance_upper_limit`, `distance_step`). Pixel-space UDim2 fields
-/// (`position`, `size`, `anchor_point`, `size_offset`) are 2D canvas
-/// coordinates and are not converted; `extents_offset` /
-/// `extents_offset_world_space` are part-size multipliers (a ratio, not a
-/// length) and are not converted either.
-///
-/// Every path that turns a BillboardGui definition into a marker calls this:
-/// [`spawn_gui_element`], the folder-form spawn in `file_loader`, and the
-/// hot-create in `file_watcher`. A Space imported from Roblox is authored in
-/// feet, so a path that skipped it revealed each label 3.28 times farther
-/// than authored.
-pub fn billboard_lengths_to_native(g: &mut GuiTomlProperties, authored_unit: Option<&str>) {
-    #[cfg(feature = "units_v1")]
-    {
-        let from = authored_unit
-            .and_then(eustress_common::units::Unit::from_symbol)
-            .unwrap_or(eustress_common::units::ENGINE_NATIVE_UNIT);
-        let to = eustress_common::units::ENGINE_NATIVE_UNIT;
-        if from == to {
-            return;
-        }
-        if let Some(v) = g.units_offset {
-            g.units_offset = Some(eustress_common::units::convert_vec3_f32(v, from, to));
-        }
-        if let Some(v) = g.units_offset_world_space {
-            g.units_offset_world_space = Some(eustress_common::units::convert_vec3_f32(v, from, to));
-        }
-        for f in [&mut g.max_distance, &mut g.distance_lower_limit,
-                  &mut g.distance_upper_limit, &mut g.distance_step] {
-            if let Some(v) = *f {
-                *f = Some(eustress_common::units::convert_f32(v, from, to));
-            }
-        }
-    }
-    #[cfg(not(feature = "units_v1"))]
-    {
-        let _ = (g, authored_unit);
-    }
-}
-
 // ============================================================================
 // 3. spawn_gui_element — create Bevy UI entity with rendering components
 // ============================================================================
@@ -866,7 +419,7 @@ pub fn spawn_gui_element(
     path: &Path,
     gui_def: &GuiTomlFile,
 ) -> Entity {
-    let gui_type = gui_class_from_extension(path);
+    let gui_type = gui_class_of(path, gui_def);
     let display_name = if !gui_def.instance.name.is_empty() {
         gui_def.instance.name.clone()
     } else {
@@ -914,33 +467,22 @@ pub fn spawn_gui_element(
         service: "StarterGui".to_string(),
     };
 
+    // What it draws as: the one builder a Player's reader uses too
+    // (`gui_display_for_class`). The remaining media classes (PDF, video,
+    // web, viewport) draw their class name until they render.
+    let display = gui_display_for_class(gui_type, gui_def);
     let entity = match gui_type {
-        "ScreenGui" => spawn_screen_gui_element(commands, instance, loaded_from, &display_name, gui.visible),
-        "TextLabel" => spawn_text_label_element(commands, instance, loaded_from, &display_name, gui, gui_def.text.as_ref()),
-        "TextButton" => spawn_text_button_element(commands, instance, loaded_from, &display_name, gui, gui_def.text.as_ref()),
-        "Frame" => spawn_frame_element(commands, instance, loaded_from, &display_name, gui),
-        "ScrollingFrame" => spawn_scrolling_frame_element(commands, instance, loaded_from, &display_name, gui, gui_def),
-        "TextBox" => spawn_text_box_element(commands, instance, loaded_from, &display_name, gui, gui_def.text.as_ref()),
+        "ScreenGui" => spawn_screen_gui_element(commands, instance, loaded_from, &display_name, display),
+        "TextLabel" => spawn_text_label_element(commands, instance, loaded_from, &display_name, gui, gui_def.text.as_ref(), display),
+        "TextButton" => spawn_text_button_element(commands, instance, loaded_from, &display_name, display),
+        "ScrollingFrame" => spawn_scrolling_frame_element(commands, instance, loaded_from, &display_name, gui, gui_def, display),
+        "TextBox" => spawn_text_box_element(commands, instance, loaded_from, &display_name, display),
         // ImageLabel / ImageButton: render the actual image (source in
         // [asset].path, resolved against the folder) via GuiElementDisplay.image_path.
         "ImageLabel" | "ImageButton" => {
-            spawn_image_element(commands, instance, loaded_from, &display_name, gui, gui_def, path)
+            spawn_image_element(commands, instance, loaded_from, &display_name, gui, gui_def, path, display)
         }
-        // Remaining media classes — placeholder frames with class label until
-        // full media rendering is implemented (PDF, video, web, viewport)
-        "DocumentFrame" | "VideoFrame" | "WebFrame" | "ViewportFrame" => {
-            // Use placeholder text showing the class type
-            let placeholder_text = Some(GuiTomlText {
-                text: format!("[{}]", gui_type),
-                text_color: [0.5, 0.5, 0.5, 0.8],
-                font_size: 12.0,
-                text_x_alignment: "Center".to_string(),
-                text_y_alignment: "Center".to_string(),
-                ..Default::default()
-            });
-            spawn_frame_element_with_text(commands, instance, loaded_from, &display_name, gui, placeholder_text.as_ref())
-        }
-        _ => spawn_frame_element(commands, instance, loaded_from, &display_name, gui),
+        _ => spawn_frame_element(commands, instance, loaded_from, &display_name, display),
     };
 
     // CRITICAL: attach `InstanceFile` so the save_*_changes systems
@@ -1020,7 +562,7 @@ fn spawn_screen_gui_element(
     instance: eustress_common::classes::Instance,
     loaded_from: super::file_loader::LoadedFromFile,
     display_name: &str,
-    visible: bool,
+    display: GuiElementDisplay,
 ) -> Entity {
     // Read the service before `loaded_from` moves into the spawn bundle.
     let is_screen_overlay = loaded_from.service == "StarterGui";
@@ -1049,191 +591,8 @@ fn spawn_screen_gui_element(
     // visible (Enabled = false). The cold-load path attaches this in
     // file_loader.rs; without it here, a ScreenGui made by Insert, the file
     // watcher or the UI Builder painted nothing until the Space reopened.
-    ec.insert(GuiElementDisplay {
-        x: 0.0, y: 0.0, width: 0.0, height: 0.0,
-        position_udim2: [0.0; 4], size_udim2: [0.0; 4],
-        anchor_point: [0.0, 0.0],
-        z_order: 0, visible, clip_children: false,
-        scroll_x: 0.0, scroll_y: 0.0,
-        bg_color: [0.0; 4], border_size: 0.0, border_color: [0.0; 4],
-        corner_radius: 0.0,
-        text: String::new(), text_color: [1.0; 4],
-        font: String::new(),
-        font_size: 14.0, font_weight: 400,
-        text_align: "Center".to_string(), text_y_align: "Center".to_string(),
-        text_stroke_color: [0.0, 0.0, 0.0, 0.0],
-        text_scaled: false,
-        image_path: String::new(),
-        class_type: "screengui".to_string(),
-        mouse_filter: "ignore".to_string(),
-    });
+    ec.insert(display);
     ec.id()
-}
-
-/// Frame — container with background color and optional border
-/// Build a GuiElementDisplay from TOML properties + optional text
-pub fn gui_display_from_props(gui: &GuiTomlProperties, text_props: Option<&GuiTomlText>, class_type: &str) -> GuiElementDisplay {
-    let (text, text_color, font, text_stroke_color, font_size, text_align, text_y_align, font_weight, text_scaled) = if let Some(tp) = text_props {
-        let weight_source = if !tp.font.is_empty() { &tp.font } else { &tp.font_family };
-        (
-            tp.text.clone(),
-            [tp.text_color[0], tp.text_color[1], tp.text_color[2], (1.0 - tp.text_transparency).clamp(0.0, 1.0)],
-            if !tp.font.is_empty() { tp.font.clone() } else { tp.font_family.clone() },
-            [tp.text_stroke_color[0], tp.text_stroke_color[1], tp.text_stroke_color[2], (1.0 - tp.text_stroke_transparency).clamp(0.0, 1.0)],
-            tp.font_size,
-            tp.text_x_alignment.clone(),
-            tp.text_y_alignment.clone(),
-            font_weight_from_name(weight_source),
-            tp.text_scaled,
-        )
-    } else {
-        (String::new(), [1.0, 1.0, 1.0, 1.0], String::new(), [0.0, 0.0, 0.0, 0.0], 14.0, "Center".to_string(), "Center".to_string(), 400, false)
-    };
-
-    // `gui.position` and `gui.size` are `UDim2`. We store the source
-    // 4-tuple AND a best-effort resolved-pixel rect (Offset-only here,
-    // since the parent's pixel extent isn't known at this site).
-    // `collect_subtree` resolves Scale at render time using the parent
-    // billboard's canvas dimensions.
-    GuiElementDisplay {
-        x: gui.position.x.offset,
-        y: gui.position.y.offset,
-        width: gui.size.x.offset.max(1.0),
-        height: gui.size.y.offset.max(1.0),
-        position_udim2: [
-            gui.position.x.scale, gui.position.x.offset,
-            gui.position.y.scale, gui.position.y.offset,
-        ],
-        size_udim2: [
-            gui.size.x.scale, gui.size.x.offset,
-            gui.size.y.scale, gui.size.y.offset,
-        ],
-        anchor_point: gui.anchor_point,
-        z_order: gui.z_index,
-        visible: gui.visible,
-        clip_children: class_type.eq_ignore_ascii_case("scrollingframe"),
-        scroll_x: 0.0,
-        scroll_y: 0.0,
-        bg_color: [
-            gui.background_color[0],
-            gui.background_color[1],
-            gui.background_color[2],
-            (1.0 - gui.resolved_background_transparency()).clamp(0.0, 1.0),
-        ],
-        border_size: gui.border_size,
-        border_color: gui.border_color,
-        corner_radius: gui.corner_radius,
-        text,
-        text_color,
-        font,
-        font_size,
-        font_weight,
-        text_align,
-        text_y_align,
-        text_stroke_color,
-        text_scaled,
-        image_path: String::new(),
-        class_type: class_type.to_string(),
-        mouse_filter: "stop".to_string(),
-    }
-}
-
-/// Build a `BillboardGui` class component from parsed `[gui]` TOML
-/// properties. This is the single mapping from the on-disk schema
-/// (`GuiTomlProperties`) to the typed class — used by the cold-load path
-/// (`file_loader.rs`), the hot-*create* path (`file_watcher.rs`), and the
-/// hot-*modify* path. Centralising it here fixes the bug where an in-place
-/// `_instance.toml` edit (e.g. changing `[gui] size`) updated the file but
-/// not the live quad: the modify handler only re-inserted `Transform` +
-/// material and never refreshed the `BillboardGui` class, so the quad kept
-/// its spawn-time size. Re-inserting the class component this builds fires
-/// `Changed<BillboardGui>` → `sync_billboard_class_to_marker` →
-/// `sync_billboard_properties`, which rebuilds the quad scale, canvas, and
-/// z-bias from the new values. Optional schema fields that are absent leave
-/// the class default in place (older TOMLs that predate a property still
-/// load cleanly).
-pub fn billboard_class_from_props(
-    g: &GuiTomlProperties,
-) -> eustress_common::classes::BillboardGui {
-    let mut bb = eustress_common::classes::BillboardGui::default();
-
-    // Geometry
-    bb.size = g.size;
-    if let Some(v) = g.size_offset { bb.size_offset = v; }
-    if let Some(v) = g.extents_offset { bb.extents_offset = v; }
-    if let Some(v) = g.extents_offset_world_space { bb.extents_offset_world_space = v; }
-    if let Some(v) = g.units_offset { bb.units_offset = v; }
-    if let Some(v) = g.units_offset_world_space { bb.units_offset_world_space = v; }
-
-    // Distance
-    if let Some(v) = g.max_distance { bb.max_distance = v; }
-    if let Some(v) = g.distance_lower_limit { bb.distance_lower_limit = v; }
-    if let Some(v) = g.distance_upper_limit { bb.distance_upper_limit = v; }
-    if let Some(v) = g.distance_step { bb.distance_step = v; }
-
-    // Behaviour flags
-    if let Some(v) = g.active { bb.active = v; }
-    if let Some(v) = g.enabled { bb.enabled = v; }
-    if let Some(v) = g.always_on_top { bb.always_on_top = v; }
-    if let Some(v) = g.clips_descendants { bb.clips_descendants = v; }
-    if let Some(v) = g.reset_on_spawn { bb.reset_on_spawn = v; }
-    if let Some(v) = g.stiffness_by_distance { bb.stiffness_by_distance = v; }
-
-    // Appearance
-    if let Some(v) = g.brightness { bb.brightness = v; }
-    if let Some(v) = g.light_influence { bb.light_influence = v; }
-
-    // Sorting
-    if let Some(ref s) = g.z_index_behavior {
-        bb.z_index_behavior = match s.as_str() {
-            "Global" => eustress_common::classes::ZIndexBehavior::Global,
-            _ => eustress_common::classes::ZIndexBehavior::Sibling,
-        };
-    }
-    bb.z_index = g.z_index;
-
-    bb
-}
-
-/// Build a `SurfaceGui` class component from parsed `[gui]` TOML
-/// properties, as [`billboard_class_from_props`] does for a BillboardGui:
-/// the one mapping from the on-disk schema to the class, used by the
-/// cold-load path (`file_loader.rs`) and by the file watcher's hot create
-/// and hot modify. It reads the `[gui]` keys the SurfaceGui spawner reads
-/// (`spawners::gui_containers::surface_gui`) except the two alignments,
-/// which `GuiTomlProperties` does not carry. Absent fields keep the class
-/// default, so an older TOML loads cleanly. `size` is not read: a SurfaceGui
-/// file has none, and the `[gui]` default is a 100x30 pixel box where the
-/// class default covers the whole face. Nothing is unit-converted; the
-/// canvas is in pixels.
-pub fn surface_class_from_props(
-    g: &GuiTomlProperties,
-) -> eustress_common::classes::SurfaceGui {
-    let mut sg = eustress_common::classes::SurfaceGui::default();
-
-    // Face and canvas
-    if let Some(ref s) = g.face {
-        // The spawner's `normal_id_from_str`: any case, an `Enum.NormalId.`
-        // prefix or Roblox's number; an unknown name is Front.
-        sg.face = eustress_common::classes::NormalId::parse(s).unwrap_or_default();
-    }
-    if let Some(v) = g.canvas_size { sg.canvas_size = v; }
-    if let Some(v) = g.pixels_per_unit { sg.pixels_per_unit = v; }
-
-    // Distance
-    if let Some(v) = g.max_distance { sg.max_distance = v; }
-
-    // Behaviour flags
-    if let Some(v) = g.active { sg.active = v; }
-    if let Some(v) = g.enabled { sg.enabled = v; }
-    if let Some(v) = g.always_on_top { sg.always_on_top = v; }
-    if let Some(v) = g.clips_descendants { sg.clips_descendants = v; }
-
-    // Appearance
-    if let Some(v) = g.brightness { sg.brightness = v; }
-    if let Some(v) = g.light_influence { sg.light_influence = v; }
-
-    sg
 }
 
 fn spawn_frame_element(
@@ -1241,7 +600,7 @@ fn spawn_frame_element(
     instance: eustress_common::classes::Instance,
     loaded_from: super::file_loader::LoadedFromFile,
     display_name: &str,
-    gui: &GuiTomlProperties,
+    display: GuiElementDisplay,
 ) -> Entity {
     let entity = commands.spawn((
         instance,
@@ -1252,32 +611,7 @@ fn spawn_frame_element(
         // Display::None (bevy_ui 0.18 only skips taffy compute, not the
         // per-entity sync + recursion) — ~8K imported GUI elements cost
         // ~9 ms/frame in the editor.
-        gui_display_from_props(gui, None, "Frame"),
-    )).id();
-    commands.entity(entity).insert(loaded_from);
-    entity
-}
-
-/// Frame with optional text overlay (used for media class placeholders)
-fn spawn_frame_element_with_text(
-    commands: &mut Commands,
-    instance: eustress_common::classes::Instance,
-    loaded_from: super::file_loader::LoadedFromFile,
-    display_name: &str,
-    gui: &GuiTomlProperties,
-    text_props: Option<&GuiTomlText>,
-) -> Entity {
-    let class = instance.class_name;
-    // Roblox-parity: class_type stores the PascalCase class identifier
-    // (TextLabel, TextButton, ImageLabel, …). Debug-format already gives
-    // PascalCase since `ClassName` derives `Debug` on its variants, so no
-    // post-processing is needed.
-    let class_str = format!("{:?}", class);
-    let entity = commands.spawn((
-        instance,
-        Name::new(display_name.to_string()),
-        // No bevy_ui Node — see spawn_frame_element PERF note.
-        gui_display_from_props(gui, text_props, &class_str),
+        display,
     )).id();
     commands.entity(entity).insert(loaded_from);
     entity
@@ -1295,8 +629,8 @@ fn spawn_scrolling_frame_element(
     display_name: &str,
     gui: &GuiTomlProperties,
     gui_def: &GuiTomlFile,
+    mut display: GuiElementDisplay,
 ) -> Entity {
-    let mut display = gui_display_from_props(gui, None, "ScrollingFrame");
 
     // Build the typed component from [scrolling]; default-fill the rest.
     let mut sf = eustress_common::classes::ScrollingFrame::default();
@@ -1353,27 +687,14 @@ fn spawn_image_element(
     gui: &GuiTomlProperties,
     gui_def: &GuiTomlFile,
     path: &Path,
+    mut display: GuiElementDisplay,
 ) -> Entity {
     let is_button = matches!(instance.class_name, eustress_common::classes::ClassName::ImageButton);
-    let class_str = if is_button { "ImageButton" } else { "ImageLabel" };
 
     // Image SOURCE: [asset].path first (importer), then [image].image.
-    let rel_image: Option<String> = gui_def
-        .asset
-        .as_ref()
-        .and_then(|a| a.get("path"))
-        .and_then(|p| p.as_str())
-        .map(|s| s.to_string())
-        .or_else(|| {
-            gui_def
-                .image
-                .as_ref()
-                .map(|i| i.image.clone())
-                .filter(|s| !s.is_empty())
-        });
+    let rel_image: Option<String> = gui_image_source(gui_def);
 
     // Resolve the relative path against the GUI folder for slint load.
-    let mut display = gui_display_from_props(gui, None, class_str);
     if let Some(rel) = rel_image.as_ref() {
         if !rel.is_empty() {
             let base = path.parent().unwrap_or(Path::new("."));
@@ -1447,6 +768,7 @@ fn spawn_text_label_element(
     display_name: &str,
     gui: &GuiTomlProperties,
     text_props: Option<&GuiTomlText>,
+    display: GuiElementDisplay,
 ) -> Entity {
     use eustress_common::classes::{TextLabel, Font, TextXAlignment, TextYAlignment};
 
@@ -1517,6 +839,16 @@ fn spawn_text_label_element(
     // looked centered while the class component / panel did not.)
     label.anchor_point = gui.anchor_point;
     label.text_scaled = text_props.map(|t| t.text_scaled).unwrap_or(false);
+    // Wrapping and the stroke, which `sync_textlabel_to_display` copies from
+    // the class onto the display: the class must hold the file's values, or
+    // Studio draws what a Player reading the same file does not.
+    label.text_wrapped = text_props.map(|t| t.text_wrapped).unwrap_or(true);
+    if let Some(t) = text_props {
+        label.text_stroke_color3 = [t.text_stroke_color[0], t.text_stroke_color[1], t.text_stroke_color[2]];
+        label.text_stroke_transparency = t.text_stroke_transparency;
+    }
+    label.active = gui.active.unwrap_or(false);
+    label.clips_descendants = gui.clips_descendants.unwrap_or(false);
     label.visible = gui.visible;
     label.z_index = gui.z_index;
 
@@ -1525,7 +857,7 @@ fn spawn_text_label_element(
         label,
         Name::new(display_name.to_string()),
         TextLabelMarker,
-        gui_display_from_props(gui, text_props, "TextLabel"),
+        display,
     )).id();
     commands.entity(entity).insert(loaded_from);
     entity
@@ -1537,14 +869,13 @@ fn spawn_text_button_element(
     instance: eustress_common::classes::Instance,
     loaded_from: super::file_loader::LoadedFromFile,
     display_name: &str,
-    gui: &GuiTomlProperties,
-    text_props: Option<&GuiTomlText>,
+    display: GuiElementDisplay,
 ) -> Entity {
     let entity = commands.spawn((
         instance,
         Name::new(display_name.to_string()),
         // No bevy_ui Node — see spawn_frame_element PERF note.
-        gui_display_from_props(gui, text_props, "TextButton"),
+        display,
     )).id();
     commands.entity(entity).insert(loaded_from);
     entity
@@ -1556,15 +887,14 @@ fn spawn_text_box_element(
     instance: eustress_common::classes::Instance,
     loaded_from: super::file_loader::LoadedFromFile,
     display_name: &str,
-    gui: &GuiTomlProperties,
-    text_props: Option<&GuiTomlText>,
+    display: GuiElementDisplay,
 ) -> Entity {
     let entity = commands.spawn((
         instance,
         Name::new(display_name.to_string()),
         TextBoxMarker,
         // No bevy_ui Node — see spawn_frame_element PERF note.
-        gui_display_from_props(gui, text_props, "TextBox"),
+        display,
     )).id();
     commands.entity(entity).insert(loaded_from);
     entity

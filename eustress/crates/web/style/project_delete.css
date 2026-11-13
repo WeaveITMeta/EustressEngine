@@ -1,0 +1,47 @@
+/* =============================================================================
+   Delete and restore a published Space (src/pages/project_delete.rs). The dialog reuses the archive
+   dialog's frame (main.css .modal-overlay, .archive-dialog); this sheet adds what it needs on top.
+   ============================================================================= */
+
+.sd-dialog { max-height: calc(100vh - 32px); overflow-y: auto; }
+.sd-dialog h4 { margin: var(--space-md) 0 var(--space-xs); color: var(--color-text-primary); font-size: var(--text-sm); }
+.sd-list { margin: 0; padding-left: var(--space-lg); color: #c9d1d9; }
+.sd-list li { margin-bottom: var(--space-xs); overflow-wrap: anywhere; }
+.sd-form { display: grid; gap: var(--space-sm); margin-top: var(--space-md); }
+.sd-name {
+  display: block;
+  padding: var(--space-sm);
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.05);
+  color: var(--color-text-primary);
+  font-family: var(--font-mono, monospace);
+  overflow-wrap: anywhere;
+  user-select: all;
+}
+.sd-input { width: 100%; min-height: 40px; }
+.sd-code { max-width: 12em; font-family: var(--font-mono, monospace); font-size: 1.25rem; letter-spacing: 0.3em; text-align: center; }
+.sd-hint { margin: 0; color: var(--color-text-secondary); }
+
+/* A problem is a word first ("Problem.", "Not possible now.") and a colour second, so it never depends on colour alone. */
+.sd-problem {
+  margin: var(--space-sm) 0 0;
+  padding: var(--space-sm) var(--space-md);
+  border: 1px solid rgba(248, 81, 73, 0.6);
+  border-left-width: 4px;
+  border-radius: 8px;
+  color: var(--color-text-primary);
+  overflow-wrap: anywhere;
+}
+.sd-problem strong { color: #ff8a80; }
+
+/* The dialog's danger button keeps the archive dialog's size and weight. */
+.archive-dialog .btn-danger { background: var(--color-danger); color: #fff; }
+.archive-dialog .btn:disabled { opacity: 0.5; cursor: not-allowed; }
+.sd-dialog :focus-visible { outline: 2px solid #6cb6ff; outline-offset: 2px; }
+
+/* A deleted Space's card on /projects. */
+.pj-deleted { display: grid; gap: var(--space-sm); margin-top: var(--space-sm); padding: var(--space-sm) var(--space-md); border: 1px solid rgba(248, 81, 73, 0.45); border-left-width: 4px; border-radius: 8px; }
+.pj-deleted p { margin: 0; color: var(--g-text-2, #c9d1d9); }
+.pj-deleted strong { color: var(--g-text, #fff); }
+.pj-status.deleted { color: #ff9892; border-color: rgba(248, 81, 73, 0.45); }

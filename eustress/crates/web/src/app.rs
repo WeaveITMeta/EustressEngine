@@ -90,6 +90,7 @@ use crate::pages::{
     profile::ProfilePage,
     settings::SettingsPage,
     terms::TermsPage,
+    sponsor::SponsorPage,
     tickets::TicketsPage,
     trust_registry::TrustRegistryPage,
     kyc::KycPage,
@@ -324,6 +325,7 @@ pub fn App() -> impl IntoView {
                 <Route path=path!("/bliss") view=BlissPage />
                 <Route path=path!("/bliss/history") view=BlissHistoryPage />
                 <Route path=path!("/tickets") view=TicketsPage />
+                <Route path=path!("/sponsor") view=SponsorPage />
                 <Route path=path!("/bliss-leaderboard") view=BlissLeaderboardPage />
                 <Route path=path!("/download") view=DownloadPage />
                 <Route path=path!("/downloads/player") view=DownloadPlayerPage />

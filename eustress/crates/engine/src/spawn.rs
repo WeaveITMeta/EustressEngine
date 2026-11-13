@@ -813,6 +813,7 @@ pub fn spawn_text_label(
             (1.0 - label.text_stroke_transparency).clamp(0.0, 1.0),
         ],
         text_scaled: label.text_scaled,
+        text_wrapped: label.text_wrapped,
         z_order: label.z_index,
         visible: label.visible,
         clip_children: label.clips_descendants,
@@ -854,6 +855,7 @@ pub fn spawn_text_label(
         image_path: String::new(),
         class_type: "TextLabel".to_string(),
         mouse_filter: "stop".to_string(),
+        active: label.active,
     };
 
     commands.spawn((

@@ -17,16 +17,15 @@
 //!
 //! ## Parts
 //!
-//! A Space opened on this computer spawns its parts straight from its files
-//! (`space_read`). A world that arrived from a host, or as a published
-//! simulation, is opened as a DataModel tree instead
-//! (`tree_read::open_player_world_dir`; the browser Player opens its records
-//! with `open_player_world`), its session begun as Studio's Play begins its
-//! own, and inserted as the session's `PlayDataModel` with its
-//! [`SceneKeys`]; the
-//! Play runtime Studio shares draws it as a replica. The tree is where
-//! replication writes, so the host's changes reach the screen, and each
-//! part is drawn once.
+//! Every Space opens as a DataModel tree (`tree_read::open_player_world_dir`;
+//! the browser Player opens its records with `open_player_world`): a Space on
+//! this computer, a published simulation, and a world that arrived from a
+//! host. Its session begins as Studio's Play begins its own, and the tree is
+//! inserted as the session's `PlayDataModel` with its [`SceneKeys`], for the
+//! Play runtime Studio shares to draw. Played alone, this Player is the
+//! session's Authority and runs it (its scripts, physics and GUIs); joined to
+//! a host, it is a replica, and replication writes the host's changes into
+//! the same tree. Each part is drawn once.
 //!
 //! ## Terrain
 //!
@@ -60,7 +59,7 @@ use bevy::platform::time::Instant;
 use bevy::prelude::*;
 use bevy::tasks::{block_on, poll_once, AsyncComputeTaskPool, Task};
 use eustress_common::datamodel::{is_base_part, DataModel};
-use eustress_common::space_read::{read_space_parts, spawn_space_parts, SpawnedFromSpace};
+use eustress_common::space_read::SpawnedFromSpace;
 use eustress_common::play_session::{FromTree, PlayAssetRoot, PlayDataModel};
 use eustress_play_runtime::material_registry::{register_space_materials, MaterialRegistry};
 
@@ -152,12 +151,12 @@ struct InFlightVoxelBuild {
 
 /// Where an opening Space's parts come from.
 enum PartSource<'a> {
-    /// Spawned straight from its files: a Space on this computer.
-    Files,
-    /// Its DataModel tree, which replication writes into and the shared Play
-    /// runtime draws: a world that arrived from a host or as a published
-    /// simulation.
-    Tree { player_name: &'a str },
+    /// Its DataModel tree, which the shared Play runtime draws (and, when
+    /// joined, replication writes into). `solo`: nobody hosts it (a Space on
+    /// this computer, or a published simulation played alone), so this Player
+    /// gives its own player the containers a host would
+    /// (`play_session::give_player_containers`).
+    Tree { player_name: &'a str, solo: bool },
 }
 
 /// What opening a Space needs to replace the world's terrain with its own.
@@ -263,9 +262,13 @@ fn open_local_space(
         info!("space: none found — keeping the built-in demo scene");
         return;
     };
+    // Played as Studio's Play plays it: the Space's tree, its scripts, its
+    // GUIs and its custom meshes, with this Player as the session's Authority.
+    // Spawning parts straight from the files drew no GUI, ran no script and
+    // drew every custom mesh as a block.
     let parts = open_space_at(
         &root,
-        PartSource::Files,
+        PartSource::Tree { player_name: "Player", solo: true },
         &mut commands,
         &mut meshes,
         &mut materials,
@@ -308,8 +311,12 @@ fn open_requested_space(
     }
     let network = live.is_some();
     let source = match live {
-        Some(_) => PartSource::Tree { player_name: join.as_deref().map_or("Player", |j| j.name.as_str()) },
-        None => PartSource::Files,
+        Some(_) => PartSource::Tree {
+            player_name: join.as_deref().map_or("Player", |j| j.name.as_str()),
+            solo: join.is_none(),
+        },
+        // A Space on this computer: played alone, as its Authority.
+        None => PartSource::Tree { player_name: "Player", solo: true },
     };
     let parts =
         open_space_at(&request.root, source, &mut commands, &mut meshes, &mut materials, &mut open, &mut terrain);
@@ -345,7 +352,6 @@ fn open_space_at(
     terrain: &mut SpaceTerrainAccess<'_, '_>,
 ) -> Option<usize> {
     let root = root.to_path_buf();
-    let from_tree = matches!(source, PartSource::Tree { .. });
     // The Space's character policy (its replacement bodies and StarterPlayer
     // switches), in place before the avatar spawns; it replaces the last
     // Space's, so each world starts from its own.
@@ -361,39 +367,13 @@ fn open_space_at(
         world.get_resource_or_insert_with(eustress_common::services::workspace::Workspace::default).gravity = gravity;
     });
     let (spawned, skipped, spawn, errors) = match source {
-        PartSource::Files => {
-            let geo = match read_space_parts(&root) {
-                Ok(g) => g,
-                Err(e) => {
-                    // Loud, not silent: a Space that fails to open is the
-                    // difference between testing the course and testing an
-                    // empty plane.
-                    error!("space: {} failed to open — {e}", root.display());
-                    return None;
-                }
-            };
-            for err in &geo.errors {
-                warn!("space: {err}");
-            }
-            if !geo.skipped.is_empty() {
-                // Reported by class so "the course looks wrong" has an answer
-                // that is not "read the loader".
-                warn!("space: skipped non-Part content: {:?}", geo.skipped);
-            }
-            let boxed = geo.custom_mesh_parts();
-            if boxed > 0 {
-                warn!("space: {boxed} parts use custom meshes, drawn as blocks at their size");
-            }
-            let spawned = spawn_space_parts(commands, meshes, materials, &geo);
-            (spawned, geo.skipped_total(), geo.spawn_point(), geo.errors.len())
-        }
-        PartSource::Tree { player_name } => {
+        PartSource::Tree { player_name, solo } => {
             // The tree with its session begun as Studio's Play begins its
             // own: the local Player (which replication maps the host's
             // Player for this peer onto), the Space's camera, gravity and
             // CharacterAutoLoads. The browser Player opens its records the
             // same way.
-            let world = match eustress_common::tree_read::open_player_world_dir(&root, player_name) {
+            let mut world = match eustress_common::tree_read::open_player_world_dir(&root, player_name) {
                 Ok(world) => world,
                 Err(e) => {
                     error!("space: {} failed to open — {e}", root.display());
@@ -403,6 +383,13 @@ fn open_space_at(
             info!("space: {} read into its tree: {}", root.display(), world.report.summary());
             for problem in &world.report.problems {
                 warn!("space: {problem}");
+            }
+            // Played alone, nobody hosts: this Player gives its player the
+            // Backpack, PlayerScripts and the PlayerGui filled from StarterGui
+            // that a host gives each player who joins. Joined, the host's
+            // copies arrive through replication instead.
+            if solo {
+                eustress_common::play_session::give_player_containers(&mut world.dm, world.local_player);
             }
             let parts = tree_parts(&world.dm);
             let shared = eustress_common::datamodel::new_shared();
@@ -419,12 +406,10 @@ fn open_space_at(
     // PointLight / SpotLight / SurfaceLight / DirectionalLight instances,
     // placed as Studio places them; the shared `light_classes` plugin lights
     // them exactly as Studio does. They clear with the parts. A tree's draw
-    // step spawns its Point, Spot and Surface lights itself, so from files a
-    // tree takes only its Directional lights.
+    // step spawns its Point, Spot and Surface lights itself, so from the files
+    // it takes only its Directional lights.
     let (mut lights, light_problems) = eustress_common::plugins::light_classes::read_space_lights(&root);
-    if from_tree {
-        lights.retain(|l| matches!(l.component, eustress_common::plugins::light_classes::LightComponent::Directional(_)));
-    }
+    lights.retain(|l| matches!(l.component, eustress_common::plugins::light_classes::LightComponent::Directional(_)));
     for problem in &light_problems {
         warn!("space: light {problem}");
     }

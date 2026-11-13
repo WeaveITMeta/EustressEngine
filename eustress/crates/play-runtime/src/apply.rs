@@ -14,6 +14,7 @@ use eustress_common::avatar::control::AvatarScriptControl;
 use eustress_common::avatar::spawn::AvatarBody;
 use eustress_common::classes::{
     BasePart, BillboardGui, ClassName, Instance, Material, Part, PartType, PropertyValue, Sound, SoundRolloffMode,
+    SurfaceGui,
 };
 use eustress_common::services::sound::{SoundInPlay, SoundSeek};
 use eustress_common::datamodel::{
@@ -47,13 +48,14 @@ pub struct ScriptRootWrite {
 /// humanoids, scripts) lives in the tree only; the systems that need them
 /// read the tree. The Terrain is a BasePart, but the terrain root draws and
 /// collides it. A Sound's entity is what the Sound player plays; one in a
-/// part or an Attachment is heard from there.
+/// part or an Attachment is heard from there. A SurfaceGui's entity is what
+/// its GUI children are painted onto, on a face of its part.
 fn spawns_entity(class: &str) -> bool {
     (is_base_part(class) && class != "Terrain")
         || matches!(
             class,
-            "Model" | "Folder" | "Configuration" | "Actor" | "ScreenGui" | "BillboardGui" | "PointLight" | "SpotLight" | "SurfaceLight"
-                | "Sound"
+            "Model" | "Folder" | "Configuration" | "Actor" | "ScreenGui" | "BillboardGui" | "SurfaceGui" | "PointLight"
+                | "SpotLight" | "SurfaceLight" | "Sound"
         )
         || (is_gui_object(class) && class != "ViewportFrame")
 }
@@ -631,7 +633,11 @@ fn spawn_instance(
         let can_query = get("CanQuery").and_then(DmValue::as_bool).unwrap_or(true);
         let physical = can_collide || can_touch || can_query;
         if physical {
-            ec.insert((collider, body_for(anchored, role), CollisionEventsEnabled));
+            // A part outside the world (a template in ServerStorage or
+            // ReplicatedStorage) holds still: with its collider off, a
+            // Dynamic body would fall forever, and its falling CFrame would
+            // reach the tree and every Clone() of it.
+            ec.insert((collider, body_for(anchored || !visible, role), CollisionEventsEnabled));
             if let Some((friction, restitution)) = src_contact {
                 if let Some(f) = friction {
                     ec.insert(f);
@@ -646,7 +652,7 @@ fn spawn_instance(
             if !visible {
                 ec.insert((ColliderDisabled, DetachedByScript));
             }
-            if !anchored && role == PlayRole::Authority {
+            if !anchored && visible && role == PlayRole::Authority {
                 ec.insert(eustress_common::play_session::PlayModePhysicsActivated);
             }
         } else if !visible {
@@ -665,9 +671,10 @@ fn spawn_instance(
             .and_then(|s| world.get::<GuiElementDisplay>(s).cloned())
             .unwrap_or_else(|| blank_display(&class));
         display.class_type = class.clone();
-        // Roblox only lets buttons (and Active objects) sink clicks; a label
-        // over the world must not swallow the mouse.
-        display.mouse_filter = if matches!(class.as_str(), "TextButton" | "ImageButton") {
+        // Roblox only lets buttons, text boxes (and Active objects) sink
+        // clicks; a label over the world must not swallow the mouse. A TextBox
+        // must take the click, or it can never be given the keyboard.
+        display.mouse_filter = if matches!(class.as_str(), "TextButton" | "ImageButton" | "TextBox") {
             "stop".into()
         } else {
             "ignore".into()
@@ -703,6 +710,31 @@ fn spawn_instance(
             Instance { name: name.clone(), class_name: ClassName::BillboardGui, archivable: true, id: 0, uuid: String::new(), ai: false },
             bb,
             BillboardGuiMarker::default(),
+            Name::new(name.clone()),
+            DataModelSpawned,
+        ));
+        if !visible {
+            ec.insert(DetachedByScript);
+        }
+        ec.id()
+    } else if class == "SurfaceGui" {
+        // The class component is all the SurfaceGui systems need
+        // (`billboards::place_surface_guis`): they give it its texture and
+        // quad, lay it over its part's face, and paint its GUI children (a
+        // TextLabel under it gets `ChildOf` to this entity) into the texture.
+        // One that is not a part's own draws nothing.
+        let mut sg = clone_src.and_then(|s| world.get::<SurfaceGui>(s).cloned()).unwrap_or_default();
+        for (k, v) in props.iter() {
+            apply_surface_prop(&mut sg, k, v);
+        }
+        if !visible {
+            sg.enabled = false;
+        }
+        let mut ec = world.spawn((
+            Transform::IDENTITY,
+            Visibility::Inherited,
+            Instance { name: name.clone(), class_name: ClassName::SurfaceGui, archivable: true, id: 0, uuid: String::new(), ai: false },
+            sg,
             Name::new(name.clone()),
             DataModelSpawned,
         ));
@@ -844,9 +876,10 @@ fn relink(world: &mut World, dm: &eustress_common::datamodel::SharedDataModel, i
                 .map_or(false, |c| matches!(c, "Workspace" | "Players" | "Lighting"));
         let is_part = g.get(id).map_or(false, |i| is_base_part(&i.class_name));
         let cf = g.get(id).and_then(|i| i.cframe());
-        // A billboard follows its Adornee, and is hidden through `Enabled`:
-        // the billboard systems rewrite its `Visibility` from that every frame.
-        let billboard = g.get(id).map_or(false, |i| i.class_name == "BillboardGui");
+        // A billboard follows its Adornee, and a billboard or a SurfaceGui is
+        // hidden through `Enabled`: their systems rewrite its `Visibility`
+        // from that every frame.
+        let billboard = g.get(id).map_or(false, |i| matches!(i.class_name.as_str(), "BillboardGui" | "SurfaceGui"));
         let class = g.class_of(id).unwrap_or_default();
         let parent = ecs_parent(&g, id, class, role);
         let billboard_enabled =
@@ -884,17 +917,34 @@ fn relink(world: &mut World, dm: &eustress_common::datamodel::SharedDataModel, i
             if let Some(mut v) = ec.get_mut::<Visibility>() {
                 *v = Visibility::Inherited;
             }
+            // Parented into the world: the body its Anchored says.
+            if ec.contains::<RigidBody>() {
+                let anchored = ec.get::<BasePart>().map_or(true, |bp| bp.anchored);
+                ec.insert(body_for(anchored, role));
+                if !anchored && role == PlayRole::Authority {
+                    ec.insert(eustress_common::play_session::PlayModePhysicsActivated);
+                }
+            }
         }
     } else if !ec.contains::<DetachedByScript>() {
         ec.insert((DetachedByScript, ColliderDisabled));
         if let Some(mut v) = ec.get_mut::<Visibility>() {
             *v = Visibility::Hidden;
         }
+        // Out of the world it holds still, as a stored part spawns.
+        if ec.contains::<RigidBody>() {
+            ec.insert(RigidBody::Static);
+        }
     }
     if let Some(want) = billboard_enabled {
         if let Some(mut bb) = ec.get_mut::<BillboardGui>() {
             if bb.enabled != want {
                 bb.enabled = want;
+            }
+        }
+        if let Some(mut sg) = ec.get_mut::<SurfaceGui>() {
+            if sg.enabled != want {
+                sg.enabled = want;
             }
         }
     }
@@ -1125,6 +1175,19 @@ fn apply_props(
                     let known = apply_sound_field(&mut s, &name, &v);
                     if known && name == "TimePosition" {
                         seek = Some(s.time_position);
+                    }
+                    known
+                }
+                None => false,
+            }
+        } else if class == "SurfaceGui" {
+            // A SurfaceGui out of the world stays off whatever `Enabled` says.
+            let detached = world.get::<DetachedByScript>(entity).is_some();
+            match world.get_mut::<SurfaceGui>(entity) {
+                Some(mut sg) => {
+                    let known = apply_surface_prop(&mut sg, &name, &v);
+                    if detached && sg.enabled {
+                        sg.enabled = false;
                     }
                     known
                 }
@@ -1397,10 +1460,12 @@ fn apply_part_prop(world: &mut World, e: Entity, parent: Option<Entity>, name: &
             // The body type follows: an anchored part stops simulating (a
             // dying zombie a script tweens), an unanchored one starts (on a
             // replica it stays kinematic: the host simulates).
+            // A part out of the world stays Static until it is parented in.
             if world.get::<RigidBody>(e).is_some() {
+                let detached = world.get::<DetachedByScript>(e).is_some();
                 let mut ec = world.entity_mut(e);
-                ec.insert(body_for(b, role));
-                if !b && role == PlayRole::Authority {
+                ec.insert(body_for(b || detached, role));
+                if !b && !detached && role == PlayRole::Authority {
                     ec.insert(eustress_common::play_session::PlayModePhysicsActivated);
                 }
             }
@@ -1496,7 +1561,8 @@ fn apply_part_prop(world: &mut World, e: Entity, parent: Option<Entity>, name: &
     }
 }
 
-/// An empty display component for a GUI class.
+/// An empty display component for a GUI class: not wrapping and not
+/// Active, as the class defaults are.
 fn blank_display(class: &str) -> GuiElementDisplay {
     GuiElementDisplay {
         x: 0.0,
@@ -1524,9 +1590,11 @@ fn blank_display(class: &str) -> GuiElementDisplay {
         text_y_align: "Center".into(),
         text_stroke_color: [0.0, 0.0, 0.0, 0.0],
         text_scaled: false,
+        text_wrapped: false,
         image_path: String::new(),
         class_type: class.to_string(),
         mouse_filter: "ignore".into(),
+        active: false,
     }
 }
 
@@ -1610,8 +1678,76 @@ fn apply_billboard_prop(bb: &mut BillboardGui, name: &str, v: &DmValue) -> bool 
                 bb.light_influence = l.clamp(0.0, 1.0);
             }
         }
+        "StiffnessByDistance" => bb.stiffness_by_distance = v.as_bool().unwrap_or(false),
+        "ZIndexBehavior" => bb.z_index_behavior = z_index_behavior(v),
+        // The billboard's depth bias, as Studio's loader reads `[gui] z_index`.
+        "ZIndex" => {
+            if let Some(z) = num(v) {
+                bb.z_index = if z.is_finite() { z.clamp(-100_000.0, 100_000.0) as i32 } else { 0 };
+            }
+        }
         // `Adornee` re-parents (see `apply_props`); the rest have no effect here.
-        "Adornee" | "ZIndexBehavior" | "Name" => {}
+        "Adornee" | "Name" => {}
+        _ => return false,
+    }
+    true
+}
+
+/// A `ZIndexBehavior` item, by name; anything but `Global` is `Sibling`.
+fn z_index_behavior(v: &DmValue) -> eustress_common::classes::ZIndexBehavior {
+    match v.as_enum_name() {
+        Some("Global") => eustress_common::classes::ZIndexBehavior::Global,
+        _ => eustress_common::classes::ZIndexBehavior::Sibling,
+    }
+}
+
+/// One SurfaceGui property onto its class component, which the SurfaceGui
+/// systems (`billboards::place_surface_guis`) place, show and paint from.
+/// `Face` takes a `NormalId` item, its name or Roblox's number.
+fn apply_surface_prop(sg: &mut SurfaceGui, name: &str, v: &DmValue) -> bool {
+    match name {
+        "Enabled" => sg.enabled = v.as_bool().unwrap_or(true),
+        "Active" => sg.active = v.as_bool().unwrap_or(true),
+        "AlwaysOnTop" => sg.always_on_top = v.as_bool().unwrap_or(false),
+        "ClipsDescendants" => sg.clips_descendants = v.as_bool().unwrap_or(false),
+        "Face" => {
+            let face = match v {
+                DmValue::Enum(e) => eustress_common::classes::NormalId::parse(&e.name),
+                DmValue::String(s) => eustress_common::classes::NormalId::parse(s),
+                DmValue::Number(n) => eustress_common::classes::NormalId::parse(&(*n as i64).to_string()),
+                _ => None,
+            };
+            sg.face = face.unwrap_or_default();
+        }
+        "CanvasSize" => {
+            if let DmValue::Vector2(s) = v {
+                let side = |x: f64| if x.is_finite() { (x as f32).clamp(1.0, 16_384.0) } else { 1.0 };
+                sg.canvas_size = [side(s.x), side(s.y)];
+            }
+        }
+        "PixelsPerUnit" => {
+            if let Some(p) = num(v) {
+                sg.pixels_per_unit = if p.is_finite() { p.max(0.0) } else { 0.0 };
+            }
+        }
+        // Roblox's MaxDistance defaults to infinity; 0 is "no limit" here.
+        "MaxDistance" => {
+            if let Some(d) = num(v) {
+                sg.max_distance = if d.is_finite() { d.max(0.0) } else { 0.0 };
+            }
+        }
+        "Brightness" => {
+            if let Some(b) = num(v) {
+                sg.brightness = b.max(0.0);
+            }
+        }
+        "LightInfluence" => {
+            if let Some(l) = num(v) {
+                sg.light_influence = l.clamp(0.0, 1.0);
+            }
+        }
+        "ZIndexBehavior" => sg.z_index_behavior = z_index_behavior(v),
+        "Adornee" | "Name" => {}
         _ => return false,
     }
     true
@@ -1684,19 +1820,29 @@ fn apply_gui_prop(d: &mut GuiElementDisplay, class: &str, name: &str, v: &DmValu
         "TextStrokeTransparency" => d.text_stroke_color[3] = 1.0 - num(v).unwrap_or(1.0).clamp(0.0, 1.0),
         "TextSize" => d.font_size = sane(num(v).unwrap_or(14.0), 512.0).max(1.0),
         "TextScaled" => d.text_scaled = v.as_bool().unwrap_or(false),
+        "TextWrapped" => d.text_wrapped = v.as_bool().unwrap_or(false),
         "Font" => {
             if let Some(f) = v.as_enum_name() {
                 d.font = f.to_string();
-                d.font_weight = if f.contains("Bold") || f.contains("Black") || f.contains("Heavy") { 700 } else { 400 };
+                // The weight Studio's loader gives the same name.
+                d.font_weight = eustress_common::gui::gui_record::font_weight_from_name(f);
+            }
+        }
+        "CornerRadius" => d.corner_radius = sane(num(v).unwrap_or(0.0), 100_000.0).max(0.0),
+        "CanvasPosition" => {
+            if let DmValue::Vector2(p) = v {
+                d.scroll_x = sane(p.x as f32, 1_000_000.0);
+                d.scroll_y = sane(p.y as f32, 1_000_000.0);
             }
         }
         "TextXAlignment" => d.text_align = v.as_enum_name().unwrap_or("Center").to_string(),
         "TextYAlignment" => d.text_y_align = v.as_enum_name().unwrap_or("Center").to_string(),
         "Image" => d.image_path = v.as_str().unwrap_or("").to_string(),
         "Active" => {
-            if v.as_bool().unwrap_or(false) {
+            d.active = v.as_bool().unwrap_or(false);
+            if d.active {
                 d.mouse_filter = "stop".into();
-            } else if !matches!(class, "TextButton" | "ImageButton") {
+            } else if !matches!(class, "TextButton" | "ImageButton" | "TextBox") {
                 d.mouse_filter = "ignore".into();
             }
         }
@@ -1876,5 +2022,83 @@ mod tests {
         shared.lock().destroy(mesh);
         app.update();
         assert!(app.world().get::<DataMeshLook>(e).is_none(), "without its SpecialMesh the wheel draws its own shape");
+    }
+    fn authority_app(shared: &eustress_common::datamodel::SharedDataModel) -> App {
+        let mut app = App::new();
+        app.add_plugins((MinimalPlugins, AssetPlugin::default()));
+        app.init_asset::<Mesh>().init_asset::<StandardMaterial>();
+        app.insert_resource(PlayDataModel { dm: shared.clone() }).insert_resource(PlayRole::Authority);
+        app.add_systems(Update, apply_frame);
+        app
+    }
+
+    /// A SurfaceGui in the tree gets an entity under its part, carrying the
+    /// class its properties say, and its GUI children hang under it, which
+    /// is where the SurfaceGui systems paint them from. A later write reaches
+    /// its class.
+    #[test]
+    fn a_surface_gui_gets_an_entity_on_its_part() {
+        use eustress_common::classes::NormalId;
+        use eustress_common::datamodel::EnumItem;
+        let mut dm = DataModel::new();
+        let ws = dm.get_service("Workspace").unwrap();
+        let part = loose_part(&mut dm, ws, [0.0, 2.0, 0.0]);
+        let gui = dm.create("SurfaceGui");
+        dm.set_prop(gui, "Face", DmValue::Enum(EnumItem::new("NormalId", "Top"))).unwrap();
+        dm.set_prop(gui, "CanvasSize", DmValue::Vector2(eustress_common::scripting::Vector2::new(400.0, 200.0))).unwrap();
+        dm.set_parent(gui, Some(part)).unwrap();
+        let label = dm.create("TextLabel");
+        dm.set_prop(label, "Text", DmValue::String("Station 1".into())).unwrap();
+        dm.set_parent(label, Some(gui)).unwrap();
+
+        let shared: eustress_common::datamodel::SharedDataModel = std::sync::Arc::new(parking_lot::Mutex::new(dm));
+        let mut app = authority_app(&shared);
+        app.update();
+
+        let gui_e = entity(&shared, gui).expect("a SurfaceGui gets an entity");
+        let part_e = entity(&shared, part).expect("its part is drawn");
+        let w = app.world();
+        let class = w.get::<SurfaceGui>(gui_e).expect("it carries the SurfaceGui class");
+        assert_eq!(class.face, NormalId::Top);
+        assert_eq!(class.canvas_size, [400.0, 200.0]);
+        assert_eq!(w.get::<ChildOf>(gui_e).map(|c| c.parent()), Some(part_e), "it hangs under its part");
+        let label_e = entity(&shared, label).expect("its label is drawn");
+        assert_eq!(w.get::<ChildOf>(label_e).map(|c| c.parent()), Some(gui_e), "its label hangs under it");
+        assert_eq!(w.get::<GuiElementDisplay>(label_e).map(|d| d.text.as_str()), Some("Station 1"));
+
+        shared.lock().set_prop(gui, "Enabled", DmValue::Bool(false)).unwrap();
+        app.update();
+        assert!(!app.world().get::<SurfaceGui>(gui_e).unwrap().enabled, "a write reaches its class");
+    }
+
+    /// An unanchored part stored outside the world (ServerStorage) spawns
+    /// Static under Authority, so it never falls with its collider off; it
+    /// simulates once parented into Workspace, and holds still again when it
+    /// leaves.
+    #[test]
+    fn a_stored_part_holds_still_until_it_enters_the_world() {
+        let mut dm = DataModel::new();
+        let storage = dm.get_service("ServerStorage").unwrap();
+        let ws = dm.get_service("Workspace").unwrap();
+        let part = dm.create("Part");
+        dm.set_prop(part, "Anchored", DmValue::Bool(false)).unwrap();
+        dm.set_prop(part, "CFrame", DmValue::CFrame(CFrame::new(0.0, 10.0, 0.0))).unwrap();
+        dm.set_parent(part, Some(storage)).unwrap();
+
+        let shared: eustress_common::datamodel::SharedDataModel = std::sync::Arc::new(parking_lot::Mutex::new(dm));
+        let mut app = authority_app(&shared);
+        app.update();
+        let e = entity(&shared, part).expect("a stored part has an entity");
+        assert_eq!(app.world().get::<RigidBody>(e), Some(&RigidBody::Static), "a stored part holds still");
+        assert!(app.world().get::<ColliderDisabled>(e).is_some());
+
+        shared.lock().set_parent(part, Some(ws)).unwrap();
+        app.update();
+        assert_eq!(app.world().get::<RigidBody>(e), Some(&RigidBody::Dynamic), "in the world it simulates");
+        assert!(app.world().get::<ColliderDisabled>(e).is_none());
+
+        shared.lock().set_parent(part, Some(storage)).unwrap();
+        app.update();
+        assert_eq!(app.world().get::<RigidBody>(e), Some(&RigidBody::Static), "out of the world it holds still again");
     }
 }

@@ -306,9 +306,11 @@ fn make_display(frame: &ScrollingFrame) -> GuiElementDisplay {
         text_y_align: "Center".to_string(),
         text_stroke_color: [0.0, 0.0, 0.0, 0.0],
         text_scaled: false,
+        text_wrapped: true,
         image_path: String::new(),
         class_type: "ScrollingFrame".to_string(),
         mouse_filter: "stop".to_string(),
+        active: false,
     }
 }
 

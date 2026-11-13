@@ -49,7 +49,39 @@ impl ToolHandler for QueryMaterialTool {
         // the table below in lock-step. The engine's own PBR path is
         // still the canonical source for runtime rendering; this copy
         // exists only for tool introspection.
-        let (roughness, metallic, reflectance, description) = pbr_entry(material_name);
+        //
+        // The lookup is case-insensitive (`gold` finds `Gold`). A name with no
+        // appearance entry used to fall through to the Plastic row with
+        // `success: true`, so `gold` in the wrong case reported `metallic: 0`
+        // and was indistinguishable from a real match. A name with neither an
+        // appearance entry nor a mechanical preset is now a failure that lists
+        // the known presets; one with only a mechanical preset (`Steel`,
+        // `Rubber`) reports the mechanical data and no appearance numbers.
+        let pbr = pbr_entry(material_name);
+        let mech_known = eustress_common::realism::materials::properties::MaterialProperties
+            ::from_name(material_name)
+            .is_some();
+        if pbr.is_none() && !mech_known {
+            return ToolResult {
+                tool_name: "query_material".to_string(),
+                tool_use_id: String::new(),
+                success: false,
+                content: format!(
+                    "Unknown material preset '{}'. Known presets: {}",
+                    material_name,
+                    KNOWN_MATERIALS.join(", "),
+                ),
+                structured_data: Some(serde_json::json!({
+                    "material": material_name,
+                    "known_presets": KNOWN_MATERIALS,
+                })),
+                stream_topic: None,
+            };
+        }
+        let (roughness, metallic, reflectance, description) = match pbr {
+            Some((r, m, f, d)) => (Some(r), Some(m), Some(f), d),
+            None => (None, None, None, "no appearance entry for this name"),
+        };
         // Round to 3 decimals before JSON emission. The table stores
         // f32 (cheap, close to the rendering path's precision), but
         // serde_json promotes f32 → f64 literally, so `0.3_f32`
@@ -57,9 +89,10 @@ impl ToolHandler for QueryMaterialTool {
         // response. Rounding collapses the ULP noise into the
         // human-readable value while preserving enough resolution for
         // downstream math.
-        let r = ((roughness    as f64) * 1000.0).round() / 1000.0;
-        let m = ((metallic     as f64) * 1000.0).round() / 1000.0;
-        let f = ((reflectance  as f64) * 1000.0).round() / 1000.0;
+        let round3 = |v: f32| ((v as f64) * 1000.0).round() / 1000.0;
+        let r = roughness.map(round3);
+        let m = metallic.map(round3);
+        let f = reflectance.map(round3);
 
         // Mechanical constants come from the SAME lookup the engine uses to
         // give a deformable part its physics, so what an agent is told here is
@@ -101,10 +134,13 @@ impl ToolHandler for QueryMaterialTool {
             tool_name: "query_material".to_string(),
             tool_use_id: String::new(),
             success: true,
-            content: format!(
-                "{}: roughness={:.2}, metallic={:.2}, reflectance={:.2} — {}{}",
-                material_name, roughness, metallic, reflectance, description, mech_text
-            ),
+            content: match (roughness, metallic, reflectance) {
+                (Some(ro), Some(me), Some(re)) => format!(
+                    "{}: roughness={:.2}, metallic={:.2}, reflectance={:.2} — {}{}",
+                    material_name, ro, me, re, description, mech_text
+                ),
+                _ => format!("{}: {}{}", material_name, description, mech_text),
+            },
             structured_data: Some(serde_json::json!({
                 "material": material_name,
                 "roughness": r,
@@ -121,36 +157,42 @@ impl ToolHandler for QueryMaterialTool {
 
 /// PBR material table — lookup mirroring
 /// `eustress_common::classes::Material::pbr_params`. Kept inline here
-/// so the shared `eustress-tools` crate stays Bevy-free. Unknown
-/// material names fall back to Plastic defaults rather than erroring —
-/// the LLM can still produce a useful tool result.
-fn pbr_entry(name: &str) -> (f32, f32, f32, &'static str) {
-    match name {
-        "Plastic"        => (0.80, 0.00, 0.50, "Standard ABS-like plastic, matte finish"),
-        "SmoothPlastic"  => (0.40, 0.00, 0.50, "Polished plastic, slight gloss"),
-        "Wood"           => (0.80, 0.00, 0.30, "Natural wood grain, warm tone"),
-        "WoodPlanks"     => (0.85, 0.00, 0.30, "Plank-patterned wood, rustic"),
-        "Metal"          => (0.30, 1.00, 0.70, "Brushed steel, high reflectance"),
-        "CorrodedMetal"  => (0.70, 0.80, 0.50, "Oxidized metal, rough pitted surface"),
-        "DiamondPlate"   => (0.50, 1.00, 0.60, "Textured anti-slip metal plate"),
-        "Foil"           => (0.10, 1.00, 0.90, "Mirror-polished metallic foil"),
-        "Grass"          => (1.00, 0.00, 0.20, "Natural grass, high roughness"),
-        "Concrete"       => (0.95, 0.00, 0.30, "Poured concrete, very rough"),
-        "Brick"          => (0.90, 0.00, 0.30, "Clay brick, rough textured"),
-        "Granite"        => (0.40, 0.00, 0.40, "Polished granite stone"),
-        "Marble"         => (0.20, 0.00, 0.50, "Smooth marble, slight veining"),
-        "Slate"          => (0.70, 0.00, 0.30, "Layered slate rock"),
-        "Sand"           => (1.00, 0.00, 0.20, "Loose sand, maximum roughness"),
-        "Fabric"         => (1.00, 0.00, 0.20, "Woven textile, diffuse scatter"),
-        "Glass"          => (0.05, 0.00, 0.80, "Transparent glass, specular transmission, IOR 1.5"),
-        "Neon"           => (0.30, 0.00, 0.50, "Self-illuminating, emissive glow"),
-        "Ice"            => (0.10, 0.00, 0.60, "Translucent ice, very smooth"),
-        "Gold"           => (0.15, 1.00, 0.95, "Pure gold, highly reflective, dense 19300 kg/m³"),
-        "Silver"         => (0.10, 1.00, 0.97, "Polished silver, highest reflectance of any metal"),
-        "Bronze"         => (0.35, 0.90, 0.70, "Copper-tin alloy, warm patina, medium roughness"),
-        _                => (0.80, 0.00, 0.50, "Standard ABS-like plastic, matte finish"),
-    }
+/// so the shared `eustress-tools` crate stays Bevy-free. Case-insensitive.
+/// `None` for a name with no appearance entry; the caller decides how to
+/// report that.
+fn pbr_entry(name: &str) -> Option<(f32, f32, f32, &'static str)> {
+    Some(match name.to_ascii_lowercase().as_str() {
+        "plastic"        => (0.80, 0.00, 0.50, "Standard ABS-like plastic, matte finish"),
+        "smoothplastic"  => (0.40, 0.00, 0.50, "Polished plastic, slight gloss"),
+        "wood"           => (0.80, 0.00, 0.30, "Natural wood grain, warm tone"),
+        "woodplanks"     => (0.85, 0.00, 0.30, "Plank-patterned wood, rustic"),
+        "metal"          => (0.30, 1.00, 0.70, "Brushed steel, high reflectance"),
+        "corrodedmetal"  => (0.70, 0.80, 0.50, "Oxidized metal, rough pitted surface"),
+        "diamondplate"   => (0.50, 1.00, 0.60, "Textured anti-slip metal plate"),
+        "foil"           => (0.10, 1.00, 0.90, "Mirror-polished metallic foil"),
+        "grass"          => (1.00, 0.00, 0.20, "Natural grass, high roughness"),
+        "concrete"       => (0.95, 0.00, 0.30, "Poured concrete, very rough"),
+        "brick"          => (0.90, 0.00, 0.30, "Clay brick, rough textured"),
+        "granite"        => (0.40, 0.00, 0.40, "Polished granite stone"),
+        "marble"         => (0.20, 0.00, 0.50, "Smooth marble, slight veining"),
+        "slate"          => (0.70, 0.00, 0.30, "Layered slate rock"),
+        "sand"           => (1.00, 0.00, 0.20, "Loose sand, maximum roughness"),
+        "fabric"         => (1.00, 0.00, 0.20, "Woven textile, diffuse scatter"),
+        "glass"          => (0.05, 0.00, 0.80, "Transparent glass, specular transmission, IOR 1.5"),
+        "neon"           => (0.30, 0.00, 0.50, "Self-illuminating, emissive glow"),
+        "ice"            => (0.10, 0.00, 0.60, "Translucent ice, very smooth"),
+        "gold"           => (0.15, 1.00, 0.95, "Pure gold, highly reflective, dense 19300 kg/m³"),
+        "silver"         => (0.10, 1.00, 0.97, "Polished silver, highest reflectance of any metal"),
+        "bronze"         => (0.35, 0.90, 0.70, "Copper-tin alloy, warm patina, medium roughness"),
+        _                => return None,
+    })
 }
+
+const KNOWN_MATERIALS: &[&str] = &[
+    "Plastic", "SmoothPlastic", "Wood", "WoodPlanks", "Metal", "CorrodedMetal",
+    "DiamondPlate", "Foil", "Grass", "Concrete", "Brick", "Granite", "Marble",
+    "Slate", "Sand", "Fabric", "Glass", "Neon", "Ice", "Gold", "Silver", "Bronze",
+];
 
 // ---------------------------------------------------------------------------
 // Calculate Physics
@@ -274,6 +316,31 @@ impl ToolHandler for CalculatePhysicsTool {
                 "params": params,
             })),
             stream_topic: None,
+        }
+    }
+}
+
+#[cfg(test)]
+mod pbr_tests {
+    use super::*;
+
+    #[test]
+    fn pbr_entry_ignores_case() {
+        let pascal = pbr_entry("Gold").expect("Gold");
+        assert_eq!(pbr_entry("gold"), Some(pascal));
+        assert_eq!(pbr_entry("GOLD"), Some(pascal));
+        assert_eq!(pascal.1, 1.00);
+    }
+
+    #[test]
+    fn pbr_entry_is_none_for_an_unknown_name() {
+        assert_eq!(pbr_entry("tungsten"), None);
+    }
+
+    #[test]
+    fn every_known_material_resolves() {
+        for name in KNOWN_MATERIALS {
+            assert!(pbr_entry(name).is_some(), "{name} is listed but has no row");
         }
     }
 }

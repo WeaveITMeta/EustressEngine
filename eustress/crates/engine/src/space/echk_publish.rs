@@ -15,11 +15,13 @@
 //! A Space-only publish exports that one Space and swaps it into the manifest
 //! the listing already plays, keeping every other Space as published.
 //!
-//! Players never receive the server-only services (ServerScriptService and
-//! ServerStorage), as in Roblox. When the author turns on Share Source, a
-//! second manifest, the source world, adds them for the gallery's Edit;
-//! otherwise they never leave the machine. A publish refuses a webhook URL in
-//! anything the public can download.
+//! Players receive the whole Space, the server-only services
+//! (ServerScriptService and ServerStorage) and every server Script's code
+//! included, so a Player playing a world alone runs its server as Studio's
+//! Play does (McKale, 2026-11-12, option A). When the author turns on Share
+//! Source, a second manifest, the source world, also carries them for the
+//! gallery's Edit. A publish refuses a webhook URL in anything the public can
+//! download.
 //!
 //! The listing is created once per API. Its id is kept in the Universe's
 //! `.eustress/sync.toml` (`RemoteState::listing_id`, which keeps production's
@@ -858,9 +860,8 @@ fn refuse_webhooks(play: &ExportedWorld, server: Option<&ExportedWorld>) -> Resu
     let shown = found.iter().take(8).cloned().collect::<Vec<_>>().join(", ");
     let more = if found.len() > 8 { format!(" and {} more", found.len() - 8) } else { String::new() };
     Err(format!(
-        "{} file(s) anyone could download hold a webhook URL: {shown}{more}. Whoever has the URL can post to that channel. Move the URL out of these files{}, then publish again.",
-        found.len(),
-        if server.is_some() { ", or turn off Share Source when they are in ServerScriptService or ServerStorage" } else { "" }
+        "{} file(s) anyone could download hold a webhook URL: {shown}{more}. Whoever has the URL can post to that channel. Move the URL out of these files, then publish again.",
+        found.len()
     ))
 }
 

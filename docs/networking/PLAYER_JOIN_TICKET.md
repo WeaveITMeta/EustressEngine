@@ -37,6 +37,12 @@ eustress-player://play/<simulation id>?api=<name>
     at staging, whose listings production moderation never saw. A ticket from the other API would be useless
     anyway.
   - A link with no `api` takes the Player's own.
+  - A link that names `production` opens on production, whatever the Player is otherwise set up for (its
+    `--api-url`, `--env`, `EUSTRESS_API_URL` or the API compiled into a staging-channel build). Production is the
+    moderated server, so this cannot show a visitor anything production moderation did not pass. Without it, the
+    command a staging run registers (`--api-url` staging) sent every production gallery link to staging, which
+    answered "This simulation was not found" (2026-11-11). A link that names `staging` still never moves a Player:
+    a Player set up for production refuses it.
   - A link that names `ticket` or `api` twice is refused.
 
 ### The website (Play page)
@@ -55,9 +61,10 @@ eustress-player://play/<simulation id>?api=<name>
   a sign-in of its own, if it has one.
 - `web/src/api/live.rs`'s link check caps the Worker's own link at 512 characters before the ticket is
   appended. It must accept the full link, up to 512 + 2,048 + 32 characters, with `_` in values.
-- A solo link accepts exactly `?api=production` or `?api=staging` after the id, and nothing else. **Order:**
-  the page adds `?api=` to solo links only once a Player that reads it has shipped. A Player from before P1
-  takes `<id>?api=..` as the id, refuses it, and closes without a word. Join links may carry `ticket` and `api`
+- A solo link accepts exactly `?api=production` or `?api=staging` after the id, and nothing else. The page
+  adds `?api=` to every solo link, production included: every released Player reads it (the first release,
+  staging-channel v0.1.0 of 2026-10-20, already does). A Player from before P1 would take `<id>?api=..` as the
+  id, refuse it, and close without a word; none was released. Join links may carry `ticket` and `api`
   at once, because an older Player ignores parameters it does not know.
 
 ### The Player

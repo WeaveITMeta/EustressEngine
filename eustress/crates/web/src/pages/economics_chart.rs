@@ -32,7 +32,7 @@ pub fn company_svg(_s: &Inputs, m: &Company) -> String {
 
     // Each source takes the taller of its ribbon and its label, so the labels never collide.
     let srcs: Vec<(&'static str, f64, &'static str)> =
-        [("tickets", m.tickets_usd, "Ticket packs"), ("plans", m.plan_revenue, "Plan subscriptions"), ("delta", m.delta_usd, "Delta packs"), ("gifts", m.gifts_usd, "Gifts to the Treasury")]
+        [("tickets", m.tickets_usd, "Ticket packs"), ("plans", m.plan_revenue, "Plan subscriptions"), ("delta", m.delta_usd, "Delta packs"), ("gifts", m.gifts_usd, "Gifts to the Treasury"), ("sponsors", m.sponsors_usd, "Engine sponsorships")]
             .into_iter()
             .filter(|p| p.1 > 0.0)
             .collect();
@@ -58,6 +58,7 @@ pub fn company_svg(_s: &Inputs, m: &Company) -> String {
     sk.link("plans", "gross", m.plan_revenue, "plans", 0.55);
     sk.link("delta", "gross", m.delta_usd, "delta", 0.55);
     sk.link("gifts", "gross", m.gifts_usd, "gifts", 0.55);
+    sk.link("sponsors", "gross", m.sponsors_usd, "sponsors", 0.55);
     sk.link("gross", "treasury", m.treasury_share, "treasury", 0.5);
     sk.link("gross", "eustress", m.eustress, "eustress", 0.55);
     sk.link("gross", "fees", m.fees, "fees", 0.5);

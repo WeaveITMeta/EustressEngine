@@ -31,9 +31,31 @@ struct AvatarResponse {
     lock_source: Option<String>,
 }
 
+/// model-viewer's module, served from assets/vendor. The shell does not load it:
+/// at 0.9 MB it would cost every page on the site, and only this component uses it.
+#[cfg_attr(feature = "ssr", allow(dead_code))]
+const MODEL_VIEWER_SRC: &str = "/assets/vendor/model-viewer-4.0.0.min.js";
+
+/// Add model-viewer's script to the page, once. The browser upgrades the
+/// `<model-viewer>` element below when the script arrives; until then it is an
+/// empty box of the same size.
+#[cfg(not(feature = "ssr"))]
+fn load_model_viewer() {
+    let Some(doc) = web_sys::window().and_then(|w| w.document()) else { return };
+    if doc.query_selector(&format!("script[src=\"{MODEL_VIEWER_SRC}\"]")).ok().flatten().is_some() {
+        return;
+    }
+    let (Ok(script), Ok(Some(head))) = (doc.create_element("script"), doc.query_selector("head")) else { return };
+    let _ = script.set_attribute("type", "module");
+    let _ = script.set_attribute("src", MODEL_VIEWER_SRC);
+    let _ = head.append_child(&script);
+}
+
 /// A mounted customizer belongs to the authenticated profile owner only.
 #[component]
 pub fn AvatarCustomizer() -> impl IntoView {
+    #[cfg(not(feature = "ssr"))]
+    load_model_viewer();
     let avatar = RwSignal::new(AvatarDescriptor::default());
     let rigs = RwSignal::new(AvatarIdentity::ALL.map(RigDefinition::builtin).to_vec());
     // The account's one identity. Never a choice: a human is the sex marker on

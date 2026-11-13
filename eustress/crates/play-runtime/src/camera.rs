@@ -39,18 +39,17 @@ pub fn show_script_camera_without_avatar(
     }
 }
 
-/// A replica's play camera for every moment without an avatar. Studio's
-/// `handle_start_play` spawns one; a joined Player gets it here, once,
-/// posed at the Space's camera. [`show_script_camera_without_avatar`] keeps
-/// it active exactly while no avatar camera exists.
-pub fn ensure_replica_play_camera(
+/// The Player's play camera for every moment without an avatar, solo or
+/// joined. Studio's `handle_start_play` spawns its own; a Player gets it
+/// here, once, posed at the Space's camera. [`show_script_camera_without_avatar`]
+/// keeps it active exactly while no avatar camera exists.
+pub fn ensure_play_camera(
     mut commands: Commands,
-    role: Option<Res<PlayRole>>,
     dm: Option<Res<PlayDataModel>>,
     existing: Query<(), With<ScriptedPlayCamera>>,
     host: Option<Res<eustress_common::avatar::AvatarHostConfig>>,
 ) {
-    if role.as_deref().copied().unwrap_or_default() != PlayRole::Replica || !existing.is_empty() {
+    if !existing.is_empty() {
         return;
     }
     let Some(dm) = dm else { return };

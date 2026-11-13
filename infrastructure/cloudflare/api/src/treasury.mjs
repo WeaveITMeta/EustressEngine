@@ -73,8 +73,9 @@ import { valueFrozenUntil, payoutPinnedUntil } from './fresh_auth.mjs';
 export const TREASURY_SPLIT = 0.50;
 
 /// What a deposit can be: a Ticket pack, a Delta pack, a subscription
-/// invoice, or a direct contribution to the treasury.
-export const DEPOSIT_KINDS = ['ticket_purchase', 'delta_purchase', 'subscription', 'treasury_fund'];
+/// invoice, a direct contribution to the treasury, or a sponsorship of the
+/// engine (sponsor.mjs), which goes whole to the platform's side.
+export const DEPOSIT_KINDS = ['ticket_purchase', 'delta_purchase', 'subscription', 'treasury_fund', 'engine_sponsor'];
 
 /// Storefront or processor fee by sales channel, taken before the split. An
 /// unknown channel is charged web pricing, never assumed free.

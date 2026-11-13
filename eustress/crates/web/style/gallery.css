@@ -740,6 +740,7 @@ a.g-chip:hover, button.g-chip:hover { border-color: var(--g-line-strong); color:
     --eco-cash: #3cba54;
     --eco-cash-t: #5ee37a;
     --eco-gifts: #f472b6;
+    --eco-sponsors: #a78bfa;
     --eco-labor: #60a5fa;
     --eco-servers: #f59e4b;
     --eco-cloud: #22d3ee;
@@ -762,6 +763,7 @@ a.g-chip:hover, button.g-chip:hover { border-color: var(--g-line-strong); color:
 .eco-svg .n-gray { fill: var(--eco-gray); }
 .eco-svg .n-cash { fill: var(--eco-cash); }
 .eco-svg .n-gifts { fill: var(--eco-gifts); }
+.eco-svg .n-sponsors { fill: var(--eco-sponsors); }
 .eco-svg .n-labor { fill: var(--eco-labor); }
 .eco-svg .n-servers { fill: var(--eco-servers); }
 .eco-svg .n-cloud { fill: var(--eco-cloud); }
@@ -775,6 +777,7 @@ a.g-chip:hover, button.g-chip:hover { border-color: var(--g-line-strong); color:
 .eco-svg .l-drip { stroke: var(--eco-drip); }
 .eco-svg .l-gray { stroke: var(--eco-gray); }
 .eco-svg .l-gifts { stroke: var(--eco-gifts); }
+.eco-svg .l-sponsors { stroke: var(--eco-sponsors); }
 .eco-svg .l-labor { stroke: var(--eco-labor); }
 .eco-svg .l-servers { stroke: var(--eco-servers); }
 .eco-svg .l-cloud { stroke: var(--eco-cloud); }
@@ -792,6 +795,7 @@ a.g-chip:hover, button.g-chip:hover { border-color: var(--g-line-strong); color:
 .eco-svg .c-gray { fill: var(--eco-gray); }
 .eco-svg .c-cash { fill: var(--eco-cash-t); }
 .eco-svg .c-gifts { fill: var(--eco-gifts); }
+.eco-svg .c-sponsors { fill: var(--eco-sponsors); }
 .eco-svg .c-labor { fill: var(--eco-labor); }
 .eco-svg .c-servers { fill: var(--eco-servers); }
 .eco-svg .c-cloud { fill: var(--eco-cloud); }

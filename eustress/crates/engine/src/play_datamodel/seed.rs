@@ -7,11 +7,11 @@ use bevy::prelude::*;
 use eustress_common::classes::{BasePart, ClassName, Humanoid, Instance, Part};
 use eustress_common::datamodel::record::{attribute_to_dm, mlua_script_class, part_props, strip_script_suffix};
 use eustress_common::datamodel::{
-    is_base_part, is_storage_service, new_shared, DataModel, DmValue, EnumItem, InstanceId,
+    is_base_part, is_storage_service, new_shared, DataModel, DmValue, InstanceId,
 };
 use eustress_common::gui::billboard_renderer::GuiElementDisplay;
+use eustress_common::gui::gui_record;
 use eustress_common::mlua::play::{PlayMlua, ScriptLaunch};
-use eustress_common::scripting::{Color3, UDim2, Vector2};
 
 use super::{DataModelSpawned, HiddenForPlay, PlayDataModel, PlayMluaHost};
 use crate::space::service_loader::ServiceComponent;
@@ -461,8 +461,24 @@ fn describe(world: &World, e: Entity) -> Option<(String, String, Vec<(String, Dm
         }
     }
 
-    if let Some(d) = world.get::<GuiElementDisplay>(e) {
-        props.extend(gui_props(d, &class));
+    // A ScreenGui's, GUI object's, BillboardGui's or SurfaceGui's live
+    // components, turned into properties by the functions a Player's reader
+    // turns the same file into properties with (`gui_record`).
+    if class == "ScreenGui" || eustress_common::datamodel::is_gui_object(&class) {
+        if let Some(d) = world.get::<GuiElementDisplay>(e) {
+            let image = gui_record::is_image_class(&class).then(|| gui_image_props(world, e, d));
+            props.extend(gui_record::gui_object_props(&class, d, image.as_ref()));
+        }
+    }
+    if class == "BillboardGui" {
+        if let Some(bb) = world.get::<eustress_common::classes::BillboardGui>(e) {
+            props.extend(gui_record::billboard_props(bb));
+        }
+    }
+    if class == "SurfaceGui" {
+        if let Some(sg) = world.get::<eustress_common::classes::SurfaceGui>(e) {
+            props.extend(gui_record::surface_props(sg));
+        }
     }
 
     // A Humanoid loaded from a file brings its properties in its record
@@ -550,44 +566,36 @@ pub fn space_relative(p: &std::path::Path) -> String {
         .unwrap_or_else(|_| p.to_string_lossy().replace('\\', "/"))
 }
 
-fn gui_props(d: &GuiElementDisplay, class: &str) -> Vec<(String, DmValue)> {
-    let mut p = Vec::new();
-    if class == "ScreenGui" {
-        p.push(("Enabled".into(), DmValue::Bool(d.visible)));
-        p.push(("DisplayOrder".into(), DmValue::Number(d.z_order as f64)));
-        return p;
+/// An ImageLabel's or ImageButton's `Image`, tint and transparency: the
+/// picture its class names, as a path in the Space resolved against its file
+/// (`gui_record::gui_image_id`, as a Player's reader resolves it), never the
+/// absolute path Studio draws from, which a joined Player could not open.
+/// Without its class, the display's picture made Space-relative.
+fn gui_image_props(world: &World, e: Entity, d: &GuiElementDisplay) -> gui_record::GuiImageProps {
+    let key = world
+        .get::<crate::space::instance_loader::InstanceFile>(e)
+        .map(|f| space_relative(&f.toml_path))
+        .unwrap_or_default();
+    if let Some(c) = world.get::<eustress_common::classes::ImageLabel>(e) {
+        return gui_record::GuiImageProps {
+            image: gui_record::gui_image_id(&key, &c.image),
+            color: c.image_color3,
+            transparency: c.image_transparency,
+        };
     }
-    let u = |a: [f32; 4]| DmValue::UDim2(UDim2::new(a[0] as f64, a[1] as f64, a[2] as f64, a[3] as f64));
-    p.push(("Position".into(), u(d.position_udim2)));
-    p.push(("Size".into(), u(d.size_udim2)));
-    p.push(("AnchorPoint".into(), DmValue::Vector2(Vector2::new(d.anchor_point[0] as f64, d.anchor_point[1] as f64))));
-    p.push(("Visible".into(), DmValue::Bool(d.visible)));
-    p.push(("ZIndex".into(), DmValue::Number(d.z_order as f64)));
-    p.push(("BackgroundColor3".into(), DmValue::Color3(Color3::new(d.bg_color[0] as f64, d.bg_color[1] as f64, d.bg_color[2] as f64))));
-    p.push(("BackgroundTransparency".into(), DmValue::Number(1.0 - d.bg_color[3] as f64)));
-    p.push(("BorderSizePixel".into(), DmValue::Number(d.border_size as f64)));
-    p.push(("BorderColor3".into(), DmValue::Color3(Color3::new(d.border_color[0] as f64, d.border_color[1] as f64, d.border_color[2] as f64))));
-    p.push(("Text".into(), DmValue::String(d.text.clone())));
-    p.push(("TextColor3".into(), DmValue::Color3(Color3::new(d.text_color[0] as f64, d.text_color[1] as f64, d.text_color[2] as f64))));
-    p.push(("TextTransparency".into(), DmValue::Number(1.0 - d.text_color[3] as f64)));
-    p.push(("TextSize".into(), DmValue::Number(d.font_size as f64)));
-    p.push(("TextScaled".into(), DmValue::Bool(d.text_scaled)));
-    let font = if d.font.is_empty() { "SourceSans".to_string() } else { d.font.clone() };
-    p.push(("Font".into(), DmValue::Enum(EnumItem::new("Font", font))));
-    let xa = if d.text_align.is_empty() { "Center".to_string() } else { title_case(&d.text_align) };
-    p.push(("TextXAlignment".into(), DmValue::Enum(EnumItem::new("TextXAlignment", xa))));
-    let ya = if d.text_y_align.is_empty() { "Center".to_string() } else { title_case(&d.text_y_align) };
-    p.push(("TextYAlignment".into(), DmValue::Enum(EnumItem::new("TextYAlignment", ya))));
-    p.push(("Image".into(), DmValue::String(d.image_path.clone())));
-    p
-}
-
-fn title_case(s: &str) -> String {
-    let mut c = s.chars();
-    match c.next() {
-        Some(f) => f.to_uppercase().collect::<String>() + &c.as_str().to_lowercase(),
-        None => String::new(),
+    if let Some(c) = world.get::<eustress_common::classes::ImageButton>(e) {
+        return gui_record::GuiImageProps {
+            image: gui_record::gui_image_id(&key, &c.image),
+            color: c.image_color3,
+            transparency: c.image_transparency,
+        };
     }
+    let image = if d.image_path.is_empty() {
+        String::new()
+    } else {
+        gui_record::gui_image_id("", &space_relative(std::path::Path::new(&d.image_path)))
+    };
+    gui_record::GuiImageProps { image, color: [1.0, 1.0, 1.0], transparency: 0.0 }
 }
 
 /// Properties of every PropertyAccess component on the entity.
@@ -943,10 +951,30 @@ mod parity {
                     children: Vec::new(),
                 };
                 // A light folder takes the file loader's light arm
-                // (`FolderLoad::Light`), every other class its general branch.
+                // (`FolderLoad::Light`), a GUI folder its GUI arms
+                // (`spawn_gui_folder`, from the file parsed as the loader's
+                // `parse_instance_text` parses it, then the file's tags and
+                // attributes), every other class its general branch.
+                let arm = crate::space::file_loader::folder_load(class);
                 let e = match (class, doc.as_ref()) {
                     (ClassName::PointLight | ClassName::SpotLight | ClassName::SurfaceLight, Some(doc)) => {
                         light_entity(commands, &meta.name, doc, class)
+                    }
+                    (_, Some(doc)) if crate::space::file_loader::is_gui_folder(arm) => {
+                        let instance_toml = PathBuf::from(format!("{dir}/_instance.toml"));
+                        let text = text_of.get(format!("{dir}/_instance.toml").as_str()).copied().unwrap_or_default();
+                        let def = crate::space::gui_loader::load_gui_definition_from_str(text);
+                        let e = crate::space::file_loader::spawn_gui_folder(
+                            commands,
+                            arm,
+                            class,
+                            &meta,
+                            &instance_toml,
+                            def,
+                            String::new(),
+                        );
+                        commands.entity(e).insert(crate::space::file_loader::record_tags_and_attributes(doc));
+                        e
                     }
                     _ => spawn_general_entity(commands, &meta, doc.as_ref(), class, String::new()),
                 };
@@ -1152,5 +1180,179 @@ mod parity {
             Some(&render(&DmValue::Number(2400.0))),
             "{studio_densities:?}"
         );
+    }
+    /// GUI in the on-disk format: a ScreenGui holding a Frame with a corner
+    /// radius, a TextLabel with a stroke, an ImageLabel with a picture beside
+    /// it, and a TextButton; a part carrying a BillboardGui with a TextLabel
+    /// (as The Super Station's are written) and a SurfaceGui with a caption.
+    fn gui_world() -> Vec<(String, String)> {
+        vec![
+            ("space.toml".into(), "[space]\ntransform_rule = \"parent_pose\"\n".into()),
+            (
+                "StarterGui/Hud/_instance.toml".into(),
+                "[metadata]\nclass_name = \"ScreenGui\"\n\n[gui]\nenabled = true\ndisplay_order = 3\n".into(),
+            ),
+            (
+                "StarterGui/Hud/Panel/_instance.toml".into(),
+                "[metadata]\nclass_name = \"Frame\"\n\n\
+                 [gui]\nposition = [0.5, -150.0, 0.1, 0.0]\nsize_scale = [0.0, 0.0]\nsize_offset = [300.0, 200.0]\n\
+                 anchor_point = [0.5, 0.0]\nbackground_color = [20, 30, 40]\nbackground_transparency = 0.25\n\
+                 border_size = 2.0\nborder_color = [255, 255, 255]\ncorner_radius = 12.0\nclips_descendants = true\nz_index = 2\n"
+                    .into(),
+            ),
+            (
+                "StarterGui/Hud/Panel/Title/_instance.toml".into(),
+                "[metadata]\nclass_name = \"TextLabel\"\n\n\
+                 [gui]\nposition = [0.0, 10.0, 0.0, 10.0]\nsize = [1.0, -20.0, 0.0, 40.0]\nbackground_transparency = 1.0\nactive = true\n\n\
+                 [text]\ntext = \"Mission Control\"\nfont = \"GothamBold\"\nfont_size = 28.0\ntext_color = [1.0, 0.9, 0.2]\n\
+                 text_stroke_color = [0.0, 0.0, 0.0]\ntext_stroke_transparency = 0.5\ntext_scaled = true\ntext_wrapped = false\n\
+                 text_x_alignment = \"left\"\ntext_y_alignment = \"Top\"\n"
+                    .into(),
+            ),
+            (
+                "StarterGui/Hud/Panel/Logo/_instance.toml".into(),
+                "[metadata]\nclass_name = \"ImageLabel\"\n\n[asset]\npath = \"../../Images/logo.png\"\n\n\
+                 [gui]\nposition = [0.0, 10.0, 0.0, 60.0]\nsize = [0.0, 64.0, 0.0, 64.0]\nbackground_transparency = 1.0\n\n\
+                 [image]\nimage_color = [255, 0, 0]\nimage_transparency = 0.5\n"
+                    .into(),
+            ),
+            (
+                "StarterGui/Hud/Panel/Go/_instance.toml".into(),
+                "[metadata]\nclass_name = \"TextButton\"\n\n\
+                 [gui]\nposition = [0.5, 0.0, 1.0, -50.0]\nsize = [0.0, 120.0, 0.0, 36.0]\ncorner_radius = 4.0\n\n\
+                 [text]\ntext = \"Go\"\nfont_size = 18.0\n"
+                    .into(),
+            ),
+            (
+                "Workspace/Sign/_instance.toml".into(),
+                "[metadata]\nclass_name = \"Part\"\nname = \"Sign\"\n\n\
+                 [transform]\nposition = [0.0, 2.0, 0.0]\nscale = [4.0, 2.0, 0.5]\n\n[properties]\nanchored = true\n"
+                    .into(),
+            ),
+            (
+                "Workspace/Sign/Label/_instance.toml".into(),
+                "[gui]\nactive = true\nadornee = \"\"\nalways_on_top = true\nclips_descendants = false\nenabled = true\n\
+                 light_influence = 0.0\nmax_distance = 160.0\nsize_offset = [0.0, 0.0]\nsize_scale = [3.4, 0.55]\n\
+                 studs_offset = [0.0, 0.0, 0.0]\nunits_offset = [0.0, 3.0, 0.0]\nz_index_behavior = \"Global\"\n\n\
+                 [metadata]\narchivable = true\nclass_name = \"BillboardGui\"\nname = \"Label\"\nunit = \"m\"\n"
+                    .into(),
+            ),
+            (
+                "Workspace/Sign/Label/Text/_instance.toml".into(),
+                "[gui]\nactive = false\nanchor_point = [0.0, 0.0]\nbackground_color = [1.0, 1.0, 1.0]\nbackground_transparency = 1.0\n\
+                 border_size_pixel = 0\nclips_descendants = false\nposition_offset = [0.0, 0.0]\nposition_scale = [0.0, 0.0]\n\
+                 size_offset = [0.0, 0.0]\nsize_scale = [1.0, 1.0]\nvisible = true\nz_index = 2\n\n\
+                 [metadata]\narchivable = true\nclass_name = \"TextLabel\"\nname = \"Text\"\nunit = \"m\"\n\n\
+                 [text]\nfont = \"Oswald\"\nfont_size = 48.0\nline_height = 1.0\nrich_text = false\n\
+                 text = \"1. Formulate your Question\"\ntext_color = [1.0, 1.0, 1.0]\ntext_scaled = true\n\
+                 text_stroke_color = [0.0, 0.0, 0.0]\ntext_stroke_transparency = 0.5\ntext_transparency = 0.0\n\
+                 text_wrapped = true\ntext_x_alignment = \"Center\"\ntext_y_alignment = \"Center\"\n"
+                    .into(),
+            ),
+            (
+                "Workspace/Sign/Screen/_instance.toml".into(),
+                "[metadata]\nclass_name = \"SurfaceGui\"\n\n\
+                 [gui]\nface = \"Top\"\ncanvas_size = [400.0, 200.0]\nmax_distance = 50.0\nalways_on_top = false\n"
+                    .into(),
+            ),
+            (
+                "Workspace/Sign/Screen/Caption/_instance.toml".into(),
+                "[metadata]\nclass_name = \"TextLabel\"\n\n\
+                 [gui]\nsize = [1.0, 0.0, 1.0, 0.0]\nbackground_color = [0, 0, 0]\n\n\
+                 [text]\ntext = \"Station 1\"\ntext_color = [255, 255, 255]\nfont_size = 32.0\n"
+                    .into(),
+            ),
+        ]
+    }
+
+    /// A Player reading a Space's GUI files holds the tree Studio seeds from
+    /// the same files: every GUI property, not the class defaults (blank
+    /// text, a white box, a 200 x 50 billboard). Studio's side runs its file
+    /// loader's GUI arms (`spawn_gui_folder`, `spawn_gui_element`) and the
+    /// TextLabel class-to-display sync it runs every frame.
+    #[test]
+    fn gui_parity_a_players_gui_starts_equal_to_studios() {
+        let fixture = gui_world();
+
+        let mut app = App::new();
+        app.add_plugins((MinimalPlugins, AssetPlugin::default(), bevy::transform::TransformPlugin));
+        app.init_asset::<Mesh>();
+        app.init_asset::<StandardMaterial>();
+        app.init_asset::<Image>();
+        app.init_asset::<ForwardDecalMaterial<StandardMaterial>>();
+        app.init_resource::<MaterialRegistry>();
+        app.init_resource::<PrimitiveMeshCache>();
+        app.insert_resource(Fixture(fixture.clone()));
+        app.add_plugins(crate::space::pose_anchor::PoseAnchorPlugin);
+        app.insert_resource(crate::space::pose_anchor::ParentPoseRule(true));
+        app.add_systems(Update, crate::billboard_gui::sync_textlabel_to_display);
+        app.world_mut().run_system_once(spawn_world).expect("the fixture spawns");
+        app.update();
+        app.update();
+
+        let studio = new_shared();
+        super::seed_scene(app.world_mut(), &studio);
+        {
+            let mut g = studio.lock();
+            let ws = g.find_service("Workspace").expect("the fixture has a Workspace");
+            eustress_common::mlua::play::terrain::ensure_terrain_instance(&mut g, ws);
+        }
+        let records: Vec<(String, Vec<u8>)> =
+            fixture.iter().map(|(p, t)| (p.clone(), t.as_bytes().to_vec())).collect();
+        let player = eustress_common::tree_read::read_space_records(&records);
+        assert!(player.report.problems.is_empty(), "{:?}", player.report.problems);
+        assert!(player.report.unread_properties.is_empty(), "{:?}", player.report.unread_properties);
+
+        let a = dump(&studio.lock());
+        let b = dump(&player.dm);
+        let mut diffs = Vec::new();
+        for (name, entry) in &a {
+            match b.get(name) {
+                None => diffs.push(format!("{name}: only in Studio's tree")),
+                Some(other) if other != entry => diffs.push(format!("{name}:\n  studio {entry:?}\n  player {other:?}")),
+                _ => {}
+            }
+        }
+        for name in b.keys() {
+            if !a.contains_key(name) {
+                diffs.push(format!("{name}: only in the Player's tree"));
+            }
+        }
+        assert!(diffs.is_empty(), "the trees differ:\n{}", diffs.join("\n"));
+
+        // Equal trees alone would not tell the file's values from the class
+        // defaults, so name a few.
+        let prop = |name: &str, key: &str| b.get(name).and_then(|(_, props, _, _)| props.get(key)).cloned();
+        let s = |v: DmValue| render(&v);
+        use eustress_common::datamodel::EnumItem;
+        use eustress_common::scripting::UDim2;
+        assert_eq!(prop("StarterGui.Hud", "DisplayOrder"), Some(s(DmValue::Number(3.0))));
+        assert_eq!(prop("StarterGui.Hud.Panel", "CornerRadius"), Some(s(DmValue::Number(12.0))));
+        assert_eq!(prop("StarterGui.Hud.Panel", "ClipsDescendants"), Some(s(DmValue::Bool(true))));
+        assert_eq!(prop("StarterGui.Hud.Panel", "Size"), Some(s(DmValue::UDim2(UDim2::new(0.0, 300.0, 0.0, 200.0)))));
+        assert_eq!(prop("StarterGui.Hud.Panel.Title", "Text"), Some(s(DmValue::String("Mission Control".into()))));
+        assert_eq!(prop("StarterGui.Hud.Panel.Title", "TextStrokeTransparency"), Some(s(DmValue::Number(0.5))));
+        assert_eq!(prop("StarterGui.Hud.Panel.Title", "TextWrapped"), Some(s(DmValue::Bool(false))));
+        assert_eq!(prop("StarterGui.Hud.Panel.Title", "Font"), Some(s(DmValue::Enum(EnumItem::new("Font", "GothamBold")))));
+        assert_eq!(prop("StarterGui.Hud.Panel.Title", "Active"), Some(s(DmValue::Bool(true))));
+        assert_eq!(
+            prop("StarterGui.Hud.Panel.Logo", "Image"),
+            Some(s(DmValue::String("StarterGui/Hud/Images/logo.png".into()))),
+            "a picture is a path in the Space, never a host's absolute path"
+        );
+        assert_eq!(prop("StarterGui.Hud.Panel.Logo", "ImageTransparency"), Some(s(DmValue::Number(0.5))));
+        assert_eq!(prop("StarterGui.Hud.Panel.Go", "Text"), Some(s(DmValue::String("Go".into()))));
+        assert_eq!(
+            prop("Workspace.Sign.Label", "Size"),
+            Some(s(DmValue::UDim2(UDim2::new(3.4f32 as f64, 0.0, 0.55f32 as f64, 0.0))))
+        );
+        assert_eq!(prop("Workspace.Sign.Label", "MaxDistance"), Some(s(DmValue::Number(160.0))));
+        assert_eq!(prop("Workspace.Sign.Label", "AlwaysOnTop"), Some(s(DmValue::Bool(true))));
+        assert_eq!(
+            prop("Workspace.Sign.Label.Text", "Text"),
+            Some(s(DmValue::String("1. Formulate your Question".into())))
+        );
+        assert_eq!(prop("Workspace.Sign.Screen", "Face"), Some(s(DmValue::Enum(EnumItem::new("NormalId", "Top")))));
+        assert_eq!(prop("Workspace.Sign.Screen.Caption", "Text"), Some(s(DmValue::String("Station 1".into()))));
     }
 }

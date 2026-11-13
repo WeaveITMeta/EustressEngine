@@ -35,6 +35,8 @@
 //                    sign in to the website; adding or removing one needs the
 //                    identity key's signature
 //   passkeys_clear   the account is being deleted: every passkey goes
+//   space_delete_*   a pending deletion or restore of a published Space: its code's
+//                    digest, attempts and rate limits (src/space_delete_ops.mjs)
 //
 // The Worker is the only caller; nothing here is reachable from the internet.
 // =============================================================================
@@ -46,6 +48,7 @@ import { hubStub, callObject } from './commerce.mjs';
 import { siteOrigin } from './cors.mjs';
 import { PASSKEY_ALGS, fromBase64url, verifyPasskeySignature, signedData } from './webauthn.mjs';
 import { passkeyIndexCall } from './passkey_index.mjs';
+import { spaceDeleteOps } from './space_delete_ops.mjs';
 
 const CHALLENGE_TTL_MS = 5 * 60 * 1000;
 const MAX_OPEN_CHALLENGES = 5;
@@ -637,6 +640,7 @@ function publicState(state, now) {
 
 const OPS = {
   ...emailOps({ fail, sha256Hex, hexOf, verifyEd25519 }),
+  ...spaceDeleteOps({ fail }),
 
   async state(args) {
     this.now = Date.now();

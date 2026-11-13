@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  BLISS_UNIT, FULL_DAY_SCORE, FOLD_HORIZON_MS, VALUE_SCORE_PER_TICKET,
+  BLISS_UNIT, FULL_DAY_SCORE, FOLD_HORIZON_MS, VALUE_SCORE_PER_TICKET, CONTRIBUTION_WEIGHTS,
   VALUE_CAP_TICKETS_PER_BUYER, VALUE_CAP_SCORE_PER_CREATOR,
   toMinor, fromMinor, formatBliss, blissEmissionRate, yearsSince,
   ledgerAppend, ledgerDeriveMinor, ledgerBalanceMinor, ledgerReconcile, ledgerMigrateUser, ledgerSpend,
@@ -219,4 +219,17 @@ test('supply reads the legacy float key until the minor-unit key exists', async 
   assert.equal(await readSupplyMinor(e), 10_000_012_345);
   e.PAYOUTS.store.set('bliss:supply_minor', { value: '10000020000' });
   assert.equal(await readSupplyMinor(e), 10_000_020_000);
+});
+
+test('time in Studio with nothing made scores a tenth of a minute; building keeps its weight', () => {
+  assert.equal(CONTRIBUTION_WEIGHTS.ActiveTime, 0.1);
+  // An hour of navigating and testing scores 6; an hour of scripting, 180.
+  assert.equal(Math.round(CONTRIBUTION_WEIGHTS.ActiveTime * 60), 6);
+  assert.equal(CONTRIBUTION_WEIGHTS.Development * 60, 180);
+  assert.deepEqual(
+    Object.fromEntries(Object.entries(CONTRIBUTION_WEIGHTS).filter(([k]) => k !== 'ActiveTime')),
+    { Development: 3.0, Creation: 2.5, Education: 2.2, Collaboration: 2.0, Optimization: 2.0,
+      QualityAssurance: 1.8, Moderation: 1.5, Documentation: 1.5, Custom: 1.0 },
+  );
+  assert.ok(Object.isFrozen(CONTRIBUTION_WEIGHTS));
 });

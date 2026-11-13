@@ -183,6 +183,15 @@ impl PlayRole {
 #[derive(Resource, Debug, Clone, Copy, Default)]
 pub struct PlayEventCursor(pub Option<u64>);
 
+/// The hidden properties behind a part's `DrawnCFrame` (the Play VM's
+/// `mlua::play::instance` reads them; the physics pull writes them): the pose
+/// a part's body is drawn at while it is drawn apart from its CFrame (eased
+/// between physics steps, or merged into a weld group), and the CFrame the
+/// part had when that pose was taken (`Nil` once it is drawn at its CFrame
+/// again). Neither replicates, and neither change is one a script sees.
+pub const DRAWN_CFRAME: &str = "__DrawnCFrame";
+pub const DRAWN_FROM_CFRAME: &str = "__DrawnFromCFrame";
+
 /// The open Space's folder, which a `MeshId` under it is written relative
 /// to. Each app keeps it current: Studio from its Space asset source, the
 /// Player from the world it opened.
@@ -220,6 +229,9 @@ pub struct HudPointer {
     pub over_gui: bool,
     /// A TextBox holds the keyboard.
     pub typing: bool,
+    /// A TextBox held the keyboard when this frame's keys were read, so they
+    /// were its: an Escape that only let go of the box opens no menu.
+    pub keys_taken: bool,
     /// Buttons pressed this frame, by entity.
     pub activated: Vec<Entity>,
 }
@@ -280,6 +292,49 @@ pub fn begin_session(dm: &mut DataModel, local_player: InstanceId, start: &Sessi
     }
     fill_backpack(dm, local_player);
     SessionIds { local_player, camera }
+}
+
+/// The containers every player has: a `Backpack` (filled from StarterPack),
+/// `PlayerScripts`, and a `PlayerGui` filled from StarterGui. A host gives
+/// them to each player who joins; a Player playing alone gives them to its
+/// own player, since no host will. A joined Player never calls this: the
+/// host's copies arrive through replication. Containers the player already
+/// has are kept, so calling it twice adds nothing.
+pub fn give_player_containers(dm: &mut DataModel, player: InstanceId) {
+    if dm.find_first_child(player, "Backpack", false).is_none() {
+        dm.create_virtual("Backpack", "Backpack", Some(player));
+        fill_backpack(dm, player);
+    }
+    if dm.find_first_child(player, "PlayerScripts", false).is_none() {
+        dm.create_virtual("PlayerScripts", "PlayerScripts", Some(player));
+    }
+    if dm.find_first_child(player, "PlayerGui", false).is_none() {
+        let gui = dm.create_virtual("PlayerGui", "PlayerGui", Some(player));
+        fill_player_gui(dm, gui, true);
+    }
+}
+
+/// Copy StarterGui into a player's `PlayerGui`. When the player joins
+/// (`first`) every GUI is copied; on a respawn the copies with `ResetOnSpawn`
+/// (the default) are replaced and the rest are kept, as in Roblox.
+pub fn fill_player_gui(dm: &mut DataModel, player_gui: InstanceId, first: bool) {
+    let Some(starter) = dm.find_service("StarterGui") else { return };
+    let resets = |dm: &DataModel, id: InstanceId| dm.get_prop(id, "ResetOnSpawn").and_then(|v| v.as_bool()).unwrap_or(true);
+    if !first {
+        for old in dm.children(player_gui).to_vec() {
+            if resets(dm, old) {
+                dm.destroy(old);
+            }
+        }
+    }
+    for template in dm.children(starter).to_vec() {
+        if !first && !resets(dm, template) {
+            continue;
+        }
+        if let Some(copy) = dm.clone_instance(template) {
+            let _ = dm.set_parent(copy, Some(player_gui));
+        }
+    }
 }
 
 /// Roblox's StarterPack: a copy of each child of the Space's StarterPack goes
@@ -410,6 +465,40 @@ mod tests {
         let copies_of: Vec<Option<InstanceId>> = dm.children(backpack).iter().map(|c| dm.get(*c).and_then(|i| i.clone_of)).collect();
         assert!(copies_of.iter().all(|c| c.is_some()), "the Backpack holds copies, not the originals: {copies_of:?}");
         assert_eq!(dm.children(pack), &[sword, bat], "the originals stay in the StarterPack");
+    }
+
+    /// A player played alone gets the containers a host gives a joined one:
+    /// a Backpack holding copies of the StarterPack, PlayerScripts, and a
+    /// PlayerGui holding copies of the StarterGui, so a Space's HUD exists
+    /// for the HUD to draw. A second call adds nothing.
+    #[test]
+    fn a_solo_player_gets_its_containers_and_the_starter_gui() {
+        let mut dm = DataModel::new();
+        let starter = dm.get_service("StarterGui").expect("StarterGui");
+        let hud = dm.create_virtual("ScreenGui", "Hud", Some(starter));
+        dm.create_virtual("TextLabel", "Cash", Some(hud));
+        let pack = dm.get_service("StarterPack").expect("StarterPack");
+        dm.create_virtual("Tool", "Sword", Some(pack));
+        let players = dm.get_service("Players").expect("Players");
+        let me = dm.create_virtual("Player", "Tester", Some(players));
+
+        give_player_containers(&mut dm, me);
+        give_player_containers(&mut dm, me);
+
+        let kids = |dm: &DataModel, id: InstanceId| -> Vec<String> {
+            dm.children(id).iter().filter_map(|c| dm.get(*c).map(|i| i.name.clone())).collect()
+        };
+        let mut containers = kids(&dm, me);
+        containers.sort();
+        assert_eq!(containers, ["Backpack", "PlayerGui", "PlayerScripts"], "each container once");
+        let gui = dm.find_first_child(me, "PlayerGui", false).expect("PlayerGui");
+        assert_eq!(kids(&dm, gui), ["Hud"], "the StarterGui is copied once");
+        let copy = dm.find_first_child(gui, "Hud", false).expect("the copy");
+        assert_ne!(copy, hud, "a copy, not the original");
+        assert_eq!(kids(&dm, copy), ["Cash"], "with its descendants");
+        assert_eq!(kids(&dm, starter), ["Hud"], "the original stays in StarterGui");
+        let backpack = dm.find_first_child(me, "Backpack", false).expect("Backpack");
+        assert_eq!(kids(&dm, backpack), ["Sword"]);
     }
 
     fn number(dm: &DataModel, id: InstanceId, name: &str) -> Option<f64> {

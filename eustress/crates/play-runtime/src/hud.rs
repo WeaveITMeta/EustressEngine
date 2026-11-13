@@ -545,9 +545,11 @@ mod tests {
             text_y_align: String::new(),
             text_stroke_color: [0.0; 4],
             text_scaled: false,
+            text_wrapped: true,
             image_path: String::new(),
             class_type: "Frame".into(),
             mouse_filter: "stop".into(),
+            active: false,
         }
     }
 

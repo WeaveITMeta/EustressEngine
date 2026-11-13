@@ -46,6 +46,7 @@ export const DEPOSIT_KIND_NAMES = {
   delta_purchase: 'Delta packs',
   subscription: 'Plans',
   treasury_fund: 'Gifts to the Treasury',
+  engine_sponsor: 'Engine sponsorships',
 };
 const DEFAULT_SETTINGS = { labor_share: 0 };
 const pad = (n) => String(n).padStart(2, '0');

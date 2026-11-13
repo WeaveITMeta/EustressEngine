@@ -101,8 +101,12 @@ fn HomeHero() -> impl IntoView {
                         on:mouseleave=move |ev| on_tilt_leave(&ev)
                     >
                         <div class="hero-render-glow" aria-hidden="true"></div>
+                        // The page's largest paint on most screens: WebP, and an 800-pixel
+                        // copy for phones, which show it about 350 pixels wide.
                         <img
-                            src="/assets/hero-render.png"
+                            src="/assets/hero-render.webp"
+                            srcset="/assets/hero-render-800.webp 800w, /assets/hero-render.webp 1334w"
+                            sizes="(max-width: 768px) 92vw, 60vw"
                             alt="The Eustress Studio editor: a photographed bicycle reconstructed as a Gaussian splat, rendering live in the viewport alongside the scene explorer and properties panels"
                             class="hero-render-img"
                             width="1334"
@@ -191,66 +195,66 @@ fn HomeComparison() -> impl IntoView {
                     <tbody>
                         <tr>
                             <td class="feature-name">"Real-time 3D world"</td>
-                            <td class="eustress"><span class="check">"✓"</span>" RTX"</td>
-                            <td><span class="check">"✓"</span>" RTX"</td>
-                            <td><span class="warn">"~"</span>" Basic 3D"</td>
-                            <td><span class="cross">"✗"</span>" Plots only"</td>
+                            <td class="eustress"><span class="check" role="img" aria-label="Yes"></span>" RTX"</td>
+                            <td><span class="check" role="img" aria-label="Yes"></span>" RTX"</td>
+                            <td><span class="warn" role="img" aria-label="Partly"></span>" Basic 3D"</td>
+                            <td><span class="cross" role="img" aria-label="No"></span>" Plots only"</td>
                         </tr>
                         <tr>
                             <td class="feature-name">"Scale (entities)"</td>
-                            <td class="eustress"><span class="check">"✓"</span>" 10M+"</td>
-                            <td><span class="check">"✓"</span>" Large (USD)"</td>
-                            <td><span class="warn">"~"</span>" 100Ks agents"</td>
-                            <td><span class="warn">"~"</span>" Matrix-bound"</td>
+                            <td class="eustress"><span class="check" role="img" aria-label="Yes"></span>" 10M+"</td>
+                            <td><span class="check" role="img" aria-label="Yes"></span>" Large (USD)"</td>
+                            <td><span class="warn" role="img" aria-label="Partly"></span>" 100Ks agents"</td>
+                            <td><span class="warn" role="img" aria-label="Partly"></span>" Matrix-bound"</td>
                         </tr>
                         <tr>
                             <td class="feature-name">"Time compression"</td>
-                            <td class="eustress"><span class="check">"✓"</span>" ~1 yr/sec"</td>
-                            <td><span class="warn">"~"</span>" Limited"</td>
-                            <td><span class="check">"✓"</span>" Discrete-event"</td>
-                            <td><span class="check">"✓"</span>" Numerical"</td>
+                            <td class="eustress"><span class="check" role="img" aria-label="Yes"></span>" ~1 yr/sec"</td>
+                            <td><span class="warn" role="img" aria-label="Partly"></span>" Limited"</td>
+                            <td><span class="check" role="img" aria-label="Yes"></span>" Discrete-event"</td>
+                            <td><span class="check" role="img" aria-label="Yes"></span>" Numerical"</td>
                         </tr>
                         <tr>
                             <td class="feature-name">"Agent-based modeling"</td>
-                            <td class="eustress"><span class="check">"✓"</span>" ECS-native"</td>
-                            <td><span class="warn">"~"</span>" Via Kit"</td>
-                            <td><span class="check">"✓"</span>" Specialty"</td>
-                            <td><span class="warn">"~"</span>" Toolbox"</td>
+                            <td class="eustress"><span class="check" role="img" aria-label="Yes"></span>" ECS-native"</td>
+                            <td><span class="warn" role="img" aria-label="Partly"></span>" Via Kit"</td>
+                            <td><span class="check" role="img" aria-label="Yes"></span>" Specialty"</td>
+                            <td><span class="warn" role="img" aria-label="Partly"></span>" Toolbox"</td>
                         </tr>
                         <tr>
                             <td class="feature-name">"Numerical / control libs"</td>
-                            <td class="eustress"><span class="warn">"~"</span>" Growing"</td>
-                            <td><span class="warn">"~"</span>" Partial"</td>
-                            <td><span class="warn">"~"</span>" Partial"</td>
-                            <td><span class="check">"✓"</span>" Gold standard"</td>
+                            <td class="eustress"><span class="warn" role="img" aria-label="Partly"></span>" Growing"</td>
+                            <td><span class="warn" role="img" aria-label="Partly"></span>" Partial"</td>
+                            <td><span class="warn" role="img" aria-label="Partly"></span>" Partial"</td>
+                            <td><span class="check" role="img" aria-label="Yes"></span>" Gold standard"</td>
                         </tr>
                         <tr>
                             <td class="feature-name">"Photoreal rendering"</td>
-                            <td class="eustress"><span class="check">"✓"</span>" RTX ray-traced"</td>
-                            <td><span class="check">"✓"</span>" RTX path-traced"</td>
-                            <td><span class="cross">"✗"</span>" None"</td>
-                            <td><span class="cross">"✗"</span>" None"</td>
+                            <td class="eustress"><span class="check" role="img" aria-label="Yes"></span>" RTX ray-traced"</td>
+                            <td><span class="check" role="img" aria-label="Yes"></span>" RTX path-traced"</td>
+                            <td><span class="cross" role="img" aria-label="No"></span>" None"</td>
+                            <td><span class="cross" role="img" aria-label="No"></span>" None"</td>
                         </tr>
                         <tr>
                             <td class="feature-name">"AI-native control"</td>
-                            <td class="eustress"><span class="check">"✓"</span>" MCP bridge"</td>
-                            <td><span class="warn">"~"</span>" Kit/USD"</td>
-                            <td><span class="cross">"✗"</span>" None"</td>
-                            <td><span class="warn">"~"</span>" Scripted"</td>
+                            <td class="eustress"><span class="check" role="img" aria-label="Yes"></span>" MCP bridge"</td>
+                            <td><span class="warn" role="img" aria-label="Partly"></span>" Kit/USD"</td>
+                            <td><span class="cross" role="img" aria-label="No"></span>" None"</td>
+                            <td><span class="warn" role="img" aria-label="Partly"></span>" Scripted"</td>
                         </tr>
                         <tr>
                             <td class="feature-name">"Source open / forkable"</td>
-                            <td class="eustress"><span class="check">"✓"</span>" PolyForm Shield"</td>
-                            <td><span class="cross">"✗"</span>" Proprietary"</td>
-                            <td><span class="cross">"✗"</span>" Commercial"</td>
-                            <td><span class="cross">"✗"</span>" Commercial"</td>
+                            <td class="eustress"><span class="check" role="img" aria-label="Yes"></span>" PolyForm Shield"</td>
+                            <td><span class="cross" role="img" aria-label="No"></span>" Proprietary"</td>
+                            <td><span class="cross" role="img" aria-label="No"></span>" Commercial"</td>
+                            <td><span class="cross" role="img" aria-label="No"></span>" Commercial"</td>
                         </tr>
                         <tr>
                             <td class="feature-name">"Pricing"</td>
-                            <td class="eustress"><span class="check">"✓"</span>" Free, no royalty"</td>
-                            <td><span class="warn">"~"</span>" Free indie, paid ent."</td>
-                            <td><span class="cross">"✗"</span>" $$$ license"</td>
-                            <td><span class="cross">"✗"</span>" $$$ per seat"</td>
+                            <td class="eustress"><span class="check" role="img" aria-label="Yes"></span>" Free, no royalty"</td>
+                            <td><span class="warn" role="img" aria-label="Partly"></span>" Free indie, paid ent."</td>
+                            <td><span class="cross" role="img" aria-label="No"></span>" $$$ license"</td>
+                            <td><span class="cross" role="img" aria-label="No"></span>" $$$ per seat"</td>
                         </tr>
                     </tbody>
                 </table>
@@ -286,59 +290,59 @@ fn HomeComparison() -> impl IntoView {
                         <tbody>
                             <tr>
                                 <td class="feature-name">"Performance"</td>
-                                <td class="eustress"><span class="check">"✓"</span>" Native Rust"</td>
-                                <td class="roblox"><span class="warn">"~"</span>" Lua VM"</td>
-                                <td class="unity"><span class="warn">"~"</span>" C# + Mono"</td>
-                                <td class="unreal"><span class="check">"✓"</span>" C++"</td>
+                                <td class="eustress"><span class="check" role="img" aria-label="Yes"></span>" Native Rust"</td>
+                                <td class="roblox"><span class="warn" role="img" aria-label="Partly"></span>" Lua VM"</td>
+                                <td class="unity"><span class="warn" role="img" aria-label="Partly"></span>" C# + Mono"</td>
+                                <td class="unreal"><span class="check" role="img" aria-label="Yes"></span>" C++"</td>
                             </tr>
                             <tr>
                                 <td class="feature-name">"Memory Safety"</td>
-                                <td class="eustress"><span class="check">"✓"</span>" Guaranteed"</td>
-                                <td class="roblox"><span class="check">"✓"</span>" Sandboxed"</td>
-                                <td class="unity"><span class="warn">"~"</span>" GC Pauses"</td>
-                                <td class="unreal"><span class="cross">"✗"</span>" Manual"</td>
+                                <td class="eustress"><span class="check" role="img" aria-label="Yes"></span>" Guaranteed"</td>
+                                <td class="roblox"><span class="check" role="img" aria-label="Yes"></span>" Sandboxed"</td>
+                                <td class="unity"><span class="warn" role="img" aria-label="Partly"></span>" GC Pauses"</td>
+                                <td class="unreal"><span class="cross" role="img" aria-label="No"></span>" Manual"</td>
                             </tr>
                             <tr>
                                 <td class="feature-name">"Max Instances"</td>
-                                <td class="eustress"><span class="check">"✓"</span>" 10M+"</td>
-                                <td class="roblox"><span class="warn">"~"</span>" 100K"</td>
-                                <td class="unity"><span class="warn">"~"</span>" 500K"</td>
-                                <td class="unreal"><span class="check">"✓"</span>" 1M+"</td>
+                                <td class="eustress"><span class="check" role="img" aria-label="Yes"></span>" 10M+"</td>
+                                <td class="roblox"><span class="warn" role="img" aria-label="Partly"></span>" 100K"</td>
+                                <td class="unity"><span class="warn" role="img" aria-label="Partly"></span>" 500K"</td>
+                                <td class="unreal"><span class="check" role="img" aria-label="Yes"></span>" 1M+"</td>
                             </tr>
                             <tr>
                                 <td class="feature-name">"Web Export"</td>
-                                <td class="eustress"><span class="check">"✓"</span>" Native WASM"</td>
-                                <td class="roblox"><span class="cross">"✗"</span>" None"</td>
-                                <td class="unity"><span class="warn">"~"</span>" WebGL"</td>
-                                <td class="unreal"><span class="cross">"✗"</span>" Limited"</td>
+                                <td class="eustress"><span class="check" role="img" aria-label="Yes"></span>" Native WASM"</td>
+                                <td class="roblox"><span class="cross" role="img" aria-label="No"></span>" None"</td>
+                                <td class="unity"><span class="warn" role="img" aria-label="Partly"></span>" WebGL"</td>
+                                <td class="unreal"><span class="cross" role="img" aria-label="No"></span>" Limited"</td>
                             </tr>
                             <tr>
                                 <td class="feature-name">"Source open / forkable"</td>
-                                <td class="eustress"><span class="check">"✓"</span>" PolyForm Shield"</td>
-                                <td class="roblox"><span class="cross">"✗"</span>" Closed"</td>
-                                <td class="unity"><span class="cross">"✗"</span>" Closed"</td>
-                                <td class="unreal"><span class="warn">"~"</span>" Source access"</td>
+                                <td class="eustress"><span class="check" role="img" aria-label="Yes"></span>" PolyForm Shield"</td>
+                                <td class="roblox"><span class="cross" role="img" aria-label="No"></span>" Closed"</td>
+                                <td class="unity"><span class="cross" role="img" aria-label="No"></span>" Closed"</td>
+                                <td class="unreal"><span class="warn" role="img" aria-label="Partly"></span>" Source access"</td>
                             </tr>
                             <tr>
                                 <td class="feature-name">"Pricing"</td>
-                                <td class="eustress"><span class="check">"✓"</span>" Free, no royalty"</td>
-                                <td class="roblox"><span class="warn">"~"</span>" Revenue share"</td>
-                                <td class="unity"><span class="cross">"✗"</span>" Per seat"</td>
-                                <td class="unreal"><span class="warn">"~"</span>" 5% royalty"</td>
+                                <td class="eustress"><span class="check" role="img" aria-label="Yes"></span>" Free, no royalty"</td>
+                                <td class="roblox"><span class="warn" role="img" aria-label="Partly"></span>" Revenue share"</td>
+                                <td class="unity"><span class="cross" role="img" aria-label="No"></span>" Per seat"</td>
+                                <td class="unreal"><span class="warn" role="img" aria-label="Partly"></span>" 5% royalty"</td>
                             </tr>
                             <tr>
                                 <td class="feature-name">"Scripting"</td>
-                                <td class="eustress"><span class="check">"✓"</span>" Soul + Rune + Luau"</td>
-                                <td class="roblox"><span class="check">"✓"</span>" Luau"</td>
-                                <td class="unity"><span class="check">"✓"</span>" C#"</td>
-                                <td class="unreal"><span class="check">"✓"</span>" Blueprint + C++"</td>
+                                <td class="eustress"><span class="check" role="img" aria-label="Yes"></span>" Soul + Rune + Luau"</td>
+                                <td class="roblox"><span class="check" role="img" aria-label="Yes"></span>" Luau"</td>
+                                <td class="unity"><span class="check" role="img" aria-label="Yes"></span>" C#"</td>
+                                <td class="unreal"><span class="check" role="img" aria-label="Yes"></span>" Blueprint + C++"</td>
                             </tr>
                             <tr>
                                 <td class="feature-name">"Studio Editor"</td>
-                                <td class="eustress"><span class="warn">"~"</span>" Maturing"</td>
-                                <td class="roblox"><span class="check">"✓"</span>" Polished"</td>
-                                <td class="unity"><span class="check">"✓"</span>" Polished"</td>
-                                <td class="unreal"><span class="check">"✓"</span>" AAA"</td>
+                                <td class="eustress"><span class="warn" role="img" aria-label="Partly"></span>" Maturing"</td>
+                                <td class="roblox"><span class="check" role="img" aria-label="Yes"></span>" Polished"</td>
+                                <td class="unity"><span class="check" role="img" aria-label="Yes"></span>" Polished"</td>
+                                <td class="unreal"><span class="check" role="img" aria-label="Yes"></span>" AAA"</td>
                             </tr>
                         </tbody>
                     </table>
@@ -382,6 +386,9 @@ struct ShowcaseBuild {
     line: &'static str,
     /// The capture, as a site path, or None while there is none yet.
     capture: Option<&'static str>,
+    /// True when the picture is a generated illustration rather than a capture
+    /// from the engine. The card says so, on the picture and in its alt text.
+    illustration: bool,
     /// Figures shown in a row under the line, as (figure, label). Empty for most builds.
     stats: &'static [(&'static str, &'static str)],
 }
@@ -401,7 +408,8 @@ const SHOWCASE_BUILDS: &[ShowcaseBuild] = &[
         tag: "DIGITAL TWIN",
         name: "V-Cell Battery",
         line: "An anode-lean lithium-sulfur cell that stacks 459 bipolar layers inside one 300 × 100 × 100 mm can, so a single cell delivers 987 V and 2,386 Wh.",
-        capture: None,
+        capture: Some("/assets/showcase/v-cell.webp"),
+        illustration: true,
         stats: &[
             ("544", "Wh/kg, pack"),
             ("987", "volts, one cell"),
@@ -415,7 +423,8 @@ const SHOWCASE_BUILDS: &[ShowcaseBuild] = &[
         tag: "ENERGY",
         name: "Fusion Exosuit",
         line: "A fusion-powered exosuit, built and run in Studio.",
-        capture: None,
+        capture: Some("/assets/showcase/fusion-exosuit.webp"),
+        illustration: true,
         stats: &[],
     },
     ShowcaseBuild {
@@ -423,7 +432,8 @@ const SHOWCASE_BUILDS: &[ShowcaseBuild] = &[
         tag: "DATA",
         name: "Climate Model",
         line: "A climate model driven by data, built and run in Studio.",
-        capture: None,
+        capture: Some("/assets/showcase/climate-model.webp"),
+        illustration: true,
         stats: &[],
     },
     ShowcaseBuild {
@@ -431,7 +441,8 @@ const SHOWCASE_BUILDS: &[ShowcaseBuild] = &[
         tag: "EPCIS / GS1",
         name: "Supply-Chain Twin",
         line: "A supply chain twin that speaks EPCIS and GS1.",
-        capture: None,
+        capture: Some("/assets/showcase/supply-chain-twin.webp"),
+        illustration: true,
         stats: &[],
     },
     ShowcaseBuild {
@@ -439,7 +450,8 @@ const SHOWCASE_BUILDS: &[ShowcaseBuild] = &[
         tag: "LENR",
         name: "LENR / Cold Fusion",
         line: "A low-energy nuclear reaction model, built and run in Studio.",
-        capture: None,
+        capture: Some("/assets/showcase/lenr-cold-fusion.webp"),
+        illustration: true,
         stats: &[],
     },
 ];
@@ -449,21 +461,36 @@ const SHOWCASE_BUILDS: &[ShowcaseBuild] = &[
 const SHOWCASE_SHOT_WIDTH: u32 = 1280;
 const SHOWCASE_SHOT_HEIGHT: u32 = 800;
 
+/// Width of the smaller copy of every capture, `<slug>-800.webp` beside it. A
+/// phone shows a card about 380 pixels wide at roughly twice the density, so
+/// 800 pixels is enough there and the full capture is for wide screens.
+const SHOWCASE_SMALL_WIDTH: u32 = 800;
+
+/// The `srcset` of a capture: its 800-pixel copy and itself.
+fn showcase_srcset(path: &str) -> String {
+    let small = path.strip_suffix(".webp").map(|stem| format!("{stem}-{SHOWCASE_SMALL_WIDTH}.webp")).unwrap_or_else(|| path.to_string());
+    format!("{small} {SHOWCASE_SMALL_WIDTH}w, {path} {SHOWCASE_SHOT_WIDTH}w")
+}
+
 /// The image slot of a card: the capture when there is one, otherwise the
 /// striped placeholder carrying the build's name.
 fn build_slot(build: &ShowcaseBuild) -> impl IntoView {
     let name = build.name;
+    let illustration = build.illustration;
     match build.capture {
         Some(path) => view! {
             <img
                 class="build-shot"
                 src=path
-                alt=format!("{name} running in Eustress Studio")
+                srcset=showcase_srcset(path)
+                sizes="(max-width: 768px) 92vw, 40vw"
+                alt=if illustration { format!("Illustration of the {name}") } else { format!("{name} running in Eustress Studio") }
                 width=SHOWCASE_SHOT_WIDTH
                 height=SHOWCASE_SHOT_HEIGHT
                 loading="lazy"
                 decoding="async"
             />
+            {illustration.then(|| view! { <span class="build-art-chip">"Illustration"</span> })}
         }
         .into_any(),
         None => view! {
@@ -555,21 +582,21 @@ fn HomeProof() -> impl IntoView {
 
                     <ul class="proof-points">
                         <li>
-                            <span class="feature-check" aria-hidden="true">"✓"</span>
+                            <span class="feature-check" aria-hidden="true"></span>
                             <span>
                                 <strong>"Source-available:"</strong>
                                 " the clock, the physics and the data layer, under PolyForm Shield."
                             </span>
                         </li>
                         <li>
-                            <span class="feature-check" aria-hidden="true">"✓"</span>
+                            <span class="feature-check" aria-hidden="true"></span>
                             <span>
                                 <strong>"Rust end to end:"</strong>
                                 " memory safety is structural."
                             </span>
                         </li>
                         <li>
-                            <span class="feature-check" aria-hidden="true">"✓"</span>
+                            <span class="feature-check" aria-hidden="true"></span>
                             <span>
                                 <strong>"Contributors rank up:"</strong>
                                 " open a pull request, earn points, become a contributor."
@@ -579,7 +606,7 @@ fn HomeProof() -> impl IntoView {
 
                     <div class="github-cta">
                         <a href="https://github.com/WeaveITMeta/EustressEngine" target="_blank" rel="noopener" class="btn-primary-steel">
-                            "★ Star on GitHub"
+                            <img class="btn-star" src="/assets/icons/home/star.svg" alt="" width="16" height="16" />"Star on GitHub"
                             <span class="btn-icon">"→"</span>
                         </a>
                         <a href="https://github.com/WeaveITMeta/EustressEngine/pulls" target="_blank" rel="noopener" class="btn-secondary-steel">
@@ -601,7 +628,7 @@ fn HomeProof() -> impl IntoView {
                         <div class="term-line"><span class="term-prompt">"$ "</span>"git clone github.com/WeaveITMeta/EustressEngine"</div>
                         <div class="term-line term-dim">"Cloning into 'EustressEngine'..."</div>
                         <div class="term-line"><span class="term-prompt">"$ "</span>"cargo run"</div>
-                        <div class="term-line term-ok">"✓ Eustress running. The world is yours."</div>
+                        <div class="term-line term-ok">"Eustress running. The world is yours."</div>
                     </div>
                     <div class="github-badges">
                         <span class="gh-badge">"PolyForm Shield"</span>
@@ -634,15 +661,15 @@ fn HomeCta() -> impl IntoView {
 
                 <div class="cta-features">
                     <div class="cta-feature">
-                        <span class="feature-check">"✓"</span>
+                        <span class="feature-check" aria-hidden="true"></span>
                         "Source-available, PolyForm Shield"
                     </div>
                     <div class="cta-feature">
-                        <span class="feature-check">"✓"</span>
+                        <span class="feature-check" aria-hidden="true"></span>
                         "Free forever, no platform tax"
                     </div>
                     <div class="cta-feature">
-                        <span class="feature-check">"✓"</span>
+                        <span class="feature-check" aria-hidden="true"></span>
                         "Fork it and ship your fork"
                     </div>
                 </div>
@@ -1144,42 +1171,42 @@ fn WhatsInsideTabs() -> impl IntoView {
                         <div>
                             <div class="power-grid">
                                 <div class="power-card">
-                                    <div class="power-icon">"🌄"</div>
+                                    <div class="power-icon"><img src="/assets/icons/home/rendering.svg" alt="" width="28" height="28" /></div>
                                     <h3>"Photoreal Rendering"</h3>
                                     <p>"Bevy's PBR pipeline. Real-time lighting, shadows, atmosphere, reflections. Worlds that look shipped, not prototyped."</p>
                                 </div>
                                 <div class="power-card">
-                                    <div class="power-icon">"🗺️"</div>
+                                    <div class="power-icon"><img src="/assets/icons/home/terrain.svg" alt="" width="28" height="28" /></div>
                                     <h3>"Massive Open Worlds"</h3>
                                     <p>"Procedural terrain and seamless streaming. Walk for hours and never hit a loading screen."</p>
                                 </div>
                                 <div class="power-card">
-                                    <div class="power-icon">"🌐"</div>
+                                    <div class="power-icon"><img src="/assets/icons/home/multiplayer.svg" alt="" width="28" height="28" /></div>
                                     <h3>"Real-Time Multiplayer"</h3>
                                     <p>"QUIC networking, server-authoritative, low latency. Built in, not bolted on."</p>
                                 </div>
                                 <div class="power-card">
-                                    <div class="power-icon">"🥽"</div>
+                                    <div class="power-icon"><img src="/assets/icons/home/xr.svg" alt="" width="28" height="28" /></div>
                                     <h3>"VR and XR Native"</h3>
                                     <p>"OpenXR out of the box. Quest, PSVR2, and desktop XR from one project."</p>
                                 </div>
                                 <div class="power-card">
-                                    <div class="power-icon">"💥"</div>
+                                    <div class="power-icon"><img src="/assets/icons/home/destruction.svg" alt="" width="28" height="28" /></div>
                                     <h3>"Physics and Destruction"</h3>
                                     <p>"Avian physics with soft bodies, ragdolls, and things that break the way they should."</p>
                                 </div>
                                 <div class="power-card">
-                                    <div class="power-icon">"🚀"</div>
+                                    <div class="power-icon"><img src="/assets/icons/home/deploy.svg" alt="" width="28" height="28" /></div>
                                     <h3>"Ship Anywhere"</h3>
                                     <p>"One project, every screen. Windows, Mac, Linux, mobile, web, and headset."</p>
                                 </div>
                                 <div class="power-card">
-                                    <div class="power-icon">"🔊"</div>
+                                    <div class="power-icon"><img src="/assets/icons/home/audio.svg" alt="" width="28" height="28" /></div>
                                     <h3>"Spatial Audio"</h3>
                                     <p>"Sound that lives in the world, not just the speakers. 3D positional audio, occlusion, and reverb that track the geometry."</p>
                                 </div>
                                 <div class="power-card">
-                                    <div class="power-icon">"🎆"</div>
+                                    <div class="power-icon"><img src="/assets/icons/home/particles.svg" alt="" width="28" height="28" /></div>
                                     <h3>"Particles and VFX"</h3>
                                     <p>"Fire, smoke, sparks, and spells. GPU particle systems that hold their frame rate when the screen gets loud."</p>
                                 </div>
@@ -1193,17 +1220,17 @@ fn WhatsInsideTabs() -> impl IntoView {
                         <div>
                             <div class="power-grid">
                                 <div class="power-card">
-                                    <div class="power-icon">"⚛️"</div>
+                                    <div class="power-icon"><img src="/assets/icons/home/physics.svg" alt="" width="28" height="28" /></div>
                                     <h3>"Simulate Reality"</h3>
                                     <p>"Every material has real properties. Every force follows real physics. Model a single battery cell or a city's power grid; energy, emergency response, economies, supply chains. Realism is the foundation, not a setting."</p>
                                 </div>
                                 <div class="power-card">
-                                    <div class="power-icon">"📊"</div>
+                                    <div class="power-icon"><img src="/assets/icons/home/data.svg" alt="" width="28" height="28" /></div>
                                     <h3>"Drive It With Data"</h3>
                                     <p>"Load millions of real rows. Query them. Feed them straight into a live model. Here, weather and economies run on data, not on timers and mocked ticks. The simulation does not fake it."</p>
                                 </div>
                                 <div class="power-card">
-                                    <div class="power-icon">"🌍"</div>
+                                    <div class="power-icon"><img src="/assets/icons/home/open.svg" alt="" width="28" height="28" /></div>
                                     <h3>"Source-Available, Free Forever"</h3>
                                     <p>"The most powerful simulation platform on Earth should not sit behind a paywall. Eustress ships under PolyForm Shield. Read it, fork it, ship what you build with it, keep every dollar. Climate, public safety, the systems we all live inside: those belong to everyone."</p>
                                 </div>
@@ -1218,22 +1245,22 @@ fn WhatsInsideTabs() -> impl IntoView {
                         <div>
                             <div class="power-grid">
                                 <div class="power-card">
-                                    <div class="power-icon">"🗃️"</div>
+                                    <div class="power-icon"><img src="/assets/icons/home/dataset.svg" alt="" width="28" height="28" /></div>
                                     <h3>"Datasets as a Noun"</h3>
                                     <p>"Apache Arrow and Polars, in the engine. Load, filter, and join millions of rows from Parquet, CSV, or a live feed, right next to your 3D scene."</p>
                                 </div>
                                 <div class="power-card">
-                                    <div class="power-icon">"📈"</div>
+                                    <div class="power-icon"><img src="/assets/icons/home/charts.svg" alt="" width="28" height="28" /></div>
                                     <h3>"GPU-Accelerated Charts"</h3>
                                     <p>"Plot data at scene scale on the GPU. Hover for the exact value. Read the fit. Charts that keep up with millions of points."</p>
                                 </div>
                                 <div class="power-card">
-                                    <div class="power-icon">"🧩"</div>
+                                    <div class="power-icon"><img src="/assets/icons/home/domain.svg" alt="" width="28" height="28" /></div>
                                     <h3>"Domain-General"</h3>
                                     <p>"One pipeline, any domain. The system does not care whether the rows are energy, supply chain, finance, or sensor streams. One inspector renders a Dataset the way it renders a Part."</p>
                                 </div>
                                 <div class="power-card">
-                                    <div class="power-icon">"🔗"</div>
+                                    <div class="power-icon"><img src="/assets/icons/home/link.svg" alt="" width="28" height="28" /></div>
                                     <h3>"Query, Then Simulate"</h3>
                                     <p>"Bind a column to a parameter and real numbers drive real physics. The gap between your spreadsheet and your simulation closes."</p>
                                 </div>
@@ -1244,42 +1271,42 @@ fn WhatsInsideTabs() -> impl IntoView {
                         <div>
                             <div class="power-grid">
                                 <div class="power-card">
-                                    <div class="power-icon">"🦀"</div>
+                                    <div class="power-icon"><img src="/assets/icons/home/rust.svg" alt="" width="28" height="28" /></div>
                                     <h3>"100% Rust"</h3>
                                     <p>"Memory-safe, fast, fearless concurrency. No garbage-collection pauses. A whole class of crash never compiles."</p>
                                 </div>
                                 <div class="power-card">
-                                    <div class="power-icon">"⏱️"</div>
+                                    <div class="power-icon"><img src="/assets/icons/home/time.svg" alt="" width="28" height="28" /></div>
                                     <h3>"Time Compression"</h3>
                                     <p>"Simulated time is not wall-clock time. Built to compress a year of simulation into a second. Age a battery a decade before lunch."</p>
                                 </div>
                                 <div class="power-card">
-                                    <div class="power-icon">"🌐"</div>
+                                    <div class="power-icon"><img src="/assets/icons/home/scale.svg" alt="" width="28" height="28" /></div>
                                     <h3>"Massive Scale"</h3>
                                     <p>"Persistence beyond live memory. Millions of entities, streamed by locality, culled on the GPU, stored in an LSM-tree world."</p>
                                 </div>
                                 <div class="power-card">
-                                    <div class="power-icon">"🎯"</div>
+                                    <div class="power-icon"><img src="/assets/icons/home/target.svg" alt="" width="28" height="28" /></div>
                                     <h3>"Avian Physics"</h3>
                                     <p>"ECS-native, deterministic physics. Soft bodies, ragdolls, constraints, destruction. Same inputs, same result, every run."</p>
                                 </div>
                                 <div class="power-card">
-                                    <div class="power-icon">"🤖"</div>
+                                    <div class="power-icon"><img src="/assets/icons/home/ai.svg" alt="" width="28" height="28" /></div>
                                     <h3>"AI-Native Bridge"</h3>
                                     <p>"Drive the live engine over MCP. Inspect it, build in it, run simulations through it. Think Playwright, for a 3D world."</p>
                                 </div>
                                 <div class="power-card">
-                                    <div class="power-icon">"✨"</div>
+                                    <div class="power-icon"><img src="/assets/icons/home/soul.svg" alt="" width="28" height="28" /></div>
                                     <h3>"Soul Language"</h3>
                                     <p>"Write logic in plain Markdown. Soul compiles your intent to native Rust. Rune and Luau are there when you want the wheel."</p>
                                 </div>
                                 <div class="power-card">
-                                    <div class="power-icon">"🎨"</div>
+                                    <div class="power-icon"><img src="/assets/icons/home/renderer.svg" alt="" width="28" height="28" /></div>
                                     <h3>"Bevy Rendering"</h3>
                                     <p>"Bevy's modern renderer. PBR, GPU-driven, clustered lighting, WebGPU-ready. 60+ FPS on real scenes."</p>
                                 </div>
                                 <div class="power-card">
-                                    <div class="power-icon">"📦"</div>
+                                    <div class="power-icon"><img src="/assets/icons/home/pipeline.svg" alt="" width="28" height="28" /></div>
                                     <h3>"Data Pipeline"</h3>
                                     <p>"Import anything. Mesh (GLTF, FBX), point clouds (PCD), CAD, and tables (Parquet, Arrow). One pipeline, every format."</p>
                                 </div>
@@ -1396,10 +1423,28 @@ mod tests {
     }
 
     #[test]
+    fn every_capture_ships_its_800_pixel_copy() {
+        for build in SHOWCASE_BUILDS {
+            let Some(path) = build.capture else { continue };
+            let srcset = showcase_srcset(path);
+            let small = srcset.split(' ').next().unwrap();
+            assert_eq!(srcset, format!("{small} 800w, {path} 1280w"), "{}", build.name);
+            let file = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(small.trim_start_matches('/'));
+            let bytes = std::fs::read(&file).unwrap_or_else(|e| panic!("{}: {} is missing ({e})", build.name, file.display()));
+            assert!(bytes.starts_with(b"RIFF") && &bytes[8..12] == b"WEBP", "{} is not a WebP", file.display());
+        }
+    }
+
+    #[test]
     fn the_hero_keeps_the_real_studio_capture_and_the_city_backdrop_is_css_only() {
         let html = hero();
-        let img = around(&html, "src=\"/assets/hero-render.png\"", "img");
-        assert!(img.contains("src=\"/assets/hero-render.png\""), "{img}");
+        let img = around(&html, "src=\"/assets/hero-render.webp\"", "img");
+        assert!(img.contains("src=\"/assets/hero-render.webp\""), "{img}");
+        // A phone takes the 800-pixel copy; both files ship.
+        assert!(img.contains("srcset=\"/assets/hero-render-800.webp 800w, /assets/hero-render.webp 1334w\""), "{img}");
+        for file in [&include_bytes!("../../assets/hero-render.webp")[..], &include_bytes!("../../assets/hero-render-800.webp")[..]] {
+            assert!(file.starts_with(b"RIFF") && &file[8..12] == b"WEBP", "a WebP file");
+        }
         assert!(img.contains("width=\"1334\"") && img.contains("height=\"714\"") && img.contains("alt=\"The Eustress Studio editor"), "{img}");
         // The backdrop is decoration: it is a CSS background, so no element, no alt text, nothing announced.
         assert!(html.contains("hero-industrial hero-city"));
@@ -1469,7 +1514,7 @@ mod tests {
             let tr = &html[at..at + html[at..].find("</tr>").expect("</tr>")];
             let eustress = &tr[tr.find("class=\"eustress\"").expect("eustress cell")..];
             let eustress = &eustress[..eustress.find("</td>").unwrap()];
-            assert!(eustress.contains("✓") && eustress.ends_with(cell), "{row}: {eustress}");
+            assert!(eustress.contains("class=\"check\"") && eustress.ends_with(cell), "{row}: {eustress}");
         }
     }
 
@@ -1575,6 +1620,7 @@ mod tests {
             name: "Test Build",
             line: "A line.",
             capture: Some("/assets/showcase/test-build.webp"),
+            illustration: false,
             stats: &[],
         };
         let html = render(|| build_slot(&build));
@@ -1583,6 +1629,11 @@ mod tests {
         assert!(img.contains(&format!("width=\"{SHOWCASE_SHOT_WIDTH}\"")) && img.contains(&format!("height=\"{SHOWCASE_SHOT_HEIGHT}\"")), "{img}");
         assert!(img.contains("alt=\"Test Build running in Eustress Studio\""), "{img}");
         assert!(!html.contains("build-slot-empty"), "{html}");
+        assert!(!html.contains("build-art-chip"), "a capture is not labelled an illustration");
+        let drawn = ShowcaseBuild { illustration: true, ..build };
+        let html = render(|| build_slot(&drawn));
+        assert!(element(&html, "img", 0).contains("alt=\"Illustration of the Test Build\""), "{html}");
+        assert!(html.contains("<span class=\"build-art-chip\">Illustration</span>"), "an illustration says so on the picture: {html}");
     }
 
     #[test]
@@ -1621,7 +1672,7 @@ mod tests {
         let pr = around(&html, "Open a pull request", "a");
         assert!(pr.contains("href=\"https://github.com/WeaveITMeta/EustressEngine/pulls\""), "{pr}");
         assert!(text.contains("$ git clone github.com/WeaveITMeta/EustressEngine"), "the terminal stays: {text}");
-        assert!(text.contains("✓ Eustress running. The world is yours."), "{text}");
+        assert!(text.contains("Eustress running. The world is yours."), "{text}");
         // the old pieces are gone
         for gone in ["Don't Take Our Word For It", "Build It With Us", "ladder", "testimonials-industrial", "Runs today"] {
             assert!(!html.contains(gone), "{gone} should be gone");

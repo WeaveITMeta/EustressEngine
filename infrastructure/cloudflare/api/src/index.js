@@ -32,7 +32,7 @@ import {
 } from './commerce.mjs';
 import {
   BLISS_UNIT, BLISS_INITIAL_SUPPLY, BLISS_INITIAL_RATE, BLISS_HALVING_YEARS, BLISS_TAIL_RATE,
-  FULL_DAY_SCORE, VALUE_SCORE_PER_TICKET, VALUE_CAP_TICKETS_PER_BUYER, VALUE_CAP_SCORE_PER_CREATOR,
+  FULL_DAY_SCORE, CONTRIBUTION_WEIGHTS, VALUE_SCORE_PER_TICKET, VALUE_CAP_TICKETS_PER_BUYER, VALUE_CAP_SCORE_PER_CREATOR,
   toMinor, fromMinor, formatBliss, readEntry, ledgerDeriveMinor, ledgerBalanceMinor, ledgerSpend,
   blissEmissionRate, yearsSince, readSupplyMinor, readDistributedMinor, valueScoreForDay, projectEmissionMinor,
 } from './bliss.mjs';
@@ -50,14 +50,17 @@ export { LiveIndex } from './live_index.mjs';
 export { GuestAllowance } from './guest.mjs';
 export { AccountAuth } from './account_auth.mjs';
 export { PasskeyIndex } from './passkey_index.mjs';
+export { HolderLedger } from './holder_ledger.mjs';
 import { accountCall, accountState, keyReplaceTerms } from './account_auth.mjs';
 import { handleKeyRotationRoute, handleAdminReplaceKeyRoute, handleKeyRestoreRoute } from './identity_routes.mjs';
 import { handlePasskeyRoute, identityFileRequired } from './passkeys.mjs';
 import { handleEmailRoute } from './email_routes.mjs';
 import { handleReleaseNotify } from './release_notify.mjs';
+import { handleReviewLatencyRoute } from './review_latency.mjs';
 import { isAdmin } from './admin_check.mjs';
 import { readAccountEmail } from './email_ops.mjs';
 import { freshGate, verifyFreshAuth, payoutPinnedUntil } from './fresh_auth.mjs';
+import { handleSpaceDeleteRoute, spaceDeleteWriteGate, sweepSpaceDeletions } from './space_delete.mjs';
 import { addressKey, guestPlayOn, handleGuest, isGuestRating } from './guest.mjs';
 import { END_ALL_GUESTS, guestSession, handleLive, handleServerCredential, holdGuestTicket, isLiveHeartbeat, livePin, livePlayInfo } from './live.mjs';
 import { GUEST_LIVE_INDEX_NAME, handleLiveNow } from './live_index.mjs';
@@ -85,6 +88,12 @@ import { handleWorldRoute, WORLD_FORMAT, PAK_FORMAT, DEFAULT_MAX_PLAYERS, checkM
 import { checkTags, listingTags, tagFilter, queryMatchesTag, genreTag, listingTagFields, setAuthorTags, withTagsWrittenBack, genreAliasValues } from './tags.mjs';
 import { handleIdentityRoute } from './identity.mjs';
 import { handleEconomicsRoute } from './economics.mjs';
+import { handleBooksRoute } from './books.mjs';
+import { handleHolderAdminRoute, handleHoldings, holderLedgerCall } from './holder_ledger.mjs';
+import { handleSubscriptionRoute, handleSubscriptionAdminRoute } from './subscriptions.mjs';
+import {
+  SPONSOR_KIND, handleSponsorCheckout, handleSponsorList, handleSponsorListing, settleSponsorCheckout, settleSponsorInvoice,
+} from './sponsor.mjs';
 import { handleTakedownRoute, sweepTakedowns, refuseBlockedUpload, hashStoredObject, checkCaptureUpload } from './takedown.mjs';
 import { handleCaseRoute } from './case_history.mjs';
 // Illegal content: the evidence vault and the legal reports written from it (src/evidence_vault.mjs, src/legal_reports.mjs).
@@ -686,6 +695,16 @@ export default {
       let moderation = null;
       try { moderation = await sweepModeration(env, await moderationDeps({}, env), { backfill: at.getUTCHours() === 0 }); }
       catch (e) { failed.push(`moderation: ${e.message}`); console.error('moderation sweep failed:', e); }
+      // Deleted Spaces past their 90 days, every hour: removed in bounded, resumable steps, never while a hold applies
+      // (src/space_delete.mjs). Its counts go into the night's record, and a run that held, failed or ran out says so in the log.
+      let spaceDeletions = null;
+      try {
+        spaceDeletions = await sweepSpaceDeletions(env);
+        if (spaceDeletions.budget_spent || spaceDeletions.failed || Object.keys(spaceDeletions.deferred || {}).length) {
+          console.warn('space deletion sweep:', JSON.stringify({ due: spaceDeletions.due, deferred: spaceDeletions.deferred, failed: spaceDeletions.failed, budget_spent: spaceDeletions.budget_spent }));
+        }
+      }
+      catch (e) { failed.push(`space deletions: ${e.message}`); console.error('space deletion sweep failed:', e?.name || 'Error'); }
 
       if (at.getUTCHours() !== 0) return;
 
@@ -704,6 +723,9 @@ export default {
         moderation_resumed: moderation?.resumed ?? 0,
         moderation_stalled: moderation?.stalled ?? 0,
         moderation_backfilled: moderation?.backfilled ?? 0,
+        // The midnight run of the hourly removal job: due, removed, deferred by reason, re-filed, failed, budget spent, or
+        // switched off (SPACE_HARD_DELETE).
+        space_deletions: spaceDeletions,
       }), { expirationTtl: 86400 * 365 });
     })());
   },
@@ -758,6 +780,15 @@ export default {
       // and verify, and nothing else (src/kyc_identity.mjs names what is blocked).
       const kycGated = await kycGate(request, env, cors, { json, verifyJwt });
       if (kycGated) return kycGated;
+
+      // A deleted Space (src/space_delete.mjs): every author write to it answers 409 listing_deleted (anyone else, 404), read
+      // from its R2 mark; then the owner's delete and restore routes and the staff view.
+      const deletedListing = await spaceDeleteWriteGate(request, url, env, cors, { json, verifyAuth });
+      if (deletedListing) return deletedListing;
+      if (url.pathname.startsWith('/api/account/spaces/') || url.pathname.startsWith('/api/admin/space-deletions')) {
+        const handled = await handleSpaceDeleteRoute(request, url, env, ctx, cors, { json, verifyAuth, verifyJwt, requireAdmin });
+        if (handled) return handled;
+      }
 
       // The guest-only sessions live now, for a guest's Play chooser (src/live.mjs, src/live_index.mjs). Read signed out,
       // whoever asks: a guest's cap (G to PG) is the signed-out one, and no adult or account session is ever in this index.
@@ -836,6 +867,9 @@ export default {
         const handled = await handleReleaseNotify(request, url, env, cors, { verifyAuth, requireAdmin, json, auditLog });
         if (handled) return handled;
       }
+
+      // Listing-review latency for staff, administrator only (src/review_latency.mjs)
+      if (url.pathname === '/api/staff/review-latency') return handleReviewLatencyRoute(request, url, env, cors, { requireAdmin, json });
 
       // Identity backup email
       if (url.pathname === '/api/identity/email-backup' && request.method === 'POST')
@@ -977,6 +1011,13 @@ export default {
         return handleStripeCheckout(request, env, cors);
       if (url.pathname === '/api/stripe/webhook' && request.method === 'POST')
         return handleStripeWebhook(request, env);
+      // Engine sponsorships: money for building the engine, once or monthly. See src/sponsor.mjs.
+      if (url.pathname === '/api/sponsor/checkout' && request.method === 'POST')
+        return handleSponsorCheckout(request, env, cors, { verifyAuth, json, stripeRequest, siteOrigin });
+      if (url.pathname === '/api/sponsors' && request.method === 'GET')
+        return handleSponsorList(env, { json, publicCors });
+      if (url.pathname === '/api/sponsor/listing' && request.method === 'PUT')
+        return handleSponsorListing(request, env, cors, { verifyAuth, json });
       if (url.pathname === '/api/stripe/connect/onboard' && request.method === 'POST')
         return handleStripeConnectOnboard(request, env, cors);
       if (url.pathname === '/api/stripe/connect/status' && request.method === 'GET')
@@ -994,6 +1035,31 @@ export default {
       if (url.pathname === '/api/economics/actual' || url.pathname.startsWith('/api/admin/economics/')) {
         const economics = await handleEconomicsRoute(request, url, env, cors, { json, requireAdmin, publicCors });
         if (economics) return economics;
+      }
+
+      // The monthly books close: a journal, a trial balance and a check against Stripe. Admin only. See src/books.mjs.
+      if (url.pathname.startsWith('/api/admin/books/')) {
+        const books = await handleBooksRoute(request, url, env, cors, { json, requireAdmin, stripeRequest });
+        if (books) return books;
+      }
+
+      // The holder ledger: who holds how many units of the company. Administrators write; a holder reads their own. See
+      // src/holder_ledger.mjs.
+      if (url.pathname === '/api/admin/holders' || url.pathname.startsWith('/api/admin/holders/')) {
+        const holders = await handleHolderAdminRoute(request, url, env, cors, { json, requireAdmin });
+        if (holders) return holders;
+      }
+      if (url.pathname === '/api/holdings' && request.method === 'GET')
+        return handleHoldings(request, env, cors, { json, verifyAuth });
+      // The offering and its subscriptions: a person subscribes and signs, an administrator records funds and accepts. No
+      // money moves through these routes. See src/subscriptions.mjs.
+      if (url.pathname.startsWith('/api/admin/offerings') || url.pathname.startsWith('/api/admin/subscriptions')) {
+        const subsAdmin = await handleSubscriptionAdminRoute(request, url, env, cors, { json, requireAdmin, ledgerCall: holderLedgerCall });
+        if (subsAdmin) return subsAdmin;
+      }
+      if (url.pathname.startsWith('/api/offering') || url.pathname.startsWith('/api/subscriptions')) {
+        const subs = await handleSubscriptionRoute(request, url, env, cors, { json, verifyAuth, ledgerCall: holderLedgerCall });
+        if (subs) return subs;
       }
 
       // Ledger transparency (public, read-only, wildcard CORS) + health.
@@ -2612,17 +2678,12 @@ async function handleCosign(request, env, cors) {
   if (!contribution_type || !contribution_hash)
     return json({ error: 'contribution_type and contribution_hash required' }, 400, cors);
 
-  // (1) Contribution weights (from bliss-core/src/contribution.rs).
+  // (1) Contribution weights (CONTRIBUTION_WEIGHTS in bliss.mjs).
   // Unknown types are REJECTED — no 1.0 fallback that would let an
   // attacker smuggle an arbitrary string through as a valid claim.
-  const weights = {
-    ActiveTime: 1.0, Creation: 2.5, Collaboration: 2.0, Education: 2.2,
-    Development: 3.0, Moderation: 1.5, QualityAssurance: 1.8,
-    Optimization: 2.0, Documentation: 1.5, Custom: 1.0,
-  };
-  if (!Object.prototype.hasOwnProperty.call(weights, contribution_type))
+  if (!Object.prototype.hasOwnProperty.call(CONTRIBUTION_WEIGHTS, contribution_type))
     return json({ error: `Unknown contribution_type: ${contribution_type}` }, 400, cors);
-  const weight = weights[contribution_type];
+  const weight = CONTRIBUTION_WEIGHTS[contribution_type];
 
   // Sanitize duration to a finite [1, 3600] second window.
   let durSecs = Number(duration_secs);
@@ -4326,6 +4387,8 @@ async function handleStripeWebhook(request, env) {
     // with each paid invoice (invoice.paid below), its first one included.
     if (sessionType === 'delta_purchase') return settleDeltaPurchase(session, grossCents, userId, env);
     if (sessionType === 'subscription') return recordPlanCheckout(session, env);
+    // A sponsorship of the engine: whole to Eustress's side, after the fee.
+    if (sessionType === SPONSOR_KIND) return settleSponsorCheckout(session, grossCents, userId, env, { treasuryCall });
     // Anything else that is not a Ticket pack or a treasury contribution was
     // not created by this Worker: acknowledge it and move no money.
     if (sessionType && sessionType !== 'ticket_purchase' && sessionType !== 'treasury_fund') {
@@ -4427,6 +4490,7 @@ async function handleStripeWebhook(request, env) {
     const invoice = event.data.object;
     const meta = invoice.subscription_details?.metadata || invoice.parent?.subscription_details?.metadata || {};
     if (meta.type === 'subscription' && PLANS.includes(meta.eustress_plan)) return settlePlanInvoice(invoice, meta, env);
+    if (meta.type === SPONSOR_KIND) return settleSponsorInvoice(invoice, meta, env, { treasuryCall });
     if (invoice.billing_reason !== 'subscription_cycle' || meta.type !== 'treasury_fund') {
       return new Response('OK', { status: 200 });
     }
@@ -5502,10 +5566,13 @@ async function handleMultipartPart(request, simId, env, cors) {
 
   if (!uploadId) return json({ error: 'Missing upload_id' }, 400, cors);
 
-  // The same rule as Create: only the listing's author adds to its upload.
+  // The same rules as Create: only the listing's author adds to its upload, and nothing is added while a hold is on it.
   const simData = await env.SOCIAL.get(`sim:${simId}`);
   if (!simData) return json({ error: 'Simulation not found' }, 404, cors);
-  if (JSON.parse(simData).author_id !== auth) return json({ error: 'Not your simulation' }, 403, cors);
+  const sim = JSON.parse(simData);
+  if (sim.author_id !== auth) return json({ error: 'Not your simulation' }, 403, cors);
+  const held = await refuseWhileHeld(env, sim, auth, cors);
+  if (held) return held;
 
   const r2Key = `universes/${simId}/universe.pak`;
   const multipart = env.SCENES.resumeMultipartUpload(r2Key, uploadId);
@@ -5670,6 +5737,27 @@ async function handleUploadThumbnail(request, simId, env, cors) {
   return json({ thumbnail_url: thumbnailUrl }, 200, cors);
 }
 
+// The keys under `prefix`, read a page at a time until KV says the list is complete (a page can hold fewer keys than asked
+// for, so its length never says the list ended), stopping at `max` keys or LIST_PAGES_MAX list calls. The caller reads each
+// key again, and an invocation may make 1,000 KV operations in all, so a list cut short is logged rather than read on.
+const LIST_PAGES_MAX = 20;
+async function listKeysUpTo(kv, prefix, max) {
+  const keys = [];
+  let cursor;
+  for (let pages = 0; pages < LIST_PAGES_MAX && keys.length < max; pages++) {
+    const page = await kv.list({ prefix, limit: Math.min(1000, max - keys.length), ...(cursor ? { cursor } : {}) });
+    keys.push(...(page?.keys || []));
+    if (page?.list_complete || !page?.cursor) return keys.slice(0, max);
+    cursor = page.cursor;
+  }
+  console.warn(`listKeysUpTo: ${prefix.split(':')[0]} keys cut at ${Math.min(keys.length, max)}`);
+  return keys.slice(0, max);
+}
+// The most listing keys the Gallery reads per request: each costs a read, and each card served a second (its play count).
+const GALLERY_LISTINGS_READ = 400;
+// The most of an author's listings Projects reads: each costs three reads. Cases reads the same number (src/case_history.mjs).
+const AUTHOR_LISTINGS_READ = 200;
+
 // Return the authenticated user's published simulations as "projects"
 async function handleUserProjects(request, url, env, cors) {
   const limit = parseInt(url.searchParams.get('limit') || '50');
@@ -5683,7 +5771,7 @@ async function handleUserProjects(request, url, env, cors) {
 
   try {
     // Find all simulations authored by this user via sim-author:{userId}:* keys
-    const list = await env.SOCIAL.list({ prefix: `sim-author:${auth}:`, limit: 100 });
+    const list = { keys: await listKeysUpTo(env.SOCIAL, `sim-author:${auth}:`, AUTHOR_LISTINGS_READ) };
     const projects = [];
     const locked = await legalLockedIds(env);
 
@@ -5707,7 +5795,9 @@ async function handleUserProjects(request, url, env, cors) {
           // changes_requested, appeal_in_review, approved_private), or
           // 'unreviewed' for a listing that predates the gate. Held and
           // quarantined both read as in_review; see authorView.
-          status: sim.archived === true ? 'archived' : isListable(sim) ? 'published' : authorStatusOf(sim.moderation?.status, sim.is_public !== false),
+          status: sim.deletion ? 'deleted' : sim.archived === true ? 'archived' : isListable(sim) ? 'published' : authorStatusOf(sim.moderation?.status, sim.is_public !== false),
+          // A deleted listing's dates (src/space_delete.mjs); its owner restores it from Projects.
+          deletion: sim.deletion || null,
           moderation: sim.moderation ? {
             status: authorStatusOf(sim.moderation.status, sim.is_public !== false), rating: sim.moderation.status === 'approved' ? (sim.moderation.rating || null) : null,
             child_directed: sim.moderation.child_directed === true, featured: sim.moderation.featured === true,
@@ -5780,7 +5870,7 @@ async function handleListSimulations(url, env, cors, opts = {}) {
     // free text over name, description, author and tags. docs/networking/LISTING_TAGS.md.
     const wanted = tagFilter([...(url?.searchParams?.getAll('tag') || []), ...genreAliasValues(url?.searchParams?.getAll('genre'))]);
     const query = (url?.searchParams?.get('q') || '').normalize('NFKC').trim().toLowerCase();
-    const list = wanted.none ? { keys: [] } : await env.SOCIAL.list({ prefix: 'sim:', limit: 100 });
+    const list = { keys: wanted.none ? [] : await listKeysUpTo(env.SOCIAL, 'sim:', GALLERY_LISTINGS_READ) };
     const sims = [];
 
     // One R2 list for every locked listing, so a page does not pay a read each.
@@ -6275,7 +6365,8 @@ async function handleGetWebsiteManifest(request, url, segment, env) {
   // that does not exist, so it says nothing about why.
   const listingRaw = await env.SOCIAL.get(`sim:${target.simId}`);
   const listing = listingRaw ? await simWithLegalLock(env, JSON.parse(listingRaw)) : null;
-  const withheld = ['quarantined', 'held', 'rejected', 'changes_requested', 'appealed'].includes(listing?.moderation?.status);
+  // A deleted listing (its R2 mark, read through simWithLegalLock) publishes nothing either.
+  const withheld = ['quarantined', 'held', 'rejected', 'changes_requested', 'appealed'].includes(listing?.moderation?.status) || !!listing?.deletion;
 
   // A conditional request only needs metadata to answer, so HEAD first when the
   // caller offered a validator and fall through to a full GET only if it does

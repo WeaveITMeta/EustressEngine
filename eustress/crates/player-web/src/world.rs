@@ -131,7 +131,13 @@ fn open_arrived_world(
             });
             continue;
         };
-        let opened = open_player_world(records, &name.0);
+        let mut opened = open_player_world(records, &name.0);
+        // Played alone, nobody hosts: give the player the Backpack,
+        // PlayerScripts and StarterGui-filled PlayerGui a host would give a
+        // joined one (the desktop Player's `space_world.rs` does the same).
+        if joined.is_none() {
+            eustress_common::play_session::give_player_containers(&mut opened.dm, opened.local_player);
+        }
         info!(
             "space: {} read into its tree: {}",
             world.start_space,

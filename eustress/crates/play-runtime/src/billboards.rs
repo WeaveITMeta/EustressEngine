@@ -453,6 +453,20 @@ impl BillboardAtlas {
     }
 
     /// Compute UV bounds in atlas-relative `[0,1]` for a tile slot.
+    /// Where a `w × h` px canvas drawn in `slot` sits in the atlas at its
+    /// current size, inset half a texel on every side so filtering never
+    /// reads a neighbour tile. `v` is a fraction of the atlas height, so the
+    /// answer goes stale when the atlas grows: every `BillboardUv` is written
+    /// from this after the last grow that could affect it.
+    fn canvas_uv(&self, slot: u32, w: u32, h: u32) -> (Vec2, Vec2) {
+        let (uv_min, uv_max) = self.slot_uv(slot);
+        let umax = uv_min.x + (uv_max.x - uv_min.x) * (w as f32 / TILE_W as f32);
+        let vmax = uv_min.y + (uv_max.y - uv_min.y) * (h as f32 / TILE_H as f32);
+        let half_u = 0.5 / self.atlas_w_px() as f32;
+        let half_v = 0.5 / self.atlas_h_px() as f32;
+        (Vec2::new(uv_min.x + half_u, uv_min.y + half_v), Vec2::new(umax - half_u, vmax - half_v))
+    }
+
     fn slot_uv(&self, slot: u32) -> (Vec2, Vec2) {
         let col = slot % self.cols;
         let row = slot / self.cols;
@@ -900,7 +914,9 @@ fn spawn_billboard_render_state(
     }
     candidates.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
 
-    for (cand_entity, _dist) in candidates {
+    // (entity, slot, canvas w, canvas h, z bias) of each grant in this pass;
+    // their UVs are written once the pass is done growing the atlas.
+    let mut granted: Vec<(Entity, u32, u32, u32, f32)> = Vec::new();    for (cand_entity, _dist) in candidates {
         let Ok((entity, mut marker, global_tf, mut transform)) = billboards.get_mut(cand_entity)
         else {
             continue;
@@ -970,25 +986,17 @@ fn spawn_billboard_render_state(
             None => {
                 match atlas.try_grow(&mut images) {
                     Some(_) => {
-                        // Refresh every existing billboard's UV — their
-                        // `vmin/vmax` are scaled against `atlas.rows`,
-                        // which just doubled. Without this every tile
-                        // before the grow would sample double-tall after
-                        // the grow. Apply the same half-texel inset as
-                        // the initial spawn so no bilinear bleed at
-                        // tile boundaries.
-                        let atlas_w_px = atlas.atlas_w_px() as f32;
-                        let atlas_h_px = atlas.atlas_h_px() as f32;
-                        let half_u = 0.5 / atlas_w_px;
-                        let half_v = 0.5 / atlas_h_px;
+                        // Refresh every billboard granted in an earlier
+                        // frame: their `vmin/vmax` are fractions of
+                        // `atlas.rows`, which just doubled, so each would
+                        // sample twice its tile's height. The ones granted
+                        // earlier in THIS pass are not in `existing` yet
+                        // (their inserts are still queued); they get their
+                        // UV after the loop, from the final atlas size.
                         for (tile, mut uv, handle) in &mut existing {
-                            let (uv_min, uv_max) = atlas.slot_uv(tile.slot);
-                            let effective_umax = uv_min.x
-                                + (uv_max.x - uv_min.x) * (handle.width  as f32 / TILE_W as f32);
-                            let effective_vmax = uv_min.y
-                                + (uv_max.y - uv_min.y) * (handle.height as f32 / TILE_H as f32);
-                            uv.uv_min = Vec2::new(uv_min.x + half_u, uv_min.y + half_v);
-                            uv.uv_max = Vec2::new(effective_umax - half_u, effective_vmax - half_v);
+                            let (uv_min, uv_max) = atlas.canvas_uv(tile.slot, handle.width, handle.height);
+                            uv.uv_min = uv_min;
+                            uv.uv_max = uv_max;
                         }
                         atlas.free_slots.pop()
                             .expect("free_slots populated by try_grow")
@@ -1012,8 +1020,6 @@ fn spawn_billboard_render_state(
                 }
             }
         };
-        let (uv_min, uv_max) = atlas.slot_uv(slot);
-
         let world_pos = global_tf.map(|g: &GlobalTransform| g.translation()).unwrap_or(Vec3::ZERO);
         // World quad size comes from the RAW (unclamped) authored pixels, the
         // same expression `sync_billboard_properties` uses — `w`/`h` are the
@@ -1043,30 +1049,12 @@ fn spawn_billboard_render_state(
             })
             .clone();
 
-        // The quad's [0,1]×[0,1] UV range needs to map to the tile region
-        // in the atlas, but we ALSO want oversized atlas tiles to show only
-        // the rendered portion (the top-left `w × h` pixels of the tile).
-        // Compute the effective UV box accordingly.
-        let effective_umax = uv_min.x + (uv_max.x - uv_min.x) * (w as f32 / TILE_W as f32);
-        let effective_vmax = uv_min.y + (uv_max.y - uv_min.y) * (h as f32 / TILE_H as f32);
-        // Half-texel inset: with bilinear filtering enabled, a sample
-        // taken at the EXACT edge of a tile's UV range blends 50/50
-        // with the neighboring tile's edge pixel (still inside the
-        // atlas, so ClampToEdge addressing doesn't catch it). That's
-        // how the user's "red O / white smudge floating in the world"
-        // artifacts appeared — fragments of other billboards' atlas
-        // content bleeding through. Shrinking the sampled rectangle
-        // inward by half a texel on each side guarantees every
-        // bilinear sample's 4 neighbors are inside the canvas region.
-        let (atlas_w_px, atlas_h_px) = (
-            atlas.atlas_w_px() as f32,
-            atlas.atlas_h_px() as f32,
-        );
-        let half_texel_u = 0.5 / atlas_w_px;
-        let half_texel_v = 0.5 / atlas_h_px;
-        let uv_min_inset = Vec2::new(uv_min.x + half_texel_u, uv_min.y + half_texel_v);
-        let uv_max_inset = Vec2::new(effective_umax - half_texel_u, effective_vmax - half_texel_v);
-
+        // The quad shows the rendered `w × h` corner of the tile. Its UV is
+        // written after the loop: a later grant in this pass can grow the
+        // atlas, and a UV computed now would then cover several tiles'
+        // height and squash the label (every label on a Space that loads a
+        // few hundred at once).
+        granted.push((entity, slot, w, h, marker.z_index as f32 * Z_INDEX_METRES_PER_UNIT));
         // `face_camera = false` → emit a `BillboardLockAxis::rotation`
         // marker so the WGSL pipeline picks the LOCK_ROTATION variant,
         // which uses the entity's Transform.rotation literally instead
@@ -1077,12 +1065,6 @@ fn spawn_billboard_render_state(
             crate::billboard_pipeline::Billboard,
             crate::billboard_pipeline::BillboardMesh(mesh_handle),
             crate::billboard_pipeline::BillboardAtlasTexture(atlas.texture.clone()),
-            crate::billboard_pipeline::BillboardUv {
-                uv_min: uv_min_inset,
-                uv_max: uv_max_inset,
-                z_bias: marker.z_index as f32 * Z_INDEX_METRES_PER_UNIT,
-                _padding: 0.0,
-            },
             crate::billboard_pipeline::BillboardDepth(!marker.always_on_top),
             BillboardAtlasTile { slot },
             // Every field recomputed from `marker` right now — never carried
@@ -1125,6 +1107,17 @@ fn spawn_billboard_render_state(
         // kept in agreement by hand.
         marker.set_changed();
         let _ = world_pos;
+    }
+
+    // Every grant's UV from the atlas as this pass leaves it.
+    for (entity, slot, w, h, z_bias) in granted {
+        let (uv_min, uv_max) = atlas.canvas_uv(slot, w, h);
+        commands.entity(entity).insert(crate::billboard_pipeline::BillboardUv {
+            uv_min,
+            uv_max,
+            z_bias,
+            _padding: 0.0,
+        });
     }
 }
 
@@ -1458,20 +1451,9 @@ fn sync_billboard_properties(
             handle.content_scale = content_scale;
             handle.last_label_hash = 0; // force re-render
 
-            let (uv_min, uv_max) = atlas.slot_uv(tile.slot);
-            let effective_umax = uv_min.x + (uv_max.x - uv_min.x) * (canvas_w as f32 / TILE_W as f32);
-            let effective_vmax = uv_min.y + (uv_max.y - uv_min.y) * (canvas_h as f32 / TILE_H as f32);
-            // Half-texel inset — see spawn_billboard_render_state for
-            // the rationale. Without this, bilinear filtering at the
-            // tile boundary pulls in the neighboring tile's content
-            // and leaks fragments of unrelated billboards onto the
-            // quad.
-            let atlas_w_px = atlas.atlas_w_px() as f32;
-            let atlas_h_px = atlas.atlas_h_px() as f32;
-            let half_u = 0.5 / atlas_w_px;
-            let half_v = 0.5 / atlas_h_px;
-            uv.uv_min = Vec2::new(uv_min.x + half_u, uv_min.y + half_v);
-            uv.uv_max = Vec2::new(effective_umax - half_u, effective_vmax - half_v);
+            let (uv_min, uv_max) = atlas.canvas_uv(tile.slot, canvas_w, canvas_h);
+            uv.uv_min = uv_min;
+            uv.uv_max = uv_max;
 
             if content_scale < 1.0 {
                 warn!(
@@ -1539,14 +1521,26 @@ fn sync_billboard_properties(
 /// suppresses the player's own head label without needing a separate
 /// per-player hide flag.
 fn cull_billboards_by_distance(
-    cameras: Query<&GlobalTransform, With<Camera3d>>,
+    cameras: Query<(&GlobalTransform, &Camera), With<Camera3d>>,
     mut billboards: Query<
         (&BillboardGuiMarker, &GlobalTransform, &mut Visibility),
         With<crate::billboard_pipeline::Billboard>,
     >,
 ) {
-    let Some(cam) = cameras.iter().next() else { return };
-    let cam_pos = cam.translation();
+    // The PRIMARY (order-0) camera, the one the allocator, the recycler and
+    // the renderer in this file already resolve. `iter().next()` took whichever
+    // `Camera3d` the query yielded first, and a Studio world holds others that
+    // never move with the player (the order -1 off-screen AI camera and the
+    // Slint overlay cameras at 100 and 300). Culling against a stationary
+    // camera freezes every label's `Visibility`, so walking up to a far label
+    // never revealed it and walking away never hid it.
+    let Some(cam_pos) = cameras
+        .iter()
+        .find(|(_, c)| c.order == 0)
+        .map(|(gt, _)| gt.translation())
+    else {
+        return;
+    };
 
     for (marker, global_tf, mut vis) in &mut billboards {
         if !marker.visible {
@@ -1701,6 +1695,7 @@ struct BillboardPassStats {
     rasterized: u64,
     fresh_deferred: u64,
     changed_deferred: u64,
+    raster_time: std::time::Duration,
 }
 
 impl BillboardPassStats {
@@ -1711,12 +1706,13 @@ impl BillboardPassStats {
         }
         if self.evaluated + self.fresh_deferred + self.epoch_bumps > 0 {
             info!(
-                "🪧 billboard pass, last {:.0}s / {} frames: {} epoch bumps, {} labels evaluated, {} painted, {} fresh deferred before evaluation, {} changed deferred after",
+                "🪧 billboard pass, last {:.0}s / {} frames: {} epoch bumps, {} labels evaluated, {} painted ({:.2} ms each), {} fresh deferred before evaluation, {} changed deferred after",
                 since.elapsed().as_secs_f32(),
                 self.frames,
                 self.epoch_bumps,
                 self.evaluated,
                 self.rasterized,
+                self.raster_time.as_secs_f64() * 1000.0 / self.rasterized.max(1) as f64,
                 self.fresh_deferred,
                 self.changed_deferred
             );
@@ -1798,45 +1794,62 @@ fn update_and_render_billboards(
     // attributed to the recycle → repaint pair. Spreading the work across
     // frames costs a label at most a few frames of staleness (they fade in at
     // the edge of the alloc radius anyway) and keeps the frame bounded.
-    const MAX_LABEL_RASTERS_PER_FRAME: usize = 6;
-    // While a bulk load streams entities in, labels arrive faster than any
-    // cap can paint them and each raster is ~3.5 ms in a debug build (21 ms
-    // per frame at the cap of 6, measured on Super Station's drain). Paint
-    // fewer per frame then; the backlog catches up once the load settles.
-    const MAX_LABEL_RASTERS_PER_FRAME_LOADING: usize = 2;
-    let max_rasters = if throttle.as_deref().is_some_and(|t| t.bulk_loading) {
-        MAX_LABEL_RASTERS_PER_FRAME_LOADING
+    //
+    // Every frame paints at least `MIN_RASTERS` labels, then keeps painting
+    // while the pass is under `RASTER_BUDGET`: a slow build is bounded as
+    // before, and a fast one fills a few hundred labels in a few frames
+    // instead of six at a time. While a bulk load streams entities in,
+    // labels arrive faster than any budget can paint them, so both are
+    // smaller then and the backlog catches up once the load settles.
+    const MIN_RASTERS: usize = 6;
+    const MIN_RASTERS_LOADING: usize = 2;
+    const RASTER_BUDGET: std::time::Duration = std::time::Duration::from_millis(8);
+    const RASTER_BUDGET_LOADING: std::time::Duration = std::time::Duration::from_millis(2);
+    let (min_rasters, budget) = if throttle.as_deref().is_some_and(|t| t.bulk_loading) {
+        (MIN_RASTERS_LOADING, RASTER_BUDGET_LOADING)
     } else {
-        MAX_LABEL_RASTERS_PER_FRAME
+        (MIN_RASTERS, RASTER_BUDGET)
     };
+    let pass_start = bevy::platform::time::Instant::now();
     let mut rasters_this_frame: usize = 0;
+    let spent = |rasters: usize| rasters >= min_rasters && pass_start.elapsed() >= budget;
 
-    for (entity, mut handle, tile, bb_tf, marker) in &mut billboards {
-        if let Some(cp) = cam_pos {
-            if bb_tf.translation().distance_squared(cp) > BILLBOARD_CULL_RADIUS_SQ {
-                continue;
+    // The labels that need work, nearest the camera first, so what the
+    // player is looking at fills in before the far side of the world.
+    // Up to date for the current epoch? (Covers both "painted" and
+    // "verified-unchanged-by-hash": either way the tile is current.)
+    // EXCEPTION: a freshly-(re)allocated tile has `last_label_hash == 0` and
+    // its atlas slot was just zeroed, so it MUST paint even if this entity's
+    // stale `painted_at` still matches the current epoch, which happens when
+    // `recycle_offscreen_billboard_slots` evicted this billboard and it
+    // re-entered range without any intervening GUI change (static scene +
+    // camera roam). Without this exception a recycled billboard would
+    // re-appear blank. Steady-state tiles have a non-zero hash so they still
+    // take the cheap epoch skip.
+    let mut order: Vec<(f32, Entity)> = billboards
+        .iter()
+        .filter_map(|(entity, handle, _, bb_tf, _)| {
+            let d2 = cam_pos.map_or(0.0, |cp| bb_tf.translation().distance_squared(cp));
+            if d2 > BILLBOARD_CULL_RADIUS_SQ {
+                return None;
             }
-        }
-        // Up to date for the current epoch? (Covers both "painted" and
-        // "verified-unchanged-by-hash" — either way the tile is current.)
-        // EXCEPTION: a freshly-(re)allocated tile has `last_label_hash == 0`
-        // and its atlas slot was just zeroed, so it MUST paint even if this
-        // entity's stale `painted_at` still matches the current epoch — which
-        // happens when `recycle_offscreen_billboard_slots` evicted this
-        // billboard and it re-entered range without any intervening GUI change
-        // (static scene + camera roam). Without this exception a recycled
-        // billboard would re-appear blank. Steady-state tiles have a non-zero
-        // hash so they still take the cheap epoch skip.
-        if handle.last_label_hash != 0 && painted_at.get(&entity) == Some(&*epoch) {
-            continue;
-        }
+            if handle.last_label_hash != 0 && painted_at.get(&entity) == Some(&*epoch) {
+                return None;
+            }
+            Some((d2, entity))
+        })
+        .collect();
+    order.sort_by(|a, b| a.0.total_cmp(&b.0));
+
+    for (_, entity) in order {
+        let Ok((entity, mut handle, tile, _, marker)) = billboards.get_mut(entity) else { continue };
         // A fresh tile (`last_label_hash == 0`) always needs a raster. Once
         // this frame's raster budget is spent it would be flattened, hashed
         // and then deferred anyway, so defer it before that work: with a
         // backlog of unpainted labels in range (thousands on a large
         // MindSpace), every frame flattened and hashed the whole backlog to
         // paint six of them.
-        if handle.last_label_hash == 0 && rasters_this_frame >= max_rasters {
+        if handle.last_label_hash == 0 && spent(rasters_this_frame) {
             stats.fresh_deferred += 1;
             continue;
         }
@@ -1895,7 +1908,7 @@ fn update_and_render_billboards(
         // and with a non-zero `last_label_hash` that stamp would make the
         // early-out at the top of the loop skip this label until the NEXT
         // epoch — so un-stamp it, and the next frame picks it up first.
-        if rasters_this_frame >= max_rasters {
+        if spent(rasters_this_frame) {
             painted_at.remove(&entity);
             stats.changed_deferred += 1;
             continue;
@@ -1903,6 +1916,7 @@ fn update_and_render_billboards(
         rasters_this_frame += 1;
         stats.rasterized += 1;
         handle.last_label_hash = hash;
+        let raster_start = bevy::platform::time::Instant::now();
 
         // Render this billboard into a temporary tile-sized pixmap, then
         // blit into the shared atlas at the entity's slot offset.
@@ -1930,7 +1944,7 @@ fn update_and_render_billboards(
         let cols = atlas.cols;
         blit_tile_into_atlas(&mut atlas.cpu_buf, &pixmap, tile.slot, atlas_w_px, cols);
         atlas.dirty_tiles.push(tile.slot);
-        let _ = entity;
+        stats.raster_time += raster_start.elapsed();
     }
 }
 
@@ -2157,6 +2171,75 @@ pub(crate) fn render_element(
     }
 }
 
+/// Roblox `TextScaled`: the largest font size at which `text` fits inside
+/// `(elem.width, elem.height)`, in TRUE (unclamped) pixel space.
+///
+/// The text is shaped once. Shaping does not depend on the font size in
+/// cosmic-text, so each candidate size only lays the shaped runs out again
+/// (`set_metrics_and_size` keeps the shaping and redoes the layout). The
+/// search used to build and shape a new buffer at every step, ten times per
+/// label, and that shaping was most of what painting a label cost.
+fn scaled_font_size(text_state: &mut BillboardTextState, elem: &GuiElementDisplay, text: &str, wrap: cosmic_text::Wrap) -> f32 {
+    let weight = cosmic_text::Weight(elem.font_weight.clamp(100, 900) as u16);
+    let fam = if elem.font.is_empty() {
+        cosmic_text::Family::SansSerif
+    } else {
+        cosmic_text::Family::Name(&elem.font)
+    };
+    let attrs = Attrs::new().family(fam).weight(weight);
+
+    // Bound WIDTH (so wrapping happens) but leave HEIGHT UNBOUNDED so every
+    // wrapped line is counted. With a height, cosmic-text limits
+    // `layout_runs` to the lines that fit inside the band, so a multi-line
+    // label (e.g. "AI Workshop" wrapping to two lines) under-reported its
+    // height, `fits_at` passed an oversized font, and the overflow line was
+    // clipped ("AI Workshop" showed as "AI"). Uses the body renderer's 1.4×
+    // line height so the test matches what ships to the pixmap.
+    let font_system = &mut text_state.font_system;
+    let mut buf = TextBuffer::new(font_system, Metrics::new(elem.height.max(72.0), elem.height.max(72.0) * 1.4));
+    buf.set_size(font_system, Some(elem.width), None);
+    buf.set_wrap(font_system, wrap);
+    buf.set_text(font_system, text, attrs, Shaping::Advanced);
+
+    let mut fits_at = |candidate_size: f32| -> bool {
+        buf.set_metrics_and_size(font_system, Metrics::new(candidate_size, candidate_size * 1.4), Some(elem.width), None);
+        buf.shape_until_scroll(font_system, false);
+        // Reject if any line exceeds the element's width or the stack
+        // overflows its height.
+        let mut total_h = 0.0_f32;
+        let mut max_w = 0.0_f32;
+        for run in buf.layout_runs() {
+            total_h += run.line_height;
+            max_w = max_w.max(run.line_w);
+        }
+        total_h <= elem.height && max_w <= elem.width
+    };
+
+    // Binary search in `[1, hi]`. 1 px is the lower readability floor.
+    //
+    // The UPPER bound scales with the box, because `TextScaled` means "as
+    // large as fits" and what fits is a property of the rect, not a
+    // constant. `elem.height` is the natural bound: line height is 1.4× the
+    // font size, so a single line at `font = elem.height` already overspills
+    // vertically and `fits_at(elem.height)` is false for any non-empty
+    // string, exactly the "upper end never fits" invariant a bisection
+    // needs. It grows with the billboard, so a 1400×420 px sign gets ~300 px
+    // glyphs instead of glyphs 5% of its own height.
+    //
+    // The 72 floor keeps the historical band for ordinary small labels: a
+    // 20-px-tall rect still searches up to 72 and converges on whatever
+    // genuinely fits. Ten halvings: `lo` only ever advances to sizes that
+    // fit, so extra iterations refine, never overflow.
+    let mut lo: f32 = 1.0;
+    let mut hi: f32 = elem.height.max(72.0);
+    for _ in 0..10 {
+        let mid = (lo + hi) * 0.5;
+        if fits_at(mid) { lo = mid; } else { hi = mid; }
+        if hi - lo < 0.5 { break; }
+    }
+    lo.max(1.0)
+}
+
 fn render_text(
     pixmap: &mut Pixmap,
     elem: &GuiElementDisplay,
@@ -2183,89 +2266,14 @@ fn render_text(
     // Every source of a label's text reaches here (a Space, a host's
     // replication, a script), so this is where it is bounded.
     let text = eustress_common::text_bound::bound_block_lines(&elem.text, LABEL_LINES);
+    // Roblox `TextWrapped`: break lines at the element's width, or let each
+    // line run on past it. The fit search below shapes with the same mode,
+    // so `TextScaled` text without wrapping shrinks to fit on its lines.
+    let wrap = if elem.text_wrapped { cosmic_text::Wrap::Word } else { cosmic_text::Wrap::None };
     let font_size = if elem.text_scaled && !elem.text.is_empty()
         && elem.width > 0.0 && elem.height > 0.0
     {
-        let weight = cosmic_text::Weight(elem.font_weight.clamp(100, 900) as u16);
-        let fam = if elem.font.is_empty() {
-            cosmic_text::Family::SansSerif
-        } else {
-            cosmic_text::Family::Name(&elem.font)
-        };
-        let attrs = Attrs::new().family(fam).weight(weight);
-        // Shape the text at `candidate_size` and return whether the
-        // resulting layout fits inside `(elem.width, elem.height)`.
-        // Uses 1.4× line-height matching the body renderer so the test
-        // matches what actually ships to the pixmap.
-        let mut fits_at = |candidate_size: f32| -> bool {
-            let metrics = Metrics::new(candidate_size, candidate_size * 1.4);
-            let mut buf = TextBuffer::new(&mut text_state.font_system, metrics);
-            // Bound WIDTH (so wrapping happens) but leave HEIGHT UNBOUNDED so
-            // every wrapped line is counted. Passing Some(height) made
-            // cosmic-text limit `layout_runs` to the lines that fit inside the
-            // band, so a multi-line label (e.g. "AI Workshop" wrapping to two
-            // lines) UNDER-reported its height → `fits_at` returned true for an
-            // oversized font → the text rendered too big and the overflow line
-            // was clipped ("AI Workshop" showed as "AI"). With `None` we sum
-            // the TRUE total height of all wrapped lines and shrink the font
-            // until the whole label genuinely fits the band height.
-            buf.set_size(
-                &mut text_state.font_system,
-                Some(elem.width),
-                None,
-            );
-            buf.set_wrap(&mut text_state.font_system, cosmic_text::Wrap::Word);
-            buf.set_text(
-                &mut text_state.font_system,
-                &text,
-                attrs.clone(),
-                Shaping::Advanced,
-            );
-            buf.shape_until_scroll(&mut text_state.font_system, false);
-            // Sum total run height; reject if any line exceeds element
-            // width or stack overflows element height.
-            let mut total_h = 0.0_f32;
-            let mut max_w = 0.0_f32;
-            for run in buf.layout_runs() {
-                total_h += run.line_height;
-                max_w = max_w.max(run.line_w);
-            }
-            total_h <= elem.height && max_w <= elem.width
-        };
-
-        // Binary search in `[1, hi]`. 1 px is the lower readability floor.
-        //
-        // The UPPER bound scales with the box, because `TextScaled` means
-        // "as large as fits" and what fits is a property of the rect, not a
-        // constant. `elem.height` is the natural bound: line height is 1.4×
-        // the font size, so a single line at `font = elem.height` already
-        // overspills vertically and `fits_at(elem.height)` is false for any
-        // non-empty string — exactly the "upper end never fits" invariant a
-        // bisection needs, and it grows with the billboard so a 1400×420 px
-        // sign gets ~300 px glyphs instead of glyphs 5% of its own height.
-        // (A fixed ceiling made `TextScaled` read backwards — the bigger the
-        // billboard, the smaller its text looked, since `content_scale`
-        // shrinks the raster of an oversized canvas on top of the cap.)
-        //
-        // The 72 floor keeps the historical band for ordinary small labels:
-        // a 20-px-tall rect still searches up to 72 and still converges on
-        // whatever genuinely fits, so nothing about existing content moves.
-        // Because `hi` is a bound that provably cannot fit, the search always
-        // reports a real fit rather than a clamp, and there is no "hit the
-        // ceiling" case left to warn about.
-        let mut lo: f32 = 1.0;
-        let mut hi: f32 = elem.height.max(72.0);
-        // Two halvings more than a fixed-72 band needed. The band is now as
-        // tall as the box, so signage-scale text would otherwise converge
-        // several px short of its true fit; `lo` only ever advances to sizes
-        // that fit, so extra iterations refine, never overflow.
-        let max_iters = 10;
-        for _ in 0..max_iters {
-            let mid = (lo + hi) * 0.5;
-            if fits_at(mid) { lo = mid; } else { hi = mid; }
-            if hi - lo < 0.5 { break; }
-        }
-        lo.max(1.0)
+        scaled_font_size(text_state, elem, &text, wrap)
     } else {
         elem.font_size.max(8.0)
     };
@@ -2316,10 +2324,10 @@ fn render_text(
         Some(fit_w),
         Some(fit_h),
     );
-    // Explicit word-wrap. Default depends on cosmic-text version — pin
-    // it so long text on a narrow canvas (e.g. a mindmap node label)
-    // breaks onto the next line instead of overflowing horizontally.
-    buffer.set_wrap(&mut text_state.font_system, cosmic_text::Wrap::Word);
+    // The wrap mode chosen above, set explicitly: the default depends on the
+    // cosmic-text version. A wrapping label on a narrow canvas (e.g. a
+    // mindmap node label) breaks onto the next line instead of overflowing.
+    buffer.set_wrap(&mut text_state.font_system, wrap);
 
     let weight = cosmic_text::Weight(elem.font_weight.clamp(100, 900) as u16);
     let fam = if elem.font.is_empty() {
@@ -2392,6 +2400,13 @@ fn render_text(
     // glyph bitmaps redrawn at (±1, ±1) + cardinal offsets with the
     // stroke colour, before the body text overlays on top. Skipped when
     // stroke alpha is 0 to keep the typical no-stroke path fast.
+    let clip_px = clip_rect.map(|c| {
+        let x0 = c[0].floor() as i32;
+        let y0 = c[1].floor() as i32;
+        let x1 = (c[0] + c[2]).ceil() as i32;
+        let y1 = (c[1] + c[3]).ceil() as i32;
+        (x0, y0, x1, y1)
+    });
     let stroke_a = (elem.text_stroke_color[3] * 255.0) as u8;
     if stroke_a > 0 {
         let stroke_color = CosmicColor::rgba(
@@ -2400,93 +2415,81 @@ fn render_text(
             (elem.text_stroke_color[2] * 255.0) as u8,
             stroke_a,
         );
-        const HALO_OFFSETS: [(i32, i32); 8] = [
-            (-1, -1), (0, -1), (1, -1),
-            (-1,  0),          (1,  0),
-            (-1,  1), (0,  1), (1,  1),
-        ];
-        for (ox, oy) in HALO_OFFSETS {
-            let ox_origin = origin_x + ox;
-            let oy_origin = origin_y + oy;
-            buffer.draw(
-                &mut text_state.font_system,
-                &mut text_state.swash_cache,
-                stroke_color,
-                |px, py, w, h, color| {
-                    let px = ox_origin + px;
-                    let py = oy_origin + py;
-                    for dy in 0..h as i32 {
-                        for dx in 0..w as i32 {
-                            let sx = px + dx;
-                            let sy = py + dy;
-                            if sx < 0 || sy < 0 || sx >= pixmap.width() as i32 || sy >= pixmap.height() as i32 {
-                                continue;
-                            }
-                            if let Some((cx0, cy0, cx1, cy1)) = clip_rect.map(|c| {
-                                (c[0].floor() as i32, c[1].floor() as i32,
-                                 (c[0] + c[2]).ceil() as i32, (c[1] + c[3]).ceil() as i32)
-                            }) {
-                                if sx < cx0 || sy < cy0 || sx >= cx1 || sy >= cy1 {
-                                    continue;
-                                }
-                            }
-                            let a = color.a();
-                            if a == 0 { continue; }
-                            let idx = (sy as usize * pixmap.width() as usize + sx as usize) * 4;
-                            let buf = pixmap.data_mut();
-                            let src_a = a as u32;
-                            let inv = 255 - src_a;
-                            buf[idx]     = ((color.r() as u32 * src_a + buf[idx]     as u32 * inv) / 255) as u8;
-                            buf[idx + 1] = ((color.g() as u32 * src_a + buf[idx + 1] as u32 * inv) / 255) as u8;
-                            buf[idx + 2] = ((color.b() as u32 * src_a + buf[idx + 2] as u32 * inv) / 255) as u8;
-                            buf[idx + 3] = (src_a + buf[idx + 3] as u32 * inv / 255) as u8;
-                        }
-                    }
-                },
-            );
-        }
+        draw_text_halo(pixmap, &mut buffer, text_state, stroke_color, origin_x, origin_y, clip_px);
     }
-    let clip_px = clip_rect.map(|c| {
-        let x0 = c[0].floor() as i32;
-        let y0 = c[1].floor() as i32;
-        let x1 = (c[0] + c[2]).ceil() as i32;
-        let y1 = (c[1] + c[3]).ceil() as i32;
-        (x0, y0, x1, y1)
-    });
 
     buffer.draw(
         &mut text_state.font_system,
         &mut text_state.swash_cache,
         text_color,
-        |px, py, w, h, color| {
-            let px = origin_x + px;
-            let py = origin_y + py;
-            for dy in 0..h as i32 {
-                for dx in 0..w as i32 {
-                    let sx = px + dx;
-                    let sy = py + dy;
-                    if sx < 0 || sy < 0 || sx >= pixmap.width() as i32 || sy >= pixmap.height() as i32 {
-                        continue;
-                    }
-                    if let Some((cx0, cy0, cx1, cy1)) = clip_px {
-                        if sx < cx0 || sy < cy0 || sx >= cx1 || sy >= cy1 {
-                            continue;
-                        }
-                    }
-                    let a = color.a();
-                    if a == 0 { continue; }
-                    let idx = (sy as usize * pixmap.width() as usize + sx as usize) * 4;
-                    let buf = pixmap.data_mut();
-                    let src_a = a as u32;
-                    let inv = 255 - src_a;
-                    buf[idx]     = ((color.r() as u32 * src_a + buf[idx]     as u32 * inv) / 255) as u8;
-                    buf[idx + 1] = ((color.g() as u32 * src_a + buf[idx + 1] as u32 * inv) / 255) as u8;
-                    buf[idx + 2] = ((color.b() as u32 * src_a + buf[idx + 2] as u32 * inv) / 255) as u8;
-                    buf[idx + 3] = (src_a + buf[idx + 3] as u32 * inv / 255) as u8;
+        |px, py, w, h, color| blend_glyph_rect(pixmap, origin_x + px, origin_y + py, w, h, color, clip_px),
+    );
+}
+
+/// The 1-px offsets the text-stroke halo is drawn at.
+const HALO_OFFSETS: [(i32, i32); 8] = [
+    (-1, -1), (0, -1), (1, -1),
+    (-1,  0),          (1,  0),
+    (-1,  1), (0,  1), (1,  1),
+];
+
+/// The text-stroke halo: the glyphs in `stroke_color` at each of
+/// [`HALO_OFFSETS`], under the body text. The glyphs are laid out and
+/// rasterised once; the pixel runs that pass yields are the same wherever
+/// they land, so they are recorded and blended at every offset in the order
+/// eight separate passes blended them, and the result is the same to the
+/// byte. Eight passes were three quarters of what painting a stroked label
+/// cost.
+fn draw_text_halo(
+    pixmap: &mut Pixmap,
+    buffer: &mut TextBuffer,
+    text_state: &mut BillboardTextState,
+    stroke_color: CosmicColor,
+    origin_x: i32,
+    origin_y: i32,
+    clip_px: Option<(i32, i32, i32, i32)>,
+) {
+    let mut runs: Vec<(i32, i32, u32, u32, CosmicColor)> = Vec::new();
+    buffer.draw(&mut text_state.font_system, &mut text_state.swash_cache, stroke_color, |px, py, w, h, color| {
+        runs.push((px, py, w, h, color));
+    });
+    for (ox, oy) in HALO_OFFSETS {
+        for &(px, py, w, h, color) in &runs {
+            blend_glyph_rect(pixmap, origin_x + ox + px, origin_y + oy + py, w, h, color, clip_px);
+        }
+    }
+}
+
+/// Blend one glyph pixel run of `color` over the pixmap at `(px, py)`,
+/// inside the pixmap and the clip.
+fn blend_glyph_rect(pixmap: &mut Pixmap, px: i32, py: i32, w: u32, h: u32, color: CosmicColor, clip_px: Option<(i32, i32, i32, i32)>) {
+    let a = color.a();
+    if a == 0 {
+        return;
+    }
+    let (pw, ph) = (pixmap.width() as i32, pixmap.height() as i32);
+    let buf = pixmap.data_mut();
+    for dy in 0..h as i32 {
+        for dx in 0..w as i32 {
+            let sx = px + dx;
+            let sy = py + dy;
+            if sx < 0 || sy < 0 || sx >= pw || sy >= ph {
+                continue;
+            }
+            if let Some((cx0, cy0, cx1, cy1)) = clip_px {
+                if sx < cx0 || sy < cy0 || sx >= cx1 || sy >= cy1 {
+                    continue;
                 }
             }
-        },
-    );
+            let idx = (sy as usize * pw as usize + sx as usize) * 4;
+            let src_a = a as u32;
+            let inv = 255 - src_a;
+            buf[idx]     = ((color.r() as u32 * src_a + buf[idx]     as u32 * inv) / 255) as u8;
+            buf[idx + 1] = ((color.g() as u32 * src_a + buf[idx + 1] as u32 * inv) / 255) as u8;
+            buf[idx + 2] = ((color.b() as u32 * src_a + buf[idx + 2] as u32 * inv) / 255) as u8;
+            buf[idx + 3] = (src_a + buf[idx + 3] as u32 * inv / 255) as u8;
+        }
+    }
 }
 
 fn rounded_rect_path(x: f32, y: f32, w: f32, h: f32, r: f32) -> tiny_skia::Path {
@@ -2601,6 +2604,7 @@ pub(crate) fn label_hash(flat: &[FlatElem]) -> u64 {
         for s in &e.text_stroke_color { s.to_bits().hash(&mut h); }
         for a in &e.anchor_point { a.to_bits().hash(&mut h); }
         e.text_scaled.hash(&mut h);
+        e.text_wrapped.hash(&mut h);
         e.corner_radius.to_bits().hash(&mut h);
         e.border_size.to_bits().hash(&mut h);
         e.image_path.hash(&mut h);
@@ -3027,4 +3031,275 @@ fn init_billboard_atlas(world: &mut World) {
         create_atlas_image(&mut images, INITIAL_ATLAS_ROWS, cols)
     };
     world.insert_non_send_resource(BillboardAtlas::new(texture, INITIAL_ATLAS_ROWS, cols, max_dim));
+}
+
+#[cfg(test)]
+mod cull_distance_tests {
+    use super::*;
+    use crate::billboard_pipeline::Billboard;
+
+    #[derive(Resource)]
+    struct PrimaryCam(Entity);
+
+    /// A moving primary camera (`order == 0`) and a stationary decoy
+    /// (`order == -1`) spawned FIRST and parked on the billboard. Code that
+    /// takes the first `Camera3d` measures a distance of about 0 and reports
+    /// the label visible forever, so these tests fail against it.
+    fn world_with(primary: Vec3, billboard_at: Vec3, max_distance: f32) -> (World, Entity) {
+        let mut world = World::new();
+        world.spawn((
+            Camera3d::default(),
+            Camera { order: -1, ..default() },
+            GlobalTransform::from_translation(billboard_at),
+        ));
+        let primary_cam = world
+            .spawn((
+                Camera3d::default(),
+                Camera { order: 0, ..default() },
+                GlobalTransform::from_translation(primary),
+            ))
+            .id();
+        let billboard = world
+            .spawn((
+                Billboard,
+                BillboardGuiMarker { max_distance, visible: true, ..default() },
+                GlobalTransform::from_translation(billboard_at),
+                Visibility::Visible,
+            ))
+            .id();
+        world.insert_resource(PrimaryCam(primary_cam));
+        (world, billboard)
+    }
+
+    fn run(world: &mut World) {
+        let mut schedule = Schedule::default();
+        schedule.add_systems(cull_billboards_by_distance);
+        schedule.run(world);
+    }
+
+    fn move_primary(world: &mut World, to: Vec3) {
+        let cam = world.resource::<PrimaryCam>().0;
+        *world.get_mut::<GlobalTransform>(cam).unwrap() = GlobalTransform::from_translation(to);
+    }
+
+    fn visibility(world: &World, e: Entity) -> Visibility {
+        *world.get::<Visibility>(e).unwrap()
+    }
+
+    #[test]
+    fn far_from_primary_camera_hides_despite_nearby_secondary_camera() {
+        let (mut world, bb) = world_with(Vec3::ZERO, Vec3::new(0.0, 0.0, 400.0), 300.0);
+        run(&mut world);
+        assert_eq!(visibility(&world, bb), Visibility::Hidden);
+    }
+
+    #[test]
+    fn visibility_tracks_the_primary_camera_as_it_moves() {
+        let (mut world, bb) = world_with(Vec3::ZERO, Vec3::new(0.0, 0.0, 400.0), 300.0);
+        run(&mut world);
+        assert_eq!(visibility(&world, bb), Visibility::Hidden, "starts out of range");
+        move_primary(&mut world, Vec3::new(0.0, 0.0, 300.0));
+        run(&mut world);
+        assert_eq!(visibility(&world, bb), Visibility::Visible, "approaching reveals it");
+        move_primary(&mut world, Vec3::ZERO);
+        run(&mut world);
+        assert_eq!(visibility(&world, bb), Visibility::Hidden, "retreating hides it again");
+    }
+
+    #[test]
+    fn lower_limit_hides_when_primary_camera_is_too_close() {
+        let (mut world, bb) = world_with(Vec3::ZERO, Vec3::new(0.0, 0.0, 5.0), 0.0);
+        world.get_mut::<BillboardGuiMarker>(bb).unwrap().distance_lower_limit = 20.0;
+        run(&mut world);
+        assert_eq!(visibility(&world, bb), Visibility::Hidden, "inside the lower limit");
+        move_primary(&mut world, Vec3::new(0.0, 0.0, -100.0));
+        run(&mut world);
+        assert_eq!(visibility(&world, bb), Visibility::Visible, "backing off clears it");
+    }
+}
+
+#[cfg(test)]
+mod text_fit_tests {
+    use super::*;
+
+    /// The search as it was: a new buffer, shaped from scratch, at every
+    /// candidate size. Kept here as the reference the one-shaping search
+    /// must match exactly.
+    fn reshaping_fit(text_state: &mut BillboardTextState, elem: &GuiElementDisplay, text: &str, wrap: cosmic_text::Wrap) -> f32 {
+        let weight = cosmic_text::Weight(elem.font_weight.clamp(100, 900) as u16);
+        let fam = if elem.font.is_empty() { cosmic_text::Family::SansSerif } else { cosmic_text::Family::Name(&elem.font) };
+        let attrs = Attrs::new().family(fam).weight(weight);
+        let mut fits_at = |size: f32| -> bool {
+            let mut buf = TextBuffer::new(&mut text_state.font_system, Metrics::new(size, size * 1.4));
+            buf.set_size(&mut text_state.font_system, Some(elem.width), None);
+            buf.set_wrap(&mut text_state.font_system, wrap);
+            buf.set_text(&mut text_state.font_system, text, attrs.clone(), Shaping::Advanced);
+            buf.shape_until_scroll(&mut text_state.font_system, false);
+            let (mut h, mut w) = (0.0_f32, 0.0_f32);
+            for run in buf.layout_runs() {
+                h += run.line_height;
+                w = w.max(run.line_w);
+            }
+            h <= elem.height && w <= elem.width
+        };
+        let (mut lo, mut hi) = (1.0_f32, elem.height.max(72.0));
+        for _ in 0..10 {
+            let mid = (lo + hi) * 0.5;
+            if fits_at(mid) { lo = mid; } else { hi = mid; }
+            if hi - lo < 0.5 { break; }
+        }
+        lo.max(1.0)
+    }
+
+    /// Labels shaped like The Super Station's: ring words (2.1 × 0.5 studs),
+    /// longer titles that wrap, a sign, one with wrapping off, an empty font
+    /// name and a heavy weight.
+    fn labels() -> Vec<GuiElementDisplay> {
+        let mut out = Vec::new();
+        for (text, w, h, font, wrapped, weight) in [
+            ("Decision", 105.0, 25.0, "Oswald", true, 400),
+            ("Reconciling A Broken Past", 105.0, 25.0, "Oswald", true, 400),
+            ("Significance", 105.0, 25.0, "Oswald", true, 700),
+            ("How to think", 400.0, 120.0, "Oswald", true, 400),
+            ("Step 4: weigh what each answer costs and what it makes possible", 300.0, 200.0, "", true, 400),
+            ("A line that does not wrap at all", 160.0, 40.0, "Arial", false, 400),
+            ("AI Workshop", 90.0, 60.0, "", true, 400),
+            ("1400 by 420 sign", 1400.0, 420.0, "Oswald", true, 400),
+        ] {
+            let mut e = eustress_common::gui::gui_record::screen_gui_display(true, 0);
+            e.text = text.into();
+            e.width = w;
+            e.height = h;
+            e.font = font.into();
+            e.font_weight = weight;
+            e.text_scaled = true;
+            e.text_wrapped = wrapped;
+            out.push(e);
+        }
+        out
+    }
+
+    /// Shaping once and laying out per size picks the very same font size,
+    /// to the bit, as reshaping at every size; the time each takes is
+    /// printed (never asserted).
+    #[test]
+    fn one_shaping_fits_text_exactly_as_reshaping_did() {
+        let mut state = BillboardTextState::default();
+        let labels = labels();
+        // Warm the font database and glyph caches for both paths alike.
+        for e in &labels {
+            let wrap = if e.text_wrapped { cosmic_text::Wrap::Word } else { cosmic_text::Wrap::None };
+            scaled_font_size(&mut state, e, &e.text, wrap);
+        }
+        let (mut old_t, mut new_t) = (std::time::Duration::ZERO, std::time::Duration::ZERO);
+        for e in &labels {
+            let wrap = if e.text_wrapped { cosmic_text::Wrap::Word } else { cosmic_text::Wrap::None };
+            let t = std::time::Instant::now();
+            let old = reshaping_fit(&mut state, e, &e.text, wrap);
+            old_t += t.elapsed();
+            let t = std::time::Instant::now();
+            let new = scaled_font_size(&mut state, e, &e.text, wrap);
+            new_t += t.elapsed();
+            assert_eq!(old.to_bits(), new.to_bits(), "{:?} at {}x{}: reshaping fit {old}, one shaping {new}", e.text, e.width, e.height);
+            assert!(new > 1.0, "{:?} fits at more than the floor", e.text);
+        }
+        println!("fit search, {} labels: reshaping {:?}, one shaping {:?}", labels.len(), old_t, new_t);
+    }
+
+    /// The halo as it was: eight full draw passes, one per offset.
+    fn redrawn_halo(pixmap: &mut Pixmap, buffer: &mut TextBuffer, state: &mut BillboardTextState, color: CosmicColor, ox0: i32, oy0: i32, clip: Option<(i32, i32, i32, i32)>) {
+        for (ox, oy) in HALO_OFFSETS {
+            buffer.draw(&mut state.font_system, &mut state.swash_cache, color, |px, py, w, h, c| {
+                blend_glyph_rect(pixmap, ox0 + ox + px, oy0 + oy + py, w, h, c, clip);
+            });
+        }
+    }
+
+    /// Recording the glyph runs once and blending them at every offset
+    /// paints the very same bytes as eight draw passes, clipped or not,
+    /// over a non-empty background; the time each takes is printed.
+    #[test]
+    fn one_pass_halo_paints_exactly_what_eight_passes_did() {
+        let mut state = BillboardTextState::default();
+        let stroke = CosmicColor::rgba(0, 0, 0, 127);
+        let (mut old_t, mut new_t) = (std::time::Duration::ZERO, std::time::Duration::ZERO);
+        let mut checked = 0;
+        for e in labels() {
+            let size = scaled_font_size(&mut state, &e, &e.text, cosmic_text::Wrap::Word);
+            let mut buffer = TextBuffer::new(&mut state.font_system, Metrics::new(size, size * 1.4));
+            buffer.set_size(&mut state.font_system, Some(e.width.min(TILE_W as f32)), Some(e.height.min(TILE_H as f32)));
+            buffer.set_text(&mut state.font_system, &e.text, Attrs::new().family(cosmic_text::Family::Name(&e.font)), Shaping::Advanced);
+            buffer.shape_until_scroll(&mut state.font_system, false);
+            for clip in [None, Some((3, 2, 60, 18))] {
+                let mut before = Pixmap::new(TILE_W, TILE_H).unwrap();
+                before.fill(tiny_skia::Color::from_rgba8(40, 90, 200, 180));
+                let mut after = before.clone();
+                let t = std::time::Instant::now();
+                redrawn_halo(&mut before, &mut buffer, &mut state, stroke, 4, 3, clip);
+                old_t += t.elapsed();
+                let t = std::time::Instant::now();
+                draw_text_halo(&mut after, &mut buffer, &mut state, stroke, 4, 3, clip);
+                new_t += t.elapsed();
+                assert!(before.data() == after.data(), "{:?} clip {clip:?}: the one-pass halo differs", e.text);
+                assert!(before.data() != Pixmap::new(TILE_W, TILE_H).unwrap().data(), "something was drawn");
+                checked += 1;
+            }
+        }
+        println!("halo, {checked} cases: eight passes {old_t:?}, one pass {new_t:?}");
+    }
+}
+
+#[cfg(test)]
+mod atlas_grow_tests {
+    use super::*;
+    use crate::billboard_pipeline::BillboardUv;
+
+    /// A Space that loads more labels than the atlas holds in one pass (The
+    /// Super Station: 351 at once) grows the atlas several times inside one
+    /// run of the allocator. Every label must still map exactly its own
+    /// canvas: a label granted before a grow kept a UV computed for the
+    /// smaller atlas and sampled several tiles' height, so its text drew
+    /// squashed to a sliver.
+    #[test]
+    fn labels_granted_before_a_grow_in_the_same_pass_keep_their_shape() {
+        let mut world = World::new();
+        world.init_resource::<Assets<Image>>();
+        world.init_resource::<Assets<Mesh>>();
+        world.init_resource::<BillboardSpatialGrid>();
+        // Two tiles a row, one row to start, room for eight rows.
+        let texture = create_atlas_image(&mut world.resource_mut::<Assets<Image>>(), 1, 2);
+        world.insert_non_send(BillboardAtlas::new(texture, 1, 2, TILE_H * 8));
+        // A 3.8 x 0.9 m label (190 x 45 px), like a box's on the station.
+        let labels: Vec<Entity> = (0..12)
+            .map(|i| {
+                world
+                    .spawn((
+                        BillboardGuiMarker { size: [190.0, 45.0], visible: true, ..default() },
+                        Transform::from_xyz(i as f32, 0.0, 0.0),
+                    ))
+                    .id()
+            })
+            .collect();
+
+        let mut schedule = Schedule::default();
+        schedule.add_systems(spawn_billboard_render_state);
+        schedule.run(&mut world);
+
+        let atlas = world.non_send::<BillboardAtlas>();
+        assert!(atlas.rows > 1, "the pass grew the atlas ({} rows)", atlas.rows);
+        let (atlas_w, atlas_h) = (atlas.atlas_w_px() as f32, atlas.atlas_h_px() as f32);
+        let (w, h, _) = clamped_canvas_size(190.0, 45.0);
+        for label in labels {
+            let slot = world.get::<BillboardAtlasTile>(label).expect("granted a slot").slot;
+            let uv = world.get::<BillboardUv>(label).expect("has a UV");
+            let row = (slot / atlas.cols) as f32;
+            let col = (slot % atlas.cols) as f32;
+            let tall = (uv.uv_max.y - uv.uv_min.y) * atlas_h;
+            let wide = (uv.uv_max.x - uv.uv_min.x) * atlas_w;
+            assert!((tall - (h as f32 - 1.0)).abs() < 0.01, "slot {slot}: samples {tall} px of height for a {h} px canvas");
+            assert!((wide - (w as f32 - 1.0)).abs() < 0.01, "slot {slot}: samples {wide} px of width for a {w} px canvas");
+            assert!((uv.uv_min.y * atlas_h - (row * TILE_H as f32 + 0.5)).abs() < 0.01, "slot {slot}: starts off its row");
+            assert!((uv.uv_min.x * atlas_w - (col * TILE_W as f32 + 0.5)).abs() < 0.01, "slot {slot}: starts off its column");
+        }
+    }
 }

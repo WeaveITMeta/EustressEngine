@@ -1616,7 +1616,7 @@ pub fn spawn_file_entry(
             {
                 Ok(gui_def) => {
                     let display_name = super::gui_loader::gui_display_name(&file_meta.path);
-                    let gui_type = super::gui_loader::gui_class_from_extension(&file_meta.path);
+                    let gui_type = super::gui_loader::gui_class_of(&file_meta.path, &gui_def);
                     let e = super::gui_loader::spawn_gui_element(
                         commands,
                         &file_meta.path,
@@ -1772,7 +1772,7 @@ pub struct ScriptDisabled;
 
 /// A file's tags and attributes as components, by the rules a Player's
 /// reader shares (`eustress_common::datamodel::record`).
-fn record_tags_and_attributes(
+pub(crate) fn record_tags_and_attributes(
     doc: &toml::Value,
 ) -> (eustress_common::attributes::Tags, eustress_common::attributes::Attributes) {
     use eustress_common::datamodel::record;
@@ -1959,6 +1959,267 @@ pub(crate) fn folder_load(class_name: eustress_common::classes::ClassName) -> Fo
         | C::DirectionalLight => FolderLoad::Environment,
         C::PointLight | C::SpotLight | C::SurfaceLight => FolderLoad::Light,
         _ => FolderLoad::General,
+    }
+}
+
+/// Whether a folder arm is one of the GUI arms [`spawn_gui_folder`] builds.
+pub(crate) fn is_gui_folder(arm: FolderLoad) -> bool {
+    matches!(
+        arm,
+        FolderLoad::ScreenGui | FolderLoad::GuiContainer | FolderLoad::BillboardGui | FolderLoad::SurfaceGui | FolderLoad::GuiLeaf
+    )
+}
+
+/// The entity Studio builds for a GUI folder (a ScreenGui, a Frame or
+/// ScrollingFrame, a BillboardGui, a SurfaceGui, or a leaf UI class) from its
+/// parsed `_instance.toml`. What it draws as comes from the builders a
+/// Player's reader uses (`eustress_common::gui::gui_record`), so the two read
+/// one file alike. A file that does not parse loads with the class defaults
+/// (a leaf as a Folder). The caller parents it and gives it its tags and
+/// attributes.
+pub(crate) fn spawn_gui_folder(
+    commands: &mut Commands,
+    folder_arm: FolderLoad,
+    class_name: eustress_common::classes::ClassName,
+    dir_meta: &FileMetadata,
+    instance_toml: &Path,
+    gui_def: Result<super::gui_loader::GuiTomlFile, String>,
+    instance_uuid: String,
+) -> Entity {
+    use eustress_common::gui::gui_record::{billboard_class_from_def, gui_display_for_class, screen_gui_display};
+    let instance = |uuid: String| eustress_common::classes::Instance {
+        name: dir_meta.name.clone(),
+        class_name,
+        archivable: true,
+        id: 0,
+        ai: false,
+        uuid,
+    };
+    let loaded_from = || LoadedFromFile {
+        path: dir_meta.path.clone(),
+        file_type: FileType::Directory,
+        service: dir_meta.service.clone(),
+    };
+    match folder_arm {
+        FolderLoad::ScreenGui => {
+            // ScreenGui: fullscreen UI root, shown while its file leaves both
+            // `enabled` and `visible` on.
+            let display = match &gui_def {
+                Ok(def) => gui_display_for_class("ScreenGui", def),
+                Err(_) => screen_gui_display(true, 0),
+            };
+            if !display.visible {
+                info!("📋 ScreenGui '{}' loaded as hidden (enabled=false)", dir_meta.name);
+            }
+            commands
+                .spawn((
+                    instance(String::new()),
+                    loaded_from(),
+                    Name::new(dir_meta.name.clone()),
+                    // No bevy_ui Node — ScreenGui renders via GuiElementDisplay/Slint
+                    // overlay; a Node here only adds per-frame ui_layout cost (see
+                    // gui_loader::spawn_frame_element PERF note).
+                    // GuiElementDisplay with visible flag — children inherit this for rendering
+                    display,
+                ))
+                .id()
+        }
+        FolderLoad::GuiContainer => {
+            // Frame/ScrollingFrame directory: its GuiElementDisplay renders
+            // through the Slint overlay.
+            let gui_display = match &gui_def {
+                Ok(def) => gui_display_for_class(class_name.as_str(), def),
+                // Fallback: invisible container
+                Err(_) => eustress_common::gui::billboard_renderer::GuiElementDisplay {
+                    x: 0.0, y: 0.0, width: 0.0, height: 0.0,
+                    position_udim2: [0.0; 4], size_udim2: [0.0; 4],
+                    anchor_point: [0.0, 0.0],
+                    z_order: 1, visible: true, clip_children: false,
+                    scroll_x: 0.0, scroll_y: 0.0,
+                    bg_color: [0.0, 0.0, 0.0, 0.0],
+                    border_size: 0.0, border_color: [0.0; 4],
+                    corner_radius: 0.0,
+                    text: String::new(), text_color: [1.0; 4],
+                    font: String::new(),
+                    font_size: 14.0, font_weight: 400,
+                    text_align: "Center".to_string(), text_y_align: "Center".to_string(),
+                    text_stroke_color: [0.0, 0.0, 0.0, 0.0],
+                    text_scaled: false,
+                    text_wrapped: true,
+                    image_path: String::new(),
+                    class_type: "Frame".to_string(),
+                    mouse_filter: "stop".to_string(),
+                    active: false,
+                },
+            };
+            commands
+                .spawn((
+                    instance(String::new()),
+                    loaded_from(),
+                    Name::new(dir_meta.name.clone()),
+                    // No bevy_ui Node — rendered via GuiElementDisplay (PERF, see above).
+                    gui_display,
+                ))
+                .id()
+        }
+        FolderLoad::BillboardGui => {
+            // BillboardGui — 3D billboard entity (quad facing camera).
+            //
+            // Roblox parity: every `BillboardGui` instance property is
+            // round-tripped through `_instance.toml`, through the builder a
+            // Player's reader uses (`billboard_class_from_def`: lengths in
+            // metres, the size resolved). Optional fields default to the
+            // class's `Default::default()` so older TOML files load cleanly.
+            let mut bb_class = eustress_common::classes::BillboardGui::default();
+            let mut bb_offset = Vec3::new(0.0, 2.0, 0.0);
+            // Collected from `gui_def.tags` so we can attach the ECS Tags
+            // component after spawn.
+            let mut bb_tags: Vec<String> = Vec::new();
+            if let Ok(def) = &gui_def {
+                bb_tags = def.tags.clone();
+                bb_class = billboard_class_from_def(def);
+                // BillboardGui's 3D placement comes from `units_offset`
+                // (Vec3 stud offset), separate from the 2D-canvas
+                // `position: UDim2`. Mirror it into `bb_offset` for the
+                // entity's Transform. `adornee` carries an instance name;
+                // resolving it to an entity is a post-load pass (TODO).
+                bb_offset = Vec3::new(bb_class.units_offset[0], bb_class.units_offset[1], bb_class.units_offset[2]);
+            }
+
+            // Build the runtime marker by copying the parity-relevant subset
+            // of the class. `sync_billboard_class_to_marker` keeps these in
+            // sync on later edits; initialising them here makes the first
+            // frame show the right visibility / depth / size. The class
+            // carries the source-of-truth UDim2; it resolves to pixels here
+            // (Scale × PIXELS_PER_METER + Offset).
+            let [size_w_px, size_h_px] = bb_class.size.to_pixels(50.0, 50.0);
+            // `size_offset` is Roblox-parity `Vector2`, already in pixels.
+            let [size_off_x, size_off_y] = bb_class.size_offset;
+            let marker = eustress_common::gui::billboard_renderer::BillboardGuiMarker {
+                size: [size_w_px.max(1.0), size_h_px.max(1.0)],
+                size_offset: [size_off_x, size_off_y],
+                extents_offset: bb_class.extents_offset,
+                extents_offset_world_space: bb_class.extents_offset_world_space,
+                units_offset_world_space: bb_class.units_offset_world_space,
+                max_distance: if bb_class.max_distance > 0.0 && bb_class.distance_upper_limit > 0.0 {
+                    bb_class.max_distance.min(bb_class.distance_upper_limit)
+                } else {
+                    bb_class.max_distance.max(bb_class.distance_upper_limit)
+                },
+                distance_lower_limit: bb_class.distance_lower_limit.max(0.0),
+                distance_step: bb_class.distance_step.max(0.0),
+                always_on_top: bb_class.always_on_top,
+                clips_descendants: bb_class.clips_descendants,
+                brightness: bb_class.brightness.clamp(0.0, 8.0),
+                light_influence: bb_class.light_influence.clamp(0.0, 1.0),
+                face_camera: true,
+                visible: bb_class.enabled,
+                z_index: bb_class.z_index,
+            };
+
+            // The Properties panel keys its rich-class display branch off
+            // `InstanceFile` (the marker that says "this entity has a
+            // canonical `_instance.toml` on disk you can edit"). Without it,
+            // a freshly-reloaded BillboardGui falls through to the basic
+            // Data + Transform fallback.
+            let entity = commands
+                .spawn((
+                    instance(String::new()),
+                    bb_class,
+                    marker,
+                    loaded_from(),
+                    super::instance_loader::InstanceFile {
+                        toml_path: instance_toml.to_path_buf(),
+                        mesh_path: std::path::PathBuf::new(),
+                        name: dir_meta.name.clone(),
+                    },
+                    Name::new(dir_meta.name.clone()),
+                    Transform::from_translation(bb_offset),
+                    Visibility::default(),
+                ))
+                .id();
+            // Tag hydration matches `instance_loader::spawn_instance`'s path
+            // for Parts so MCP / ECS queries see GUI tags identically.
+            if !bb_tags.is_empty() {
+                commands.entity(entity).insert(eustress_common::attributes::Tags(bb_tags));
+            }
+            entity
+        }
+        FolderLoad::SurfaceGui => {
+            // SurfaceGui: UI drawn on a face of its parent part. The `[gui]`
+            // section maps through `surface_class_from_props`, the builder the
+            // file watcher's hot create and hot modify and a Player's reader
+            // share, so an absent field keeps the class default. Its UI
+            // children spawn under it.
+            let mut sg_class = eustress_common::classes::SurfaceGui::default();
+            let mut sg_adornee = String::new();
+            let mut sg_tags: Vec<String> = Vec::new();
+            if let Ok(def) = &gui_def {
+                sg_tags = def.tags.clone();
+                sg_adornee = def.gui.adornee.clone().unwrap_or_default();
+                sg_class = super::gui_loader::surface_class_from_props(&def.gui);
+            }
+
+            // The shared SurfaceGui marker, from the class. `target_part` is the
+            // authored adornee name; empty means the parent part.
+            let marker = eustress_common::gui::billboard_renderer::SurfaceGuiMarker {
+                face: sg_class.face.as_str().to_string(),
+                target_part: sg_adornee,
+                pixels_per_meter: sg_class.pixels_per_unit,
+            };
+
+            // `InstanceFile` keys the Properties panel's rich-class display, as
+            // for a BillboardGui above.
+            let entity = commands
+                .spawn((
+                    // The file's UUID, which the engine bridge finds an
+                    // instance by.
+                    instance(instance_uuid),
+                    sg_class,
+                    marker,
+                    loaded_from(),
+                    super::instance_loader::InstanceFile {
+                        toml_path: instance_toml.to_path_buf(),
+                        mesh_path: std::path::PathBuf::new(),
+                        name: dir_meta.name.clone(),
+                    },
+                    Name::new(dir_meta.name.clone()),
+                    Transform::default(),
+                    Visibility::default(),
+                ))
+                .id();
+            if !sg_tags.is_empty() {
+                commands.entity(entity).insert(eustress_common::attributes::Tags(sg_tags));
+            }
+            entity
+        }
+        _ => {
+            // Leaf UI class in folder form — the Insert-menu convention
+            // writes `Name/_instance.toml` with `class_name = "TextLabel"`
+            // (etc.) instead of the legacy flat `Name.textlabel.toml`.
+            // Routed through the same `spawn_gui_element` helper the flat
+            // path uses, which takes the class from the parsed metadata.
+            match gui_def {
+                Ok(def) => super::gui_loader::spawn_gui_element(commands, instance_toml, &def),
+                Err(e) => {
+                    warn!("Failed to load leaf UI folder {:?}: {}", dir_meta.path, e);
+                    commands
+                        .spawn((
+                            eustress_common::classes::Instance {
+                                name: dir_meta.name.clone(),
+                                class_name: eustress_common::classes::ClassName::Folder,
+                                archivable: true,
+                                id: 0,
+                                ai: false,
+                                uuid: String::new(),
+                            },
+                            loaded_from(),
+                            Name::new(dir_meta.name.clone()),
+                        ))
+                        .id()
+                }
+            }
+        }
     }
 }
 
@@ -2319,314 +2580,16 @@ pub fn spawn_directory_entry(
     // the one table of which arm below takes a class; the file watcher reads
     // it too, so a folder that appears while Studio runs loads as it does here.
     let folder_arm = folder_load(class_name);
-    let is_screen_gui = folder_arm == FolderLoad::ScreenGui;
-    let is_gui_container = folder_arm == FolderLoad::GuiContainer;
 
     // Set by the branches that fill the entity's tags and attributes
     // themselves; every other branch gets them from its file after the match.
     let mut tags_and_attributes_filled = false;
-    let folder_entity = if is_screen_gui {
-        // ScreenGui: fullscreen UI root — read enabled/visible from _instance.toml
+    let folder_entity = if is_gui_folder(folder_arm) {
+        // A ScreenGui, Frame, ScrollingFrame, BillboardGui, SurfaceGui or
+        // leaf UI class, built from its parsed file by `spawn_gui_folder`.
         let instance_toml = dir_meta.path.join("_instance.toml");
-        let screen_gui_visible = if let Ok(gui_def) = take_gui_def(&mut parsed, source, space_path, &instance_toml) {
-            gui_def.gui.visible
-        } else {
-            true // default: visible
-        };
-
-        let entity_cmds = commands.spawn((
-            eustress_common::classes::Instance {
-                name: dir_meta.name.clone(),
-                class_name,
-                archivable: true,
-                id: 0,
-                ai: false,
-                uuid: String::new(),
-            },
-            LoadedFromFile {
-                path: dir_meta.path.clone(),
-                file_type: FileType::Directory,
-                service: dir_meta.service.clone(),
-            },
-            Name::new(dir_meta.name.clone()),
-            // No bevy_ui Node — ScreenGui renders via GuiElementDisplay/Slint
-            // overlay; a Node here only adds per-frame ui_layout cost (see
-            // gui_loader::spawn_frame_element PERF note).
-            // GuiElementDisplay with visible flag — children inherit this for rendering
-            eustress_common::gui::billboard_renderer::GuiElementDisplay {
-                x: 0.0, y: 0.0, width: 0.0, height: 0.0,
-                position_udim2: [0.0; 4], size_udim2: [0.0; 4],
-                anchor_point: [0.0, 0.0],
-                z_order: 0, visible: screen_gui_visible, clip_children: false,
-                scroll_x: 0.0, scroll_y: 0.0,
-                bg_color: [0.0; 4], border_size: 0.0, border_color: [0.0; 4],
-                corner_radius: 0.0,
-                text: String::new(), text_color: [1.0; 4],
-                font: String::new(),
-                font_size: 14.0, font_weight: 400,
-                text_align: "Center".to_string(), text_y_align: "Center".to_string(),
-                text_stroke_color: [0.0, 0.0, 0.0, 0.0],
-                text_scaled: false,
-                image_path: String::new(),
-                class_type: "screengui".to_string(),
-                mouse_filter: "ignore".to_string(),
-            },
-        ));
-        if !screen_gui_visible {
-            info!("📋 ScreenGui '{}' loaded as hidden (enabled=false)", dir_meta.name);
-        }
-        entity_cmds.id()
-    } else if is_gui_container {
-        // Frame/ScrollingFrame directory — load GUI properties from _instance.toml
-        // and attach GuiElementDisplay so it renders through Slint overlay
-        let instance_toml = dir_meta.path.join("_instance.toml");
-        let gui_display = if let Ok(gui_def) = take_gui_def(&mut parsed, source, space_path, &instance_toml) {
-            let class_str = format!("{:?}", class_name).to_lowercase();
-            super::gui_loader::gui_display_from_props(&gui_def.gui, gui_def.text.as_ref(), &class_str)
-        } else {
-            // Fallback: invisible container
-            eustress_common::gui::billboard_renderer::GuiElementDisplay {
-                x: 0.0, y: 0.0, width: 0.0, height: 0.0,
-                position_udim2: [0.0; 4], size_udim2: [0.0; 4],
-                anchor_point: [0.0, 0.0],
-                z_order: 1, visible: true, clip_children: false,
-                scroll_x: 0.0, scroll_y: 0.0,
-                bg_color: [0.0, 0.0, 0.0, 0.0],
-                border_size: 0.0, border_color: [0.0; 4],
-                corner_radius: 0.0,
-                text: String::new(), text_color: [1.0; 4],
-                font: String::new(),
-                font_size: 14.0, font_weight: 400,
-                text_align: "Center".to_string(), text_y_align: "Center".to_string(),
-                text_stroke_color: [0.0, 0.0, 0.0, 0.0],
-                text_scaled: false,
-                image_path: String::new(),
-                class_type: "Frame".to_string(),
-                mouse_filter: "stop".to_string(),
-            }
-        };
-        commands.spawn((
-            eustress_common::classes::Instance {
-                name: dir_meta.name.clone(),
-                class_name,
-                archivable: true,
-                id: 0,
-                ai: false,
-                uuid: String::new(),
-            },
-            LoadedFromFile {
-                path: dir_meta.path.clone(),
-                file_type: FileType::Directory,
-                service: dir_meta.service.clone(),
-            },
-            Name::new(dir_meta.name.clone()),
-            // No bevy_ui Node — rendered via GuiElementDisplay (PERF, see above).
-            gui_display,
-        )).id()
-    } else if folder_arm == FolderLoad::BillboardGui {
-        // BillboardGui — 3D billboard entity (quad facing camera).
-        //
-        // Roblox parity: every `BillboardGui` instance property is
-        // round-tripped through `_instance.toml`. Optional fields default
-        // to the class's `Default::default()` so older TOML files (which
-        // pre-date a property) load cleanly without overwriting existing
-        // defaults.
-        let instance_toml = dir_meta.path.join("_instance.toml");
-        let mut bb_class = eustress_common::classes::BillboardGui::default();
-        let mut bb_offset = Vec3::new(0.0, 2.0, 0.0);
-        // Collected from `gui_def.tags` so we can attach the ECS Tags
-        // component after spawn (lives outside the `if let Ok` scope).
-        let mut bb_tags: Vec<String> = Vec::new();
-
-        if let Ok(gui_def) = take_gui_def(&mut parsed, source, space_path, &instance_toml) {
-            bb_tags = gui_def.tags.clone();
-            let mut g_native = gui_def.gui.clone();
-            super::gui_loader::billboard_lengths_to_native(&mut g_native, gui_def.metadata.unit.as_deref());
-            let g = &g_native;
-
-            // Geometry
-            bb_class.size = g.resolved_size();
-            if let Some(v) = g.size_offset { bb_class.size_offset = v; }
-            if let Some(v) = g.extents_offset { bb_class.extents_offset = v; }
-            if let Some(v) = g.extents_offset_world_space { bb_class.extents_offset_world_space = v; }
-            if let Some(v) = g.units_offset { bb_class.units_offset = v; }
-            if let Some(v) = g.units_offset_world_space { bb_class.units_offset_world_space = v; }
-
-            // BillboardGui's 3D placement still comes from `units_offset`
-            // (Vec3 stud offset) — separate from the 2D-canvas
-            // `position: UDim2`. Mirror it into `bb_offset` for the
-            // entity's Transform.
-            bb_offset = Vec3::new(
-                bb_class.units_offset[0],
-                bb_class.units_offset[1],
-                bb_class.units_offset[2],
-            );
-
-            // Distance
-            if let Some(v) = g.max_distance { bb_class.max_distance = v; }
-            if let Some(v) = g.distance_lower_limit { bb_class.distance_lower_limit = v; }
-            if let Some(v) = g.distance_upper_limit { bb_class.distance_upper_limit = v; }
-            if let Some(v) = g.distance_step { bb_class.distance_step = v; }
-
-            // Behaviour flags
-            if let Some(v) = g.active { bb_class.active = v; }
-            if let Some(v) = g.enabled { bb_class.enabled = v; }
-            if let Some(v) = g.always_on_top { bb_class.always_on_top = v; }
-            if let Some(v) = g.clips_descendants { bb_class.clips_descendants = v; }
-            if let Some(v) = g.reset_on_spawn { bb_class.reset_on_spawn = v; }
-            if let Some(v) = g.stiffness_by_distance { bb_class.stiffness_by_distance = v; }
-
-            // Appearance
-            if let Some(v) = g.brightness { bb_class.brightness = v; }
-            if let Some(v) = g.light_influence { bb_class.light_influence = v; }
-
-            // Sorting
-            if let Some(ref s) = g.z_index_behavior {
-                bb_class.z_index_behavior = match s.as_str() {
-                    "Global" => eustress_common::classes::ZIndexBehavior::Global,
-                    _ => eustress_common::classes::ZIndexBehavior::Sibling,
-                };
-            }
-            // ZIndex depth-bias (per-billboard integer). MindSpace's add-label
-            // derives it from the adornee part's longest scale axis; read it
-            // back so the value persists across reload instead of resetting to 0.
-            bb_class.z_index = g.z_index;
-            // NOTE: `g.adornee` carries the instance name; resolution to
-            // an Entity reference happens in a post-load pass once all
-            // instances are spawned (see resolve_billboard_adornees, TODO).
-        }
-
-        // Build the runtime marker by copying the parity-relevant subset
-        // of the class. `sync_billboard_class_to_marker` will keep these
-        // in sync on subsequent edits, but we initialise them here so
-        // the first frame shows correct visibility / depth / size.
-        // Marker mirrors the renderer's resolved-pixel inputs. Class
-        // carries the source-of-truth UDim2; we resolve to pixels here
-        // (Scale × PIXELS_PER_METER + Offset) so the renderer doesn't
-        // have to revisit UDim2 math each frame.
-        let [size_w_px, size_h_px] = bb_class.size.to_pixels(50.0, 50.0);
-        // `size_offset` is Roblox-parity `Vector2` — already in pixels.
-        let [size_off_x, size_off_y] = bb_class.size_offset;
-        let marker = eustress_common::gui::billboard_renderer::BillboardGuiMarker {
-            size: [size_w_px.max(1.0), size_h_px.max(1.0)],
-            size_offset: [size_off_x, size_off_y],
-            extents_offset: bb_class.extents_offset,
-            extents_offset_world_space: bb_class.extents_offset_world_space,
-            units_offset_world_space: bb_class.units_offset_world_space,
-            max_distance: if bb_class.max_distance > 0.0 && bb_class.distance_upper_limit > 0.0 {
-                bb_class.max_distance.min(bb_class.distance_upper_limit)
-            } else {
-                bb_class.max_distance.max(bb_class.distance_upper_limit)
-            },
-            distance_lower_limit: bb_class.distance_lower_limit.max(0.0),
-            distance_step: bb_class.distance_step.max(0.0),
-            always_on_top: bb_class.always_on_top,
-            clips_descendants: bb_class.clips_descendants,
-            brightness: bb_class.brightness.clamp(0.0, 8.0),
-            light_influence: bb_class.light_influence.clamp(0.0, 1.0),
-            face_camera: true,
-            visible: bb_class.enabled,
-            z_index: bb_class.z_index,
-        };
-
-        // The Properties panel keys its rich-class display branch off
-        // `InstanceFile` (it's the marker that says "this entity has a
-        // canonical `_instance.toml` on disk you can edit"). Without it,
-        // a freshly-reloaded BillboardGui falls through to the basic
-        // Data + Transform fallback and the user can't edit AlwaysOnTop /
-        // MaxDistance / Brightness / etc. through the panel.
-        let instance_toml_path = dir_meta.path.join("_instance.toml");
-        let entity = commands.spawn((
-            eustress_common::classes::Instance {
-                name: dir_meta.name.clone(),
-                class_name,
-                archivable: true,
-                id: 0,
-                ai: false,
-                uuid: String::new(),
-            },
-            bb_class,
-            marker,
-            LoadedFromFile {
-                path: dir_meta.path.clone(),
-                file_type: FileType::Directory,
-                service: dir_meta.service.clone(),
-            },
-            super::instance_loader::InstanceFile {
-                toml_path: instance_toml_path,
-                mesh_path: std::path::PathBuf::new(),
-                name: dir_meta.name.clone(),
-            },
-            Name::new(dir_meta.name.clone()),
-            Transform::from_translation(bb_offset),
-            Visibility::default(),
-        )).id();
-        // Tag hydration matches `instance_loader::spawn_instance`'s path
-        // for Parts so MCP / ECS queries see GUI tags identically.
-        if !bb_tags.is_empty() {
-            commands.entity(entity).insert(eustress_common::attributes::Tags(bb_tags));
-        }
-        entity
-    } else if folder_arm == FolderLoad::SurfaceGui {
-        // SurfaceGui: UI drawn on a face of its parent part. The `[gui]`
-        // section maps through `surface_class_from_props`, the builder the
-        // file watcher's hot create and hot modify share, so an absent field
-        // keeps the class default. Its UI children spawn under it in the
-        // loop below.
-        let instance_toml = dir_meta.path.join("_instance.toml");
-        let mut sg_class = eustress_common::classes::SurfaceGui::default();
-        let mut sg_adornee = String::new();
-        // Collected from `gui_def.tags` so we can attach the ECS Tags
-        // component after spawn (lives outside the `if let Ok` scope).
-        let mut sg_tags: Vec<String> = Vec::new();
-
-        if let Ok(gui_def) = take_gui_def(&mut parsed, source, space_path, &instance_toml) {
-            sg_tags = gui_def.tags.clone();
-            sg_adornee = gui_def.gui.adornee.clone().unwrap_or_default();
-            sg_class = super::gui_loader::surface_class_from_props(&gui_def.gui);
-        }
-
-        // The shared SurfaceGui marker, from the class. `target_part` is the
-        // authored adornee name; empty means the parent part.
-        let marker = eustress_common::gui::billboard_renderer::SurfaceGuiMarker {
-            face: sg_class.face.as_str().to_string(),
-            target_part: sg_adornee,
-            pixels_per_meter: sg_class.pixels_per_unit,
-        };
-
-        // `InstanceFile` keys the Properties panel's rich-class display, as
-        // for a BillboardGui above.
-        let entity = commands.spawn((
-            eustress_common::classes::Instance {
-                name: dir_meta.name.clone(),
-                class_name,
-                archivable: true,
-                id: 0,
-                ai: false,
-                // The file's UUID, which the engine bridge finds an
-                // instance by.
-                uuid: instance_uuid.clone(),
-            },
-            sg_class,
-            marker,
-            LoadedFromFile {
-                path: dir_meta.path.clone(),
-                file_type: FileType::Directory,
-                service: dir_meta.service.clone(),
-            },
-            super::instance_loader::InstanceFile {
-                toml_path: instance_toml,
-                mesh_path: std::path::PathBuf::new(),
-                name: dir_meta.name.clone(),
-            },
-            Name::new(dir_meta.name.clone()),
-            Transform::default(),
-            Visibility::default(),
-        )).id();
-        if !sg_tags.is_empty() {
-            commands.entity(entity).insert(eustress_common::attributes::Tags(sg_tags));
-        }
-        entity
+        let gui_def = take_gui_def(&mut parsed, source, space_path, &instance_toml);
+        spawn_gui_folder(commands, folder_arm, class_name, dir_meta, &instance_toml, gui_def, instance_uuid.clone())
     } else if folder_arm == FolderLoad::Media {
         // Image / Video — imported media class. Loads the asset_path
         // referenced by `[asset].path` in _instance.toml, which lives
@@ -3061,39 +3024,6 @@ pub fn spawn_directory_entry(
                     Name::new(dir_meta.name.clone()),
                     Transform::default(),
                     Visibility::default(),
-                )).id()
-            }
-        }
-    } else if folder_arm == FolderLoad::GuiLeaf {
-        // Leaf UI class in folder form — new Insert-menu convention
-        // writes `Name/_instance.toml` with `class_name = "TextLabel"`
-        // (etc.) instead of the legacy flat `Name.textlabel.toml`.
-        // Route through the same `spawn_gui_element` helper the flat
-        // path uses so Bevy UI components, click handlers, and text
-        // rendering all stay in one implementation. The loader at
-        // `gui_class_from_extension` now peeks the `_instance.toml`
-        // metadata when the file ends in `_instance.toml`, so
-        // `spawn_gui_element` resolves the right class without any
-        // extra parameter threading here.
-        let instance_toml = dir_meta.path.join("_instance.toml");
-        match take_gui_def(&mut parsed, source, space_path, &instance_toml) {
-            Ok(gui_def) => {
-                super::gui_loader::spawn_gui_element(commands, &instance_toml, &gui_def)
-            }
-            Err(e) => {
-                warn!("Failed to load leaf UI folder {:?}: {}", dir_meta.path, e);
-                commands.spawn((
-                    eustress_common::classes::Instance {
-                        name: dir_meta.name.clone(),
-                        class_name: eustress_common::classes::ClassName::Folder,
-                        archivable: true, id: 0, ai: false, uuid: String::new(),
-                    },
-                    LoadedFromFile {
-                        path: dir_meta.path.clone(),
-                        file_type: FileType::Directory,
-                        service: dir_meta.service.clone(),
-                    },
-                    Name::new(dir_meta.name.clone()),
                 )).id()
             }
         }

@@ -134,6 +134,10 @@ pub struct PauseMenuState {
     pub settings_screen: SettingsScreen,
     /// Temporary settings being edited (applied on save)
     pub temp_settings: Option<GameSettings>,
+    /// How the cursor stood when the menu opened (grab mode, shown, locked
+    /// for play), put back when it closes: a Space with no avatar, or a
+    /// TextBox to click, keeps its free cursor.
+    pub cursor_before: Option<(bevy::window::CursorGrabMode, bool, bool)>,
 }
 
 /// Event to reset the character
@@ -158,7 +162,7 @@ impl Plugin for PauseMenuPlugin {
             .init_resource::<GameSettings>()
             .add_message::<ResetCharacterEvent>()
             .add_message::<SettingsChangedEvent>()
-            .add_systems(Update, (toggle_pause_menu, drive_pause_menu).chain())
+            .add_systems(Update, (toggle_pause_menu, drive_pause_menu, block_hud_while_open).chain())
             .add_systems(Update, (handle_reset_character, apply_settings));
     }
 }
@@ -170,11 +174,14 @@ impl Plugin for PauseMenuPlugin {
 /// Toggle pause menu with ESC
 fn toggle_pause_menu(
     keys: Res<ButtonInput<KeyCode>>,
+    hud: Option<Res<eustress_common::play_session::HudPointer>>,
     mut pause_state: ResMut<PauseMenuState>,
     mut player_service: ResMut<PlayerService>,
     mut cursor_options: Query<&mut bevy::window::CursorOptions, With<bevy::window::Window>>,
 ) {
-    if keys.just_pressed(KeyCode::Escape) {
+    // An Escape typed into a TextBox only lets go of the box, as in Roblox.
+    let typing = hud.is_some_and(|h| h.keys_taken);
+    if keys.just_pressed(KeyCode::Escape) && !typing {
         // If in settings, go back to main menu
         if pause_state.settings_screen != SettingsScreen::None {
             pause_state.settings_screen = SettingsScreen::None;
@@ -190,17 +197,43 @@ fn toggle_pause_menu(
         pause_state.settings_screen = SettingsScreen::None;
         pause_state.temp_settings = None;
         
-        // Update cursor based on pause state
+        // Free the cursor for the menu, and give play back the cursor it had.
         if let Ok(mut cursor) = cursor_options.single_mut() {
             if pause_state.is_open {
+                pause_state.cursor_before = Some((cursor.grab_mode, cursor.visible, player_service.cursor_locked));
                 cursor.grab_mode = bevy::window::CursorGrabMode::None;
                 cursor.visible = true;
                 player_service.cursor_locked = false;
             } else {
-                cursor.grab_mode = bevy::window::CursorGrabMode::Locked;
-                cursor.visible = false;
-                player_service.cursor_locked = true;
+                restore_cursor(&mut pause_state, &mut cursor, &mut player_service);
             }
+        }
+    }
+}
+
+/// The cursor as play had it before the menu opened; locked for play when
+/// the menu never saw it.
+fn restore_cursor(
+    pause: &mut PauseMenuState,
+    cursor: &mut bevy::window::CursorOptions,
+    player_service: &mut PlayerService,
+) {
+    let (grab, visible, locked) =
+        pause.cursor_before.take().unwrap_or((bevy::window::CursorGrabMode::Locked, false, true));
+    cursor.grab_mode = grab;
+    cursor.visible = visible;
+    player_service.cursor_locked = locked;
+}
+
+/// While the menu is open, the Space's HUD takes no clicks or keys: the menu
+/// has them (Studio blocks its HUD the same way under its own panels).
+fn block_hud_while_open(
+    pause: Res<PauseMenuState>,
+    blocked: Option<ResMut<eustress_play_runtime::hud_input::GuiInputBlocked>>,
+) {
+    if let Some(mut blocked) = blocked {
+        if blocked.0 != pause.is_open {
+            blocked.0 = pause.is_open;
         }
     }
 }
@@ -225,10 +258,8 @@ fn close_pause_menu(
     pause.temp_settings = None;
     pause.selected = 0;
     if let Ok(mut cursor) = cursor_options.single_mut() {
-        cursor.grab_mode = bevy::window::CursorGrabMode::Locked;
-        cursor.visible = false;
+        restore_cursor(pause, &mut cursor, player_service);
     }
-    player_service.cursor_locked = true;
 }
 
 /// The pause menu's rows, and the keys and clicks that choose them. Drawn by

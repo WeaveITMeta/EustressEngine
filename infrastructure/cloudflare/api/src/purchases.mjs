@@ -29,6 +29,7 @@
 // =============================================================================
 
 import { isAdultListing, mayView, signedThumbnailUrl, viewerFor } from './adult_content.mjs';
+import { deletionMarkHead } from './space_delete_mark.mjs';
 
 export const PURCHASE_KEY_PREFIX = 'purchase:';
 
@@ -154,7 +155,8 @@ export async function resolveAttribution(env, { simulation_id, creator_id } = {}
   if (hasSim) {
     if (!isSimulationId(simulation_id)) return { error: 'Invalid simulation_id', status: 400 };
     const raw = await env.SOCIAL.get(`sim:${simulation_id}`);
-    if (!raw) return { error: 'Simulation not found', status: 404 };
+    // A deleted listing reads as missing here, as everywhere outside its author's view: the same 404, and its name on no receipt.
+    if (!raw || await deletionMarkHead(env, simulation_id)) return { error: 'Simulation not found', status: 404 };
     const sim = JSON.parse(raw);
     const author = typeof sim.author_id === 'string' && sim.author_id ? sim.author_id : null;
     if (hasCreator && creator_id !== author) {

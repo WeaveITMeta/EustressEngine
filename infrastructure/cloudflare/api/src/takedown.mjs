@@ -117,6 +117,7 @@ import {
 import { assignCaseReference } from './case_reference.mjs';
 import { sendNotice, scrubAddresses } from './account_notices.mjs';
 import { sendStaffAlert, sendStaffDigests, alertOverdueStaffQueue } from './staff_alerts.mjs';
+import { reviewLatency, digestLines } from './review_latency.mjs';
 import { renderEmail, html, paragraph, note as noteLine, facts, formatWhen } from './email_shell.mjs';
 import { readAccountEmail } from './email_ops.mjs';
 import { accountTimeZone } from './account_time_zone.mjs';
@@ -124,6 +125,7 @@ import { sha256Hex, prepareUserImage, derivedCopyOf, storedImageVerdict } from '
 import { defaultCache } from './body_cache.mjs';
 import { siteOrigin } from './cors.mjs';
 import { sealEvidence, listingEvidenceItems } from './evidence_vault.mjs';
+import { readTombstone, tombstoneHashes } from './space_delete_mark.mjs';
 
 export const TAKEDOWN_LAW = 'TAKE IT DOWN Act';
 /// The law's bound on removal after a valid request. Removal here takes seconds; this is what a late one is measured against.
@@ -483,6 +485,21 @@ const STEPS = {
     // New hashes: the identical-copy scan goes over every listing again, from the sweep if not from here.
     await restartScan(env);
   },
+  // A listing its author deleted and the hourly job removed for good (src/space_delete.mjs): nothing is served there, so
+  // there is no lock, case hold, seal or author notice to write, but its files are still named by the tombstone's hashes.
+  // They go on the blocklist, so a re-upload of the same bytes is refused, and the identical-copy scan looks for them in
+  // every other listing. The review captures are never removed (universes/{id}/moderation/), so they are hashed as for a
+  // listing still there.
+  gone_hashes: async (env, rec, simId) => {
+    const tomb = await readTombstone(env, simId);
+    if (!tomb) return;
+    const hashes = tombstoneHashes(tomb).map((h) => ({ ...h, sim_id: simId }));
+    for (const h of await listingHashes(env, { id: simId, author_id: tomb.author_id || null })) {
+      if (!hashes.some((x) => x.sha256 === h.sha256)) hashes.push(h);
+    }
+    for (const h of hashes) await blockHash(env, rec, h);
+    await restartScan(env);
+  },
   // Possible CSAM: the listing's files are sealed into the evidence vault (src/evidence_vault.mjs) with the takedown's facts.
   // A seal that is not complete leaves the step owed, so the sweep runs it again; nothing is deleted either way. A request is
   // a person's statement, not a confident detection, so nothing is reported to an authority from here.
@@ -544,7 +561,7 @@ const STEPS = {
 
 const stepKind = (step) => step.split(':')[0];
 const stepArg = (step) => step.split(':').slice(1).join(':') || null;
-const REMOVAL_STEP = (step) => ['lock', 'forum_lock', 'case', 'hashes', 'notice', 'scan', 'seal'].includes(stepKind(step));
+const REMOVAL_STEP = (step) => ['lock', 'forum_lock', 'case', 'hashes', 'gone_hashes', 'notice', 'scan', 'seal'].includes(stepKind(step));
 /// A step that removes content: while one is owed, something the request named may still be served.
 const LOCK_STEP = (step) => ['lock', 'forum_lock'].includes(stepKind(step));
 
@@ -1248,7 +1265,10 @@ async function alertStaff(env, kind, facts, { required = false, alertId = null, 
 /// From the hourly sweep (sweepTakedowns, after the case steps): the over-cap digest to each staff address
 /// (src/staff_alerts.mjs). `recipients`: the staff addresses, when the caller has them already.
 export async function sendStaffDigest(env, { now = Date.now(), recipients = null } = {}) {
-  return sendStaffDigests(env, recipients || (await staffAddresses(env)), (d) => renderMail('staff_digest', { ...d, at: new Date(now).toISOString() }), { now, fromName: FROM_NAME });
+  // Review latency (src/review_latency.mjs): a section of the digest; a read that fails leaves the section out, never the digest.
+  let latency = [];
+  try { latency = env.SOCIAL ? digestLines(await reviewLatency(env, { now })) : []; } catch (e) { console.error('takedown: the review latency was not read:', e?.name || 'Error'); }
+  return sendStaffDigests(env, recipients || (await staffAddresses(env)), (d) => renderMail('staff_digest', { ...d, latency, at: new Date(now).toISOString() }), { now, fromName: FROM_NAME });
 }
 
 /// From the hourly sweep, after the case steps and the digest: a staff_failure alert on the legal lane when an alert has
@@ -1499,7 +1519,7 @@ export function renderMail(kind, d) {
           `Named here: ${(d.entries || []).filter((e) => !e.reason || e.reason === 'daily_cap').length} past the day's allowance, ${(d.entries || []).filter((e) => e.reason && e.reason !== 'daily_cap').length} after a failed send.`,
           ...(d.more ? [`${d.more} more are waiting and are named in the next digest, within the hour.`] : []),
         ],
-        rows: (d.entries || []).map((e) => [`${e.kind || 'alert'}${e.required ? ' (required)' : ''}`, `${e.reference || 'no reference'}, queued ${when(e.queued_at)}${e.reason && e.reason !== 'daily_cap' ? ', after its send failed' : ''}`]),
+        rows: [...(d.entries || []).map((e) => [`${e.kind || 'alert'}${e.required ? ' (required)' : ''}`, `${e.reference || 'no reference'}, queued ${when(e.queued_at)}${e.reason && e.reason !== 'daily_cap' ? ', after its send failed' : ''}`]), ...(d.latency || [])],
       });
     case 'staff_queue_overdue': {
       const kinds = (o) => Object.entries(o || {}).sort(([a], [b]) => (a < b ? -1 : 1)).map(([k, n]) => `${k} ${n}`).join(', ') || 'none';
@@ -1590,7 +1610,8 @@ async function fileRequest(request, url, env, cors, deps) {
   ctx.open.set(rec.id, rec);
   await runSteps(env, rec, ctx);
   for (const l of rec.locations) {
-    if (l.listing_id && l.result !== 'not_found') l.result = targetOf(rec, l.listing_id)?.locked_at ? 'removed' : 'pending';
+    if (l.listing_id && l.removed_listing) l.result = 'removed';
+    else if (l.listing_id && l.result !== 'not_found') l.result = targetOf(rec, l.listing_id)?.locked_at ? 'removed' : 'pending';
     else if (l.forum_post_id && l.result !== 'not_found') l.result = forumTargetOf(rec, l.forum_post_id)?.locked_at ? 'removed' : 'pending';
   }
   await saveTakedown(env, rec, 'received');
@@ -1630,7 +1651,7 @@ async function openCase(env, value, { accountId, ip, receivedAt }) {
       // The address only as a keyed hash: enough to see one address behind many requests, not to read it.
       ip_hash: ip ? (await sha256Hex(new TextEncoder().encode(`${env.JWT_SECRET || ''}:${ip}`))).slice(0, 32) : null,
     },
-    locations: [], targets: [], forum_targets: [], unresolved: [], hashes: [], pending: [], step_errors: {},
+    locations: [], targets: [], forum_targets: [], removed_listings: [], unresolved: [], hashes: [], pending: [], step_errors: {},
     reviews: [], decision: null, attempts: 0, history: [{ at: receivedAt, event: 'received' }],
   };
   // Each location to a listing or a forum post. A namespace is a website manifest's handle; it names the listing that publishes it.
@@ -1653,6 +1674,14 @@ async function openCase(env, value, { accountId, ip, receivedAt }) {
       if (listingId && !UUID.test(listingId)) listingId = null;
     }
     const sim = listingId ? await readSim(env, listingId) : null;
+    // Removed for good by its author's deletion: its files are blocked from the tombstone (the gone_hashes step), and the
+    // location reads as removed, which it is.
+    const tomb = !sim && listingId && UUID.test(listingId) ? await readTombstone(env, listingId) : null;
+    if (tomb) {
+      rec.locations.push({ location: l.location, listing_id: listingId, object: l.object, result: 'removed', removed_listing: true });
+      if (!rec.removed_listings.includes(listingId)) rec.removed_listings.push(listingId);
+      continue;
+    }
     if (!sim) {
       rec.locations.push({ location: l.location, listing_id: null, object: l.object, result: 'not_found' });
       rec.unresolved.push({ location: l.location, reason: 'no listing at this location' });
@@ -1664,8 +1693,9 @@ async function openCase(env, value, { accountId, ip, receivedAt }) {
   }
   const ids = rec.targets.map((t) => t.sim_id);
   const posts = rec.forum_targets.map((t) => t.post_id);
+  const gone = rec.removed_listings;
   // The locks first, every one, before anything slower.
-  rec.pending = [...ids.map((s) => `lock:${s}`), ...posts.map((p) => `forum_lock:${p}`), ...ids.map((s) => `case:${s}`), ...(rec.possible_csam ? ids.map((s) => `seal:${s}`) : []), ...ids.map((s) => `hashes:${s}`), ...(ids.length ? ['scan'] : []), ...ids.map((s) => `notice:${s}`), 'receipt', 'staff'];
+  rec.pending = [...ids.map((s) => `lock:${s}`), ...posts.map((p) => `forum_lock:${p}`), ...ids.map((s) => `case:${s}`), ...(rec.possible_csam ? ids.map((s) => `seal:${s}`) : []), ...ids.map((s) => `hashes:${s}`), ...gone.map((s) => `gone_hashes:${s}`), ...(ids.length || gone.length ? ['scan'] : []), ...ids.map((s) => `notice:${s}`), 'receipt', 'staff'];
   // Nothing on Eustress at any location: a person looks at it.
   if (!ids.length && !posts.length) rec.status = 'under_review';
   await env.SOCIAL.put(tdKey(id), JSON.stringify(rec));

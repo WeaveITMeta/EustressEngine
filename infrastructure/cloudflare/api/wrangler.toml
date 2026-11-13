@@ -282,6 +282,18 @@ class_name = "PasskeyIndex"
 tag = "v8-passkey-index"
 new_sqlite_classes = ["PasskeyIndex"]
 
+# Holder ledger (src/holder_ledger.mjs): one object holding who holds how many
+# units of the company, with every issuance, transfer and repurchase as an entry
+# that is never changed. A Durable Object because a balance must never be spent
+# twice. Only administrators write to it; nothing here sells anything.
+[[durable_objects.bindings]]
+name = "HOLDER_LEDGER"
+class_name = "HolderLedger"
+
+[[migrations]]
+tag = "v9-holder-ledger"
+new_sqlite_classes = ["HolderLedger"]
+
 # Cosign claims per account. The engine sends at most 6 claims per 5-minute
 # flush; this only meets a script. Per Cloudflare location, like the manifest
 # limiter above.
@@ -366,8 +378,8 @@ cpu_ms = 300000
 [observability]
 enabled = true
 
-# Email Workers - send identity backup emails from identity@eustress.dev
-# Requires Email Routing enabled on eustress.dev in Cloudflare dashboard
+# Cloudflare Email Sending for eustress.dev - sends identity backup emails from identity@eustress.dev
+# and the Space delete and restore mail from support@eustress.dev (DELETE_MAIL_FROM)
 [[send_email]]
 name = "EMAIL"
 
@@ -380,6 +392,21 @@ FORK_ID = "eustress.dev"
 # it. It stays "off" until the host side ships the guest protections
 # (guest_caps) and McKale turns it on.
 GUEST_PLAY = "off"
+# Deleting and restoring a published Space (src/space_delete.mjs, docs/architecture/
+# DELETE_PUBLISHED_SPACE.md): the confirmation code is emailed to the account's verified
+# address. On only when this is exactly "on"; anything else, or unset, answers 503
+# delete_unavailable. Off until one code mail is shown to arrive (the delivery check in the
+# design document) and McKale turns it on.
+DELETE_CODE_EMAIL = "off"
+# The sender of the delete and restore code mail and of the deleted and restored notices (shown as
+# "Eustress Support"). No other mail uses it.
+DELETE_MAIL_FROM = "support@eustress.dev"
+# The hourly job that removes a deleted Space for good, 90 days after its deletion
+# (src/space_delete.mjs sweepSpaceDeletions). Armed separately from the code mail, so
+# switching DELETE_CODE_EMAIL on never arms the removal by itself. On only when this is
+# exactly "on"; anything else, or unset, and the job reads and removes nothing. Off until
+# McKale turns it on (docs/architecture/DELETE_PUBLISHED_SPACE_SECURITY_REVIEW.md).
+SPACE_HARD_DELETE = "off"
 # Daily caps on guest chat checks that reach Jev (each a paid model call;
 # src/guest.mjs guestChatCaps, GUEST_PLAY.md section 13): per listing, per host
 # account, and for the whole deployment. Unset, or not a whole number, is the
@@ -585,6 +612,14 @@ class_name = "PasskeyIndex"
 tag = "v8-passkey-index"
 new_sqlite_classes = ["PasskeyIndex"]
 
+[[env.staging.durable_objects.bindings]]
+name = "HOLDER_LEDGER"
+class_name = "HolderLedger"
+
+[[env.staging.migrations]]
+tag = "v9-holder-ledger"
+new_sqlite_classes = ["HolderLedger"]
+
 [[env.staging.send_email]]
 name = "EMAIL"
 
@@ -595,6 +630,12 @@ enabled = true
 [env.staging.vars]
 # Hosted guest play: off until switched on here, as in production (see [vars]).
 GUEST_PLAY = "off"
+# Deleting a published Space: on in staging so the code mail can be shown to arrive (production stays off; see [vars]).
+DELETE_CODE_EMAIL = "on"
+# The sender of the delete and restore mail (see [vars]).
+DELETE_MAIL_FROM = "support@eustress.dev"
+# Removing a deleted Space for good: off until McKale turns it on (see [vars]).
+SPACE_HARD_DELETE = "off"
 # Guest chat check caps: the defaults apply unless set (see [vars]).
 # GUEST_CHAT_CAP_LISTING = "5000"
 # GUEST_CHAT_CAP_HOST = "5000"

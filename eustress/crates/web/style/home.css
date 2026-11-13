@@ -44,7 +44,8 @@
                 rgba(10, 10, 18, 0.95) 0%,
                 rgba(10, 10, 18, 0.90) 55%,
                 rgba(10, 10, 18, 0.95) 100%),
-            url("/assets/home/hero-city.webp");
+            /* Under a 90% scrim a 960-pixel copy looks the same and is a fifth of the bytes. */
+            url("/assets/home/hero-city-960.webp");
         background-position: 68% center;
     }
 }
@@ -356,7 +357,23 @@
         url("/assets/home/cta-horizon.webp");
     background-repeat: no-repeat;
     background-size: cover;
-    background-position: right 80%;
+    /* Anchored to the bottom, so the glowing horizon sits a fixed share of the
+       width above the section's bottom edge: 254 of the picture's 941 rows,
+       about 15.2vw once the picture spans the width. */
+    background-position: right bottom;
+    /* The ticked lines sit on the dark ground BELOW the horizon, the action
+       above it: the bottom padding is the horizon's height minus the lines'
+       block (about 86px) and a 28px clearance. */
+    padding-bottom: max(28px, calc(15.2vw - 114px));
+}
+
+/* The action stays above the horizon; the ticked lines go below it. */
+.cta-horizon .cta-btn {
+    margin-bottom: 0;
+}
+
+.cta-horizon .cta-features {
+    margin-top: 72px;
 }
 
 /* Text sits on a picture here, so the muted grey steps up one level. */
@@ -373,6 +390,84 @@
                 rgba(10, 10, 18, 0.72) 55%,
                 rgba(10, 10, 18, 0.82) 100%),
             url("/assets/home/cta-horizon.webp");
-        background-position: 72% 80%;
+        background-position: 72% bottom;
+        /* On a phone the picture is scaled by height, so the horizon sits at
+           73% of the section: little padding below the lines, a wider gap above. */
+        padding-bottom: 16px;
     }
+
+    .cta-horizon .cta-features {
+        margin-top: 76px;
+    }
+}
+
+/* =============================================================================
+   Marks and icons: SVG files, never emoji or text symbols
+   ========================================================================== */
+
+.page-home .power-icon {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 52px;
+    height: 52px;
+    margin-bottom: var(--space-md);
+    border-radius: 12px;
+    background: rgba(60, 186, 84, 0.08);
+    border: 1px solid rgba(60, 186, 84, 0.22);
+    font-size: 0;
+}
+
+.page-home .power-icon img {
+    width: 28px;
+    height: 28px;
+    display: block;
+}
+
+.page-home .check,
+.page-home .cross,
+.page-home .warn,
+.page-home .feature-check {
+    display: inline-block;
+    width: 1em;
+    height: 1em;
+    vertical-align: -0.15em;
+    background-repeat: no-repeat;
+    background-position: center;
+    background-size: contain;
+    font-size: inherit;
+}
+
+.page-home .check,
+.page-home .feature-check { background-image: url("/assets/icons/home/check.svg"); }
+.page-home .cross { background-image: url("/assets/icons/home/cross.svg"); }
+.page-home .warn { background-image: url("/assets/icons/home/partial.svg"); }
+
+.page-home .feature-check {
+    width: 1.05em;
+    height: 1.05em;
+    flex: 0 0 auto;
+}
+
+.btn-star {
+    width: 16px;
+    height: 16px;
+    display: block;
+}
+
+/* A generated picture says so, on the picture. */
+.showcase-grid-industrial .build-art-chip {
+    position: absolute;
+    left: 10px;
+    bottom: 10px;
+    padding: 3px 8px;
+    border-radius: 6px;
+    background: rgba(10, 10, 18, 0.72);
+    border: 1px solid rgba(128, 144, 160, 0.25);
+    color: var(--color-text-secondary);
+    font-family: var(--font-mono);
+    font-size: 10px;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    pointer-events: none;
 }

@@ -1,11 +1,11 @@
-# Eustress Mode — "Civil".
+# Eustress Mode — "Civil Engineering".
 # Civil / structural engineering: parametric drafting, terrain, data, and
 # MindSpace for project note-graphs. Survey/Structures tabs are
 # forward-looking (declared ahead of their tooling).
 
 [mode]
 id = "civil"
-name = "Civil"
+name = "Civil Engineering"
 icon = "bridge"
 version = "1.0"
 author = "Eustress"

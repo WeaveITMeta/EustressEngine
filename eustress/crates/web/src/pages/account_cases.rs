@@ -4,7 +4,9 @@
 // Reviews of the account's listings, removals of its content, and the removal requests it filed, newest first. The Worker's emails
 // link here. Reads GET /api/account/cases (a session; the answer is private and not cached), twenty at a time with "Load more".
 // A case can carry plain-words feedback, a link to the review panel for an appeal, or a form to ask for a review
-// (POST /api/account/cases/{reference}/review).
+// (POST /api/account/cases/{reference}/review). Every card shows its full reference with a Copy button, its status as a word
+// with an icon, its progress as steps (Received, In review, Decided, Appealed), its dates in one format with the time zone
+// named, and the appeal action when the account may appeal. The rules for those are in takedown_wire.rs (section 6b).
 //
 // Wire names and parsing are in takedown_wire.rs.
 //
@@ -20,7 +22,7 @@
 use leptos::prelude::*;
 use leptos::task::spawn_local;
 
-use super::take_it_down::{focus_id, CopyReference};
+use super::take_it_down::{focus_id, CaseDate, CaseTimeline, CopyReference, StatusIcon};
 use super::takedown_wire::*;
 use crate::api::{failure_sentence, ApiClient, ApiError};
 use crate::components::{CentralNav, Footer};
@@ -159,11 +161,10 @@ pub fn SignInNotice() -> impl IntoView {
 // 3. The list
 // -----------------------------------------------------------------------------
 
-/// A row in words: the headline, the status, and when it last changed.
-pub fn row_parts(c: &CaseEntry) -> (String, String, String) {
+/// A row in words: the headline and the status. Its date is row_when (one date, named).
+pub fn row_parts(c: &CaseEntry) -> (String, String) {
     let headline = if c.headline.trim().is_empty() { kind_words(&c.kind).to_string() } else { c.headline.trim().to_string() };
-    let when = c.updated_at.as_deref().or(c.opened_at.as_deref()).map(stamp_words).unwrap_or_default();
-    (headline, humanize(&c.status), when)
+    (headline, humanize(&c.status))
 }
 
 #[component]
@@ -211,7 +212,12 @@ fn CaseList(
                     </p>
                     <ul class="tid-cases">
                         {move || cases.get().iter().map(|c| {
-                            let (headline, status, when) = row_parts(c);
+                            let (headline, status) = row_parts(c);
+                            let raw_status = c.status.clone();
+                            let when = row_when(c);
+                            let steps = case_timeline(c);
+                            let appeal = appeal_href(c);
+                            let ref_id = format!("tid-row-ref-{}", c.reference);
                             let reference = c.reference.clone();
                             let open = c.reference.clone();
                             view! {
@@ -219,11 +225,15 @@ fn CaseList(
                                     <button type="button" class="tid-case-row" on:click=move |_| selected.set(Some(open.clone()))>
                                         <span class="tid-case-head">{headline}</span>
                                         <span class="tid-case-meta">
-                                            <span class="tid-case-ref">{reference}</span>
-                                            <span class="tid-badge">{status}</span>
-                                            <span class="tid-case-when">{when}</span>
+                                            <span class="tid-badge"><StatusIcon status=raw_status />{status}</span>
+                                            {when.map(|(label, raw)| view! { <span class="tid-case-when">{label}" "<CaseDate raw=raw /></span> })}
                                         </span>
                                     </button>
+                                    <CaseTimeline steps=steps />
+                                    <CopyReference reference=reference id=ref_id />
+                                    {appeal.map(|href| view! {
+                                        <p class="tid-case-actions"><a class="tid-btn tid-btn-primary" href=href>"Open the review and appeal"</a></p>
+                                    })}
                                 </li>
                             }
                         }).collect_view()}
@@ -293,10 +303,6 @@ fn feedback_view(fb: Feedback) -> impl IntoView {
     }
 }
 
-fn dated(label: &'static str, raw: &Option<String>) -> Option<(&'static str, String)> {
-    raw.as_deref().map(|r| (label, stamp_words(r)))
-}
-
 #[component]
 fn CaseDetail(
     cases: RwSignal<Vec<CaseEntry>>,
@@ -320,24 +326,26 @@ fn CaseDetail(
 /// One case in full: what it is, where it stands, what was found, and what can be done next.
 #[component]
 pub fn CaseBody(case: CaseEntry, asked: RwSignal<Vec<(String, String)>>) -> impl IntoView {
-    let (headline, status, _) = row_parts(&case);
+    let (headline, _) = row_parts(&case);
     let reference = case.reference.clone();
     let status_now = {
         let reference = reference.clone();
+        let status = case.status.clone();
         // After a review request is sent, the Worker's new status stands in for the old one without reloading the list.
-        move || asked.with(|a| a.iter().find(|(r, _)| *r == reference).map(|(_, s)| humanize(s)).filter(|s| !s.is_empty())).unwrap_or_else(|| status.clone())
+        move || asked.with(|a| a.iter().find(|(r, _)| *r == reference).map(|(_, s)| s.clone()).filter(|s| !s.trim().is_empty())).unwrap_or_else(|| status.clone())
+    };
+    let progress = {
+        let case = case.clone();
+        let status_now = status_now.clone();
+        move || {
+            let mut c = case.clone();
+            c.status = status_now();
+            view! { <CaseTimeline steps=case_timeline(&c) /> }
+        }
     };
     let outcome = case.outcome.clone().filter(|o| !o.trim().is_empty()).map(|o| outcome_words(&o));
     let listing_name = case.listing.as_ref().map(|l| l.name.clone()).filter(|n| !n.trim().is_empty());
-    let dates: Vec<(&'static str, String)> = [
-        dated("Opened", &case.opened_at),
-        dated("Removed", &case.removed_at),
-        dated("Decided", &case.decided_at),
-        dated("Last updated", &case.updated_at),
-    ]
-    .into_iter()
-    .flatten()
-    .collect();
+    let dates = case_date_rows(&case);
     let locations = case
         .locations
         .iter()
@@ -348,13 +356,12 @@ pub fn CaseBody(case: CaseEntry, asked: RwSignal<Vec<(String, String)>>) -> impl
 
     // A listing review can be appealed in the review panel that already exists; this page links to it.
     let appeal = if case.kind == "listing_review" {
-        let id = case.listing.as_ref().map(|l| l.id.clone()).filter(|i| !i.is_empty());
-        match (case.can_appeal, id) {
-            (true, Some(id)) => Some(view! {
-                <p><a class="tid-btn tid-btn-primary" href=format!("/projects?review={id}")>"Open the review and appeal"</a></p>
+        match appeal_href(&case) {
+            Some(href) => Some(view! {
+                <p class="tid-case-actions"><a class="tid-btn tid-btn-primary" href=href>"Open the review and appeal"</a></p>
             }.into_any()),
-            _ if case.appeal.is_some() => Some(view! { <p>"An appeal is on file for this case."</p> }.into_any()),
-            _ => None,
+            None if case.appeal.is_some() => Some(view! { <p>"An appeal is on file for this case."</p> }.into_any()),
+            None => None,
         }
     } else {
         None
@@ -365,18 +372,22 @@ pub fn CaseBody(case: CaseEntry, asked: RwSignal<Vec<(String, String)>>) -> impl
             <h2>{headline}</h2>
             <p class="tid-label">{kind_words(&case.kind)}</p>
             <CopyReference reference=case.reference.clone() id="tid-detail-ref" />
-            <p><strong>"Status: "</strong>{status_now}</p>
+            <p><strong>"Status: "</strong>{move || {
+                let s = status_now();
+                view! { <span class="tid-status-chip"><StatusIcon status=s.clone() />{humanize(&s)}</span> }
+            }}</p>
+            {progress}
             {outcome.map(|o| view! { <p>{o}</p> })}
             {listing_name.map(|n| view! { <p><strong>"Listing: "</strong>{n}</p> })}
+            {appeal}
             <dl class="tid-dates">
-                {dates.into_iter().map(|(label, when)| view! { <dt>{label}</dt><dd>{when}</dd> }).collect_view()}
+                {dates.into_iter().map(|(label, when)| view! { <dt>{label}</dt><dd><CaseDate raw=when /></dd> }).collect_view()}
             </dl>
             {has_locations.then(|| view! {
                 <h3>"What happened to each item"</h3>
                 <ul class="tid-locations">{locations}</ul>
             })}
             {feedback.map(feedback_view)}
-            {appeal}
             {review}
         </div>
     }
@@ -597,13 +608,14 @@ mod tests {
 
     #[test]
     fn a_row_is_the_headline_the_status_and_the_last_change() {
-        let (headline, status, when) = row_parts(&review_case());
-        assert_eq!((headline.as_str(), status.as_str(), when.as_str()), ("Review of Tower", "Decided", "Oct 2, 2026, 10:00 AM UTC"));
+        let (headline, status) = row_parts(&review_case());
+        assert_eq!((headline.as_str(), status.as_str()), ("Review of Tower", "Decided"));
+        assert_eq!(row_when(&review_case()), Some(("Updated", "2026-10-02T10:00:00Z".to_string())));
         let mut c = request_case();
         c.headline = "  ".to_string();
         assert_eq!(row_parts(&c).0, "Removal request");
         c.opened_at = Some("2026-10-04T10:00:00Z".to_string());
-        assert_eq!(row_parts(&c).2, "Oct 4, 2026, 10:00 AM UTC", "opened stands in when there is no update");
+        assert_eq!(row_when(&c), Some(("Opened", "2026-10-04T10:00:00Z".to_string())), "opened stands in when there is no update");
     }
 
     #[test]
@@ -628,6 +640,37 @@ mod tests {
         assert!(!feedback_has_content(&Feedback::default()));
         assert!(feedback_has_content(&Feedback { note: Some("x".to_string()), ..Feedback::default() }));
         assert!(!feedback_has_content(&Feedback { note: Some("  ".to_string()), ..Feedback::default() }));
+    }
+
+    #[test]
+    fn case_card_list_row_shows_reference_status_icon_steps_one_date_and_the_appeal() {
+        let render = |cases: Vec<CaseEntry>| {
+            html(|| {
+                view! { <CaseList cases=RwSignal::new(cases) total=RwSignal::new(1u64) next=RwSignal::new(None) selected=RwSignal::new(None) /> }
+            })
+        };
+        let page = render(vec![review_case()]);
+        assert!(page.contains("value=\"EC-AAAA-BBBB-CCCC-DDDD-EEEE\"") && page.contains(">Copy<"), "{page}");
+        assert!(page.contains("tid-icon") && page.contains("Decided"), "{page}");
+        assert!(page.contains("tid-timeline") && page.contains("Received") && page.contains("(current step)"), "{page}");
+        assert!(page.contains("href=\"/projects?review=l1\"") && page.contains("Open the review and appeal"), "the appeal is on the card: {page}");
+        assert_eq!(page.matches("Oct 2, 2026, 10:00 AM UTC").count(), 1, "one date on the row: {page}");
+        let mut quiet = review_case();
+        quiet.can_appeal = false;
+        assert!(!render(vec![quiet]).contains("/projects?review="), "no appeal on the card when none may be made");
+    }
+
+    #[test]
+    fn case_card_detail_shows_the_appeal_outside_the_feedback_and_each_moment_once() {
+        let mut c = review_case();
+        c.decided_at = c.updated_at.clone();
+        let page = body(c);
+        let appeal = page.find("/projects?review=l1").expect("appeal link");
+        let feedback = page.find("What we found").expect("feedback");
+        assert!(appeal < feedback, "the appeal sits above the feedback block, not inside it: {page}");
+        // opened, decided and last updated: decided and last updated are the same moment, so two dates are printed, not three
+        assert_eq!(page.matches("<time").count(), 2, "{page}");
+        assert!(page.contains("Oct 1, 2026, 10:00 AM UTC") && page.contains("Opened") && !page.contains("Last updated"), "{page}");
     }
 
     #[test]

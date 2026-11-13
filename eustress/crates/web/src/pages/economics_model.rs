@@ -639,6 +639,8 @@ pub struct Company {
     pub tickets_usd: f64,
     pub delta_usd: f64,
     pub gifts_usd: f64,
+    /// Sponsorships of the engine, which go whole to Eustress's side after the fee. Only a real period has them.
+    pub sponsors_usd: f64,
     /// Drawn from the Worker's statement of a real period, not from the sliders.
     pub actual: bool,
     /// Daily players behind the month: a share of Roblox's, or the receipts at Roblox's spend per player.
@@ -720,6 +722,7 @@ pub fn company(s: &Inputs) -> Company {
         tickets_usd: s.tickets,
         delta_usd: s.delta,
         gifts_usd: 0.0,
+        sponsors_usd: 0.0,
         actual: false,
         daily_players,
         subscribers,

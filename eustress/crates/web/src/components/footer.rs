@@ -45,6 +45,7 @@ pub fn Footer() -> impl IntoView {
                         <a href="/learn" class="footer-link">"Learn"</a>
                         <a href="/currency" class="footer-link">"Currency"</a>
                         <a href="/premium" class="footer-link">"Premium"</a>
+                        <a href="/sponsor" class="footer-link">"Sponsor"</a>
                         <a href="/license" class="footer-link">"License"</a>
                     </div>
                     <div class="footer-link-col">

@@ -287,8 +287,7 @@ fn assembly_mass(dm: &DataModel, id: InstanceId) -> f64 {
 /// or merged into a weld group): the pose its body is drawn at, and the CFrame
 /// the part had when that pose was taken (`Nil` once it is drawn at its CFrame
 /// again). Neither replicates, and neither change is one a script sees.
-pub const DRAWN_CFRAME: &str = "__DrawnCFrame";
-pub const DRAWN_FROM_CFRAME: &str = "__DrawnFromCFrame";
+pub use crate::play_session::{DRAWN_CFRAME, DRAWN_FROM_CFRAME};
 
 /// A part's `DrawnCFrame`: the drawn pose the engine last took, while the
 /// part's CFrame is still the one it was taken with; otherwise its CFrame. A

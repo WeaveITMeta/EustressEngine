@@ -51,7 +51,7 @@ use bevy::prelude::*;
 
 use eustress_common::classes::{BasePart, Instance as ClassInstance, Material, Part, PartType};
 use eustress_common::soul::rune_runtime::{
-    call_script_exit, call_script_init, call_script_ready, call_script_update, RuneRuntimeState,
+    call_script_exit, call_script_frame, RuneRuntimeState,
 };
 
 use crate::simulation::plugin::SimValuesResource;
@@ -525,10 +525,9 @@ pub fn drive_rune_frame(
     // `eustress::terrain` reads it and takes edits only while it is in place.
     let clock_start = crate::profiler::phase_armed().then(std::time::Instant::now);
     let terrain_view = terrain.view();
+    // The lifecycle itself is shared with the Player (`call_script_frame`).
     rune_terrain::with_terrain_view(terrain_view.as_ref(), || {
-        call_script_init(&mut runtime);
-        call_script_ready(&mut runtime);
-        call_script_update(&mut runtime, time.delta_secs() as f64);
+        call_script_frame(&mut runtime, time.delta_secs() as f64);
     });
     // Purchases to grant go to the script defining `process_receipt`, while
     // the bridges are still installed.

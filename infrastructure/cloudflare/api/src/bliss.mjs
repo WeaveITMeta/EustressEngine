@@ -65,6 +65,23 @@ export const BLISS_TAIL_RATE = 0.005; // 0.5% floor, forever
 /// more. The long-run supply ceiling does not depend on it.
 export const FULL_DAY_SCORE = 1440;
 
+/// The witness's weight per contribution type: a claim scores
+/// `weight x node bonus x minutes`. A type outside this table is refused.
+/// Time in Studio with nothing made (`ActiveTime`: navigating, inspecting,
+/// testing) is worth a tenth of a minute; Bliss is earned by building.
+export const CONTRIBUTION_WEIGHTS = Object.freeze({
+  Development: 3.0,
+  Creation: 2.5,
+  Education: 2.2,
+  Collaboration: 2.0,
+  Optimization: 2.0,
+  QualityAssurance: 1.8,
+  Moderation: 1.5,
+  Documentation: 1.5,
+  Custom: 1.0,
+  ActiveTime: 0.1,
+});
+
 /// Checkpoints fold in only entries older than this. The nightly settlement
 /// refuses to credit a score date close to it (see treasury.mjs).
 export const FOLD_HORIZON_MS = 7 * 86400 * 1000;

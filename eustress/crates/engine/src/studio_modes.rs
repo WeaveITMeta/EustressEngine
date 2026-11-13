@@ -767,7 +767,7 @@ pub fn load_builtin_modes() -> Vec<ModeManifest> {
         (include_str!("../modes/student.toml"), "student"),
         (include_str!("../modes/business.toml"), "business"),
         (include_str!("../modes/legal.toml"), "legal"),
-        (include_str!("../modes/ai.toml"), "ai"),
+        (include_str!("../modes/si.toml"), "si"),
         (include_str!("../modes/civil.toml"), "civil"),
         (include_str!("../modes/engineering.toml"), "engineering"),
         (include_str!("../modes/justice.toml"), "justice"),
@@ -1146,7 +1146,7 @@ mod tests {
         assert_eq!(
             ids,
             vec![
-                "gaming", "student", "business", "legal", "ai", "civil",
+                "gaming", "student", "business", "legal", "si", "civil",
                 "engineering", "justice", "health", "military", "government",
                 "publicsector",
             ],
@@ -1521,17 +1521,17 @@ right = ["properties"]
         assert_eq!(pipes.name, "Water Pipe Gen");
         assert_eq!(pipes.tools.len(), 3);
 
-        // The AI Corpus tool set is the one whose every button really works.
-        let ai = modes.iter().find(|m| m.id == "ai").unwrap();
-        let corpus = ai.toolsets.iter().find(|t| t.id == "corpus").expect("corpus toolset");
+        // The Super Intelligence Corpus tool set is the one whose every button really works.
+        let si = modes.iter().find(|m| m.id == "si").unwrap();
+        let corpus = si.toolsets.iter().find(|t| t.id == "corpus").expect("corpus toolset");
         assert_eq!(corpus.tools.len(), 10);
         for tool in &corpus.tools {
             let meta = crate::tool_metadata::tool_meta(tool).unwrap();
             assert!(meta.wired, "corpus tool '{tool}' must stay wired");
         }
-        assert_eq!(ai.effective_layout("training").unwrap().sizes.get("bottom"), Some(&300.0));
+        assert_eq!(si.effective_layout("training").unwrap().sizes.get("bottom"), Some(&300.0));
         assert_eq!(
-            ai.effective_layout("acquisition").unwrap().sizes.get("bottom"),
+            si.effective_layout("acquisition").unwrap().sizes.get("bottom"),
             Some(&200.0),
             "a discipline with no table uses the mode's"
         );
@@ -1583,17 +1583,17 @@ right = ["properties"]
 
     #[test]
     fn ai_mode_shape() {
-        // AI sits between Legal and Civil in the dropdown — source order in
+        // Super Intelligence sits between Legal and Civil in the dropdown — source order in
         // `load_builtin_modes` IS display order, so a reorder there silently
         // moves the mode; pin it.
         let modes = load_builtin_modes();
         let ids: Vec<&str> = modes.iter().map(|m| m.id.as_str()).collect();
-        let ai = ids.iter().position(|i| *i == "ai").expect("ai mode missing");
-        assert_eq!(ids[ai - 1], "legal", "AI must follow Legal in the Modes dropdown");
-        assert_eq!(ids[ai + 1], "civil", "AI must precede Civil in the Modes dropdown");
+        let si = ids.iter().position(|i| *i == "si").expect("si mode missing");
+        assert_eq!(ids[si - 1], "legal", "Super Intelligence must follow Legal in the Modes dropdown");
+        assert_eq!(ids[si + 1], "civil", "Super Intelligence must precede Civil in the Modes dropdown");
 
-        let m = modes.iter().find(|m| m.id == "ai").unwrap();
-        assert!(!m.submodes.is_empty(), "AI must be discipline-gated, never directly selectable");
+        let m = modes.iter().find(|m| m.id == "si").unwrap();
+        assert!(!m.submodes.is_empty(), "Super Intelligence must be discipline-gated, never directly selectable");
 
         // Universal tabs are carried verbatim into every discipline. Without
         // this, a submode override silently makes the wired `data:*` corpus
@@ -1603,44 +1603,44 @@ right = ["properties"]
             let tabs = m.effective_custom_tabs(&sub.id);
             assert!(
                 tabs.iter().any(|t| t.id == "corpus"),
-                "ai '{}' missing universal tab 'corpus'",
+                "si '{}' missing universal tab 'corpus'",
                 sub.id
             );
             assert!(
                 tabs.iter().any(|t| t.id == "runs"),
-                "ai '{}' missing universal tab 'runs'",
+                "si '{}' missing universal tab 'runs'",
                 sub.id
             );
             // Publishing drops `hub` deliberately: its own three tabs
             // supersede it. Every other discipline must carry it.
             let has_hub = tabs.iter().any(|t| t.id == "hub");
             if sub.id == "publishing" {
-                assert!(!has_hub, "ai publishing should supersede the universal 'hub' tab, not duplicate it");
+                assert!(!has_hub, "si publishing should supersede the universal 'hub' tab, not duplicate it");
                 assert!(
                     tabs.iter().any(|t| t.id == "hub-release"),
-                    "ai publishing missing its own 'hub-release' tab"
+                    "si publishing missing its own 'hub-release' tab"
                 );
             } else {
-                assert!(has_hub, "ai '{}' missing universal tab 'hub'", sub.id);
+                assert!(has_hub, "si '{}' missing universal tab 'hub'", sub.id);
             }
         }
 
         // The Corpus tab is the honest part of this mode: every id in it is a
-        // really-wired action, so the AI mode is useful on day one rather than
+        // really-wired action, so the Super Intelligence mode is useful on day one rather than
         // being entirely aspirational. If one of these ever stops being wired,
         // this fails instead of quietly demoting the tab to dream buttons.
         let corpus = m
             .custom_tabs
             .iter()
             .find(|t| t.id == "corpus")
-            .expect("ai fallback tabs missing 'corpus'");
+            .expect("si fallback tabs missing 'corpus'");
         for sec in &corpus.sections {
             for tool in &sec.tools {
                 let meta = crate::tool_metadata::tool_meta(tool)
-                    .unwrap_or_else(|| panic!("ai corpus tool '{tool}' has no metadata"));
+                    .unwrap_or_else(|| panic!("si corpus tool '{tool}' has no metadata"));
                 assert!(
                     meta.wired,
-                    "ai corpus tool '{tool}' is not wired — the Corpus tab must stay real"
+                    "si corpus tool '{tool}' is not wired — the Corpus tab must stay real"
                 );
             }
         }

@@ -85,6 +85,11 @@ pub struct GuiElementDisplay {
     /// Useful for fixed-size billboard labels that should always read at
     /// the canvas extent regardless of how long the string is.
     pub text_scaled: bool,
+    /// Roblox `TextWrapped`. When `true` the text breaks onto new lines at
+    /// the element's width; when `false` each line runs on past it (clipped
+    /// only by an ancestor that clips). `TextScaled` fits the text as it
+    /// wraps or does not.
+    pub text_wrapped: bool,
     pub image_path: String,
     pub class_type: String,
     /// Mouse filter mode (Godot-style):
@@ -92,6 +97,10 @@ pub struct GuiElementDisplay {
     /// - "pass": receives events but passes them through
     /// - "ignore": transparent to mouse, events go straight through
     pub mouse_filter: String,
+    /// Roblox `Active`: the element sinks the input it receives. The Play
+    /// runtime derives `mouse_filter` from it; the tree carries it as the
+    /// `Active` property.
+    pub active: bool,
 }
 
 /// Marker for BillboardGui entities — rendered by the engine crate as 3D

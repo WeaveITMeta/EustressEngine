@@ -4,7 +4,10 @@
 //! from eustress_common. Mirrors engine capabilities for play mode parity.
 //!
 //! ## Architecture
-//! - Rune scripts: compiled + executed via RuneRuntimeState (from common)
+//! - Rune scripts: the open world's `SoulScript`s, compiled and run as
+//!   Studio's Play runs them by `common::soul::rune_play::TreeRunePlugin`
+//!   (all of them played solo; only this player's own when joined to a host,
+//!   which runs the rest), against `player_rune_modules`
 //! - Luau scripts: a Space's scripts run in the Play runtime's own VM
 //!   (`common::tree_scripts`), made when a session begins; this plugin makes
 //!   none, so a bare launch builds no Luau VM
@@ -20,10 +23,8 @@ pub use hot_reload::*;
 use bevy::prelude::*;
 use avian3d::prelude::Gravity;
 use eustress_common::soul::{SoulConfig, ScriptRegistry, SoulPlugin as CommonSoulPlugin};
-use eustress_common::soul::rune_runtime::{
-    RuneRuntimeState, RuneModuleRegistry,
-    run_script_init, run_script_update, cleanup_scripts,
-};
+use eustress_common::soul::rune_runtime::{RuneRuntimeState, RuneModuleRegistry};
+use eustress_common::soul::rune_play::{player_rune_modules, RuneScope, TreeRunePlugin};
 
 // ============================================================================
 // Client Soul Plugin — full script execution
@@ -51,52 +52,44 @@ impl Plugin for ClientSoulPlugin {
             .init_resource::<SoulRuntime>()
             .init_resource::<HotReloadWatcher>();
 
-        // Register client Rune modules at startup
-        app.add_systems(Startup, register_client_rune_modules);
+        // Register client Rune modules at startup, and pick which of a
+        // world's Rune scripts this Player runs: all of them solo, only this
+        // player's own when joined (the host runs the rest).
+        app.add_systems(Startup, (register_client_rune_modules, pick_rune_scope));
+
+        // The open world's Rune scripts, driven once per frame among the Play
+        // frame's scripts. The only Rune driver here: a second one over the
+        // same `RuneRuntimeState` would run every `on_update` twice.
+        app.add_plugins(TreeRunePlugin);
 
         // Script execution events
         app.add_message::<ScriptExecuteEvent>()
             .add_message::<ScriptReloadEvent>();
 
-        // Script execution systems (always running — scripts may need to run
-        // outside of a formal "play mode" on the client)
-        app.add_systems(Update, (
-            run_script_init,
-            run_script_update.after(run_script_init),
-            execute_scripts,
-            watch_hot_reload,
-        ));
+        app.add_systems(Update, (execute_scripts, watch_hot_reload));
 
         info!("ClientSoulPlugin initialized — Rune + GUI bridge ready");
     }
 }
 
-/// Register Rune modules available to client scripts.
-/// Installs the shared GUI + logging module from common.
+/// Register the Rune modules a Player's scripts compile against: the shared
+/// Player set (`eustress::dm`, `eustress::Vector3`, the GUI and log
+/// functions, `event_bus`).
 fn register_client_rune_modules(
     mut module_registry: ResMut<RuneModuleRegistry>,
 ) {
-    // Install shared GUI + logging module
-    match eustress_common::soul::rune_gui_module::create_gui_module() {
-        Ok(module) => {
-            module_registry.add_module(module);
-            info!("✅ Registered GUI module for client Rune runtime");
-        }
-        Err(e) => {
-            error!("Failed to create GUI module: {}", e);
-        }
+    let modules = player_rune_modules();
+    let count = modules.len();
+    for module in modules {
+        module_registry.add_module(module);
     }
+    info!("Registered {count} Rune module(s) for the Player");
+}
 
-    // Install event bus module
-    match eustress_common::events::event_bus_rune_module() {
-        Ok(module) => {
-            module_registry.add_module(module);
-            info!("✅ Registered EventBus module for client Rune runtime");
-        }
-        Err(e) => {
-            error!("Failed to create EventBus module: {}", e);
-        }
-    }
+/// Joined to a host, only this player's own Rune runs here; played solo
+/// (a published simulation, or a local Space), all of it.
+fn pick_rune_scope(mut commands: Commands, join: Option<Res<crate::systems::net_play::JoinTarget>>) {
+    commands.insert_resource(if join.is_some() { RuneScope::ClientOnly } else { RuneScope::Everything });
 }
 
 // ============================================================================
@@ -214,5 +207,79 @@ mod tests {
             !app.world().contains_resource::<eustress_common::mlua::MluaRuntimeState>(),
             "a bare launch must build no Luau VM"
         );
+    }
+
+    /// A Player played solo runs every Rune script in the world; joined to a
+    /// host, only its own (the host runs the rest).
+    #[test]
+    fn a_join_runs_only_this_players_rune() {
+        let scope_after = |join: bool| {
+            let mut app = App::new();
+            if join {
+                let link = eustress_networking::JoinLink::parse("eustress://join/127.0.0.1:7777").expect("a link");
+                app.insert_resource(crate::systems::net_play::JoinTarget::new(link, "Ada".into(), None, |_| None));
+            }
+            app.add_systems(Startup, pick_rune_scope);
+            app.update();
+            *app.world().resource::<RuneScope>()
+        };
+        assert_eq!(scope_after(false), RuneScope::Everything);
+        assert_eq!(scope_after(true), RuneScope::ClientOnly);
+    }
+
+    /// The Player's soul plugin drives a world's Rune once a frame, against
+    /// the Player's modules: the Rune frame runs `on_update` exactly once per
+    /// frame (a second driver over the same runtime would run it twice), and
+    /// `eustress::dm` and `eustress::Vector3` resolve.
+    #[test]
+    fn the_player_runs_a_worlds_rune_once_a_frame() {
+        use eustress_common::datamodel::DmValue;
+        use eustress_common::play_session::PlayDataModel;
+
+        let mut app = App::new();
+        app.add_plugins(MinimalPlugins).add_plugins(ClientSoulPlugin);
+        let script = r#"
+use eustress::dm;
+use eustress::Vector3;
+pub fn on_update(dt) {
+    let b = dm::find_path("Workspace.Box");
+    dm::set_attribute_number(b, "Frames", dm::get_attribute_number(b, "Frames") + 1.0);
+    dm::set_vector3(b, "Size", Vector3::new(2.0, 2.0, 2.0));
+    eustress::log_info("tick");
+}
+"#;
+        let records: Vec<(String, Vec<u8>)> = [
+            ("SoulService/_service.toml", "[service]\nclass_name = \"SoulService\"\n"),
+            ("SoulService/Counter.rune", script),
+            ("Workspace/_service.toml", "[service]\nclass_name = \"Workspace\"\n"),
+            (
+                "Workspace/Box.part.toml",
+                "[metadata]\nclass_name = \"Part\"\nname = \"Box\"\n\n[properties]\nanchored = true\n\n\
+                 [transform]\nposition = [0.0, 1.0, 0.0]\nrotation = [0.0, 0.0, 0.0, 1.0]\nscale = [1.0, 1.0, 1.0]\n",
+            ),
+        ]
+        .iter()
+        .map(|(k, v)| (k.to_string(), v.as_bytes().to_vec()))
+        .collect();
+        let world = eustress_common::tree_read::open_player_world(&records, "Tester");
+        let dm = eustress_common::datamodel::new_shared();
+        *dm.lock() = world.dm;
+        app.update(); // Startup: modules registered, scope picked.
+        app.insert_resource(PlayDataModel { dm: dm.clone() });
+        for _ in 0..5 {
+            app.update();
+        }
+        let g = dm.lock();
+        let ws = g.find_service("Workspace").expect("Workspace");
+        let b = g.find_first_child(ws, "Box", false).expect("the box");
+        let out: Vec<String> = g.output.iter().map(|l| format!("[{}] {}", l.source, l.text)).collect();
+        assert_eq!(g.get_attribute(b, "Frames"), Some(DmValue::Number(5.0)), "{out:?}");
+        let size = g.get_prop(b, "Size").and_then(|v| v.as_vector3()).expect("a size");
+        assert_eq!((size.x, size.y, size.z), (2.0, 2.0, 2.0));
+        assert!(out.iter().any(|l| l == "[SoulService.Counter] Started"), "{out:?}");
+        // A second driver would call on_update again each frame: its tree
+        // writes are no-ops (nothing published), but its log lines are not.
+        let ticks = out.iter().filter(|l| *l == "[SoulService.Counter] tick").count();
+        assert_eq!(ticks, 5, "one on_update per frame: {out:?}");
     }
 }

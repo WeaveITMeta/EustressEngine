@@ -477,6 +477,38 @@ pub struct BasePartSnapshot {
     pub can_collide: bool,
     pub transparency: f32,
     pub color: [f32; 4],
+    /// The part's Size, which a save writes as its `[transform] scale`. A
+    /// script that resizes a part in Play (a pulse, a highlight) has to have
+    /// it put back on Stop, or the next save writes the Play-time size into
+    /// the Space. `None` in a snapshot made before this field existed.
+    #[serde(default)]
+    pub size: Option<[f32; 3]>,
+}
+
+impl From<&BasePart> for BasePartSnapshot {
+    fn from(bp: &BasePart) -> Self {
+        Self {
+            anchored: bp.anchored,
+            can_collide: bp.can_collide,
+            transparency: bp.transparency,
+            color: bp.color.to_linear().to_f32_array(),
+            size: Some(bp.size.to_array()),
+        }
+    }
+}
+
+impl BasePartSnapshot {
+    /// Put the captured values back. Every way out of Play and every save
+    /// point restores the same set.
+    pub fn apply_to(&self, bp: &mut BasePart) {
+        bp.anchored = self.anchored;
+        bp.can_collide = self.can_collide;
+        bp.transparency = self.transparency;
+        bp.color = Color::linear_rgba(self.color[0], self.color[1], self.color[2], self.color[3]);
+        if let Some(size) = self.size {
+            bp.size = Vec3::from_array(size);
+        }
+    }
 }
 
 /// Humanoid component snapshot
@@ -801,13 +833,7 @@ fn handle_start_play(
             // Capture BasePart
             if true /* capture_basepart */ {
                 if let Some(bp) = basepart {
-                    let rgba = bp.color.to_linear().to_f32_array();
-                    entity_snapshot.basepart = Some(BasePartSnapshot {
-                        anchored: bp.anchored,
-                        can_collide: bp.can_collide,
-                        transparency: bp.transparency,
-                        color: rgba,
-                    });
+                    entity_snapshot.basepart = Some(BasePartSnapshot::from(bp));
                 }
             }
             
@@ -1139,10 +1165,7 @@ fn handle_stop_play(
                     
                     // Restore BasePart
                     if let (Some(mut bp), Some(bps)) = (basepart, &entity_snapshot.basepart) {
-                        bp.anchored = bps.anchored;
-                        bp.can_collide = bps.can_collide;
-                        bp.transparency = bps.transparency;
-                        bp.color = Color::linear_rgba(bps.color[0], bps.color[1], bps.color[2], bps.color[3]);
+                        bps.apply_to(&mut bp);
                     }
                     
                     // Restore Humanoid
@@ -1344,9 +1367,11 @@ fn restore_scene_on_enter_edit(
                 ts.apply_to(&mut t);
                 restored += 1;
             }
+            // The same set as the Stop button: a part a script resized or
+            // recoloured goes back, or the next save writes the Play-time
+            // value into the Space.
             if let (Some(mut bp), Some(bps)) = (basepart, &es.basepart) {
-                bp.anchored = bps.anchored;
-                bp.can_collide = bps.can_collide;
+                bps.apply_to(&mut bp);
             }
             // Sim state must rewind on EVERY stop path, not just the Slint
             // Stop button — MCP stop_simulation, sim auto-stop and F8/Escape
@@ -1443,13 +1468,7 @@ fn handle_create_save_point(
             }
             
             if let Some(bp) = basepart {
-                let rgba = bp.color.to_linear().to_f32_array();
-                entity_snapshot.basepart = Some(BasePartSnapshot {
-                    anchored: bp.anchored,
-                    can_collide: bp.can_collide,
-                    transparency: bp.transparency,
-                    color: rgba,
-                });
+                entity_snapshot.basepart = Some(BasePartSnapshot::from(bp));
             }
             
             if let Some(h) = humanoid {
@@ -1514,12 +1533,9 @@ fn handle_restore_save_point(
                 }
                 
                 if let (Some(mut bp), Some(bps)) = (basepart, &entity_snapshot.basepart) {
-                    bp.anchored = bps.anchored;
-                    bp.can_collide = bps.can_collide;
-                    bp.transparency = bps.transparency;
-                    bp.color = Color::linear_rgba(bps.color[0], bps.color[1], bps.color[2], bps.color[3]);
+                    bps.apply_to(&mut bp);
                 }
-                
+
                 if let (Some(mut h), Some(hs)) = (humanoid, &entity_snapshot.humanoid) {
                     h.health = hs.health;
                     h.max_health = hs.max_health;
@@ -2978,5 +2994,79 @@ mod session_end_tests {
         assert!(app.world().get::<PlayModePhysicsActivated>(part).is_none());
         go(&mut app, PlayModeState::Playing);
         assert_eq!(app.world().get::<RigidBody>(part), Some(&RigidBody::Dynamic), "the next session starts it");
+    }
+}
+
+#[cfg(test)]
+mod part_restore_tests {
+    use super::*;
+    use bevy::ecs::system::RunSystemOnce;
+
+    /// A part as an author saved it, then the Play-start snapshot of it.
+    fn authored(world: &mut World) -> (Entity, WorldSnapshot) {
+        let bp = BasePart { size: Vec3::splat(5.0), transparency: 0.0, ..Default::default() };
+        let part = world
+            .spawn((
+                Instance { name: "Core".into(), class_name: ClassName::Part, archivable: true, id: 0, uuid: String::new(), ai: false },
+                bp.clone(),
+                Transform::from_scale(Vec3::splat(5.0)),
+            ))
+            .id();
+        let mut snapshot = WorldSnapshot::new(0, "play start");
+        let mut es = EntitySnapshot::new(part.to_bits());
+        es.transform = Some(TransformSnapshot::from(&Transform::from_scale(Vec3::splat(5.0))));
+        es.basepart = Some(BasePartSnapshot::from(&bp));
+        snapshot.entities.insert(part.to_bits(), es);
+        (part, snapshot)
+    }
+
+    /// What a script leaves behind in Play: a pulse that resized the part and
+    /// a fade that changed its transparency and colour.
+    fn played(world: &mut World, part: Entity) {
+        let mut bp = world.get_mut::<BasePart>(part).unwrap();
+        bp.size = Vec3::splat(4.8093014);
+        bp.transparency = 0.4;
+        bp.color = Color::linear_rgba(1.0, 0.0, 0.0, 1.0);
+        world.get_mut::<Transform>(part).unwrap().scale = Vec3::splat(4.8093014);
+    }
+
+    /// Leaving Play by any path but the Stop button (an agent's stop, the
+    /// simulation's own stop, a key) puts back the part's Size, which a save
+    /// writes as its scale, along with the rest of what the Stop button
+    /// restores. It kept the Play-time size, and the next save wrote it into
+    /// the Space.
+    #[test]
+    fn leaving_play_puts_back_a_size_a_script_changed() {
+        let mut world = World::new();
+        world.insert_resource(Time::<Physics>::default());
+        world.init_resource::<PlayMode>();
+        world.init_resource::<Messages<eustress_common::avatar::DespawnAllAvatars>>();
+        let (part, snapshot) = authored(&mut world);
+        let mut stack = SnapshotStack::default();
+        stack.push(snapshot, &SnapshotConfig::default());
+        world.insert_resource(stack);
+        played(&mut world, part);
+
+        world.run_system_once(restore_scene_on_enter_edit).unwrap();
+
+        let bp = world.get::<BasePart>(part).unwrap();
+        assert_eq!(bp.size, Vec3::splat(5.0), "the part's Size");
+        assert_eq!(bp.transparency, 0.0, "its transparency");
+        assert_eq!(bp.color.to_linear().to_f32_array(), BasePart::default().color.to_linear().to_f32_array(), "its colour");
+        assert_eq!(world.get::<Transform>(part).unwrap().scale, Vec3::splat(5.0), "its transform");
+    }
+
+    /// A snapshot written before Size was recorded still loads, and restoring
+    /// it leaves the size alone rather than zeroing it.
+    #[test]
+    fn a_snapshot_without_a_size_leaves_the_size_alone() {
+        let old: BasePartSnapshot = serde_json::from_str(
+            r#"{"anchored":true,"can_collide":false,"transparency":0.5,"color":[1.0,1.0,1.0,1.0]}"#,
+        )
+        .unwrap();
+        let mut bp = BasePart { size: Vec3::splat(2.0), ..Default::default() };
+        old.apply_to(&mut bp);
+        assert_eq!(bp.size, Vec3::splat(2.0));
+        assert_eq!(bp.transparency, 0.5);
     }
 }

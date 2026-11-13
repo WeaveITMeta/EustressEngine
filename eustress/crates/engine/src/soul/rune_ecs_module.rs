@@ -192,18 +192,9 @@ pub fn create_ecs_module() -> Result<Module, ContextError> {
     // is not a usable vector type. `rune_value_type_registration` in the test
     // module at the bottom of this file asserts every declared function is
     // registered.
-    module.ty::<Vector3>()?;
-    module.function_meta(Vector3::new)?;
-    module.function_meta(Vector3::magnitude)?;
-    module.function_meta(Vector3::unit)?;
-    module.function_meta(Vector3::dot)?;
-    module.function_meta(Vector3::cross)?;
-    module.function_meta(Vector3::lerp)?;
-    module.function_meta(Vector3::add)?;
-    module.function_meta(Vector3::sub)?;
-    module.function_meta(Vector3::mul)?;
-    module.function_meta(Vector3::div)?;
-    module.function_meta(Vector3::neg)?;
+    // The shared list, so the Player's `eustress::Vector3` has the same
+    // functions (`eustress_common::soul::rune_values`).
+    eustress_common::soul::rune_values::install_vector3(&mut module)?;
 
     module.ty::<Color3>()?;
     module.function_meta(Color3::new)?;
@@ -778,109 +769,11 @@ fn log_error(message: &str) {
 // Vector3 — Roblox-compatible 3D vector type for Rune
 // ============================================================================
 
-/// 3D vector matching Roblox Vector3 API.
+/// 3D vector matching Roblox Vector3 API. Defined in `eustress_common` so
+/// `eustress::dm` (also in common, and installed by the Player) returns the
+/// same Rune type a script builds with `Vector3::new`.
 #[cfg(feature = "realism-scripting")]
-#[derive(Debug, Clone, Copy, rune::Any)]
-#[rune(item = ::eustress)]
-pub struct Vector3 {
-    #[rune(get, set)]
-    pub x: f64,
-    #[rune(get, set)]
-    pub y: f64,
-    #[rune(get, set)]
-    pub z: f64,
-}
-
-// Implement TryClone for Rune 0.14 compatibility
-#[cfg(feature = "realism-scripting")]
-impl rune::alloc::clone::TryClone for Vector3 {
-    fn try_clone(&self) -> Result<Self, rune::alloc::Error> {
-        Ok(*self)
-    }
-}
-
-#[cfg(feature = "realism-scripting")]
-impl Vector3 {
-    pub const ZERO: Vector3 = Vector3 { x: 0.0, y: 0.0, z: 0.0 };
-    pub const ONE: Vector3 = Vector3 { x: 1.0, y: 1.0, z: 1.0 };
-
-    /// Rust-side constructor (not wrapped by rune macro)
-    pub fn create(x: f64, y: f64, z: f64) -> Self {
-        Self { x, y, z }
-    }
-
-    #[rune::function(path = Self::new)]
-    pub fn new(x: f64, y: f64, z: f64) -> Self {
-        Self { x, y, z }
-    }
-
-    #[rune::function(instance)]
-    pub fn magnitude(&self) -> f64 {
-        (self.x * self.x + self.y * self.y + self.z * self.z).sqrt()
-    }
-
-    #[rune::function(instance, path = Self::unit)]
-    pub fn unit(&self) -> Self {
-        let mag = (self.x * self.x + self.y * self.y + self.z * self.z).sqrt();
-        if mag > 0.0 {
-            Self { x: self.x / mag, y: self.y / mag, z: self.z / mag }
-        } else {
-            Self::ZERO
-        }
-    }
-
-    #[rune::function(instance)]
-    pub fn dot(&self, other: &Self) -> f64 {
-        self.x * other.x + self.y * other.y + self.z * other.z
-    }
-
-    #[rune::function(instance)]
-    pub fn cross(&self, other: &Self) -> Self {
-        Self {
-            x: self.y * other.z - self.z * other.y,
-            y: self.z * other.x - self.x * other.z,
-            z: self.x * other.y - self.y * other.x,
-        }
-    }
-
-    #[rune::function(instance)]
-    pub fn lerp(&self, goal: &Self, alpha: f64) -> Self {
-        Self {
-            x: self.x + (goal.x - self.x) * alpha,
-            y: self.y + (goal.y - self.y) * alpha,
-            z: self.z + (goal.z - self.z) * alpha,
-        }
-    }
-
-    #[rune::function(instance)]
-    pub fn add(&self, other: &Self) -> Self {
-        Self { x: self.x + other.x, y: self.y + other.y, z: self.z + other.z }
-    }
-
-    #[rune::function(instance)]
-    pub fn sub(&self, other: &Self) -> Self {
-        Self { x: self.x - other.x, y: self.y - other.y, z: self.z - other.z }
-    }
-
-    #[rune::function(instance)]
-    pub fn mul(&self, scalar: f64) -> Self {
-        Self { x: self.x * scalar, y: self.y * scalar, z: self.z * scalar }
-    }
-
-    #[rune::function(instance)]
-    pub fn div(&self, scalar: f64) -> Self {
-        Self { x: self.x / scalar, y: self.y / scalar, z: self.z / scalar }
-    }
-
-    #[rune::function(instance)]
-    pub fn neg(&self) -> Self {
-        Self { x: -self.x, y: -self.y, z: -self.z }
-    }
-
-    fn to_array(&self) -> [f32; 3] {
-        [self.x as f32, self.y as f32, self.z as f32]
-    }
-}
+pub use eustress_common::soul::rune_values::Vector3;
 
 // ============================================================================
 // Color3 — Roblox-compatible RGB color type for Rune

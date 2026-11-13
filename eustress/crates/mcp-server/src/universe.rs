@@ -325,10 +325,25 @@ fn scan_for_live_engine(roots: &[PathBuf]) -> Option<PathBuf> {
     // Two passes so one unreachable port file can't hide a live engine:
     // collect every candidate, then probe. A Universe whose file is stale is
     // skipped rather than returned.
-    let candidates: Vec<PathBuf> = discover_universes(roots)
+    //
+    // Newest port file first. The engine rewrites `.eustress/engine.port` when
+    // the active Space changes and leaves the previous Universe's file behind,
+    // so more than one file can name the same live port (observed: two
+    // Universes both holding the one running engine's port). Probing in sorted
+    // order picked the alphabetically-first Universe, which is not the one the
+    // engine last wrote; the most recently written file is.
+    let mut candidates: Vec<(PathBuf, std::time::SystemTime)> = discover_universes(roots)
         .into_iter()
-        .filter(|u| u.join(".eustress").join("engine.port").is_file())
+        .filter_map(|u| {
+            let meta = std::fs::metadata(u.join(".eustress").join("engine.port")).ok()?;
+            if !meta.is_file() {
+                return None;
+            }
+            Some((u, meta.modified().unwrap_or(std::time::UNIX_EPOCH)))
+        })
         .collect();
+    candidates.sort_by(|a, b| b.1.cmp(&a.1));
+    let candidates: Vec<PathBuf> = candidates.into_iter().map(|(u, _)| u).collect();
 
     for u in &candidates {
         if port_file_is_live(&u.join(".eustress").join("engine.port")) {
@@ -367,6 +382,49 @@ mod tests {
     fn extract_toml_top_level() {
         let src = "[metadata]\nclass_name = \"Script\"\nother = 1";
         assert_eq!(extract_toml(src, "class_name").as_deref(), Some("Script"));
+    }
+
+    /// A Universe folder under `base` whose `.eustress/engine.port` holds
+    /// `port` and was last written `age_secs` ago.
+    fn universe_with_port(base: &Path, name: &str, port: u16, age_secs: u64) -> PathBuf {
+        let u = base.join(name);
+        std::fs::create_dir_all(u.join("Spaces")).unwrap();
+        std::fs::create_dir_all(u.join(".eustress")).unwrap();
+        let file = u.join(".eustress").join("engine.port");
+        std::fs::write(&file, port.to_string()).unwrap();
+        let when = std::time::SystemTime::now() - std::time::Duration::from_secs(age_secs);
+        std::fs::File::options().write(true).open(&file).unwrap().set_modified(when).unwrap();
+        u
+    }
+
+    #[test]
+    fn two_port_files_naming_one_live_engine_resolve_to_the_newest() {
+        let base = std::env::temp_dir().join(format!("eustress-live-engine-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        // "Alpha" sorts first and is older; "Zulu" is the one written last.
+        universe_with_port(&base, "Alpha", port, 600);
+        let zulu = universe_with_port(&base, "Zulu", port, 5);
+        let found = scan_for_live_engine(&[base.clone()]);
+        let _ = std::fs::remove_dir_all(&base);
+        assert_eq!(found.map(|p| p.file_name().unwrap().to_owned()), zulu.file_name().map(|n| n.to_owned()));
+    }
+
+    #[test]
+    fn a_newer_stale_port_file_does_not_shadow_an_older_live_one() {
+        let base = std::env::temp_dir().join(format!("eustress-live-engine-stale-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let live_port = listener.local_addr().unwrap().port();
+        let dead = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let dead_port = dead.local_addr().unwrap().port();
+        drop(dead);
+        let alive = universe_with_port(&base, "Alive", live_port, 600);
+        universe_with_port(&base, "Dead", dead_port, 5);
+        let found = scan_for_live_engine(&[base.clone()]);
+        let _ = std::fs::remove_dir_all(&base);
+        assert_eq!(found.map(|p| p.file_name().unwrap().to_owned()), alive.file_name().map(|n| n.to_owned()));
     }
 
     #[test]

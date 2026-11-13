@@ -47,6 +47,7 @@ import { sendNotice } from './account_notices.mjs';
 import { renderEmail, html, paragraph, facts as factRows, note } from './email_shell.mjs';
 import { sealEvidence, listingEvidenceItems, readViewReceipt, writeAuditRecord, VAULT_ITEM_ID } from './evidence_vault.mjs';
 import { isAdmin } from './admin_check.mjs';
+import { deletionMarkOf, withDeletionMark, listDeletionMarks, attachDeletionMarks, withDeletionFrom } from './space_delete_mark.mjs';
 
 export const MODERATION_VERSION = '1.0';
 export const POLICY_VERSION = '2.5';
@@ -5055,7 +5056,8 @@ export async function saveCase(env, rec, previousStatus, opts = {}) {
   const lock = await syncLegalLock(env, rec);
   await env.SOCIAL.put(caseKey(rec.sim_id), JSON.stringify(rec));
   if (previousStatus && previousStatus !== rec.status) await env.SOCIAL.delete(queueKey(previousStatus, rec.sim_id)).catch(() => {});
-  await env.SOCIAL.put(queueKey(rec.status, rec.sim_id), rec.updated_at);
+  // updated_at rides on the key's metadata so the review-latency scan (src/review_latency.mjs) can skip a case it need not read.
+  await env.SOCIAL.put(queueKey(rec.status, rec.sim_id), rec.updated_at, { metadata: { u: rec.updated_at } });
   if (lock.after) await lock.after();
 }
 
@@ -5296,8 +5298,12 @@ export function withLegalLock(sim, lock) {
   return { ...sim, moderation: { ...(sim.moderation || {}), status: lock.kind === 'serve_block' ? 'quarantined' : 'held' } };
 }
 
+// A deleted listing (its R2 mark, src/space_delete_mark.mjs) reads as private with a `deletion` field, read here too, so
+// every serving path that reads the lock reads the deletion.
 export async function simWithLegalLock(env, sim) {
-  return sim ? withLegalLock(sim, await legalLockOf(env, sim.id)) : sim;
+  if (!sim) return sim;
+  const [lock, deletion] = await Promise.all([legalLockOf(env, sim.id), deletionMarkOf(env, sim.id)]);
+  return withDeletionMark(withLegalLock(sim, lock), deletion);
 }
 
 // Every locked listing id at once, for pages that list many (one R2 list call,
@@ -5314,13 +5320,15 @@ export async function legalLockedIds(env, ttlMs = 10_000) {
     for (const o of page?.objects || []) ids.set(o.key.slice('locks/legal/'.length), o.customMetadata?.kind === 'content_lock' ? 'content_lock' : 'serve_block');
     cursor = page?.truncated ? page.cursor : undefined;
   } while (cursor);
+  // Deleted listings ride on the same list, under a symbol (src/space_delete_mark.mjs); withLegalLockFrom folds them in.
+  attachDeletionMarks(ids, await listDeletionMarks(env));
   LOCK_LIST_CACHE.set(env.SCENES, { at: Date.now(), ids });
   return ids;
 }
 
 export function withLegalLockFrom(sim, ids) {
   const kind = ids?.get(sim?.id);
-  return kind ? withLegalLock(sim, { kind }) : sim;
+  return withDeletionFrom(kind ? withLegalLock(sim, { kind }) : sim, ids);
 }
 
 // The approval binding. An approval is for the exact objects that were
@@ -6114,7 +6122,7 @@ export function authorView(rec, sim) {
   const removal = removalNoticeReleased(rec) ? rec.removal_notice : null;
   const status = removal ? (rec.status === 'appealed' && rec.appeal?.status === 'pending' ? 'appeal_in_review' : 'removed') : authorStatusOf(rec.status, isPublic, !!rec.legal_hold);
   const headline = status === 'in_review' && ['held', 'quarantined'].includes(rec.status) ? HEADLINES.in_review_person
-    : status === 'in_review' ? 'We are reviewing your listing. This usually takes under a minute.'
+    : status === 'in_review' ? 'We are reviewing your listing. This page and your notifications update when it is decided.'
     : HEADLINES[status];
 
   const reasons = [];
@@ -6267,6 +6275,8 @@ async function setStatus(env, rec, status, decisionPatch, event, detail) {
     rec.resume_attempts = 0;
     if (rec.scripts && typeof rec.scripts === 'object') rec.scripts = { ...rec.scripts, stalled_attempts: 0 };
   }
+  // The decision's time on the review clock (src/review_latency.mjs); an appeal's outcome is measured on the appeal.
+  if (rec.review_clock && ['approved', 'rejected', 'changes_requested', 'quarantined', 'held'].includes(status) && !String(event).startsWith('appeal_')) rec.review_clock = { ...rec.review_clock, decided_at: new Date().toISOString() };
   pushHistory(rec, event, detail);
   await saveCase(env, rec, prev, { revoke });
   // An approval binds the objects that were reviewed, before the listing's
@@ -7610,6 +7620,8 @@ async function runLeased(simId, env, deps, opts, lease, meter = null) {
   rec.policy_hash = deps.policyHash || null;
   rec.status = 'classifying';
   rec.classifying_since = new Date().toISOString();
+  // The review's clock for src/review_latency.mjs: set by a publish (the author's submit time is on the listing), kept by a carried-on run, else none.
+  rec.review_clock = trigger === 'publish' ? { submitted_at: sim.moderation?.submitted_at || null, started_at: rec.classifying_since } : (carried ? rec.review_clock ?? null : null);
   await saveCase(env, rec, prevStatus);
   await applyToSim(env, simId, opts.keepListed ? { evidence_epoch: epoch } : { status: 'classifying', evidence_epoch: epoch });
 

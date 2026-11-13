@@ -49,13 +49,20 @@ usage:
   eustress-client eustress-player://join/<host:port>?key=...&pin=...
   eustress-client --sim <simulation id>    play a published simulation
   eustress-client eustress-player://play/<simulation id>
+  eustress-client <Space directory>       open that Space (a directory that contains Workspace/)
+  eustress-client --help                   print this usage and exit
   eustress-client --version                print the version and exit
   --env <staging|production>               use that named server for this run
   --api-url <url>                          use this Eustress API (as EUSTRESS_API_URL does); either
                                            wins over the server this build was compiled for, and
                                            --api-url wins over --env. The eustress-player:// link a
                                            staging Player registers carries --api-url
-links written with eustress:// in place of eustress-player:// open the same way";
+links written with eustress:// in place of eustress-player:// open the same way
+a path that is not a scene file or a Space directory is an error";
+
+/// `from_args` returns this, and nothing else, when the player asked for
+/// usage. `main` prints [`USAGE`] and exits 0.
+const USAGE_REQUEST: &str = "usage";
 
 /// The Player's own URL scheme. On Windows one application owns a scheme, and
 /// `eustress://` belongs to Studio, so a Player installer registers this one;
@@ -84,6 +91,35 @@ fn option_name(arg: &str) -> String {
     arg.chars().take_while(|c| c.is_ascii_alphanumeric() || *c == '-').take(40).collect()
 }
 
+/// A positional argument that names something on disk.
+enum LocalPath {
+    Scene(PathBuf),
+    Space(PathBuf),
+}
+
+fn is_scene_file(path: &std::path::Path) -> bool {
+    matches!(
+        path.extension().and_then(|e| e.to_str()).map(|e| e.to_ascii_lowercase()).as_deref(),
+        Some("eustress" | "eustressengine" | "ron" | "escene" | "json")
+    )
+}
+
+/// A scene file, or a Space directory (`Workspace/` inside it). Anything
+/// else is an error, so a typo does not open the movement course.
+fn local_path(raw: &str) -> Result<LocalPath, String> {
+    let path = PathBuf::from(raw);
+    if path.is_dir() && path.join("Workspace").is_dir() {
+        return Ok(LocalPath::Space(path));
+    }
+    if path.is_file() && is_scene_file(&path) {
+        return Ok(LocalPath::Scene(path));
+    }
+    if !path.exists() {
+        return Err(format!("no such scene file or Space directory: {raw}"));
+    }
+    Err(format!("not a scene file or a Space directory (a Space contains Workspace/): {raw}"))
+}
+
 /// How the Player was launched. Not `Clone`: a join can carry the ticket a
 /// gallery's Play page put in its link, which is never copied
 /// (`docs/networking/PLAYER_JOIN_TICKET.md`). Its `Debug` prints no ticket
@@ -91,7 +127,11 @@ fn option_name(arg: &str) -> String {
 #[derive(Debug)]
 pub enum Launch {
     /// A Space from this computer, or a legacy scene file.
-    Local { scene_path: Option<PathBuf> },
+    ///
+    /// `space_dir` is a Space directory the argument named (it contains
+    /// `Workspace/`). `main` points `EUSTRESS_SPACE` at it, so the movement
+    /// course is not opened instead. `scene_path` is a legacy scene file.
+    Local { scene_path: Option<PathBuf>, space_dir: Option<PathBuf> },
     /// Join a Studio host. `extras`: the ticket and API an
     /// `eustress-player://` link carries; none for `--connect`.
     Join { link: JoinLink, name: String, extras: LinkExtras },
@@ -101,10 +141,15 @@ pub enum Launch {
 
 impl Launch {
     fn from_args(args: &[String]) -> Result<Self, String> {
+        // `--help` and `-h` before anything else, so a bad path on the same
+        // command still prints usage, and `-h` is never a scene path.
+        if args.iter().skip(1).any(|a| matches!(a.as_str(), "--help" | "-h" | "-?")) {
+            return Err(USAGE_REQUEST.into());
+        }
         // Each kind of launch keeps the extras of the link that named it.
         let mut link: Option<(JoinLink, LinkExtras)> = None;
         let mut sim: Option<(String, LinkExtras)> = None;
-        let (mut key, mut pin, mut name, mut scene) = (None, None, None, None);
+        let (mut key, mut pin, mut name, mut scene, mut space_dir) = (None, None, None, None, None);
         let mut it = args.iter().skip(1);
         while let Some(raw) = it.next() {
             let mut value = |flag: &str| it.next().cloned().ok_or_else(|| format!("{flag} needs a value"));
@@ -144,8 +189,16 @@ impl Launch {
                 other if other.starts_with(STUDIO_SCHEME) || other.starts_with("https://") => {
                     link = Some((parse_join_link(other)?, extras));
                 }
-                other if other.starts_with("--") => return Err(format!("unknown option {}", option_name(other))),
-                other => scene = Some(PathBuf::from(other)),
+                other if other.starts_with('-') => return Err(format!("unknown option {}", option_name(other))),
+                other => {
+                    if scene.is_some() || space_dir.is_some() {
+                        return Err("only one scene file or Space directory".into());
+                    }
+                    match local_path(other)? {
+                        LocalPath::Scene(path) => scene = Some(path),
+                        LocalPath::Space(path) => space_dir = Some(path),
+                    }
+                }
             }
         }
 
@@ -184,7 +237,7 @@ impl Launch {
                 .unwrap_or_else(|| "Player".to_string());
             return Ok(Launch::Join { link, name, extras });
         }
-        Ok(Launch::Local { scene_path: scene })
+        Ok(Launch::Local { scene_path: scene, space_dir })
     }
 
     fn is_network(&self) -> bool {
@@ -200,6 +253,34 @@ impl Launch {
             Launch::Join { extras, .. } | Launch::Published { extras, .. } => extras.check_api(player_api),
             Launch::Local { .. } => Ok(()),
         }
+    }
+
+    /// The API the launching link names (`?api=` / `&api=`), if any.
+    fn link_api(&self) -> Option<&'static str> {
+        match self {
+            Launch::Join { extras, .. } | Launch::Published { extras, .. } => extras.api,
+            Launch::Local { .. } => None,
+        }
+    }
+}
+
+/// The API this run uses, given the API its link names and the run's own
+/// override (`--api-url`, else `--env`; see [`api_override`]). `None` leaves
+/// `EUSTRESS_API_URL` or the server compiled into this build in force.
+///
+/// A link that names production opens on production, whatever this Player is
+/// otherwise set up for: production is the moderated server, so no page can
+/// use this to show a visitor anything production moderation did not pass.
+/// The `eustress-player://` command a staging run registers carries
+/// `--api-url` for staging, and without this every production gallery link
+/// opened on staging, which has never seen production's listings ("This
+/// simulation was not found"). A link that names staging never moves a Player
+/// off production: [`LinkExtras::check_api`] still refuses it, so no web page
+/// can point a production Player at staging.
+fn run_api(link_api: Option<&'static str>, run_override: Option<String>) -> Option<String> {
+    match link_api {
+        Some(api) if api == eustress_common::api_base::PRODUCTION_API => Some(api.to_string()),
+        _ => run_override,
     }
 }
 
@@ -282,6 +363,14 @@ fn player_log_fmt_layer(_app: &mut App) -> Option<bevy::log::BoxedFmtLayer> {
 pub fn build_app(launch: Launch) -> App {
     let mut app = App::new();
     let network = launch.is_network();
+    // Joined to a host, this Player draws the host's session (a replica);
+    // played alone, nobody else will run it, so it runs it itself, as
+    // Studio's Play does: server scripts, live physics, `Touched`.
+    let play_role = if matches!(launch, Launch::Join { .. }) {
+        eustress_common::play_session::PlayRole::Replica
+    } else {
+        eustress_common::play_session::PlayRole::Authority
+    };
     // A world that arrives over the network (a host's Space, or a published
     // simulation) is written into this process's own folder before opening.
     let live = network.then(systems::live_world::LiveWorld::for_this_process);
@@ -289,7 +378,7 @@ pub fn build_app(launch: Launch) -> App {
         live.prepare();
     }
     let scene_path = match &launch {
-        Launch::Local { scene_path } => scene_path.clone(),
+        Launch::Local { scene_path, .. } => scene_path.clone(),
         _ => None,
     };
 
@@ -417,12 +506,11 @@ pub fn build_app(launch: Launch) -> App {
         .add_plugins(systems::space_world::SpaceWorldPlugin { open_local: !network })
         // Multiplayer: join a Studio host, and open any world that arrives.
         .add_plugins(systems::net_play::NetPlayPlugin)
-        // A joined world is a DataModel tree that replication writes into;
-        // the Play runtime Studio shares draws it, as a replica: parts,
-        // lights, the HUD, billboards, sounds, particles and the camera.
-        .add_plugins(eustress_play_runtime::PlayRuntimePlugin {
-            role: eustress_common::play_session::PlayRole::Replica,
-        })
+        // A world is a DataModel tree the Play runtime Studio shares draws:
+        // parts, lights, the HUD, billboards, sounds, particles and the
+        // camera. Joined, replication writes into it; played alone, this
+        // Player simulates it.
+        .add_plugins(eustress_play_runtime::PlayRuntimePlugin { role: play_role })
         // A drawn part's DataMesh child (SpecialMesh, BlockMesh,
         // CylinderMesh) is what it draws; its collider stays its own shape.
         .add_plugins(eustress_common::data_mesh::DataMeshPlugin)
@@ -567,17 +655,23 @@ fn main() {
         say(false, &format!("eustress-client {}", env!("CARGO_PKG_VERSION")));
         return;
     }
-    // `--env` then `--api-url`, before anything reads the API base, which is
-    // read once. Both set `EUSTRESS_API_URL`, so they win over the server
-    // compiled into this build. `--api-url` wins when both are present.
+    // The API is set before anything reads the API base, which is read once.
+    // A link that names production opens on production; otherwise `--api-url`,
+    // then `--env`, set `EUSTRESS_API_URL`, which wins over the server compiled
+    // into this build (`run_api`).
     let launch = (|| {
-        if let Some(url) = api_override(&args)? {
+        let launch = Launch::from_args(&args)?;
+        if let Some(url) = run_api(launch.link_api(), api_override(&args)?) {
             std::env::set_var(eustress_common::api_base::API_URL_VAR, url);
         }
-        Launch::from_args(&args)
+        Ok::<_, String>(launch)
     })();
     let launch = match launch {
         Ok(launch) => launch,
+        Err(e) if e == USAGE_REQUEST => {
+            say(false, USAGE);
+            return;
+        }
         Err(e) => {
             say(true, &format!("eustress-client: {e}\n\n{USAGE}"));
             // A release Player has no console, so the reason would go nowhere:
@@ -593,15 +687,21 @@ fn main() {
     };
     // A link names the API it belongs to, and this Player opens only its
     // own: a link for the other is refused here, before anything is fetched,
-    // minted or connected. A link never sets the API. `--api-url`, `--env`
-    // and `EUSTRESS_API_URL` do, ahead of the server compiled into this
-    // build (docs/networking/PLAYER_JOIN_TICKET.md).
+    // minted or connected. Only a link that names production sets the API
+    // (`run_api`); otherwise `--api-url`, `--env` and `EUSTRESS_API_URL` do,
+    // ahead of the server compiled into this build
+    // (docs/networking/PLAYER_JOIN_TICKET.md).
     if let Err(why) = launch.check_api(eustress_common::api_base::api_base()) {
         say(true, &format!("eustress-client: {why}"));
         if !cfg!(debug_assertions) {
             show_message("Eustress Player could not open this link", &why);
         }
         std::process::exit(2);
+    }
+    if let Launch::Local { space_dir: Some(dir), .. } = &launch {
+        // `resolve_space` reads this before the movement course, so the
+        // directory on the command line is the one that opens.
+        std::env::set_var("EUSTRESS_SPACE", dir);
     }
     // A panic is written to this run's log and shown once, instead of ending
     // the window silently: a release Player has no console to show it.
@@ -677,6 +777,15 @@ fn spawn_local_avatar(
 ) {
     if *placed || !terrain.ready() {
         return;
+    }
+    // The Space's `Players.CharacterAutoLoads`, as a published world reads it
+    // (`net_play`): off, nobody gets a body, and the Space's camera is the view.
+    if let Some(root) = open.root.as_deref() {
+        if !eustress_common::play_session::space_character_auto_loads(root) {
+            *placed = true;
+            info!("space: this Space gives players no avatar (Players.CharacterAutoLoads is off)");
+            return;
+        }
     }
     let at = match open.spawn {
         Some(pad) => pad,
@@ -933,6 +1042,38 @@ mod launch_link_tests {
         assert_eq!(production.check_api(PRODUCTION), Ok(()));
     }
 
+    /// A link that names production opens on production even through the
+    /// command a staging run registered (`--api-url` staging), the way the
+    /// gallery's Play button reached a staging-pinned Player on 2026-11-11.
+    /// A link that names staging, or none, never moves the run: the run's own
+    /// override stands, and a production Player still refuses staging.
+    #[test]
+    fn a_production_link_opens_on_production_whatever_the_player_was_pinned_to() {
+        let pinned = ["eustress-client", "--api-url", STAGING];
+        let link = format!("eustress-player://play/{SIM}?api=production");
+        let argv = args(&[pinned[0], pinned[1], pinned[2], &link]);
+        let launch = Launch::from_args(&argv).expect("the registered command parses");
+        let api = run_api(launch.link_api(), api_override(&argv).expect("override parses"));
+        assert_eq!(api.as_deref(), Some(PRODUCTION), "the link's production wins over the pinned staging");
+        assert_eq!(launch.check_api(PRODUCTION), Ok(()));
+        // A join link the same way.
+        let join = from_link(&gallery_join(&format!("&ticket={TICKET}&api=production"))).expect("parses");
+        assert_eq!(run_api(join.link_api(), Some(STAGING.to_string())).as_deref(), Some(PRODUCTION));
+
+        // A staging link keeps the run's own API, so a production Player still refuses it.
+        let staging = from_link(&format!("eustress-player://play/{SIM}?api=staging")).expect("parses");
+        assert_eq!(run_api(staging.link_api(), None), None, "a staging link never sets the API");
+        assert!(staging.check_api(PRODUCTION).is_err());
+        assert_eq!(run_api(staging.link_api(), Some(STAGING.to_string())).as_deref(), Some(STAGING));
+
+        // A link that names no API, and a launch with no link, keep the run's override.
+        let bare = from_link(&format!("eustress-player://play/{SIM}")).expect("parses");
+        assert_eq!(run_api(bare.link_api(), Some(STAGING.to_string())).as_deref(), Some(STAGING));
+        assert_eq!(run_api(bare.link_api(), None), None);
+        let local = Launch::from_args(&args(&["eustress-client"])).expect("parses");
+        assert_eq!(local.link_api(), None);
+    }
+
     /// A link that cannot be opened is refused in words that never quote its
     /// ticket: the ticket comes out before the link is read, and no launch
     /// error quotes a whole argument.
@@ -1004,5 +1145,64 @@ mod launch_link_tests {
             let launch = from_link(&format!(" {link} ")).expect("parses");
             assert!(matches!(&launch, Launch::Join { extras, .. } if extras.ticket.is_some()), "{written} was not read as a link");
         }
+    }
+
+    /// `--help` and `-h` ask for usage. They are not a scene path, so they
+    /// cannot fall through to the movement course. `main` exits 0 for this.
+    #[test]
+    fn help_asks_for_usage_instead_of_opening_a_space() {
+        for flag in ["--help", "-h", "-?"] {
+            let e = Launch::from_args(&args(&["eustress-client", flag])).expect_err(flag);
+            assert_eq!(e, USAGE_REQUEST, "{flag} must be usage, not a path");
+        }
+        let with_junk = Launch::from_args(&args(&["eustress-client", "no-such-space", "--help"])).expect_err("help wins");
+        assert_eq!(with_junk, USAGE_REQUEST);
+    }
+
+    /// A positional argument that is not a scene file or a Space directory
+    /// is refused. It must not become a launch that opens the movement course.
+    #[test]
+    fn a_bad_positional_argument_is_refused() {
+        let missing = Launch::from_args(&args(&["eustress-client", "no-such-space"])).expect_err("missing");
+        assert!(missing.contains("no such"), "{missing}");
+        assert_ne!(missing, USAGE_REQUEST);
+
+        let dir = std::env::temp_dir().join(format!("eustress-not-a-space-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let not_space = Launch::from_args(&args(&["eustress-client", dir.to_str().unwrap()])).expect_err("not a space");
+        assert!(not_space.contains("not a scene file"), "{not_space}");
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let file = std::env::temp_dir().join(format!("eustress-notes-{}.txt", std::process::id()));
+        std::fs::write(&file, "hello").unwrap();
+        let not_scene = Launch::from_args(&args(&["eustress-client", file.to_str().unwrap()])).expect_err("not a scene");
+        assert!(not_scene.contains("not a scene file"), "{not_scene}");
+        let _ = std::fs::remove_file(&file);
+    }
+
+    /// A directory with `Workspace/` is that Space, not a scene file.
+    #[test]
+    fn a_space_directory_is_the_space_that_opens() {
+        let root = std::env::temp_dir().join(format!("eustress-space-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("Workspace")).unwrap();
+        let launch = Launch::from_args(&args(&["eustress-client", root.to_str().unwrap()])).expect("a space");
+        match launch {
+            Launch::Local { scene_path, space_dir } => {
+                assert!(scene_path.is_none());
+                assert_eq!(space_dir.as_deref(), Some(root.as_path()));
+            }
+            other => panic!("expected a local space, got {other:?}"),
+        }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// No positional argument still opens whatever Space the environment
+    /// names, which is the movement course when that variable is unset.
+    #[test]
+    fn no_positional_argument_stays_the_default_space() {
+        let launch = Launch::from_args(&args(&["eustress-client"])).expect("default");
+        assert!(matches!(launch, Launch::Local { scene_path: None, space_dir: None }));
     }
 }

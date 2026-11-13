@@ -314,6 +314,52 @@ pub fn pristine_shell(html: &str) -> Option<String> {
     Some(shell)
 }
 
+/// The call in Trunk's start-up script that fetches and starts the WebAssembly.
+pub const TRUNK_INIT: &str = "const wasm = await init(";
+
+/// What `defer_app_start` puts in front of `TRUNK_INIT`. `assets/loader.js`
+/// defines the promise: settled at once unless the page carries a prerendered
+/// copy of its own address, and then once the window has loaded and the browser
+/// has measured the page's largest paint. Without loader.js it is `undefined`,
+/// and awaiting that goes straight on.
+pub const MOUNT_GATE_WAIT: &str = "await window.eustressMountGate;\n";
+
+/// The shell with the app's start held behind `window.eustressMountGate`.
+///
+/// Trunk preloads the WebAssembly from `<head>` and starts the app the moment
+/// the module runs. On a prerendered page that is the wrong order twice over:
+/// the download competes with the page's own text and images, and the live app
+/// replaces the static copy before the browser has measured its largest paint,
+/// so that paint is timed from the live app, behind the whole download
+/// (Lighthouse put it at 22 seconds on a phone). The preload goes, and the
+/// start-up script waits on the gate before it fetches anything.
+///
+/// Idempotent, so a second prerender run over its own output changes nothing.
+/// An `Err` means Trunk's script no longer has the expected `init(` call.
+pub fn defer_app_start(shell: &str) -> Result<String, String> {
+    let mut page = shell.to_string();
+    // Every `<link>` that preloads WebAssembly; the module preload of the JS glue stays.
+    let mut from = 0;
+    while let Some(rel) = page[from..].find("<link") {
+        let start = from + rel;
+        let Some(len) = page[start..].find('>') else { break };
+        let tag = &page[start..start + len + 1];
+        if tag.contains(r#"rel="preload""#) && tag.contains(r#"type="application/wasm""#) {
+            page.replace_range(start..start + len + 1, "");
+        } else {
+            from = start + len + 1;
+        }
+    }
+    if page.contains(MOUNT_GATE_WAIT) {
+        return Ok(page);
+    }
+    let Some(at) = page.find(TRUNK_INIT) else {
+        return Err(format!("the shell has no `{TRUNK_INIT}` (Trunk's start-up script changed)"));
+    };
+    page.insert_str(at, MOUNT_GATE_WAIT);
+    Ok(page)
+}
+
 // -----------------------------------------------------------------------------
 // 4. Sitemap
 // -----------------------------------------------------------------------------
@@ -873,6 +919,46 @@ mod tests {
     const INDEX: &str = include_str!("../index.html");
     const SITEMAP: &str = include_str!("../sitemap.xml");
     const ROBOTS: &str = include_str!("../robots.txt");
+
+    /// The end of `<head>` exactly as Trunk 0.21 wrote it for the live site (hashes shortened).
+    const TRUNK_TAIL: &str = "<script type=\"module\">\nimport init, * as bindings from '/eustress-web-ab1d.js';\n\
+        const wasm = await init({ module_or_path: '/eustress-web-ab1d_bg.wasm' });\n\n\nwindow.wasmBindings = bindings;\n\n\n\
+        dispatchEvent(new CustomEvent(\"TrunkApplicationStarted\", {detail: {wasm}}));\n\n</script>\n\
+        <link rel=\"modulepreload\" href=\"/eustress-web-ab1d.js\" crossorigin=\"anonymous\" integrity=\"sha384-js\">\
+        <link rel=\"preload\" href=\"/eustress-web-ab1d_bg.wasm\" crossorigin=\"anonymous\" integrity=\"sha384-wasm\" as=\"fetch\" type=\"application/wasm\"></head>";
+
+    #[test]
+    fn the_app_starts_behind_the_gate_and_the_webassembly_is_not_preloaded() {
+        let shell = format!("<html><head><title>t</title>{TRUNK_TAIL}<body><div id=\"app\"></div></body></html>");
+        let page = defer_app_start(&shell).unwrap();
+        assert!(!page.contains("as=\"fetch\""), "the WebAssembly preload is gone: {page}");
+        assert!(page.contains("<link rel=\"modulepreload\" href=\"/eustress-web-ab1d.js\""), "the glue's preload stays");
+        assert!(page.contains(&format!("{MOUNT_GATE_WAIT}{TRUNK_INIT}")), "the gate comes right before init: {page}");
+        assert_eq!(page.matches(MOUNT_GATE_WAIT).count(), 1);
+        // A second prerender run over its own output changes nothing.
+        assert_eq!(defer_app_start(&page).unwrap(), page);
+        // The mount point is untouched, so splice and pristine_shell still find it.
+        assert!(page.contains(APP_MOUNT));
+        assert!(defer_app_start("<html><head></head><body><div id=\"app\"></div></body></html>").is_err(), "no init call");
+    }
+
+    #[test]
+    fn the_gate_and_its_page_rules_are_where_the_shell_expects_them() {
+        let loader = include_str!("../assets/loader.js");
+        assert!(loader.contains("window.eustressMountGate"), "loader.js defines the gate");
+        assert!(loader.contains("'largest-contentful-paint'") && loader.contains("'load'"), "it waits for the largest paint and load");
+        assert!(loader.contains("link[rel=\"canonical\"]"), "a static copy counts only for its own address");
+        assert!(loader.contains("classList.add('app-live')"));
+        let css = include_str!("../style/main.css");
+        assert!(css.contains("@keyframes rise-solid") && css.contains(".app-live .hero-text > h1"), "main.css: the solid rise and no second entrance");
+        // The shell loads loader.js, and nothing preloads model-viewer on every page.
+        assert!(INDEX.contains("<script src=\"/assets/loader.js\"></script>"));
+        assert!(!INDEX.contains("model-viewer-4.0.0.min.js"), "model-viewer loads only where it is used");
+        let customizer = include_str!("components/avatar_customizer.rs");
+        assert!(customizer.contains("\"/assets/vendor/model-viewer-4.0.0.min.js\""), "the customizer loads it itself");
+        let vendored = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/vendor/model-viewer-4.0.0.min.js");
+        assert!(vendored.is_file(), "{} ships", vendored.display());
+    }
     const REDIRECTS: &str = include_str!("../_redirects");
     const LLMS: &str = include_str!("../llms.txt");
     const APP: &str = include_str!("app.rs");

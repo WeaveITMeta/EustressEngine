@@ -685,14 +685,10 @@ pub fn launch_link(link: &str, ticket: Option<&str>, api: &str) -> String {
                 with_api(link, api)
             }
         }
-        // A solo link carries `api` on staging only. Staging is tested with a Player that reads it (build 32, P1); production keeps
-        // the link as the Worker sent it until a Player release that reads it ships, because an older Player takes the whole query
-        // as part of the listing id, refuses it, and exits without a window. Join links carry both (an old Player ignores
-        // parameters it does not know).
-        None if link.starts_with("eustress-player://play/") && api == "staging" => {
-            with_api(link, api)
-        }
-        None if link.starts_with("eustress-player://play/") => link.to_string(),
+        // Every link names the site's API, solo links included: every released Player reads it (the first release, staging
+        // channel v0.1.0 of 2026-10-20, does). A production solo link that named none opened a Player whose registered command
+        // pinned staging on staging, which answered "This simulation was not found" (2026-11-11); a Player that reads the
+        // name opens a production link on production (docs/networking/PLAYER_JOIN_TICKET.md).
         None => with_api(link, api),
     }
 }
@@ -1967,12 +1963,16 @@ mod tests {
     #[test]
     fn a_solo_link_gets_the_api_name_and_never_a_ticket() {
         let solo = "eustress-player://play/aaaaaaaa-1111-4111-8111-aaaaaaaaaaaa";
+        let production = launch_link(solo, None, "production");
         assert_eq!(
-            launch_link(solo, None, "production"),
-            solo,
-            "production solo links carry no api until a Player release reads it"
+            production,
+            format!("{solo}?api=production"),
+            "a production solo link names production, so a staging-pinned Player still opens it on production"
         );
-        // Staging is tested with a Player that reads `api` (build 32, P1), so its solo links name the staging API.
+        assert!(
+            is_player_link(&production),
+            "the production solo link is one the page may hand to the browser"
+        );
         let staged = launch_link(solo, None, "staging");
         assert_eq!(staged, format!("{solo}?api=staging"));
         assert!(

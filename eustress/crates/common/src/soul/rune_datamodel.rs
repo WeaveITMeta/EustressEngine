@@ -1,7 +1,7 @@
 //! # `eustress::dm`: Rune on the live Play DataModel
 //!
 //! The same tree Luau scripts read and write during Play
-//! ([`eustress_common::datamodel`]), so the two languages share one world: a
+//! ([`crate::datamodel`]), so the two languages share one world: a
 //! part Rune recolours reads back recoloured in Luau the same frame, and a
 //! BindableEvent Rune fires reaches Luau's `Event:Connect` handlers.
 //!
@@ -9,6 +9,12 @@
 //! `0` means none. Rune's `on_update` builds a fresh VM each call, so a
 //! script keeps its state in the tree (attributes) rather than in globals.
 //! Outside a Play session every call returns its empty value.
+//!
+//! One implementation for every shell: Studio's Play installs it with its
+//! engine modules (`engine::soul::rune_api::engine_rune_modules`), and the
+//! Player with its own set ([`super::rune_play::player_rune_modules`]). The
+//! tree a call reaches is [`crate::datamodel::active`], which each shell
+//! publishes while its session runs.
 //!
 //! ```rune
 //! use eustress::dm;
@@ -28,10 +34,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use rune::{ContextError, Module};
 
-use eustress_common::datamodel::{self, DataModel, DmEvent, DmValue, InstanceId, OutputLevel};
-use eustress_common::scripting::{Color3, Vector3 as V3};
+use crate::datamodel::{self, DataModel, DmEvent, DmValue, InstanceId, OutputLevel};
+use crate::scripting::{Color3, Vector3 as V3};
 
-use super::rune_ecs_module::Vector3;
+use super::rune_values::Vector3;
 
 fn with<R>(default: R, f: impl FnOnce(&mut DataModel) -> R) -> R {
     match datamodel::active() {

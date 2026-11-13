@@ -374,6 +374,45 @@
     font-family: var(--font-mono);
 }
 
+.tid-icon {
+    display: inline-block;
+    min-width: 1.2em;
+    margin-right: 0.35em;
+    text-align: center;
+    font-weight: 700;
+}
+
+.tid-status-chip {
+    display: inline-flex;
+    align-items: baseline;
+    font-weight: 600;
+}
+
+/* Case progress: a mark and a word per step; the state is also said in text for a screen reader. */
+.tid-timeline {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--space-xs) var(--space-lg);
+    margin: var(--space-sm) 0;
+    padding: 0;
+    list-style: none;
+    font-size: var(--text-sm);
+    color: var(--color-text-secondary);
+}
+
+.tid-step-mark {
+    margin-right: 0.35em;
+}
+
+.tid-step-current {
+    font-weight: 700;
+    color: var(--color-text-primary);
+}
+
+.tid-case-actions {
+    margin: var(--space-sm) 0 0;
+}
+
 .tid-badge {
     padding: 0 8px;
     font-weight: 600;

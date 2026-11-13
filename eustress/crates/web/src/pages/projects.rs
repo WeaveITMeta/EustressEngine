@@ -39,6 +39,7 @@ use crate::utils::{after_event, format_count};
 use super::review_panel::ReviewPanel;
 use super::project_sell::{seller_for, SellButton, SellChip, SellNote};
 use super::project_tags::TagEditor;
+use super::project_delete::{can_offer_delete, deleted_card, deleted_card_words, DeleteSpaceModal, DeletedCard, DeletionView, Mode as SpaceMode};
 use crate::tags::{gallery_href, query_matches_tag, suggested_label};
 
 // -----------------------------------------------------------------------------
@@ -58,6 +59,8 @@ pub enum SpaceStatus {
     ChangesRequested,
     /// Passed review, and the author keeps it private.
     Private,
+    /// The owner deleted it: hidden from everyone, and restorable until the removal date (src/pages/project_delete.rs).
+    Deleted,
 }
 
 impl SpaceStatus {
@@ -70,6 +73,7 @@ impl SpaceStatus {
             Self::NotListed => "not_listed",
             Self::ChangesRequested => "changes_requested",
             Self::Private => "private",
+            Self::Deleted => "deleted",
         }
     }
 
@@ -82,6 +86,7 @@ impl SpaceStatus {
             Self::NotListed => "Not listed",
             Self::ChangesRequested => "Changes requested",
             Self::Private => "Private",
+            Self::Deleted => "Deleting",
         }
     }
 
@@ -95,6 +100,7 @@ impl SpaceStatus {
             "not_listed" => Self::NotListed,
             "changes_requested" => Self::ChangesRequested,
             "approved_private" => Self::Private,
+            "deleted" => Self::Deleted,
             "in_review" | "appeal_in_review" | "unreviewed" | "review"
             | "pending" | "classifying" | "held" | "appealed" | "quarantined" => Self::UnderReview,
             _ => Self::Draft,
@@ -124,6 +130,8 @@ pub struct Place {
     pub updated_at: String,
     pub created_at: String,
     pub is_public: bool,
+    /// Where a deleted Space stands (status `deleted`); none for any other.
+    pub deletion: Option<DeletionView>,
 }
 
 /// API response types
@@ -155,6 +163,9 @@ pub struct ProjectData {
     pub created_at: String,
     pub published_at: Option<String>,
     pub storage_url: Option<String>,
+    /// Present when the owner deleted the Space (status `deleted`).
+    #[serde(default)]
+    pub deletion: Option<DeletionView>,
 }
 
 /// One part of the page's data: still loading, here, or its route failed (with the words for why).
@@ -174,7 +185,7 @@ pub enum Viewer {
 }
 
 /// The status chips over the grid: the four that are always offered, then the rarer ones only when a Space has that status.
-const STATUS_CHIPS: [(&str, &str, bool); 8] = [
+const STATUS_CHIPS: [(&str, &str, bool); 9] = [
     ("all", "All", true),
     ("published", "Published", true),
     ("draft", "Drafts", true),
@@ -183,6 +194,7 @@ const STATUS_CHIPS: [(&str, &str, bool); 8] = [
     ("private", "Private", false),
     ("changes_requested", "Changes requested", false),
     ("not_listed", "Not listed", false),
+    ("deleted", "Deleting", false),
 ];
 
 /// How many Spaces a status chip stands for.
@@ -263,7 +275,8 @@ pub fn card_art(url: Option<&str>) -> Option<String> {
 
 /// What makes a card draw again: a Space whose status, tags or last edit changed is a new card.
 fn card_key(place: &Place) -> String {
-    format!("{}|{}|{}|{}", place.id, place.status.as_str(), place.updated_at, place.tags.join(","))
+    let removal = place.deletion.as_ref().and_then(|d| d.restore_until.as_deref()).unwrap_or("");
+    format!("{}|{}|{}|{}|{}", place.id, place.status.as_str(), place.updated_at, place.tags.join(","), removal)
 }
 
 // -----------------------------------------------------------------------------
@@ -278,6 +291,8 @@ pub fn ProjectsPage() -> impl IntoView {
     // The project whose settings dialog is open, the one an Archive is waiting on, and the line that says what just happened.
     let settings_open = RwSignal::new(None::<Place>);
     let archive_ask = RwSignal::new(None::<Place>);
+    // The Space whose delete or restore dialog is open, and which of the two.
+    let deletion_ask = RwSignal::new(None::<(Place, SpaceMode)>);
     let toast = RwSignal::new(None::<Toast>);
     // The project whose review panel is open. A review email links to
     // /projects?review=<id>, which opens it.
@@ -343,6 +358,7 @@ pub fn ProjectsPage() -> impl IntoView {
                             updated_at: p.last_edited,
                             created_at: p.created_at,
                             is_public: p.is_public,
+                            deletion: p.deletion,
                         }
                     }).collect();
                     spaces.set(Load::Ready(places));
@@ -410,6 +426,9 @@ pub fn ProjectsPage() -> impl IntoView {
         }
     });
     let on_configure = Callback::new(move |place: Place| settings_open.set(Some(place)));
+    let on_deletion = Callback::new(move |ask: (Place, SpaceMode)| deletion_ask.set(Some(ask)));
+    let modal_reload = reload.clone();
+    let modal_api = app_state.api_url.clone();
     // The tag editor saved: close the dialog, read the list again, and say that the Space goes back to review.
     let after_tags = {
         let reload = reload.clone();
@@ -423,7 +442,7 @@ pub fn ProjectsPage() -> impl IntoView {
     let undo_archive = {
         let set_archived = set_archived.clone();
         move |id: String| {
-            let place = Place { id, name: "the Space".to_string(), description: String::new(), thumbnail_url: None, status: SpaceStatus::Archived, visits: 0, favorites: 0, max_players: 0, tags: Vec::new(), tags_source: None, updated_at: String::new(), created_at: String::new(), is_public: false };
+            let place = Place { id, name: "the Space".to_string(), description: String::new(), thumbnail_url: None, status: SpaceStatus::Archived, visits: 0, favorites: 0, max_players: 0, tags: Vec::new(), tags_source: None, updated_at: String::new(), created_at: String::new(), is_public: false, deletion: None };
             set_archived(place, false);
         }
     };
@@ -433,7 +452,7 @@ pub fn ProjectsPage() -> impl IntoView {
             <CentralNav active="projects".to_string() />
             <div class="g-backdrop" aria-hidden="true"></div>
             <main class="g-main">
-                <ProjectsBody spaces=spaces viewer=viewer review_open=review_open on_configure=on_configure on_archive=on_archive sellers=sellers retry=retry />
+                <ProjectsBody spaces=spaces viewer=viewer review_open=review_open on_configure=on_configure on_archive=on_archive on_deletion=on_deletion sellers=sellers retry=retry />
             </main>
 
             // A line that says what an archive just did, with the way back
@@ -465,6 +484,21 @@ pub fn ProjectsPage() -> impl IntoView {
                             </div>
                         </div>
                     </div>
+                }
+            })}
+
+            // Delete a Space, or restore a deleted one: what it does, the name to type, then the emailed code
+            {move || deletion_ask.get().map(|(place, mode)| {
+                let reload = modal_reload.clone();
+                view! {
+                    <DeleteSpaceModal
+                        sim_id=place.id.clone()
+                        fallback_name=place.name.clone()
+                        mode=mode
+                        api_url=modal_api.clone()
+                        on_close=Callback::new(move |_| deletion_ask.set(None))
+                        on_done=Callback::new(move |_| reload())
+                    />
                 }
             })}
 
@@ -570,6 +604,7 @@ pub fn ProjectsBody(
     review_open: RwSignal<Option<String>>,
     on_configure: Callback<Place>,
     on_archive: Callback<Place>,
+    on_deletion: Callback<(Place, SpaceMode)>,
     sellers: RwSignal<Vec<SellerSimulation>>,
     retry: Callback<()>,
 ) -> impl IntoView {
@@ -603,7 +638,7 @@ pub fn ProjectsBody(
                     (_, Load::Failed(why)) => failed_state(why, retry).into_any(),
                     (_, Load::Ready(list)) if list.is_empty() => empty_state().into_any(),
                     (_, Load::Ready(list)) => view! {
-                        <ProjectList list=list review_open=review_open on_configure=on_configure on_archive=on_archive sellers=sellers />
+                        <ProjectList list=list review_open=review_open on_configure=on_configure on_archive=on_archive on_deletion=on_deletion sellers=sellers />
                     }.into_any(),
                 }}
             </section>
@@ -632,6 +667,7 @@ fn ProjectList(
     review_open: RwSignal<Option<String>>,
     on_configure: Callback<Place>,
     on_archive: Callback<Place>,
+    on_deletion: Callback<(Place, SpaceMode)>,
     sellers: RwSignal<Vec<SellerSimulation>>,
 ) -> impl IntoView {
     let all = StoredValue::new(list);
@@ -698,7 +734,7 @@ fn ProjectList(
                             each=filtered_spaces
                             key=card_key
                             children=move |place| {
-                                view! { <PlaceCard place=place review_open=review_open on_configure=on_configure on_archive=on_archive sellers=sellers /> }
+                                view! { <PlaceCard place=place review_open=review_open on_configure=on_configure on_archive=on_archive on_deletion=on_deletion sellers=sellers /> }
                             }
                         />
                     </div>
@@ -730,6 +766,7 @@ fn PlaceCard(
     review_open: RwSignal<Option<String>>,
     on_configure: Callback<Place>,
     on_archive: Callback<Place>,
+    on_deletion: Callback<(Place, SpaceMode)>,
     sellers: RwSignal<Vec<SellerSimulation>>,
 ) -> impl IntoView {
     let playable = matches!(place.status, SpaceStatus::Published | SpaceStatus::Private);
@@ -752,26 +789,47 @@ fn PlaceCard(
     let visits = place.visits;
     // This project's selling entry, once the account's commerce record has loaded. No entry: no chip and no Sell button.
     let seller_id = place.id.clone();
-    let seller = Memo::new(move |_| sellers.with(|list| seller_for(list, &seller_id).cloned()));
+    let deleted = place.status == SpaceStatus::Deleted;
+    // A deleted Space sells nothing and shows no selling chip.
+    let seller = Memo::new(move |_| if deleted { None } else { sellers.with(|list| seller_for(list, &seller_id).cloned()) });
+    // A deleted Space says so, with the restore deadline and a Restore button, or says its removal is in progress.
+    let deleted_note = deleted.then(|| {
+        let card = deleted_card(place.deletion.as_ref(), now_ms());
+        let (head, line) = deleted_card_words(&card);
+        let restore = matches!(card, DeletedCard::Deleting { .. }).then(|| {
+            let target = place.clone();
+            view! { <button type="button" class="action-btn primary" on:click=move |_| on_deletion.run((target.clone(), SpaceMode::Restore))>"Restore"</button> }
+        });
+        view! { <div class="pj-deleted" role="status"><p><strong>{head}</strong></p><p>{line}</p>{restore}</div> }
+    });
 
     // Every item does something. Play only where the listing can be played; Review only where review has something to say.
     let mut items = Vec::new();
-    if playable {
+    if !deleted && playable {
         let id = play_id.clone();
         items.push(Item::new("Play", "play.svg", Action::Call(Callback::new(move |_| chooser.open(&id)))));
     }
-    items.push(Item::new("Edit in Studio", "edit.svg", Action::Open(edit_url.clone())));
+    if !deleted {
+        items.push(Item::new("Edit in Studio", "edit.svg", Action::Open(edit_url.clone())));
+    }
     if has_review {
         let id = place.id.clone();
         items.push(Item::new("Review", "shield.svg", Action::Call(Callback::new(move |_| review_open.set(Some(id.clone()))))));
     }
-    let for_settings = place.clone();
-    items.push(Item::new("Settings", "settings.svg", Action::Call(Callback::new(move |_| on_configure.run(for_settings.clone())))));
-    let for_archive = place.clone();
-    items.push(
-        Item::new(if archived { "Unarchive" } else { "Archive" }, "archive.svg", Action::Call(Callback::new(move |_| on_archive.run(for_archive.clone()))))
-            .divided(),
-    );
+    if !deleted {
+        let for_settings = place.clone();
+        items.push(Item::new("Settings", "settings.svg", Action::Call(Callback::new(move |_| on_configure.run(for_settings.clone())))));
+        let for_archive = place.clone();
+        items.push(
+            Item::new(if archived { "Unarchive" } else { "Archive" }, "archive.svg", Action::Call(Callback::new(move |_| on_archive.run(for_archive.clone()))))
+                .divided(),
+        );
+    }
+    if can_offer_delete(deleted) {
+        let for_delete = place.clone();
+        items.push(Item::new("Delete Space", "trash.svg", Action::Call(Callback::new(move |_| on_deletion.run((for_delete.clone(), SpaceMode::Delete))))).danger());
+    }
+    let has_menu = !items.is_empty();
 
     view! {
         <article class="g-card pj-card">
@@ -788,9 +846,11 @@ fn PlaceCard(
                             None => view! { <span>{place.name.clone()}</span> }.into_any(),
                         }}
                     </h3>
-                    <div class="menu-container">
-                        <ActionMenu label=format!("Options for {}", place.name) items=items />
-                    </div>
+                    {has_menu.then(|| view! {
+                        <div class="menu-container">
+                            <ActionMenu label=format!("Options for {}", place.name) items=items />
+                        </div>
+                    })}
                 </div>
 
                 {(!place.description.trim().is_empty()).then(|| view! { <p class="pj-desc">{place.description.clone()}</p> })}
@@ -816,6 +876,9 @@ fn PlaceCard(
                     {edited.map(|w| view! { <span>{w}</span> })}
                 </div>
 
+                {deleted_note}
+
+                {(!deleted).then(|| view! {
                 <div class="card-actions pj-actions">
                     {playable.then(|| view! {
                         <button type="button" class="action-btn primary" on:click=move |_| chooser.open(&play_id)>
@@ -838,6 +901,7 @@ fn PlaceCard(
                     })}
                     {move || seller.get().map(|sim| view! { <SellButton sim_id=sim.id /> })}
                 </div>
+                })}
             </div>
         </article>
     }
@@ -1371,6 +1435,7 @@ mod tests {
             updated_at: "2026-10-12T09:00:00Z".to_string(),
             created_at: "2026-09-01T09:00:00Z".to_string(),
             is_public: true,
+            deletion: None,
         }
     }
 
@@ -1402,7 +1467,7 @@ mod tests {
             let review_open = RwSignal::new(None::<String>);
             view! {
                 <Router>
-                    <ProjectsBody spaces=spaces viewer=Signal::stored(viewer) review_open=review_open on_configure=Callback::new(|_| ()) on_archive=Callback::new(|_| ()) sellers=sellers retry=Callback::new(|_| ()) />
+                    <ProjectsBody spaces=spaces viewer=Signal::stored(viewer) review_open=review_open on_configure=Callback::new(|_| ()) on_archive=Callback::new(|_| ()) on_deletion=Callback::new(|_| ()) sellers=sellers retry=Callback::new(|_| ()) />
                 </Router>
             }
             .to_html()
@@ -1663,6 +1728,69 @@ mod tests {
         for gone in [concat!(".page-projects-", "industrial"), concat!(".projects-", "glow"), concat!(".projects-", "title"), concat!(".ai-protocol-", "card"), concat!(".place", "-card"), concat!(".ai-bench-", "row")] {
             assert!(!MAIN_CSS.contains(&format!("{gone} ")), "{gone} is still in main.css");
         }
+    }
+
+    fn gone(id: &str, deletion: Option<DeletionView>) -> Place {
+        let mut p = place(id, "Super Station", SpaceStatus::Deleted, 9, &["city"]);
+        p.deletion = deletion;
+        p
+    }
+
+    fn soft(until: &str) -> DeletionView {
+        DeletionView { state: "soft".to_string(), soft_deleted_at: None, hard_delete_after: Some(until.to_string()), restore_until: Some(until.to_string()), removal_in_progress: false }
+    }
+
+    #[test]
+    fn delete_space_a_deleting_card_shows_the_deadline_and_a_restore_button_and_nothing_else_to_do() {
+        let html = render(Viewer::SignedIn, Load::Ready(vec![gone("a1", Some(soft("2999-01-01T00:00:00Z")))]));
+        assert!(html.contains("Deleting"), "{html}");
+        assert!(html.contains("Hidden from everyone. You can restore it until Jan 1, 2999, 12:00 AM UTC."), "{html}");
+        assert!(html.contains("Restore</button>"), "{html}");
+        // A deleted Space cannot be played, edited, reviewed, sold, configured or archived; the card draws no menu and no selling chip,
+        // even though the account's record names it as a Space that sells.
+        for gone in ["card-actions", "eustress://edit/", "sell-chip", "Options for Super Station", "Removal is in progress"] {
+            assert!(!html.contains(gone), "a deleting card still shows {gone}: {html}");
+        }
+        // The status chip over the grid is offered because one Space has that status.
+        assert!(html.contains("pj-status deleted"), "{html}");
+    }
+
+    #[test]
+    fn delete_space_a_card_whose_removal_began_or_whose_window_closed_says_so_with_no_button() {
+        let mut hard = soft("2026-01-01T00:00:00Z");
+        hard.state = "hard_deleting".to_string();
+        hard.restore_until = None;
+        let past = soft("2026-01-01T00:00:00Z");
+        let flagged = DeletionView { removal_in_progress: true, ..soft("2999-01-01T00:00:00Z") };
+        for (what, d) in [("hard", Some(hard)), ("past", Some(past)), ("flagged", Some(flagged)), ("none", None)] {
+            let html = render(Viewer::SignedIn, Load::Ready(vec![gone("c3", d)]));
+            assert!(html.contains("Removal is in progress"), "{what}: {html}");
+            assert!(!html.contains("Restore</button>") && !html.contains("Options for Super Station") && !html.contains("card-actions"), "{what}: {html}");
+        }
+    }
+
+    #[test]
+    fn delete_space_every_other_card_still_offers_delete_in_its_menu_and_the_page_opens_the_dialog() {
+        let src = page_source();
+        // The menu item, in the danger style, for every Space that is not already deleted.
+        assert_eq!(src.matches("Item::new(\"Delete Space\", \"trash.svg\"").count(), 1);
+        assert!(src.contains("if can_offer_delete(deleted) {") && src.contains(".danger());"));
+        // The card's Restore and the menu's Delete both open the same dialog, in its two modes.
+        assert!(src.contains("on_deletion.run((target.clone(), SpaceMode::Restore))") && src.contains("on_deletion.run((for_delete.clone(), SpaceMode::Delete))"));
+        assert!(src.contains("<DeleteSpaceModal") && src.contains("deletion_ask.set(Some(ask))"));
+        // The Worker's two words for a deleted listing reach the card.
+        assert_eq!(SpaceStatus::from_api("deleted"), SpaceStatus::Deleted);
+        assert_eq!(SpaceStatus::Deleted.display_name(), "Deleting");
+        let parsed: ProjectsResponse = serde_json::from_str(
+            r#"{"projects":[{"id":"x","name":"N","description":null,"thumbnail_url":null,"status":"deleted","max_players":4,"is_public":false,"version":1,"play_count":0,"favorite_count":0,"last_edited":"","created_at":"","published_at":null,"storage_url":null,"deletion":{"state":"soft","soft_deleted_at":"2026-11-12T10:00:00Z","hard_delete_after":"2027-02-10T10:00:00Z","restore_until":"2027-02-10T10:00:00Z"}}],"total":1,"page":1,"limit":50}"#,
+        )
+        .unwrap();
+        let d = parsed.projects[0].deletion.as_ref().unwrap();
+        assert_eq!((d.state.as_str(), d.restore_until.as_deref(), d.removal_in_progress), ("soft", Some("2027-02-10T10:00:00Z"), false));
+        // A listing with no deletion object is read as before.
+        assert!(status_chips(&sample()).iter().all(|(key, _, _)| *key != "deleted"), "no deleted Space, no chip");
+        let with = [sample(), vec![gone("d4", None)]].concat();
+        assert!(status_chips(&with).iter().any(|(key, label, n)| (*key, *label, *n) == ("deleted", "Deleting", 1)));
     }
 
     #[cfg(feature = "ssr")]

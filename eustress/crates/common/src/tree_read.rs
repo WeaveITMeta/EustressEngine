@@ -37,7 +37,10 @@
 //!     and lighting, and lights keep the folder's name and their parent's
 //!     pose, and take the file's attributes and tags. A Sound and a Point,
 //!     Spot or Surface light also carry their component's properties, built
-//!     by the builder Studio's loader uses ([`record_component_props`]).
+//!     by the builder Studio's loader uses ([`record_component_props`]). A
+//!     ScreenGui, BillboardGui, SurfaceGui or GUI object carries what its
+//!     file draws, by the builders Studio's loader uses
+//!     ([`crate::gui::gui_record::record_gui_props`]).
 //! * A child composes onto its parent's pose, never its size, when the
 //!   Space's `space.toml` names `[space] transform_rule = "parent_pose"`; a
 //!   Space written before the rule composes onto the parent's whole
@@ -511,6 +514,7 @@ fn own_branch(class: ClassName) -> bool {
             | ClassName::Frame
             | ClassName::ScrollingFrame
             | ClassName::BillboardGui
+            | ClassName::SurfaceGui
             | ClassName::TextLabel
             | ClassName::TextButton
             | ClassName::TextBox
@@ -698,6 +702,10 @@ impl Reader<'_, '_> {
                 props.extend(component_props(&record_attachment(doc, &display)));
             }
             props.extend(data_mesh_props(class, data_mesh_section(doc)));
+            // A ScreenGui, BillboardGui, SurfaceGui or GUI object: what Studio's
+            // loader builds from the same file, as its seed turns it into
+            // properties.
+            props.extend(crate::gui::gui_record::record_gui_props(&class_name, doc, &format!("{path}/_instance.toml")));
         }
         let folded = if is_mlua_class(class) { self.child_source(path) } else { None };
         if let Some((code, _)) = &folded {
@@ -831,6 +839,12 @@ impl Reader<'_, '_> {
         props.extend(record_class_props(&class, doc));
         let id = self.dm.create_scene(&class, &name, Some(parent), props);
         self.seed_file_data(id, doc);
+        // A Rune script's file, Space-relative: the Player's Rune driver
+        // compiles only `.rune` and `.soul` sources, as Studio's does, and
+        // its Output lines point at it.
+        if class == "SoulScript" {
+            self.dm.set_script_file(id, src_key.clone());
+        }
         self.bind(&src_key, id);
         self.note(id, &format!("{path}/_instance.toml"), ClassName::SoulScript, false, false, parent_world, parent_world);
     }
@@ -845,6 +859,9 @@ impl Reader<'_, '_> {
         };
         let code = String::from_utf8_lossy(self.index.bytes(i)).into_owned();
         let id = self.dm.create_scene(&class, &name, Some(parent), vec![("Source".to_string(), DmValue::String(code))]);
+        if class == "SoulScript" {
+            self.dm.set_script_file(id, key);
+        }
         self.bind(key, id);
     }
 

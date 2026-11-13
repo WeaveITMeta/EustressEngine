@@ -251,7 +251,7 @@ pub fn sync_remote_players(dm: Option<Res<PlayDataModel>>, mut remote: ResMut<Re
         eustress_common::play_session::fill_backpack(&mut g, id);
         g.create_virtual("PlayerScripts", "PlayerScripts", Some(id));
         let gui = g.create_virtual("PlayerGui", "PlayerGui", Some(id));
-        fill_player_gui(&mut g, gui, true);
+        eustress_common::play_session::fill_player_gui(&mut g, gui, true);
         // Commerce reads a signed-in player's passes once it can; until then
         // `UserOwnsGamePassAsync` waits for them. Marked here, with
         // `PlayerAdded`, so no handler can ask before the mark is set.
@@ -327,7 +327,7 @@ pub fn pull_remote_characters(
                 // resets it.
                 if !spawned_before.insert(player) {
                     if let Some(gui) = g.find_first_child_of_class(player, "PlayerGui", false) {
-                        fill_player_gui(&mut g, gui, false);
+                        eustress_common::play_session::fill_player_gui(&mut g, gui, false);
                     }
                 }
                 model
@@ -337,29 +337,6 @@ pub fn pull_remote_characters(
         // corrected onto the owner's samples, so its state is close to theirs.
         let movement = loco.map(|l| eustress_common::animation::character::locomotion_sample(l, climb));
         super::pull::place_character(&mut g, model, tf, body, intent, movement);
-    }
-}
-
-/// Copy StarterGui into a joined player's `PlayerGui`. On joining (`first`)
-/// every GUI is copied; on a respawn the copies with `ResetOnSpawn` (the
-/// default) are replaced and the rest are kept, as in Roblox.
-fn fill_player_gui(g: &mut DataModel, player_gui: InstanceId, first: bool) {
-    let Some(starter) = g.find_service("StarterGui") else { return };
-    let resets = |g: &DataModel, id: InstanceId| g.get_prop(id, "ResetOnSpawn").and_then(|v| v.as_bool()).unwrap_or(true);
-    if !first {
-        for old in g.children(player_gui).to_vec() {
-            if resets(g, old) {
-                g.destroy(old);
-            }
-        }
-    }
-    for template in g.children(starter).to_vec() {
-        if !first && !resets(g, template) {
-            continue;
-        }
-        if let Some(copy) = g.clone_instance(template) {
-            let _ = g.set_parent(copy, Some(player_gui));
-        }
     }
 }
 

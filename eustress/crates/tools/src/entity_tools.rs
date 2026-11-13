@@ -529,6 +529,76 @@ fn entity_files(workspace: &std::path::Path, name: &str) -> Result<[std::path::P
     ])
 }
 
+/// Every live entity folder named `safe_name` under `workspace`, at any depth.
+///
+/// `create_entity`'s `parent` argument nests entities under Model folders
+/// (`Workspace/Plant/Stage2/Core/_instance.toml`), but `entity_files` only
+/// looks at `Workspace/<name>/`, so `update_entity` and `delete_entity` could
+/// not reach anything created with a `parent`. A match needs an
+/// `_instance.toml`, so a bare Model folder of the same name does not count.
+/// Hidden folders (`.eustress` trash and undo scaffolding) and symlinks are
+/// not followed, so a trashed copy never shadows a live entity and the walk
+/// stays inside the Space. Results are sorted, so the order is stable.
+fn find_entity_folders(workspace: &std::path::Path, safe_name: &str) -> Vec<std::path::PathBuf> {
+    fn walk(dir: &std::path::Path, safe_name: &str, out: &mut Vec<std::path::PathBuf>) {
+        let Ok(entries) = std::fs::read_dir(dir) else { return };
+        let mut subdirs: Vec<std::path::PathBuf> = entries
+            .flatten()
+            .filter(|e| e.file_type().map(|t| t.is_dir()).unwrap_or(false))
+            .map(|e| e.path())
+            .filter(|p| {
+                p.file_name()
+                    .and_then(|n| n.to_str())
+                    .map(|n| !n.starts_with('.'))
+                    .unwrap_or(false)
+            })
+            .collect();
+        subdirs.sort();
+        for sub in subdirs {
+            if sub.file_name().and_then(|n| n.to_str()) == Some(safe_name)
+                && sub.join("_instance.toml").is_file()
+            {
+                out.push(sub.clone());
+            }
+            walk(&sub, safe_name, out);
+        }
+    }
+    let mut out = Vec::new();
+    walk(workspace, safe_name, &mut out);
+    out
+}
+
+/// `entity_files`, then, when no direct `Workspace/<name>/_instance.toml` or
+/// legacy flat file exists, the one nested entity of that name. More than one
+/// nested match is an error naming them, so a write or delete never lands on
+/// a guess.
+fn locate_entity_files(workspace: &std::path::Path, name: &str) -> Result<[std::path::PathBuf; 3], String> {
+    let files = entity_files(workspace, name)?;
+    if files.iter().any(|p| p.exists()) {
+        return Ok(files);
+    }
+    let safe = crate::sandbox::plain_name(&name.replace(' ', "_").replace('/', "_"))
+        .map_err(|why| format!("Invalid entity name: {why}"))?;
+    let mut found = find_entity_folders(workspace, &safe);
+    match found.len() {
+        0 => Ok(files),
+        1 => {
+            let folder = found.remove(0);
+            Ok([folder.join("_instance.toml"), files[1].clone(), files[2].clone()])
+        }
+        _ => Err(format!(
+            "Entity name '{}' is ambiguous: {} entities share it ({}). Rename one, or address it by a unique name.",
+            name,
+            found.len(),
+            found
+                .iter()
+                .map(|p| p.strip_prefix(workspace).unwrap_or(p).to_string_lossy().replace('\\', "/"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        )),
+    }
+}
+
 pub struct UpdateEntityTool;
 
 impl ToolHandler for UpdateEntityTool {
@@ -543,7 +613,7 @@ impl ToolHandler for UpdateEntityTool {
                     "position": { "type": "array", "items": { "type": "number" }, "description": "[x, y, z] new position" },
                     "size": { "type": "array", "items": { "type": "number" }, "description": "[x, y, z] new size" },
                     "material": { "type": "string", "description": "New material preset" },
-                    "color": { "type": "array", "items": { "type": "number" }, "description": "[r, g, b] new color (0-1)" },
+                    "color": { "type": "array", "items": { "type": "number" }, "description": "[r, g, b] new color: 0.0-1.0 floats, or 0-255 integers" },
                     "transparency": { "type": "number", "description": "Transparency (0.0 = opaque, 1.0 = invisible)" },
                     "anchored": { "type": "boolean", "description": "Whether the entity is anchored (immovable)" },
                     "can_collide": { "type": "boolean", "description": "Whether the entity participates in collision" },
@@ -565,7 +635,7 @@ impl ToolHandler for UpdateEntityTool {
         let workspace = ctx.space_root.join("Workspace");
 
         // Find the entity file: folder/_instance.toml or legacy flat files
-        let candidates = match entity_files(&workspace, name) {
+        let candidates = match locate_entity_files(&workspace, name) {
             Ok(files) => files,
             Err(e) => return ToolResult {
                 tool_name: "update_entity".to_string(), tool_use_id: String::new(),
@@ -736,7 +806,7 @@ impl ToolHandler for DeleteEntityTool {
     fn execute(&self, input: serde_json::Value, ctx: &ToolContext) -> ToolResult {
         let name = input.get("name").and_then(|v| v.as_str()).unwrap_or("");
         let workspace = ctx.space_root.join("Workspace");
-        let [instance_toml, part_toml, glb_toml] = match entity_files(&workspace, name) {
+        let [instance_toml, part_toml, glb_toml] = match locate_entity_files(&workspace, name) {
             Ok(files) => files,
             Err(e) => return ToolResult {
                 tool_name: "delete_entity".to_string(), tool_use_id: String::new(),
@@ -867,5 +937,63 @@ mod color_tests {
     #[test]
     fn a_missing_color_is_the_default() {
         assert_eq!(parse_color(&json!({}), "color", [0.1, 0.2, 0.3]), [0.1, 0.2, 0.3]);
+    }
+}
+
+#[cfg(test)]
+mod nested_lookup_tests {
+    use super::*;
+
+    fn scratch(tag: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("eustress-entity-lookup-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn entity(workspace: &std::path::Path, rel: &str) -> std::path::PathBuf {
+        let dir = workspace.join(rel);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("_instance.toml"), "").unwrap();
+        dir
+    }
+
+    #[test]
+    fn a_nested_entity_is_found() {
+        let ws = scratch("nested");
+        let want = entity(&ws, "Plant/Stage2/Core");
+        let files = locate_entity_files(&ws, "Core").unwrap();
+        let _ = std::fs::remove_dir_all(&ws);
+        assert_eq!(files[0], want.join("_instance.toml"));
+    }
+
+    #[test]
+    fn a_direct_entity_wins_over_a_nested_one() {
+        let ws = scratch("direct");
+        let want = entity(&ws, "Core");
+        entity(&ws, "Plant/Core");
+        let files = locate_entity_files(&ws, "Core").unwrap();
+        let _ = std::fs::remove_dir_all(&ws);
+        assert_eq!(files[0], want.join("_instance.toml"));
+    }
+
+    #[test]
+    fn two_nested_matches_are_refused() {
+        let ws = scratch("ambiguous");
+        entity(&ws, "A/Core");
+        entity(&ws, "B/Core");
+        let err = locate_entity_files(&ws, "Core").unwrap_err();
+        let _ = std::fs::remove_dir_all(&ws);
+        assert!(err.contains("ambiguous"), "{err}");
+    }
+
+    #[test]
+    fn trash_and_marker_less_folders_do_not_match() {
+        let ws = scratch("hidden");
+        entity(&ws, ".eustress/trash/Ghost");
+        std::fs::create_dir_all(ws.join("Plant/Bare")).unwrap();
+        assert!(find_entity_folders(&ws, "Ghost").is_empty());
+        assert!(find_entity_folders(&ws, "Bare").is_empty());
+        let _ = std::fs::remove_dir_all(&ws);
     }
 }

@@ -64,7 +64,7 @@ fn hide_billboard_owned_ui_nodes(
     }
 }
 
-fn sync_textlabel_to_display(
+pub(crate) fn sync_textlabel_to_display(
     mut q: Query<(&eustress_common::classes::TextLabel, &mut GuiElementDisplay),
                  Changed<eustress_common::classes::TextLabel>>,
 ) {
@@ -74,10 +74,12 @@ fn sync_textlabel_to_display(
         gui.text_color = [tl.text_color3[0], tl.text_color3[1], tl.text_color3[2],
                           (1.0 - tl.text_transparency).clamp(0.0, 1.0)];
         gui.font_size = tl.font_size.max(1.0);
+        // The class names only a few faces; any other weight comes from the
+        // font's name, as Studio's loader and a Player derive it.
         gui.font_weight = match tl.font {
             Font::GothamBold => 700,
             Font::GothamLight => 300,
-            _ => 400,
+            _ => crate::space::gui_loader::font_weight_from_name(&gui.font),
         };
         gui.text_align = match tl.text_x_alignment {
             TextXAlignment::Left => "Left".to_string(),
@@ -98,6 +100,8 @@ fn sync_textlabel_to_display(
             (1.0 - tl.text_stroke_transparency).clamp(0.0, 1.0),
         ];
         gui.text_scaled = tl.text_scaled;
+        gui.text_wrapped = tl.text_wrapped;
+        gui.active = tl.active;
         gui.bg_color = [tl.background_color3[0], tl.background_color3[1], tl.background_color3[2],
                         (1.0 - tl.background_transparency).clamp(0.0, 1.0)];
         gui.border_color = [tl.border_color3[0], tl.border_color3[1], tl.border_color3[2], 1.0];
@@ -365,12 +369,11 @@ fn apply_text_label_to_toml(
         text_x_alignment: x_align.to_string(),
         text_y_alignment: y_align.to_string(),
         text_scaled: class.text_scaled,
-        // Compile scaffold: the struct's serde-default values (opaque text, no
-        // stroke) so the tree builds. Real stroke round-trip is the co-agent's
-        // in-flight text-stroke feature — left for them to wire from `class`.
+        text_wrapped: class.text_wrapped,
+        // The class's transparency already rides in `text_color`'s alpha.
         text_transparency: 0.0,
-        text_stroke_color: [0.0, 0.0, 0.0, 1.0],
-        text_stroke_transparency: 1.0,
+        text_stroke_color: [class.text_stroke_color3[0], class.text_stroke_color3[1], class.text_stroke_color3[2], 1.0],
+        text_stroke_transparency: class.text_stroke_transparency,
     });
 }
 
@@ -500,6 +503,8 @@ fn apply_text_button_to_toml(
         text_x_alignment: x_align.to_string(),
         text_y_alignment: "Center".to_string(),
         text_scaled: false,
+        // The file's wrapping, kept: the class does not carry it.
+        text_wrapped: toml.text.as_ref().map_or(true, |t| t.text_wrapped),
         // Compile scaffold (serde-default stroke) — co-agent finalizes wiring.
         text_transparency: 0.0,
         text_stroke_color: [0.0, 0.0, 0.0, 1.0],
@@ -571,6 +576,8 @@ fn apply_text_box_to_toml(
         text_x_alignment: "Left".to_string(),
         text_y_alignment: "Center".to_string(),
         text_scaled: false,
+        // The file's wrapping, kept: the class does not carry it.
+        text_wrapped: toml.text.as_ref().map_or(true, |t| t.text_wrapped),
         // Compile scaffold (serde-default stroke) — co-agent finalizes wiring.
         text_transparency: 0.0,
         text_stroke_color: [0.0, 0.0, 0.0, 1.0],

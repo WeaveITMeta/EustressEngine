@@ -107,8 +107,9 @@ pub fn engine_rune_modules() -> Vec<rune::Module> {
         Err(e) => error!("Failed to create event_bus Rune module: {}", e),
     }
 
-    // `eustress::dm`: the live Play DataModel, shared with Luau.
-    match super::rune_datamodel::create_datamodel_module() {
+    // `eustress::dm`: the live Play DataModel, shared with Luau, and the
+    // one implementation the Player installs too.
+    match eustress_common::soul::rune_datamodel::create_datamodel_module() {
         Ok(module) => modules.push(module),
         Err(e) => error!("Failed to create eustress::dm Rune module: {}", e),
     }

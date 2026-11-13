@@ -115,9 +115,11 @@ fn elem(rect: Rect, bg: [f32; 4], text: &str, size: f32, weight: i32, color: [f3
         text_y_align: "Top".into(),
         text_stroke_color: [0.0; 4],
         text_scaled: false,
+        text_wrapped: true,
         image_path: String::new(),
         class_type: if text.is_empty() { "Frame" } else { "TextLabel" }.into(),
         mouse_filter: "ignore".into(),
+        active: false,
     }
 }
 

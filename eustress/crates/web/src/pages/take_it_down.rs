@@ -9,7 +9,7 @@
 //
 // Table of Contents:
 // 1. Browser helpers: focus, select, clipboard
-// 2. The reference with a Copy button
+// 2. The reference with a Copy button, a case date, a status icon, a case timeline
 // 3. The page and the notice
 // 4. The form
 // 5. The result view
@@ -77,31 +77,86 @@ const SELECTED_NOTE: &str = "The reference is selected. Press Ctrl+C, or Command
 /// A case reference in a read-only box with a Copy button. If the clipboard is not available or refuses, the text in the box is
 /// selected and the line beside the button says how to copy it.
 #[component]
-pub fn CopyReference(reference: String, id: &'static str) -> impl IntoView {
+pub fn CopyReference(reference: String, #[prop(into)] id: String) -> impl IntoView {
     let note = RwSignal::new(String::new());
     let text = reference.clone();
+    let copy_id = id.clone();
+    let focus_id_of = id.clone();
     let copy = move |_| match start_clipboard_write(&text) {
-        Some(promise) => spawn_local(async move {
-            if JsFuture::from(promise).await.is_ok() {
-                note.set("Copied.".to_string());
-            } else {
-                select_input(id);
-                note.set(SELECTED_NOTE.to_string());
-            }
-        }),
+        Some(promise) => {
+            let copy_id = copy_id.clone();
+            spawn_local(async move {
+                if JsFuture::from(promise).await.is_ok() {
+                    note.set("Copied.".to_string());
+                } else {
+                    select_input(&copy_id);
+                    note.set(SELECTED_NOTE.to_string());
+                }
+            })
+        }
         None => {
-            select_input(id);
+            select_input(&copy_id);
             note.set(SELECTED_NOTE.to_string());
         }
     };
     view! {
         <div class="tid-ref">
-            <label class="tid-sr" for=id>"Case reference"</label>
-            <input id=id class="tid-ref-input" type="text" readonly value=reference on:focus=move |_| select_input(id) />
+            <label class="tid-sr" for=id.clone()>"Case reference"</label>
+            <input id=id class="tid-ref-input" type="text" readonly value=reference on:focus=move |_| select_input(&focus_id_of) />
             <button type="button" class="tid-btn" on:click=copy>"Copy"</button>
             <span class="tid-copy-note" role="status">{move || note.get()}</span>
         </div>
     }
+}
+
+/// A case time, the one way every case page writes one: `Oct 2, 2026, 10:00 AM MST`. It uses the account's time zone when the page
+/// has it, else the browser's, and the zone's short name is always in the text.
+#[component]
+pub fn CaseDate(raw: String) -> impl IntoView {
+    let account_zone = use_context::<crate::state::AppState>().and_then(|s| match s.auth.get_untracked() {
+        crate::state::AuthState::Authenticated(u) => u.time_zone,
+        _ => None,
+    });
+    let zone = case_zone(account_zone.as_deref(), None);
+    let text = stamp_words_in(&raw, zone.as_deref());
+    let machine = stamp_ms(&raw).is_some().then(|| raw.trim().to_string());
+    view! { <time datetime=machine>{text}</time> }
+}
+
+/// The mark beside a status word. Hidden from a screen reader, because the word beside it says the same thing; it is there so the
+/// status is never told by color alone.
+#[component]
+pub fn StatusIcon(status: String) -> impl IntoView {
+    view! { <span class="tid-icon" aria-hidden="true">{status_icon(&status)}</span> }
+}
+
+/// Where a case stands, in steps. Each step says its state in words as well as in its mark.
+#[component]
+pub fn CaseTimeline(steps: Vec<Step>) -> impl IntoView {
+    let items = steps
+        .into_iter()
+        .map(|s| {
+            let mark = match s.state {
+                StepState::Done => "\u{2713}",
+                StepState::Current => "\u{25CF}",
+                StepState::Later => "\u{25CB}",
+            };
+            let class = match s.state {
+                StepState::Done => "tid-step tid-step-done",
+                StepState::Current => "tid-step tid-step-current",
+                StepState::Later => "tid-step tid-step-later",
+            };
+            let current = (s.state == StepState::Current).then_some("step");
+            view! {
+                <li class=class aria-current=current>
+                    <span class="tid-step-mark" aria-hidden="true">{mark}</span>
+                    <span class="tid-step-label">{s.label}</span>
+                    <span class="tid-sr">{format!(" ({})", s.state.words())}</span>
+                </li>
+            }
+        })
+        .collect_view();
+    view! { <ol class="tid-timeline" aria-label="Case progress">{items}</ol> }
 }
 
 // -----------------------------------------------------------------------------

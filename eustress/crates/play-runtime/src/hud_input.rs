@@ -110,6 +110,7 @@ fn hud_input(
         keys.clear();
         pointer.over_gui = false;
         pointer.typing = false;
+        pointer.keys_taken = false;
         if keyboard.0 {
             keyboard.0 = false;
         }
@@ -167,6 +168,7 @@ fn hud_input(
 
     // Typing into the held box.
     let events: Vec<KeyboardInput> = keys.read().cloned().collect();
+    pointer.keys_taken = g.focused_textbox.is_some() && !blocked.0;
     if let (Some(textbox), false) = (g.focused_textbox, blocked.0) {
         let multi_line = flag(&g, textbox, "MultiLine", false);
         let mut text = g.get_prop(textbox, "Text").and_then(|v| v.as_str().map(str::to_string)).unwrap_or_default();

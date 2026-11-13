@@ -22,9 +22,10 @@
     <meta property="og:url" content="https://eustress.dev/">
     <meta property="og:title" content="Eustress Engine | Simulation & Data Platform">
     <meta property="og:description" content="Source-available simulation and data platform built in Rust. Model a battery cell or a power grid, drive it with real data, and compress time up to a year per second.">
-    <meta property="og:image" content="https://eustress.dev/assets/og-image.png">
-    <meta property="og:image:width" content="1254">
-    <meta property="og:image:height" content="1254">
+    <meta property="og:image" content="https://eustress.dev/assets/og-card.png">
+    <meta property="og:image:width" content="1200">
+    <meta property="og:image:height" content="630">
+    <meta property="og:image:alt" content="Eustress Engine: build the real world, watch it run. A miniature city with fusion, Stirling and solar power under live data panels.">
     <meta property="og:site_name" content="Eustress Engine">
     <meta property="og:locale" content="en_US">
     
@@ -33,7 +34,8 @@
     <meta name="twitter:url" content="https://eustress.dev/">
     <meta name="twitter:title" content="Eustress Engine | Simulation & Data Platform">
     <meta name="twitter:description" content="Source-available simulation and data platform built in Rust. Model a battery cell or a power grid, drive it with real data, and compress time up to a year per second.">
-    <meta name="twitter:image" content="https://eustress.dev/assets/og-image.png">
+    <meta name="twitter:image" content="https://eustress.dev/assets/og-card.png">
+    <meta name="twitter:image:alt" content="Eustress Engine: build the real world, watch it run. A miniature city with fusion, Stirling and solar power under live data panels.">
     <meta name="twitter:site" content="@eustressengine">
     <meta name="twitter:creator" content="@eustressengine">
     
@@ -67,12 +69,10 @@
     <link rel="manifest" href="/assets/site.webmanifest">
     
     <!-- Fonts -->
-    <link rel="preconnect" href="https://fonts.googleapis.com">
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+    <!-- Inter and JetBrains Mono, self-hosted (style/fonts.css, assets/fonts): no second and third origin before the first paint. -->
+    <link data-trunk rel="css" href="style/fonts.css">
     
-    <!-- Styles -->
-    <script type="module" src="/assets/vendor/model-viewer-4.0.0.min.js"></script>
+    <!-- Styles. (model-viewer, 0.9 MB, is loaded by the avatar customizer when it opens, not here.) -->
     <link data-trunk rel="css" href="style/main.css">
     <link data-trunk rel="css" href="style/take_it_down.css">
     <!-- Purchases page and the profile's spending card. A file of its own
@@ -95,6 +95,8 @@
     <link data-trunk rel="css" href="style/legal_acts.css">
     <!-- The tag chips and editor on /projects (src/pages/project_tags.rs). -->
     <link data-trunk rel="css" href="style/project_tags.css">
+    <!-- Delete and restore a published Space: the dialog and a deleted card on /projects (src/pages/project_delete.rs). -->
+    <link data-trunk rel="css" href="style/project_delete.css">
     <!-- The top bar (components/nav.rs). Last, so it wins over the sheets above. -->
     <link data-trunk rel="css" href="style/login.css">
     <link data-trunk rel="css" href="style/community.css">

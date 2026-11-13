@@ -1262,10 +1262,10 @@ pub fn flat_extension_class(key: &str) -> ClassName {
 /// (and, when it draws no mesh, from its other sections), and its tags.
 ///
 /// Studio's seed adds a few properties from components this function does not
-/// model: the GUI element classes' and the light, sound,
-/// emitter, beam, decal and attachment classes'. Those
-/// instances get their class defaults here; [`reads_own_properties`] says
-/// which classes are fully read.
+/// model: the light, sound, emitter, beam, decal and attachment classes'.
+/// Those instances get their class defaults here; [`reads_own_properties`]
+/// says which classes are fully read. A GUI folder's properties are read by
+/// the folder walk ([`crate::gui::gui_record::record_gui_props`]).
 pub fn record_props(rec: InstanceRecord<'_>) -> RecordInstance {
     let mut problems = Vec::new();
     let engine_class = match rec.form {
@@ -1682,25 +1682,11 @@ pub fn starter_player_props(doc: &toml::Value) -> Vec<(String, DmValue)> {
 pub struct RecordClassProps(pub Vec<(String, DmValue)>);
 
 /// Whether a Player's reader reads every property Studio's seed gives a
-/// class. The rest get their class defaults and their attributes.
+/// class. The rest get their class defaults and their attributes. The GUI
+/// classes are read through [`crate::gui::gui_record`], the builders
+/// Studio's loader uses.
 pub fn reads_own_properties(class: &str) -> bool {
-    !matches!(
-        class,
-        "ScreenGui"
-            | "Frame"
-            | "ScrollingFrame"
-            | "BillboardGui"
-            | "SurfaceGui"
-            | "TextLabel"
-            | "TextButton"
-            | "TextBox"
-            | "ImageLabel"
-            | "ImageButton"
-            | "ViewportFrame"
-            | "ParticleEmitter"
-            | "Beam"
-            | "Decal"
-    )
+    !matches!(class, "ParticleEmitter" | "Beam" | "Decal")
 }
 
 /// A custom mesh's `MeshId`: its path relative to the Space, as Studio's

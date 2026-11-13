@@ -34,9 +34,9 @@ pub mod rune_api;
 pub mod error_tracker;
 pub mod vm_pool;
 pub mod rune_ecs_module;
-/// `eustress::dm`: Rune's access to the live Play DataModel Luau shares.
-#[cfg(feature = "realism-scripting")]
-pub mod rune_datamodel;
+// `eustress::dm`, Rune's access to the live Play DataModel Luau shares,
+// lives in `eustress_common::soul::rune_datamodel`: the Player installs it
+// too, so there is one implementation.
 /// `eustress::terrain`: Rune's edits and reads of the Space's terrain in Play.
 #[cfg(feature = "realism-scripting")]
 pub mod rune_terrain;

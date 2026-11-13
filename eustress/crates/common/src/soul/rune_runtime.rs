@@ -288,7 +288,23 @@ pub fn compile_scripts(
     runtime.compiled.clear();
     runtime.initialized.clear();
     runtime.last_errors.clear();
+    compile_more_scripts(runtime, module_registry, scripts);
+}
 
+/// Compile `scripts` into `runtime` beside the scripts it already holds,
+/// each keyed by its `entity_index`, as [`compile_scripts`] does after
+/// clearing. For a session whose scripts arrive while it runs (a joined
+/// Player's own containers, which the host replicates after the join). A
+/// newly compiled script gets its `on_init` on the next frame.
+#[cfg(feature = "realism-scripting")]
+pub fn compile_more_scripts(
+    runtime: &mut RuneRuntimeState,
+    module_registry: &RuneModuleRegistry,
+    scripts: &[ScriptSource],
+) {
+    if scripts.is_empty() {
+        return;
+    }
     let rune_context = match module_registry.build_context() {
         Ok(ctx) => ctx,
         Err(e) => {
@@ -329,6 +345,8 @@ pub fn compile_scripts(
 
         match result {
             Ok(unit) => {
+                runtime.initialized.remove(&script.entity_index);
+                runtime.initialized.remove(&(script.entity_index + 1_000_000));
                 runtime.compiled.insert(script.entity_index, CompiledScript {
                     unit: std::sync::Arc::new(unit),
                     context: runtime_ctx.clone(),
@@ -847,6 +865,17 @@ pub fn call_script_update(runtime: &mut RuneRuntimeState, dt: f64) {
         runtime.last_errors.extend(errors);
     }
     let _ = (runtime, dt);
+}
+
+/// One Play frame of every compiled script, in Studio's order: `on_init` for
+/// scripts that have not had it, `on_ready` one frame after it, then
+/// `on_update(dt)`. Studio's Play driver (`engine::soul::rune_play`) and the
+/// Player's ([`super::rune_play`]) both run a frame through this, each inside
+/// one system that installs its bridges first.
+pub fn call_script_frame(runtime: &mut RuneRuntimeState, dt: f64) {
+    call_script_init(runtime);
+    call_script_ready(runtime);
+    call_script_update(runtime, dt);
 }
 
 /// Call `on_exit()` on every compiled script. Run before `cleanup_scripts`.

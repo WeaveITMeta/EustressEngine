@@ -18,6 +18,7 @@
 // 4. A case's public status
 // 5. The account's cases: wire types, paging, review
 // 6. Words
+// 6b. Case cards: dates, progress, status icon, appeal
 // 7. Tests
 // =============================================================================
 
@@ -766,6 +767,149 @@ pub fn takedown_notification_sentence(event: &str) -> Option<&'static str> {
 }
 
 // -----------------------------------------------------------------------------
+// 6b. Case cards: dates, progress, status icon, appeal
+// -----------------------------------------------------------------------------
+// Pure rules the case card and the status page share, so they run without a browser. Everything here is read from fields the Worker
+// already sends (opened_at, status, decided_at, appeal); nothing new is asked for, and nothing says who decided or why.
+
+/// Milliseconds since 1970 for a Worker time: ISO text, or seconds or milliseconds written as digits. None for anything else.
+pub fn stamp_ms(raw: &str) -> Option<i64> {
+    let t = raw.trim();
+    if !t.is_empty() && t.chars().all(|c| c.is_ascii_digit()) {
+        let n = t.parse::<i64>().ok()?;
+        // Ten digits is seconds; more is milliseconds.
+        return Some(if t.len() <= 11 { n.saturating_mul(1000) } else { n });
+    }
+    chrono::DateTime::parse_from_rfc3339(t).ok().map(|d| d.timestamp_millis())
+}
+
+/// The zone every case time is written in: the account's own when the page has it, else the browser's. None means the
+/// reader's own zone is used without being named in advance.
+pub fn case_zone(account: Option<&str>, browser: Option<&str>) -> Option<String> {
+    [account, browser].into_iter().flatten().map(str::trim).find(|z| !z.is_empty()).map(String::from)
+}
+
+/// A case time in one format (`Oct 2, 2026, 10:00 AM MST`), in the given zone when the browser knows it. The zone's short name
+/// is always part of the text. A value that is not a time is shown as it came.
+pub fn stamp_words_in(raw: &str, zone: Option<&str>) -> String {
+    match stamp_ms(raw) {
+        Some(ms) => crate::time_words::when_ms_in(ms as f64, zone),
+        None => raw.trim().to_string(),
+    }
+}
+
+/// True when two Worker times are the same moment (or, if one is not a time, the same text).
+fn same_moment(a: &str, b: &str) -> bool {
+    match (stamp_ms(a), stamp_ms(b)) {
+        (Some(x), Some(y)) => x == y,
+        _ => a.trim() == b.trim(),
+    }
+}
+
+/// The dated lines of a case, as raw Worker times in the order they are shown. "Last updated" is left out when it is the same
+/// moment as a line above it, so one moment is never printed twice.
+pub fn case_date_rows(c: &CaseEntry) -> Vec<(&'static str, String)> {
+    let mut rows: Vec<(&'static str, String)> = Vec::new();
+    for (label, raw) in [("Opened", &c.opened_at), ("Removed", &c.removed_at), ("Decided", &c.decided_at)] {
+        if let Some(r) = raw.as_deref().filter(|r| !r.trim().is_empty()) {
+            rows.push((label, r.to_string()));
+        }
+    }
+    if let Some(u) = c.updated_at.as_deref().filter(|r| !r.trim().is_empty()) {
+        if !rows.iter().any(|(_, r)| same_moment(r, u)) {
+            rows.push(("Last updated", u.to_string()));
+        }
+    }
+    rows
+}
+
+/// The one date a list row shows, with the word for it: the last update, else the opening.
+pub fn row_when(c: &CaseEntry) -> Option<(&'static str, String)> {
+    c.updated_at
+        .as_deref()
+        .filter(|r| !r.trim().is_empty())
+        .map(|r| ("Updated", r.to_string()))
+        .or_else(|| c.opened_at.as_deref().filter(|r| !r.trim().is_empty()).map(|r| ("Opened", r.to_string())))
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StepState {
+    Done,
+    Current,
+    Later,
+}
+
+impl StepState {
+    /// Said in text beside the mark, so the state never rests on a shape or a color.
+    pub fn words(self) -> &'static str {
+        match self {
+            StepState::Done => "done",
+            StepState::Current => "current step",
+            StepState::Later => "not yet",
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct Step {
+    pub label: &'static str,
+    pub state: StepState,
+}
+
+/// Statuses that mean a decision has been made (a review's outcome, a removal, a closed case).
+pub fn is_decided_status(status: &str) -> bool {
+    matches!(status, "listed" | "approved_private" | "not_listed" | "changes_requested" | "removed" | "decided" | "closed")
+}
+
+/// Where a case stands: Received, In review, Decided, and Appealed once an appeal exists. A hold is "in_review" by the time it
+/// reaches this page, so it reads as a review in progress.
+pub fn timeline_steps(opened: bool, status: &str, decided: bool, appealed: bool) -> Vec<Step> {
+    let appealed_now = appealed || status == "appeal_in_review";
+    let decided_now = decided || is_decided_status(status) || appealed_now;
+    let reviewing = !decided_now && matches!(status, "in_review" | "under_review");
+    let known = opened || !status.trim().is_empty();
+    let step = |label, state| Step { label, state: if known { state } else { StepState::Later } };
+    let mut steps = vec![
+        step("Received", if reviewing || decided_now { StepState::Done } else { StepState::Current }),
+        step("In review", if decided_now { StepState::Done } else if reviewing { StepState::Current } else { StepState::Later }),
+        step("Decided", if appealed_now { StepState::Done } else if decided_now { StepState::Current } else { StepState::Later }),
+    ];
+    if appealed_now {
+        steps.push(step("Appealed", StepState::Current));
+    }
+    steps
+}
+
+/// The steps of one entry in the account's list.
+pub fn case_timeline(c: &CaseEntry) -> Vec<Step> {
+    timeline_steps(c.opened_at.is_some(), &c.status, c.decided_at.is_some(), c.appeal.is_some())
+}
+
+/// The steps of a case on the public status page, which carries no appeal.
+pub fn status_timeline(c: &CaseStatus) -> Vec<Step> {
+    timeline_steps(c.received_at.is_some(), &c.status, c.decided_at.is_some() || c.removed_at.is_some(), false)
+}
+
+/// A mark that goes beside the status word. It is a shape for the eye; the word is always printed next to it.
+pub fn status_icon(status: &str) -> &'static str {
+    match status {
+        "in_review" | "under_review" | "received" | "unreviewed" => "\u{25F7}",
+        "appeal_in_review" => "\u{21BA}",
+        "changes_requested" | "not_listed" | "removed" => "!",
+        "listed" | "approved_private" | "decided" | "closed" => "\u{2713}",
+        _ => "\u{2022}",
+    }
+}
+
+/// The review panel link for an appeal, when this card may offer one: a listing review the account can appeal.
+pub fn appeal_href(c: &CaseEntry) -> Option<String> {
+    if c.kind != "listing_review" || !c.can_appeal {
+        return None;
+    }
+    c.listing.as_ref().map(|l| l.id.trim()).filter(|i| !i.is_empty()).map(|id| format!("/projects?review={}", urlencoding::encode(id)))
+}
+
+// -----------------------------------------------------------------------------
 // 7. Tests
 // -----------------------------------------------------------------------------
 
@@ -1235,5 +1379,121 @@ mod tests {
     fn nothing_here_uses_an_em_dash_or_an_en_dash() {
         let src = include_str!("takedown_wire.rs");
         assert!(!src.contains('\u{2014}') && !src.contains('\u{2013}'));
+    }
+}
+
+#[cfg(test)]
+mod case_card_tests {
+    use super::*;
+
+    fn entry() -> CaseEntry {
+        CaseEntry {
+            kind: "listing_review".to_string(),
+            status: "decided".to_string(),
+            opened_at: Some("2026-10-01T10:00:00Z".to_string()),
+            decided_at: Some("2026-10-02T10:00:00Z".to_string()),
+            updated_at: Some("2026-10-02T10:00:00Z".to_string()),
+            listing: Some(ListingRef { id: "l1".to_string(), name: "Tower".to_string() }),
+            ..CaseEntry::default()
+        }
+    }
+
+    fn states(steps: &[Step]) -> Vec<(&'static str, StepState)> {
+        steps.iter().map(|s| (s.label, s.state)).collect()
+    }
+
+    #[test]
+    fn case_card_dates_share_one_format_and_name_a_zone() {
+        assert_eq!(stamp_words_in("2026-10-02T10:00:00Z", None), "Oct 2, 2026, 10:00 AM UTC");
+        assert_eq!(stamp_words_in("1790935200", None), "Oct 2, 2026, 10:00 AM UTC", "seconds read the same as text");
+        assert_eq!(stamp_words_in("1790935200000", None), "Oct 2, 2026, 10:00 AM UTC", "milliseconds too");
+        // with no browser the zone is UTC and is named, whatever zone the account has
+        assert_eq!(stamp_words_in("2026-10-02T10:00:00Z", Some("America/Phoenix")), "Oct 2, 2026, 10:00 AM UTC");
+        assert_eq!(stamp_words_in("soon", None), "soon");
+    }
+
+    #[test]
+    fn case_card_zone_prefers_the_account_then_the_browser() {
+        assert_eq!(case_zone(Some("America/Phoenix"), Some("UTC")).as_deref(), Some("America/Phoenix"));
+        assert_eq!(case_zone(None, Some("Europe/Berlin")).as_deref(), Some("Europe/Berlin"));
+        assert_eq!(case_zone(Some("  "), Some("Europe/Berlin")).as_deref(), Some("Europe/Berlin"));
+        assert_eq!(case_zone(None, None), None);
+    }
+
+    #[test]
+    fn case_card_last_updated_never_repeats_a_date_already_shown() {
+        // updated_at equals decided_at: one moment, one line
+        let rows = case_date_rows(&entry());
+        assert_eq!(rows.iter().map(|r| r.0).collect::<Vec<_>>(), vec!["Opened", "Decided"], "{rows:?}");
+        // a later update is its own line, and the same moment written in seconds still counts as the same
+        let mut c = entry();
+        c.updated_at = Some("2026-10-03T10:00:00Z".to_string());
+        assert_eq!(case_date_rows(&c).last().map(|r| r.0), Some("Last updated"));
+        c.updated_at = Some("1790935200".to_string());
+        assert_eq!(case_date_rows(&c).len(), 2);
+        // a row shows exactly one date, named
+        assert_eq!(row_when(&entry()).map(|r| r.0), Some("Updated"));
+        c.updated_at = None;
+        assert_eq!(row_when(&c).map(|r| r.0), Some("Opened"));
+    }
+
+    #[test]
+    fn case_card_timeline_follows_status_decision_and_appeal() {
+        use StepState::*;
+        let mut c = entry();
+        c.status = "in_review".to_string();
+        c.decided_at = None;
+        assert_eq!(states(&case_timeline(&c)), vec![("Received", Done), ("In review", Current), ("Decided", Later)]);
+        c.status = "unreviewed".to_string();
+        assert_eq!(states(&case_timeline(&c)), vec![("Received", Current), ("In review", Later), ("Decided", Later)]);
+        c.status = "not_listed".to_string();
+        assert_eq!(states(&case_timeline(&c)), vec![("Received", Done), ("In review", Done), ("Decided", Current)]);
+        c.status = "appeal_in_review".to_string();
+        assert_eq!(states(&case_timeline(&c)), vec![("Received", Done), ("In review", Done), ("Decided", Done), ("Appealed", Current)]);
+        let mut d = entry();
+        d.appeal = Some(serde_json::json!({ "status": "pending" }));
+        assert_eq!(case_timeline(&d).last().map(|s| s.label), Some("Appealed"));
+        assert!(!case_timeline(&entry()).iter().any(|s| s.label == "Appealed"), "no appeal, no Appealed step");
+    }
+
+    #[test]
+    fn case_card_public_status_timeline_uses_only_the_public_fields() {
+        use StepState::*;
+        let mut s = CaseStatus {
+            reference: String::new(),
+            kind: "listing_review".to_string(),
+            status: "under_review".to_string(),
+            received_at: Some("2026-10-08T19:00:00Z".to_string()),
+            removed_at: None,
+            decided_at: None,
+        };
+        assert_eq!(states(&status_timeline(&s)), vec![("Received", Done), ("In review", Current), ("Decided", Later)]);
+        s.status = "received".to_string();
+        assert_eq!(states(&status_timeline(&s))[0], ("Received", Current));
+        s.status = "closed".to_string();
+        assert_eq!(states(&status_timeline(&s))[2], ("Decided", Current));
+    }
+
+    #[test]
+    fn case_card_status_is_never_a_color_alone() {
+        for s in ["in_review", "under_review", "received", "listed", "not_listed", "changes_requested", "removed", "decided", "closed", "appeal_in_review", "mystery"] {
+            assert!(!status_icon(s).is_empty(), "{s} has a mark");
+        }
+        assert_ne!(status_icon("in_review"), status_icon("decided"));
+        assert_ne!(status_icon("removed"), status_icon("closed"));
+        assert_eq!(StepState::Current.words(), "current step");
+    }
+
+    #[test]
+    fn case_card_appeal_is_offered_only_for_an_appealable_listing_review_with_a_listing() {
+        let mut c = entry();
+        assert_eq!(appeal_href(&c), None, "can_appeal is false");
+        c.can_appeal = true;
+        assert_eq!(appeal_href(&c).as_deref(), Some("/projects?review=l1"));
+        c.kind = "takedown_notice".to_string();
+        assert_eq!(appeal_href(&c), None, "a takedown goes through Ask for a review");
+        c.kind = "listing_review".to_string();
+        c.listing = None;
+        assert_eq!(appeal_href(&c), None);
     }
 }

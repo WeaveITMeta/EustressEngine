@@ -60,8 +60,8 @@ use std::{
 };
 
 use eustress_web::seo::{
-    build_date, first_h1, is_doc_route, llms_full, pristine_shell, routes_from_sitemap, sitemap_with_lastmod, splice, splice_not_found,
-    strip_tags, DocPage, MarkdownDoc, MARKDOWN_DOCS, NOT_FOUND_PROBE,
+    build_date, defer_app_start, first_h1, is_doc_route, llms_full, pristine_shell, routes_from_sitemap, sitemap_with_lastmod, splice,
+    splice_not_found, strip_tags, DocPage, MarkdownDoc, MARKDOWN_DOCS, NOT_FOUND_PROBE,
 };
 use eustress_web::App;
 use hydration_context::{SharedContext, SsrSharedContext};
@@ -217,6 +217,17 @@ fn main() {
             shell_path.display()
         );
         std::process::exit(2);
+    };
+    // Every page, the app's shell included, starts the app behind loader.js's
+    // gate (see seo::defer_app_start). If Trunk's script ever changes shape the
+    // pages still work, as Trunk wrote them, and the line below says why the
+    // gate is missing.
+    let shell = match defer_app_start(&shell) {
+        Ok(gated) => gated,
+        Err(msg) => {
+            eprintln!("warn  {msg}; the app starts as Trunk wrote it");
+            shell
+        }
     };
 
     let whole_site = args.routes.is_empty();

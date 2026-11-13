@@ -33,8 +33,24 @@ name: Player Release
 # Required repository secrets (shared with release.yml):
 #   CLOUDFLARE_API_TOKEN   scoped to Object Read & Write on eustress-downloads
 #   CLOUDFLARE_ACCOUNT_ID
-# Optional, and the workflow says so when absent:
-#   WINDOWS_CERT_PFX / WINDOWS_CERT_PASSWORD   Authenticode signing
+# Windows signing, Azure Trusted Signing (required for any publish to R2,
+# staging included; a build-only run goes ahead unsigned and says so):
+#   secrets   AZURE_TENANT_ID, AZURE_CLIENT_ID, AZURE_CLIENT_SECRET
+#             (an app registration with the "Trusted Signing Certificate
+#             Profile Signer" role on the signing account)
+#   variables TRUSTED_SIGNING_ENDPOINT (the account's region endpoint, e.g.
+#             https://wus2.codesigning.azure.net/), TRUSTED_SIGNING_ACCOUNT,
+#             TRUSTED_SIGNING_PROFILE
+# The Player exe (before packaging, so the zip and the installer carry it)
+# and EustressPlayer-Setup.exe are signed and their signatures checked.
+# macOS signing, Eustress LLC's Developer ID plus notarization (also
+# required for any publish):
+#   secrets   APPLE_DEVELOPER_ID_P12 (base64 of the Developer ID Application
+#             certificate and key), APPLE_DEVELOPER_ID_P12_PASSWORD,
+#             APPLE_API_KEY_ID, APPLE_API_ISSUER_ID, APPLE_API_KEY_P8
+#             (base64 of the App Store Connect API key's .p8)
+# The app and the DMG are signed, the DMG notarized and stapled, and
+# Gatekeeper's assessment checked before upload.
 
 on:
   push:
@@ -90,6 +106,8 @@ jobs:
       download_base: ${{ steps.channel.outputs.download_base }}
       release_channel: ${{ steps.channel.outputs.release_channel }}
       default_api_url: ${{ steps.channel.outputs.default_api_url }}
+      sign_windows: ${{ steps.signing.outputs.sign_windows }}
+      sign_macos: ${{ steps.signing.outputs.sign_macos }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -135,6 +153,58 @@ jobs:
             echo "release_channel=staging" >> "$GITHUB_OUTPUT"
             echo "default_api_url=https://api-staging.eustress.dev" >> "$GITHUB_OUTPUT"
             echo "Staging: R2 prefix staging/player/. The Player is compiled for https://api-staging.eustress.dev. player/latest.json is not written, and no GitHub Release is created."
+          fi
+
+      # Nothing reaches R2, staging or production, unsigned (McKale,
+      # 2026-11-13): Windows through Azure Artifact Signing, macOS with
+      # Eustress LLC's Developer ID and Apple notarization. A build-only run
+      # may go ahead without them and keeps its installers as run artifacts.
+      - id: signing
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          PUBLISH: ${{ inputs.publish }}
+          TS_ENDPOINT: ${{ vars.TRUSTED_SIGNING_ENDPOINT }}
+          TS_ACCOUNT: ${{ vars.TRUSTED_SIGNING_ACCOUNT }}
+          TS_PROFILE: ${{ vars.TRUSTED_SIGNING_PROFILE }}
+          HAS_TENANT: ${{ secrets.AZURE_TENANT_ID != '' }}
+          HAS_CLIENT: ${{ secrets.AZURE_CLIENT_ID != '' }}
+          HAS_SECRET: ${{ secrets.AZURE_CLIENT_SECRET != '' }}
+          HAS_P12: ${{ secrets.APPLE_DEVELOPER_ID_P12 != '' }}
+          HAS_P12_PASSWORD: ${{ secrets.APPLE_DEVELOPER_ID_P12_PASSWORD != '' }}
+          HAS_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID != '' }}
+          HAS_API_ISSUER: ${{ secrets.APPLE_API_ISSUER_ID != '' }}
+          HAS_API_KEY: ${{ secrets.APPLE_API_KEY_P8 != '' }}
+        run: |
+          win=""
+          [ -n "$TS_ENDPOINT" ] || win="$win variable TRUSTED_SIGNING_ENDPOINT,"
+          [ -n "$TS_ACCOUNT" ] || win="$win variable TRUSTED_SIGNING_ACCOUNT,"
+          [ -n "$TS_PROFILE" ] || win="$win variable TRUSTED_SIGNING_PROFILE,"
+          [ "$HAS_TENANT" = "true" ] || win="$win secret AZURE_TENANT_ID,"
+          [ "$HAS_CLIENT" = "true" ] || win="$win secret AZURE_CLIENT_ID,"
+          [ "$HAS_SECRET" = "true" ] || win="$win secret AZURE_CLIENT_SECRET,"
+          mac=""
+          [ "$HAS_P12" = "true" ] || mac="$mac secret APPLE_DEVELOPER_ID_P12,"
+          [ "$HAS_P12_PASSWORD" = "true" ] || mac="$mac secret APPLE_DEVELOPER_ID_P12_PASSWORD,"
+          [ "$HAS_API_KEY_ID" = "true" ] || mac="$mac secret APPLE_API_KEY_ID,"
+          [ "$HAS_API_ISSUER" = "true" ] || mac="$mac secret APPLE_API_ISSUER_ID,"
+          [ "$HAS_API_KEY" = "true" ] || mac="$mac secret APPLE_API_KEY_P8,"
+          if [ -z "$win" ]; then
+            echo "sign_windows=true" >> "$GITHUB_OUTPUT"
+            echo "Windows signing: Azure Artifact Signing, account $TS_ACCOUNT, profile $TS_PROFILE."
+          else
+            echo "sign_windows=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::Windows signing is not configured (missing:${win%,})."
+          fi
+          if [ -z "$mac" ]; then
+            echo "sign_macos=true" >> "$GITHUB_OUTPUT"
+            echo "macOS signing: Developer ID and notarization."
+          else
+            echo "sign_macos=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::macOS signing is not configured (missing:${mac%,})."
+          fi
+          if [ -n "$win$mac" ] && { [ "$EVENT_NAME" = "push" ] || [ "$PUBLISH" = "true" ]; }; then
+            echo "::error::Refusing to publish an unsigned Player. Missing:${win}${mac%,}. Set them in the repository's Actions settings, then run again."
+            exit 1
           fi
 
       # RELEASE.md's promotion model applies to the Player as it does to
@@ -246,20 +316,38 @@ jobs:
           Stop-Process -Id $p.Id -Force
           Write-Output "OK: still running after 8s."
 
-      - name: Sign the binary
+      # Azure Artifact Signing (formerly Trusted Signing): the key stays in
+      # Microsoft's service and the runner signs through it, so there is no
+      # certificate file to store. Skipped (and the run says so) until the
+      # TRUSTED_SIGNING_* variables exist; the version job refuses any R2
+      # upload until then. The path must match BIN_DIR above.
+      - name: Sign the Player
+        if: needs.version.outputs.sign_windows == 'true'
+        uses: azure/artifact-signing-action@v2.0.0
+        with:
+          azure-tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          azure-client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          azure-client-secret: ${{ secrets.AZURE_CLIENT_SECRET }}
+          endpoint: ${{ vars.TRUSTED_SIGNING_ENDPOINT }}
+          signing-account-name: ${{ vars.TRUSTED_SIGNING_ACCOUNT }}
+          certificate-profile-name: ${{ vars.TRUSTED_SIGNING_PROFILE }}
+          files: ${{ github.workspace }}\eustress\target\x86_64-pc-windows-msvc\release\eustress-client.exe
+          file-digest: SHA256
+          timestamp-rfc3161: http://timestamp.acs.microsoft.com
+          timestamp-digest: SHA256
+
+      - name: Check the Player's signature
+        if: needs.version.outputs.sign_windows == 'true'
         shell: pwsh
         run: |
-          if (-not "${{ secrets.WINDOWS_CERT_PFX }}") {
-            Write-Warning "WINDOWS_CERT_PFX not set - shipping UNSIGNED. Users will see a SmartScreen warning."
-            exit 0
-          }
-          $pfx = "$env:RUNNER_TEMP\cert.pfx"
-          [IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String("${{ secrets.WINDOWS_CERT_PFX }}"))
-          & "C:\Program Files (x86)\Windows Kits\10\bin\x64\signtool.exe" sign `
-            /f $pfx /p "${{ secrets.WINDOWS_CERT_PASSWORD }}" `
-            /fd SHA256 /tr http://timestamp.digicert.com /td SHA256 `
-            "$env:BIN_DIR\eustress-client.exe"
-          Remove-Item $pfx -Force
+          $sig = Get-AuthenticodeSignature "$env:BIN_DIR\eustress-client.exe"
+          if ($sig.Status -ne 'Valid') { throw "eustress-client.exe signature is $($sig.Status): $($sig.StatusMessage)" }
+          "OK: eustress-client.exe signed by $($sig.SignerCertificate.Subject)"
+
+      - name: Note an unsigned build
+        if: needs.version.outputs.sign_windows != 'true'
+        shell: pwsh
+        run: Write-Warning "Trusted Signing is not configured, so this build is UNSIGNED. It stays a run artifact; the version job refuses to publish it."
 
       - name: Package
         shell: pwsh
@@ -291,6 +379,39 @@ jobs:
             installer\windows\eustress-player.iss
           if ($LASTEXITCODE -ne 0) { throw "ISCC failed with exit code $LASTEXITCODE" }
           Copy-Item dist\windows\EustressPlayer-Setup.exe dist\ -Force
+
+      - name: Sign the installer
+        if: needs.version.outputs.sign_windows == 'true'
+        uses: azure/artifact-signing-action@v2.0.0
+        with:
+          azure-tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          azure-client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          azure-client-secret: ${{ secrets.AZURE_CLIENT_SECRET }}
+          endpoint: ${{ vars.TRUSTED_SIGNING_ENDPOINT }}
+          signing-account-name: ${{ vars.TRUSTED_SIGNING_ACCOUNT }}
+          certificate-profile-name: ${{ vars.TRUSTED_SIGNING_PROFILE }}
+          files: ${{ github.workspace }}\dist\EustressPlayer-Setup.exe
+          file-digest: SHA256
+          timestamp-rfc3161: http://timestamp.acs.microsoft.com
+          timestamp-digest: SHA256
+
+      - name: Check the installer's signature
+        if: needs.version.outputs.sign_windows == 'true'
+        shell: pwsh
+        run: |
+          foreach ($f in @('dist\EustressPlayer-Setup.exe')) {
+            $sig = Get-AuthenticodeSignature $f
+            if ($sig.Status -ne 'Valid') { throw "$f signature is $($sig.Status): $($sig.StatusMessage)" }
+            "OK: $f signed by $($sig.SignerCertificate.Subject)"
+          }
+          # The zip was packed from the signed exe; check the copy inside it.
+          $zip = Get-Item dist\eustress-player-v*-windows-x64.zip
+          $out = "$env:RUNNER_TEMP\zipcheck"
+          7z x $zip.FullName "-o$out" eustress-client.exe -r -y | Out-Null
+          $inner = Get-ChildItem $out -Recurse -Filter eustress-client.exe | Select-Object -First 1
+          $sig = Get-AuthenticodeSignature $inner.FullName
+          if ($sig.Status -ne 'Valid') { throw "the zip's eustress-client.exe signature is $($sig.Status)" }
+          "OK: the zip carries the signed eustress-client.exe"
 
       - uses: actions/upload-artifact@v4
         with:
@@ -352,7 +473,36 @@ jobs:
           kill "$PID"
           echo "OK: still running after 8s."
 
+      # Eustress LLC's Developer ID certificate, into a keychain that lives
+      # only for this job. The identity's name goes to the steps below.
+      - name: Import the Developer ID certificate
+        if: needs.version.outputs.sign_macos == 'true'
+        env:
+          P12_BASE64: ${{ secrets.APPLE_DEVELOPER_ID_P12 }}
+          P12_PASSWORD: ${{ secrets.APPLE_DEVELOPER_ID_P12_PASSWORD }}
+        run: |
+          KEYCHAIN="$RUNNER_TEMP/signing.keychain-db"
+          KEYCHAIN_PASSWORD=$(openssl rand -hex 24)
+          printf '%s' "$P12_BASE64" | base64 --decode > "$RUNNER_TEMP/devid.p12"
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          security set-keychain-settings -lut 3600 "$KEYCHAIN"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          security import "$RUNNER_TEMP/devid.p12" -k "$KEYCHAIN" -P "$P12_PASSWORD" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple: -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN" > /dev/null
+          security list-keychains -d user -s "$KEYCHAIN" $(security list-keychains -d user | tr -d '"')
+          rm -f "$RUNNER_TEMP/devid.p12"
+          IDENTITY=$(security find-identity -v -p codesigning "$KEYCHAIN" | grep -o '"Developer ID Application: [^"]*"' | head -1 | tr -d '"')
+          if [ -z "$IDENTITY" ]; then
+            echo "::error::The certificate in APPLE_DEVELOPER_ID_P12 holds no 'Developer ID Application' identity."
+            exit 1
+          fi
+          echo "SIGNING_IDENTITY=$IDENTITY" >> "$GITHUB_ENV"
+          echo "SIGNING_KEYCHAIN=$KEYCHAIN" >> "$GITHUB_ENV"
+          echo "OK: signing as $IDENTITY"
+
       - name: Package DMG
+        env:
+          SIGN_MACOS: ${{ needs.version.outputs.sign_macos }}
         run: |
           pwsh installer/stage-player.ps1 -BinDir "$BIN_DIR" -OutDir player-stage
 
@@ -414,10 +564,53 @@ jobs:
           PLIST
           plutil -lint "$APP/Contents/Info.plist"
 
+          # Sign the executable, then the bundle that seals it, with the
+          # hardened runtime notarization requires and a secure timestamp.
+          if [ "$SIGN_MACOS" = "true" ]; then
+            codesign --force --options runtime --timestamp --keychain "$SIGNING_KEYCHAIN" \
+              --sign "$SIGNING_IDENTITY" "$APP/Contents/MacOS/eustress-client"
+            codesign --force --options runtime --timestamp --keychain "$SIGNING_KEYCHAIN" \
+              --sign "$SIGNING_IDENTITY" "$APP"
+            codesign --verify --strict --deep --verbose=2 "$APP"
+          else
+            echo "::warning::Developer ID signing is not configured, so this app is UNSIGNED. It stays a run artifact; the version job refuses to publish it."
+          fi
+
           # Drag-to-install: the image opens beside a link to Applications.
           ln -s /Applications dmg/Applications
-          hdiutil create -volname "Eustress Player" -srcfolder dmg -ov -format UDZO \
-            "dist/eustress-player-v${VERSION}-macos-arm64.dmg"
+          DMG="dist/eustress-player-v${VERSION}-macos-arm64.dmg"
+          hdiutil create -volname "Eustress Player" -srcfolder dmg -ov -format UDZO "$DMG"
+          if [ "$SIGN_MACOS" = "true" ]; then
+            codesign --force --timestamp --keychain "$SIGNING_KEYCHAIN" --sign "$SIGNING_IDENTITY" "$DMG"
+          fi
+
+      # Apple checks the signed image and issues a ticket; stapling attaches
+      # it, so Gatekeeper opens the Player even offline. Waits up to 30 min.
+      - name: Notarize the DMG
+        if: needs.version.outputs.sign_macos == 'true'
+        env:
+          API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          API_ISSUER_ID: ${{ secrets.APPLE_API_ISSUER_ID }}
+          API_KEY_P8_BASE64: ${{ secrets.APPLE_API_KEY_P8 }}
+        run: |
+          DMG="dist/eustress-player-v${VERSION}-macos-arm64.dmg"
+          KEY="$RUNNER_TEMP/AuthKey_${API_KEY_ID}.p8"
+          printf '%s' "$API_KEY_P8_BASE64" | base64 --decode > "$KEY"
+          xcrun notarytool submit "$DMG" --key "$KEY" --key-id "$API_KEY_ID" --issuer "$API_ISSUER_ID" \
+            --wait --timeout 30m --output-format json > "$RUNNER_TEMP/notary.json" || true
+          cat "$RUNNER_TEMP/notary.json"
+          STATUS=$(plutil -extract status raw -o - "$RUNNER_TEMP/notary.json" 2>/dev/null || echo unknown)
+          if [ "$STATUS" != "Accepted" ]; then
+            ID=$(plutil -extract id raw -o - "$RUNNER_TEMP/notary.json" 2>/dev/null || true)
+            [ -n "$ID" ] && xcrun notarytool log "$ID" --key "$KEY" --key-id "$API_KEY_ID" --issuer "$API_ISSUER_ID" || true
+            rm -f "$KEY"
+            echo "::error::Apple did not accept the DMG for notarization (status: $STATUS)."
+            exit 1
+          fi
+          rm -f "$KEY"
+          xcrun stapler staple "$DMG"
+          xcrun stapler validate "$DMG"
+          echo "OK: notarized and stapled"
 
       # Opens the finished image the way a user does and checks what they see:
       # the app, a link to Applications, the assets, and this release's version.
@@ -449,7 +642,22 @@ jobs:
             | grep -qx "eustress-player" || fail "Info.plist does not register the eustress-player:// scheme."
           ARCHS=$(lipo -archs "$BIN")
           [ "$ARCHS" = "arm64" ] || fail "The executable is '${ARCHS}', want 'arm64'."
+          # Signed: the seal holds, and Gatekeeper accepts the image and the
+          # app as a downloaded copy would be judged.
+          if [ "$SIGN_MACOS" = "true" ]; then
+            codesign --verify --strict --deep --verbose=2 "$APP" || fail "The app's signature does not verify."
+            spctl --assess --type execute --verbose "$APP" || fail "Gatekeeper rejects the app."
+            spctl --assess --type open --context context:primary-signature --verbose "$DMG" \
+              || fail "Gatekeeper rejects the DMG."
+            xcrun stapler validate "$DMG" || fail "The DMG carries no notarization ticket."
+          fi
           echo "OK: $(basename "$DMG") opens to the app and a link to Applications."
+        env:
+          SIGN_MACOS: ${{ needs.version.outputs.sign_macos }}
+
+      - name: Remove the signing keychain
+        if: always() && needs.version.outputs.sign_macos == 'true'
+        run: security delete-keychain "$RUNNER_TEMP/signing.keychain-db" || true
 
       - uses: actions/upload-artifact@v4
         with:
