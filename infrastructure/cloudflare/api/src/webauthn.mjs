@@ -408,10 +408,37 @@ export function refusal(code, detail) {
 
 const asRefusal = (e) => refusal(e instanceof WebauthnError ? e.code : 'bad_request', e?.message);
 
+/// An Android app's origin, as the platform writes it in the client data of a
+/// passkey it lets that app use: `android:apk-key-hash:` and the unpadded
+/// base64url of the SHA-256 of the app's signing certificate (32 bytes, 43
+/// characters).
+const APP_ORIGIN_PREFIX = 'android:apk-key-hash:';
+const APP_ORIGIN = /^android:apk-key-hash:[A-Za-z0-9_-]{43}$/;
+
+/// The native apps `PASSKEY_APP_ORIGINS` names (comma separated), each exactly
+/// an `android:apk-key-hash:` origin whose hash is canonical base64url of 32
+/// bytes. Anything else is dropped, so a typo fails closed.
+function passkeyAppOrigins(env) {
+  const origins = new Set();
+  for (const raw of String(env?.PASSKEY_APP_ORIGINS || '').split(',')) {
+    const entry = raw.trim();
+    if (!APP_ORIGIN.test(entry)) continue;
+    const hash = fromBase64url(entry.slice(APP_ORIGIN_PREFIX.length), 32);
+    if (hash && hash.length === 32) origins.add(entry);
+  }
+  return origins;
+}
+
 /// The relying party this deployment is: `PASSKEY_RP_ID` and the site origins
 /// `PASSKEY_ORIGINS` names (comma separated). Null when either is missing, or
 /// no listed origin is the RP id or a subdomain of it on https (or on
 /// http://localhost, for a local site).
+///
+/// `appOrigins`: the native apps `PASSKEY_APP_ORIGINS` names, which may sign IN
+/// with a passkey and nothing more. A passkey is added only on the website, so
+/// a registration checks `origins` alone; a sign-in checks `assertionOrigins`.
+/// The app is also named by the RP host's /.well-known/assetlinks.json, without
+/// which the platform does not offer the site's passkeys to it.
 export function passkeyConfig(env) {
   const rpId = String(env?.PASSKEY_RP_ID || '').trim().toLowerCase();
   if (!/^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)*$/.test(rpId) || rpId.length > 253) return null;
@@ -424,7 +451,8 @@ export function passkeyConfig(env) {
     if (secure && (host === rpId || host.endsWith(`.${rpId}`))) origins.add(url.origin);
   }
   if (!origins.size) return null;
-  return { rpId, origins };
+  const appOrigins = passkeyAppOrigins(env);
+  return { rpId, origins, appOrigins, assertionOrigins: new Set([...origins, ...appOrigins]) };
 }
 
 function checkClientData(bytes, { type, challenge, origins }) {

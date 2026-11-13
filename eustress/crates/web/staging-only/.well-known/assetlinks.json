@@ -1,0 +1,12 @@
+[
+  {
+    "relation": ["delegate_permission/common.get_login_creds"],
+    "target": {
+      "namespace": "android_app",
+      "package_name": "dev.eustress.player.debug",
+      "sha256_cert_fingerprints": [
+        "0F:9D:1A:23:8C:D2:14:AA:0E:0D:DF:6B:62:E7:29:99:C9:35:98:37:9E:93:13:81:97:68:8F:03:2F:64:AD:8E"
+      ]
+    }
+  }
+]

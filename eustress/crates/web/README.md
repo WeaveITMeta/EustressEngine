@@ -108,6 +108,11 @@ wrangler pages deploy dist --project-name eustress --branch main
 
 Output is in `dist/`, served by Cloudflare Pages at eustress.dev.
 
+Build `dist` fresh for production. The staging script
+(`eustress/scripts/browser-player-staging.sh`) adds staging-only files, such
+as `dist/.well-known/assetlinks.json` (see `staging-only/README.md`); a `dist`
+it built never goes to branch `main`.
+
 The second step matters for anything that reads the site without running
 WebAssembly: AI agents, link unfurlers, and search engines before their
 renderer gets to a page. The Trunk shell has an empty `#app`, so on its own a

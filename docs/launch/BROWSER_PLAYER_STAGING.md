@@ -118,7 +118,10 @@ eustress/scripts/browser-player-staging.sh
 ```
 
 That builds the WebGPU Player, packages `/player`, builds the site, and copies
-the Player into `eustress/crates/web/dist/player`. It does not deploy.
+the Player into `eustress/crates/web/dist/player`. It also copies
+`eustress/crates/web/staging-only/.well-known/assetlinks.json` (the debug
+Android Player's staging passkey link) into `dist/.well-known/`, so that
+`dist` is staging's only. It does not deploy.
 
 WebGL2 (browsers without WebGPU) is a second build:
 

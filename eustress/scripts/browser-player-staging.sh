@@ -125,6 +125,14 @@ cp -a "$STAGE/player" dist/player
 # The local test page pastes a join link. It is not part of the site.
 rm -f dist/player/test.html
 
+# Staging-only files (crates/web/staging-only/README.md): assetlinks.json lets
+# the debug Android Player use staging passkeys. Production never gets it.
+STAGING_ONLY="$WEB/staging-only/.well-known"
+node -e 'JSON.parse(require("fs").readFileSync(process.argv[1], "utf8"))' "$STAGING_ONLY/assetlinks.json"
+mkdir -p dist/.well-known
+cp "$STAGING_ONLY/assetlinks.json" dist/.well-known/assetlinks.json
+echo "staged dist/.well-known/assetlinks.json (staging only; never deploy this dist to main)"
+
 echo "staged at $WEB/dist/player"
 if [[ "$DEPLOY" != 1 ]]; then
   echo "not deployed. Staging deploy, and no other, is:"

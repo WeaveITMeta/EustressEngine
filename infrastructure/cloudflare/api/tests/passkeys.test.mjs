@@ -227,6 +227,151 @@ test('a passkey made or used on another site, for another RP id, or without UP o
   assert.equal((await signIn(env, auth)).status, 200, 'and the passkey itself still works');
 });
 
+// ── A native app's sign-in (the Android Player) ──────────────────────────────
+
+/// The staging Android Player's origin: the debug keystore's certificate SHA-256
+/// 0F:9D:1A:23:8C:D2:14:AA:0E:0D:DF:6B:62:E7:29:99:C9:35:98:37:9E:93:13:81:97:68:8F:03:2F:64:AD:8E.
+const APP_HASH = 'D50aI4zSFKoODd9rYucpmck1mDeekxOBl2iPAy9krY4';
+const APP = `android:apk-key-hash:${APP_HASH}`;
+
+/// Client data as Android writes it for an app: the app's origin and package, no crossOrigin.
+const androidClientData = (challenge, origin, type = 'webauthn.get') =>
+  new Uint8Array(Buffer.from(JSON.stringify({ type, challenge, origin, androidPackageName: 'dev.eustress.player.debug' })));
+
+/// A sign-in whose client data names `origin`, as an app sends it: no Origin header.
+async function appSignIn(env, auth, origin) {
+  const begun = await post(env, '/api/passkeys/login/begin', {});
+  assert.equal(begun.status, 200, JSON.stringify(begun.body));
+  return signIn(env, auth, { begun, bend: { clientData: androidClientData(begun.body.challenge, origin) } });
+}
+
+test('the fingerprint and the app origin agree', () => {
+  const fingerprint = '0F:9D:1A:23:8C:D2:14:AA:0E:0D:DF:6B:62:E7:29:99:C9:35:98:37:9E:93:13:81:97:68:8F:03:2F:64:AD:8E';
+  assert.equal(Buffer.from(fingerprint.replaceAll(':', ''), 'hex').toString('base64url'), APP_HASH);
+});
+
+test('a listed Android app signs in with a passkey added on the website, with no Origin header', async () => {
+  const { env, k0, token } = await environment({ PASSKEY_APP_ORIGINS: APP });
+  const auth = new SoftAuthenticator(-7);
+  assert.equal((await addPasskey(env, token, k0, auth)).status, 200);
+  const signed = await appSignIn(env, auth, APP);
+  assert.equal(signed.status, 200, JSON.stringify(signed.body));
+  assert.equal(signed.body.user.id, OWNER);
+  assert.equal(signed.body.amr, 'passkey');
+  assert.equal(claims(signed.body.token).amr, 'passkey', 'an app session is a passkey session: no key changes');
+  assert.equal(signed.headers.get('Access-Control-Allow-Origin'), SITE, 'no Origin header: CORS names the site, and nothing is refused for it');
+  // Every other check still holds for the app: the RP, UV, the challenge, the user handle, the sign count.
+  for (const [bend, status, code] of [
+    [{ rpId: 'evil.example' }, 403, 'rp_id_mismatch'],
+    [{ flags: { uv: false } }, 403, 'user_verification_required'],
+    [{ flags: { up: false } }, 403, 'user_presence_required'],
+  ]) {
+    const begun = await post(env, '/api/passkeys/login/begin', {});
+    const r = await signIn(env, auth, { begun, bend: { ...bend, clientData: androidClientData(begun.body.challenge, APP) } });
+    assert.equal(r.status, status, `${JSON.stringify(bend)}: ${JSON.stringify(r.body)}`);
+    assert.equal(r.body.code, code);
+  }
+  const wrongChallenge = await signIn(env, auth, {
+    begun: await post(env, '/api/passkeys/login/begin', {}),
+    bend: { clientData: androidClientData(b64url(crypto.randomBytes(32)), APP) },
+  });
+  assert.equal(wrongChallenge.body.code, 'challenge_mismatch');
+  const begunForType = await post(env, '/api/passkeys/login/begin', {});
+  const wrongType = await signIn(env, auth, { begun: begunForType, bend: { clientData: androidClientData(begunForType.body.challenge, APP, 'webauthn.create') } });
+  assert.equal(wrongType.body.code, 'client_data_type');
+  const again = await appSignIn(env, auth, APP);
+  assert.equal(again.status, 200, 'and the passkey still signs the app in');
+  const replayed = await post(env, '/api/passkeys/login', again.request);
+  assert.equal(replayed.body.code, 'challenge_invalid', 'an app\'s challenge is spent like the site\'s');
+  const begunForCount = await post(env, '/api/passkeys/login/begin', {});
+  const backwards = await signIn(env, auth, { begun: begunForCount, bend: { signCount: 1, clientData: androidClientData(begunForCount.body.challenge, APP) } });
+  assert.equal(backwards.body.code, 'passkey_cloned', 'a sign count that goes backwards is refused from the app too');
+  // The user handle must name the account the passkey index names, from the app as from the site.
+  const begunForHandle = await post(env, '/api/passkeys/login/begin', {});
+  const otherHandle = await signIn(env, auth, {
+    begun: begunForHandle,
+    bend: { userHandle: b64url(Buffer.from(OTHER)), clientData: androidClientData(begunForHandle.body.challenge, APP) },
+  });
+  assert.equal(otherHandle.status, 401, JSON.stringify(otherHandle.body));
+  assert.equal(otherHandle.body.code, 'passkey_not_accepted');
+});
+
+test('an Android app that is not listed is refused, and so is any app where none is listed', async () => {
+  const unlisted = `android:apk-key-hash:${b64url(crypto.randomBytes(32))}`;
+  for (const extra of [{ PASSKEY_APP_ORIGINS: APP }, {}]) {
+    const { env, k0, token } = await environment(extra);
+    const auth = new SoftAuthenticator(-7);
+    assert.equal((await addPasskey(env, token, k0, auth)).status, 200);
+    for (const origin of extra.PASSKEY_APP_ORIGINS ? [unlisted] : [APP, unlisted]) {
+      const r = await appSignIn(env, auth, origin);
+      assert.equal(r.status, 403, `${origin}: ${JSON.stringify(r.body)}`);
+      assert.equal(r.body.code, 'passkey_origin_not_allowed');
+      assert.equal(r.body.token, undefined);
+    }
+  }
+});
+
+test('a malformed PASSKEY_APP_ORIGINS entry is ignored: an app sending that exact text is refused', async () => {
+  const malformed = [
+    `${APP}=`, // padded
+    `android:apk-key-hash:${APP_HASH.slice(0, 42)}`, // 42 characters
+    `android:apk-key-hash:${APP_HASH}A`, // 44 characters
+    `android:apk-key-hash:${APP_HASH.slice(0, 42)}5`, // 43 characters, not canonical
+    'android:apk-key-hash:D50aI4zSFKoODd9rYucpmck1mDeekxOBl2iPAy9k+Y4', // standard base64, not base64url
+    `ANDROID:apk-key-hash:${APP_HASH}`,
+    `android:apk-key-hash: ${APP_HASH}`,
+    `android:apk-key-hash:${APP_HASH}/`,
+    `ios:bundle-id:dev.eustress.player`,
+    `https://evil.example`,
+    `*`,
+  ];
+  for (const entry of malformed) {
+    const config = passkeyConfig({ PASSKEY_RP_ID: 'eustress.dev', PASSKEY_ORIGINS: SITE, PASSKEY_APP_ORIGINS: `${entry}` });
+    assert.deepEqual([...config.appOrigins], [], entry);
+    assert.deepEqual([...config.assertionOrigins], [SITE], entry);
+  }
+  // Mixed with a good one, only the good one is kept; spaces around a comma are not part of an entry.
+  const mixed = passkeyConfig({ PASSKEY_RP_ID: 'eustress.dev', PASSKEY_ORIGINS: SITE, PASSKEY_APP_ORIGINS: `${malformed.join(',')}, ${APP} ,` });
+  assert.deepEqual([...mixed.appOrigins], [APP]);
+  // An app origin never stands in for the website's: without PASSKEY_ORIGINS there are no passkeys.
+  assert.equal(passkeyConfig({ PASSKEY_RP_ID: 'eustress.dev', PASSKEY_APP_ORIGINS: APP }), null);
+  assert.equal(passkeyConfig({ PASSKEY_RP_ID: 'eustress.dev', PASSKEY_ORIGINS: APP, PASSKEY_APP_ORIGINS: APP }), null, 'an app origin in PASSKEY_ORIGINS is not a site');
+
+  // Through the route: the malformed entry is listed, and the app sends exactly that text.
+  const { env, k0, token } = await environment({ PASSKEY_APP_ORIGINS: malformed[0] });
+  const auth = new SoftAuthenticator(-7);
+  assert.equal((await addPasskey(env, token, k0, auth)).status, 200);
+  const r = await appSignIn(env, auth, malformed[0]);
+  assert.equal(r.status, 403, JSON.stringify(r.body));
+  assert.equal(r.body.code, 'passkey_origin_not_allowed');
+});
+
+test('a listed app origin cannot add a passkey: adding stays on the website', async () => {
+  const { env, k0, token } = await environment({ PASSKEY_APP_ORIGINS: APP });
+  const auth = new SoftAuthenticator(-7);
+  const viaOrigin = await addPasskey(env, token, k0, auth, { bend: { origin: APP } });
+  assert.equal(viaOrigin.status, 403, JSON.stringify(viaOrigin.body));
+  assert.equal(viaOrigin.body.code, 'passkey_origin_not_allowed');
+  const begun = await post(env, '/api/passkeys/add/begin', {}, token);
+  const shaped = await addPasskey(env, token, k0, auth, { begun, bend: { clientData: androidClientData(begun.body.challenge, APP, 'webauthn.create') } });
+  assert.equal(shaped.status, 403, JSON.stringify(shaped.body));
+  assert.equal(shaped.body.code, 'passkey_origin_not_allowed');
+  assert.equal(await ownerOf(env, auth.id), null);
+  assert.deepEqual((await objectState(env)).passkeys || [], [], 'nothing was added');
+});
+
+test('with an app listed, an https origin off the RP domain is still refused at sign-in', async () => {
+  const { env, k0, token } = await environment({ PASSKEY_APP_ORIGINS: APP });
+  const auth = new SoftAuthenticator(-7);
+  assert.equal((await addPasskey(env, token, k0, auth)).status, 200);
+  for (const origin of ['https://evil.example', 'https://staging.eustress-cbb.pages.dev', 'http://eustress.dev', 'https://eustress.dev.evil.example', APP_HASH, `android:apk-key-hash:${APP_HASH}/`]) {
+    const r = await signIn(env, auth, { bend: { origin } });
+    assert.equal(r.status, 403, `${origin}: ${JSON.stringify(r.body)}`);
+    assert.equal(r.body.code, 'passkey_origin_not_allowed', origin);
+  }
+  assert.equal((await signIn(env, auth)).status, 200, 'the website still signs in');
+});
+
 test('the attested credential id must be the raw_id, and id and raw_id must agree', async () => {
   const { env, k0, token } = await environment();
   const auth = new SoftAuthenticator(-7);
@@ -1037,9 +1182,18 @@ test('wrangler.toml sets the relying party for production and for staging, each 
   const stagingAt = text.indexOf('[env.staging]');
   const sections = { production: text.slice(0, stagingAt), staging: text.slice(stagingAt) };
   const vars = (section) => Object.fromEntries([...section.matchAll(/^(PASSKEY_[A-Z_]+) = "([^"]*)"/gm)].map((m) => [m[1], m[2]]));
+  // Production names no native app: the Player has no release signing key yet.
   assert.deepEqual(vars(sections.production), { PASSKEY_RP_ID: 'eustress.dev', PASSKEY_ORIGINS: 'https://eustress.dev' });
-  assert.deepEqual(vars(sections.staging), { PASSKEY_RP_ID: 'staging.eustress-cbb.pages.dev', PASSKEY_ORIGINS: 'https://staging.eustress-cbb.pages.dev' });
+  assert.doesNotMatch(sections.production, /^\s*PASSKEY_APP_ORIGINS\s*=/m);
+  // Staging names the debug Android Player only.
+  assert.deepEqual(vars(sections.staging), {
+    PASSKEY_RP_ID: 'staging.eustress-cbb.pages.dev',
+    PASSKEY_ORIGINS: 'https://staging.eustress-cbb.pages.dev',
+    PASSKEY_APP_ORIGINS: APP,
+  });
   for (const section of Object.values(sections)) assert.ok(passkeyConfig(vars(section)), 'each environment\'s values make a relying party');
+  assert.deepEqual([...passkeyConfig(vars(sections.staging)).appOrigins], [APP], 'the staging value is well formed, so it is not dropped');
+  assert.deepEqual([...passkeyConfig(vars(sections.production)).appOrigins], []);
   // The passkey index object is bound and migrated in each environment, once, under its own tag.
   for (const [name, section] of Object.entries(sections)) {
     assert.match(section, /name = "PASSKEY_INDEX"\nclass_name = "PasskeyIndex"/, `${name} binds PASSKEY_INDEX`);

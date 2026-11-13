@@ -437,6 +437,8 @@ LOGIN_ORIGINS = "https://api.eustress.dev"
 # route answers 503. A passkey made on one environment never works on another.
 PASSKEY_RP_ID = "eustress.dev"
 PASSKEY_ORIGINS = "https://eustress.dev"
+# PASSKEY_APP_ORIGINS (native apps that may sign in with a passkey; see [env.staging.vars])
+# is not set here: production names no app until the Player has a release signing key.
 # Optional JSON overriding any key of DEFAULT_THRESHOLDS in src/moderation.mjs,
 # for example '{"hard_hold":0.30,"audit_rate":0.05}'. Unknown keys and
 # non-numeric values are ignored; the defaults are the calibrated baseline.
@@ -647,6 +649,16 @@ LOGIN_ORIGINS = "https://api-staging.eustress.dev"
 # Passkeys on the staging site only: a staging passkey never signs in to production.
 PASSKEY_RP_ID = "staging.eustress-cbb.pages.dev"
 PASSKEY_ORIGINS = "https://staging.eustress-cbb.pages.dev"
+# Native apps that may SIGN IN with a staging passkey (never add one; that stays on the
+# website): comma separated, each exactly android:apk-key-hash:<base64url of the SHA-256
+# of the signing certificate>; anything else is ignored (src/webauthn.mjs). This is the
+# Android Player DEBUG build (dev.eustress.player.debug, eustress/crates/player-android/
+# debug.keystore, alias androiddebugkey, SHA-256 0F:9D:1A:23:...:64:AD:8E). That keystore
+# is in the repository, so anyone can sign an app with it: it is for staging only, and
+# never goes in production's [vars]. The staging site names the same app in
+# /.well-known/assetlinks.json (eustress/crates/web/staging-only/), without which
+# Android does not offer staging passkeys to it.
+PASSKEY_APP_ORIGINS = "android:apk-key-hash:D50aI4zSFKoODd9rYucpmck1mDeekxOBl2iPAy9krY4"
 # Links in review emails (unsubscribe, review details). Production defaults to
 # api.eustress.dev and eustress.dev in src/moderation.mjs.
 PUBLIC_API_ORIGIN = "https://api-staging.eustress.dev"

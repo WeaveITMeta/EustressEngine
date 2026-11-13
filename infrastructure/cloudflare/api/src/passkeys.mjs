@@ -8,7 +8,8 @@
 //   POST /api/passkeys/remove/begin  a challenge to remove one (identity-file session)
 //   POST /api/passkeys/remove        remove one: the identity key's signature
 //   POST /api/passkeys/login/begin   options for navigator.credentials.get (no session)
-//   POST /api/passkeys/login         sign in to the website with a passkey (no session)
+//   POST /api/passkeys/login         sign in with a passkey (no session): the website, or a
+//                                    native app PASSKEY_APP_ORIGINS names (sign-in only)
 //
 // A passkey is a second key on the account. The identity file stays the master
 // key: adding or removing a passkey, and replacing the identity file, need an
@@ -223,7 +224,9 @@ async function login(request, env, config, deps) {
   try { held = JSON.parse(stored); } catch { return invalid(); }
   if (held?.purpose !== 'passkey_login' || !(Date.parse(held.expires_at) > Date.now())) return invalid();
 
-  const checked = await checkAssertion({ credential: body.credential, challenge: body.challenge, rpId: config.rpId, origins: config.origins });
+  // A sign-in may come from the website or from a native app PASSKEY_APP_ORIGINS
+  // names (the Android Player). Adding a passkey checks the website's origins only.
+  const checked = await checkAssertion({ credential: body.credential, challenge: body.challenge, rpId: config.rpId, origins: config.assertionOrigins });
   if (!checked.ok) return json({ error: checked.error, code: checked.code }, checked.status, cors);
 
   // The index names the account; the user handle the authenticator signed in with
