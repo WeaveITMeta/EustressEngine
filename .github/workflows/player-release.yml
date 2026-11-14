@@ -942,15 +942,15 @@ jobs:
             }
             if (process.env.GITHUB_EVENT_NAME !== "push") {
               if (!m.changelog_url || /\/releases\/tag\/player-v/.test(m.changelog_url)) {
-                console.error("::error::a dispatched run's changelog_url must not point at a player-v tag; there is no tag");
+                console.error("::error::the changelog_url of a dispatched run must not point at a player-v tag; there is no tag");
                 process.exit(1);
               }
               if (!/\/actions\/runs\/\d+$/.test(m.changelog_url)) {
-                console.error("::error::a dispatched run's changelog_url must be the workflow run that built this publish");
+                console.error("::error::the changelog_url of a dispatched run must be the workflow run that built this publish");
                 process.exit(1);
               }
             } else if (!new RegExp("/releases/tag/player-v" + process.env.VERSION + "$").test(m.changelog_url)) {
-              console.error("::error::a tag push's changelog_url must be the player-v tag release");
+              console.error("::error::the changelog_url of a tag push must be the player-v tag release");
               process.exit(1);
             }
             console.log("manifest complete:", Object.keys(m.platforms).join(", "), "changelog:", m.changelog_url);
