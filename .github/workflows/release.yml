@@ -383,7 +383,7 @@ jobs:
   build-linux:
     needs: version
     runs-on: ubuntu-22.04 # oldest supported glibc, so the binary runs widely
-    timeout-minutes: 240
+    timeout-minutes: 330 # the engine crate swaps heavily
     env:
       CARGO_PROFILE_RELEASE_LTO: "off"
       # Keep the symbol table through the checks below (the static-initializer
@@ -422,7 +422,11 @@ jobs:
             DIR=/mnt
           fi
           SWAP="${DIR%/}/swapfile"
-          sudo fallocate -l 24G "$SWAP"
+          # 24 GB was not enough: compiling the engine crate filled 15 GB of
+          # RAM and all 24 GB of swap and was still growing when the runner
+          # was shut down (run 43546212336). Windows finished with 16 GB of
+          # RAM and a 40 GB pagefile, so Linux gets more than that in total.
+          sudo fallocate -l 56G "$SWAP"
           sudo chmod 600 "$SWAP"
           sudo mkswap "$SWAP"
           sudo swapon "$SWAP"
