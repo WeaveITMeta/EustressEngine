@@ -386,7 +386,14 @@ jobs:
     timeout-minutes: 240
     env:
       CARGO_PROFILE_RELEASE_LTO: "off"
-      CARGO_BUILD_JOBS: 2
+      # Keep the symbol table through the checks below (the static-initializer
+      # guard reads it); Package strips it.
+      CARGO_PROFILE_RELEASE_STRIP: "debuginfo"
+      # One job, so the engine crate's code generation runs one LLVM worker,
+      # not two. With two, the runner was shut down 17 minutes into that
+      # crate's codegen even with 15 GB of RAM and 23 GB of swap (run
+      # 43534100455).
+      CARGO_BUILD_JOBS: 1
     steps:
       - uses: actions/checkout@v4
 
@@ -438,7 +445,13 @@ jobs:
 
       - name: Build
         working-directory: eustress
-        run: cargo build --release --locked --package eustress-engine
+        # Memory every 30 seconds beside the build, so a runner that dies
+        # mid-build leaves a record of how close it was.
+        run: |
+          ( while sleep 30; do echo "mem: $(free -m | awk '/^Mem:/{printf "used %sM avail %sM", $3, $7} /^Swap:/{printf " swap %sM", $3}')"; done ) &
+          MEMLOG=$!
+          cargo build --release --locked --package eustress-engine
+          kill "$MEMLOG" || true
         env:
           # The system linker, not mold: under mold, Luau's C++ static
           # initializers were dropped and the Player died of SIGFPE at startup.
@@ -470,7 +483,8 @@ jobs:
         run: |
           bash eustress/crates/engine/assets/linux/generate-icons.sh
           mkdir -p stage/icons dist
-          cp eustress/target/release/eustress-engine stage/
+          # The build kept its symbols for the checks; what ships is stripped.
+          strip --strip-all -o stage/eustress-engine eustress/target/release/eustress-engine
           cp -r eustress/crates/engine/assets stage/assets
           git ls-files eustress/crates/common/assets \
             | grep -Eiv '(^|/)scripts/|\.(fbx|py|pyc|blend[0-9]*)$' \
