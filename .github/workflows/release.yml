@@ -13,8 +13,14 @@ name: Release
 # Required repository secrets:
 #   CLOUDFLARE_API_TOKEN   scoped to Object Read & Write on eustress-downloads
 #   CLOUDFLARE_ACCOUNT_ID
-# Optional, and the workflow says so when absent:
-#   WINDOWS_CERT_PFX / WINDOWS_CERT_PASSWORD   Authenticode signing
+# Windows signing, Authenticode (required for a signed publish):
+#   WINDOWS_CERT_PFX / WINDOWS_CERT_PASSWORD
+# macOS signing and notarization are not built into this workflow yet, so a
+# signed publish is refused until they are. Nothing reaches R2 unsigned
+# without asking (McKale, 2026-11-13); the one way past it is a dispatched
+# run with unsigned=true, which publishes Windows and Linux and leaves macOS
+# out. A build-only run goes ahead unsigned and keeps its files as run
+# artifacts.
 
 on:
   push:
@@ -25,12 +31,21 @@ on:
         description: "Version to build (without the leading v)"
         required: true
       publish:
-        description: "Publish to R2 and create a GitHub release. Off: build only; the installers stay as run artifacts."
+        description: "Publish to R2. Off: build only; the installers stay as run artifacts. A GitHub Release is created only for a v* tag push."
+        type: boolean
+        default: false
+      unsigned:
+        description: "Publish UNSIGNED Windows and Linux builds to production and leave macOS out (not built, not in latest.json). Every Windows downloader sees an unknown-publisher warning. Never on a tag push."
         type: boolean
         default: false
 
 permissions:
   contents: write
+
+# One Studio release at a time.
+concurrency:
+  group: studio-release
+  cancel-in-progress: false
 
 env:
   CARGO_TERM_COLOR: always
@@ -53,6 +68,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.v.outputs.version }}
+      include_macos: ${{ steps.signing.outputs.include_macos }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -65,6 +81,37 @@ jobs:
           else
             echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
           fi
+
+      # A publish is signed, or it is the unsigned exception McKale allowed
+      # (2026-11-13): a dispatched run with unsigned=true that publishes
+      # Windows and Linux and leaves macOS out. A tag push is never unsigned.
+      - id: signing
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          PUBLISH: ${{ inputs.publish }}
+          UNSIGNED: ${{ inputs.unsigned }}
+          HAS_PFX: ${{ secrets.WINDOWS_CERT_PFX != '' }}
+          HAS_PFX_PASSWORD: ${{ secrets.WINDOWS_CERT_PASSWORD != '' }}
+        run: |
+          if [ "$UNSIGNED" = "true" ]; then
+            if [ "$EVENT_NAME" = "push" ]; then
+              echo "::error::unsigned is for a dispatched run only. A v* tag push is always signed."
+              exit 1
+            fi
+            echo "include_macos=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::UNSIGNED publish: Windows and Linux only, unsigned; macOS is not built and not listed."
+            exit 0
+          fi
+          echo "include_macos=true" >> "$GITHUB_OUTPUT"
+          missing=""
+          [ "$HAS_PFX" = "true" ] || missing="$missing secret WINDOWS_CERT_PFX,"
+          [ "$HAS_PFX_PASSWORD" = "true" ] || missing="$missing secret WINDOWS_CERT_PASSWORD,"
+          missing="$missing macOS Developer ID signing and notarization (not built into release.yml yet),"
+          if [ "$EVENT_NAME" = "push" ] || [ "$PUBLISH" = "true" ]; then
+            echo "::error::Refusing to publish an unsigned Studio. Missing:${missing%,}. A dispatched run with unsigned=true publishes Windows and Linux unsigned."
+            exit 1
+          fi
+          echo "::warning::Build only, unsigned (missing:${missing%,}). The files stay as run artifacts."
 
       # RELEASE.md's promotion model (pre-release checklist -> fast-forward
       # Core -> tag) assumes releases only ever ship from Core. A tag pushed
@@ -101,7 +148,9 @@ jobs:
   build-windows:
     needs: version
     runs-on: windows-latest
-    timeout-minutes: 120
+    # A cold engine build reached the end of the engine crate at 85 minutes;
+    # paging adds to that.
+    timeout-minutes: 240
     env:
       # The engine crate is the largest compile in the workspace. With thin LTO
       # and parallel jobs, rustc ran the 16 GB runner out of memory
@@ -110,6 +159,17 @@ jobs:
       CARGO_PROFILE_RELEASE_LTO: "off"
       CARGO_BUILD_JOBS: 2
     steps:
+      # Even with LTO off and two jobs, the engine crate exhausted the
+      # runner's commit limit ("memory allocation of 18432 bytes failed",
+      # runs 38987790108 and 39053595248). A large pagefile on the runner's
+      # spare D: disk raises it.
+      - name: Enlarge the pagefile
+        uses: al-cheb/configure-pagefile-action@9b6da52fb72a3c6147c1aad2df22d8d905681adc # v1.5
+        with:
+          minimum-size: 16GB
+          maximum-size: 40GB
+          disk-root: "D:"
+
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
@@ -195,6 +255,8 @@ jobs:
   # ─────────────────────────────────────────────────────────────────────
   build-macos-arm64:
     needs: version
+    # An unsigned run leaves macOS out: not built, not listed.
+    if: needs.version.outputs.include_macos == 'true'
     runs-on: macos-15 # Apple Silicon; GitHub retired the macos-14 arm64 runner
     timeout-minutes: 90
     steps:
@@ -321,7 +383,7 @@ jobs:
   build-linux:
     needs: version
     runs-on: ubuntu-22.04 # oldest supported glibc, so the binary runs widely
-    timeout-minutes: 90
+    timeout-minutes: 240
     env:
       CARGO_PROFILE_RELEASE_LTO: "off"
       CARGO_BUILD_JOBS: 2
@@ -338,6 +400,27 @@ jobs:
                       /usr/local/share/boost "$AGENT_TOOLSDIRECTORY" || true
           sudo apt-get clean
           df -h /
+
+      # The engine crate starved the 16 GB runner even with LTO off and two
+      # jobs: "The hosted runner lost communication with the server" 75
+      # minutes in (run 39053595248). A large swapfile, on whichever disk
+      # has more room, keeps rustc alive instead of the runner dying.
+      - name: Add swap
+        run: |
+          free -h
+          sudo swapoff -a || true
+          sudo rm -f /mnt/swapfile /swapfile || true
+          DIR=/
+          if [ -d /mnt ] && [ "$(df --output=avail -k /mnt | tail -1)" -gt "$(df --output=avail -k / | tail -1)" ]; then
+            DIR=/mnt
+          fi
+          SWAP="${DIR%/}/swapfile"
+          sudo fallocate -l 24G "$SWAP"
+          sudo chmod 600 "$SWAP"
+          sudo mkswap "$SWAP"
+          sudo swapon "$SWAP"
+          free -h
+          df -h / /mnt || true
 
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
@@ -416,7 +499,15 @@ jobs:
     needs: [version, build-windows, build-macos-arm64, build-linux]
     # A tag push publishes. A dispatched run publishes only when asked, so a
     # manual run can prove the three builds before anything goes public.
-    if: github.event_name == 'push' || inputs.publish
+    # macOS may be skipped only by an unsigned run, which leaves it out.
+    if: >-
+      !cancelled() &&
+      (github.event_name == 'push' || inputs.publish) &&
+      needs.version.result == 'success' &&
+      needs.build-windows.result == 'success' &&
+      needs.build-linux.result == 'success' &&
+      (needs.build-macos-arm64.result == 'success' ||
+       (needs.build-macos-arm64.result == 'skipped' && needs.version.outputs.include_macos == 'false'))
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4
@@ -435,6 +526,7 @@ jobs:
         env:
           VERSION: ${{ needs.version.outputs.version }}
           DOWNLOAD_BASE: ${{ env.DOWNLOAD_BASE }}
+          INCLUDE_MACOS: ${{ needs.version.outputs.include_macos }}
         run: |
           sha()  { grep " $1\$" checksums.txt | awk '{print $1}'; }
           size() { stat -c%s "$1"; }
@@ -446,16 +538,33 @@ jobs:
 
           BASE="${DOWNLOAD_BASE}/v${VERSION}"
 
+          # A tag push names the GitHub Release for its tag. A dispatched run
+          # has no tag and creates no Release, so changelog_url is the
+          # workflow run that built the files.
+          if [ "$GITHUB_EVENT_NAME" != "push" ]; then
+            CHANGELOG_URL="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+          else
+            CHANGELOG_URL="https://github.com/WeaveITMeta/EustressEngine/releases/tag/v${VERSION}"
+          fi
+
+          # macOS is listed unless an unsigned run left it out; a missing DMG
+          # on any other run still fails the check below.
+          if [ "$INCLUDE_MACOS" = "false" ]; then
+            MAC_LINE=""
+          else
+            MAC_LINE="\"macos-arm64\": { \"file\": \"${MAC}\", \"url\": \"${BASE}/${MAC}\", \"sha256\": \"$(sha "$MAC")\", \"size_bytes\": $(size "$MAC" 2>/dev/null || echo 0), \"installer\": true },"
+          fi
+
           cat > latest.json <<JSON
           {
             "version": "${VERSION}",
             "date": "$(date -u +%Y-%m-%d)",
             "channel": "stable",
-            "changelog_url": "https://github.com/WeaveITMeta/EustressEngine/releases/tag/v${VERSION}",
+            "changelog_url": "${CHANGELOG_URL}",
             "platforms": {
               "windows-x64":           { "file": "${WIN}",   "url": "${BASE}/${WIN}",   "sha256": "$(sha "$WIN")",   "size_bytes": $(size "$WIN"),   "installer": false },
               "windows-x64-installer": { "file": "${SETUP}", "url": "${BASE}/${SETUP}", "sha256": "$(sha "$SETUP")", "size_bytes": $(size "$SETUP"), "installer": true },
-              "macos-arm64":           { "file": "${MAC}",   "url": "${BASE}/${MAC}",   "sha256": "$(sha "$MAC")",   "size_bytes": $(size "$MAC"),   "installer": true },
+              ${MAC_LINE}
               "linux-x64":             { "file": "${LIN}",   "url": "${BASE}/${LIN}",   "sha256": "$(sha "$LIN")",   "size_bytes": $(size "$LIN"),   "installer": false }
             }
           }
@@ -525,7 +634,10 @@ jobs:
           echo "::error::${URL} is not serving ${VERSION}. The upload reported success, so check the Worker route and the bucket binding."
           exit 1
 
+      # Only a tag has a Release. A dispatched run's files are listed by
+      # latest.json and kept as run artifacts.
       - uses: softprops/action-gh-release@v2
+        if: github.event_name == 'push'
         with:
           files: dist/*
           generate_release_notes: true
