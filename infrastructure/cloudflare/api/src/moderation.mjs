@@ -38,8 +38,11 @@ import { textPart, userMessage } from './xai.mjs';
 import { readAccountEmail } from './email_ops.mjs';
 import { prepareUserImage, storedImageVerdict, pngColourType, measurePngAlpha, sha256Hex as sha256OfImage, identOfObject, imageVerdictKey } from './user_images.mjs';
 export { identOfObject, imageVerdictKey } from './user_images.mjs';
-import { tagsForReview, listingTags, reviewChoosesTags, judgeTags, withTagsWrittenBack, sameTagSet, JUDGE_TAGS_MAX, personalInfoIn } from './tags.mjs';
+import { tagsForReview, listingTags, reviewChoosesTags, judgeTags, withTagsWrittenBack, sameTagSet, JUDGE_TAGS_MAX, MAX_TAGS, personalInfoIn } from './tags.mjs';
 import { createReviewMeter, meterKind, meterBytes, meterCall, persistReviewMeter, rollupRecentReviewCosts, reviewCostReport, handleReviewQuote } from './review_costs.mjs';
+// The link review (Code Part IX). It imports this module too; neither reads the other's bindings at module top level.
+import { guardReplacedText } from './listing_guard.mjs';
+import { approvedPageLinks, noteListingForLinkReview, linkReviewTick, textUrls, stripUrls, hasUrl, linkFixView } from './link_review.mjs';
 import { BANDS, DESCRIPTORS, PSYCHEDELIC_USE_RATING, questionnaireOf, questionnaireRecord, questionnaireForm, checkAnswers } from './rating_questionnaire.mjs';
 import { accountFacts, propertiesNamedIn, handleAttestationAdminRoute } from './account_attestations.mjs';
 import { assignCaseReference } from './case_reference.mjs';
@@ -50,11 +53,11 @@ import { isAdmin } from './admin_check.mjs';
 import { deletionMarkOf, withDeletionMark, listDeletionMarks, attachDeletionMarks, withDeletionFrom } from './space_delete_mark.mjs';
 
 export const MODERATION_VERSION = '1.0';
-export const POLICY_VERSION = '2.5';
+export const POLICY_VERSION = '2.8';
 // Recorded in docs/architecture/DECENTRALIZATION_PLAN.md section 5. The worker
 // hashes the policy text it actually ships and cites THAT; a mismatch with this
 // anchor is logged so an unreviewed policy edit cannot pass silently.
-export const POLICY_HASH_ANCHORED = 'sha256:4716b47bfbbdfb573eebdaf78b129c91328c8e02073abf3b4398eecfc7889a02';
+export const POLICY_HASH_ANCHORED = 'sha256:d3c4885dae0bd55950e5c7a199bdd568c93a9698368ac4f1f56d20547e5cfbd2';
 // The shape of the Qualification Statement, tags and rating questionnaire a listing was reviewed under (Code Part VIII).
 // Recorded on every case and every listing. A later Code that changes that shape raises it: 2 is Code v2.2's questionnaire,
 // which asks about alcohol and tobacco, and about drugs, as two questions (rating_questionnaire.mjs QUESTIONNAIRE_VERSION 2).
@@ -73,7 +76,7 @@ export const JUDGE_EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max'];
 export const DEFAULT_JUDGE_EFFORT = 'high';
 export const SECOND_OPINION_EFFORT = 'xhigh';
 export const judgeEffortFrom = env => (JUDGE_EFFORTS.includes(env?.JUDGE_EFFORT) ? env.JUDGE_EFFORT : DEFAULT_JUDGE_EFFORT);
-const judgeModelFrom = env => (typeof env?.JUDGE_MODEL === 'string' && /^claude-[a-z0-9-]{1,60}$/.test(env.JUDGE_MODEL) ? env.JUDGE_MODEL : JUDGE_MODEL);
+export const judgeModelFrom = env => (typeof env?.JUDGE_MODEL === 'string' && /^claude-[a-z0-9-]{1,60}$/.test(env.JUDGE_MODEL) ? env.JUDGE_MODEL : JUDGE_MODEL);
 // The researcher is Grok, at the model src/grok_model.mjs resolves (the latest xAI model behind a canary, an admin pin, and
 // rollback): it sends through `deps.grokFetch` and is metered under `deps.grokModel`, so it follows auto-update and its calls
 // count toward the rollback rate like every other xAI call.
@@ -545,7 +548,7 @@ export function buildJevQuestions() {
       'None present.'),
     sexual_content_level: score('Level of sexual content in the material.', ['none', 'suggestive', 'explicit']),
     violence_level: score('Level of violence in the material.', ['none', 'cartoon_or_fantasy', 'realistic', 'graphic_gore']),
-    fear_level: score('Level of fear or dread the experience is built to produce: jump scares, sustained dread, a horror atmosphere meant to frighten. "mild" is spooky but light enough for a child to enjoy; "frightening" is built to scare. A physical hazard (fire, smoke, flood, collapse, storm, illness) at the intensity of real training is "none".', FEAR_LEVELS),
+    fear_level: score('Level of fear or dread the experience is built to produce: jump scares, sustained dread, a horror atmosphere meant to frighten. "mild" is spooky: dark places, monsters to fight, an occasional startle; "frightening" is built to terrify: repeated jump scares or dread as the product. A physical hazard (fire, smoke, flood, collapse, storm, illness) at the intensity of real training is "none".', FEAR_LEVELS),
     profanity_level: score('Level of profanity or slurs in the text.', ['none', 'mild', 'strong']),
     // Code B11 and Part V: hard drugs are a Group B article (below, with the others); life-saving drug education is mature_17;
     // showing psychedelic use, alcohol or tobacco is adult_21 (decideTriage reads these three as rating floors).
@@ -607,25 +610,25 @@ export function buildJevQuestions() {
     // Guardian Code v2.0 Part I Group B, and A10: one question per signal, in the Code's own bright-line words, so Jev and the
     // judge draw the same line. Each is answered from the scripts' source, the strings and the listing.
     scripted_startle: noul(
-      'Code B1(a). Do the scripts, strings or listing deliver a startle the visitor did not choose: a figure that suddenly appears close to the camera, a full-screen image, or a loud sound, triggered to make the visitor jump?',
-      'A startle the visitor did not choose: a sudden close figure, a full-screen image, or a loud sound meant to make them jump.',
-      'No such startle; any sudden event is one the visitor chose, or a physical hazard at the intensity of real training.'),
+      'Code B1(a). Do the scripts deliver startles the visitor did not choose (a figure suddenly close to the camera, a full-screen image or a loud sound meant to make them jump) more than once in any two minutes, or as the main thing the Space does? An occasional startle is not this.',
+      'Repeated startles the visitor did not choose.',
+      'No startles, an occasional one, or ones the visitor chose.'),
     pursuing_entity: noul(
-      'Code B1(b). Read the scripts: is there an NPC or entity that moves toward the VISITOR\'s own avatar (pathfinding to it or following it) and damages it, catches it, or ends the visitor\'s session on contact? Predators chasing prey in an ecology simulation, or traffic following a road, are not this.',
-      'An entity paths to the visitor\'s avatar and damages, catches or ends the session on contact.',
-      'No entity pursues the visitor\'s avatar to damage, catch or end the session.'),
+      'Code B1(b). Is there an entity that hunts the visitor, who can neither fight nor escape, staged to terrify (startles, screams, a figure filling the screen)? Predators, traffic, and enemies the visitor can see and fight or outrun are not this.',
+      'An unbeatable pursuer staged to terrify.',
+      'No such pursuer.'),
     horror_framing: noul(
-      'Code B1(c) and (d). Do the listing or its tags call the Space horror, scary, creepy, haunted or a jumpscare game; or are corpses, gore or distorted human figures used as its setting?',
-      'Horror framing in the listing or its tags, or corpses, gore or distorted human figures used as setting.',
-      'No horror framing and no such setting.'),
+      'Code B1(c) and (d). Do the listing or its tags sell the Space as horror or a jumpscare game; or are gore, corpses or mutilated human figures used as decoration?',
+      'Sold as horror, or gore or mutilated bodies as decoration.',
+      'Neither.'),
     playable_victims: noul(
-      'Code B2. Are people or person-like characters shown dying, injured or suffering while the visitor causes it, joins it, or is scored on it; or is a named real atrocity or disaster with victims made playable? A memorial or historical reconstruction in which the harm is not playable, and structural, fire, flood or seismic failure with no person-like victims, are not this.',
+      'Code B2. Are people or person-like characters shown dying, injured or suffering while the visitor causes it, joins it, or is scored on it; or is a named real atrocity or disaster with victims made playable? Memorials, failures with no victims, and combat between combatants in a fictional or historical game are not this.',
       'The visitor causes, joins or is scored on the suffering of person-like characters, or plays through a named real tragedy with victims.',
       'No playable suffering of person-like characters and no playable real tragedy.'),
     harm_scored: noul(
-      'Code B3. Read the scripts: does the visitor\'s score, progress or win advance when an avatar, humanoid or person-like character loses health, is knocked out, is killed, or is removed from play by being hit, shot or struck? Ballistics, crash and impact physics and structural failure with no person-like target, medical and first-aid training, and lawful hunting or fishing practice are not this.',
-      'Score, progress or a win advances when an avatar or humanoid loses health, is knocked out, killed, or removed by being hit.',
-      'Nothing the visitor gains depends on harming an avatar, humanoid or person-like character.'),
+      'Code B3. Combat is allowed only in fiction or history. Does it (a) take place in the real present or a conflict ended under 25 years ago; (b) target a real person, protected group, organisation or present-day place; (c) attack civilians, children, a school, place of worship, hospital or crowd, or play a mass shooting, bombing or terror attack; (d) score harm to captives or the helpless, torture or execution; (e) show excessive gore (realistic dismemberment, remains left in the scene)? Invented enemies and historical armies within the limits are not this.',
+      'Combat breaks a B3 limit.',
+      'No combat, or combat within the B3 limits.'),
     lawful_decision_training: noul(
       'Code B3, lawful decision training. Is this training whose score is a correct lawful decision about force: de-escalation, shoot or don\'t-shoot, or a historical command exercise?',
       'Training scored on a correct lawful decision about the use of force.',
@@ -635,13 +638,13 @@ export function buildJevQuestions() {
       'Meme or brainrot material in the listing, the tags, a playable or collectible character, or the GUI.',
       'None, or only one passing line of dialogue.'),
     accumulation_loop: noul(
-      'Code B5(a). Read the scripts: does the main thing the visitor accumulates (coins, points, a counter, a resource) grow by clicking, by waiting, by repeating an action that cannot fail, or by resetting for a multiplier (rebirth, prestige)? Model state the visitor observes and can lose by error is not this, nor is a drill whose result is shown and whose earnings do not carry into the next run.',
-      'The main accumulation grows by clicking, waiting, repeating an action that cannot fail, or resetting for a multiplier.',
-      'No such loop: what grows depends on decisions the visitor can get wrong, or nothing accumulates.'),
+      'Code B5(a). Read the scripts: does the main thing the visitor accumulates grow only by clicking, repeating an action that cannot fail, or resetting for a multiplier (rebirth, prestige)? Passive income from what the visitor built or chose, state they can lose by error, and a drill whose earnings do not carry over are not this.',
+      'Grows only by clicking, a repeat that cannot fail, or a reset for a multiplier.',
+      'No such loop.'),
     return_reward: noul(
-      'Code B5(b). Does anything reward returning after time away: daily or login rewards, streaks, restock or cooldown timers that gate progress, offline earnings, or refilling energy?',
+      'Code B5(b). Does anything reward returning after time away: daily or login rewards, streaks, timers that gate progress, or refilling energy? Passive income, offline included, is not this.',
       'A reward for returning after time away.',
-      'Nothing rewards returning after time away.'),
+      'Nothing rewards returning.'),
     // Code B6, the fair economy: one question per sub-item. Selling the Space itself, a premium edition, an expansion that adds
     // new places and challenges, a cosmetic, or a content subscription, at a fixed price shown in real money, is none of these.
     b6a_paid_progress: noul(
@@ -649,9 +652,9 @@ export function buildJevQuestions() {
       'A purchase raises power, stats, odds, rank or progress.',
       'Nothing bought changes power, stats, odds, rank or progress; purchases are the Space itself, editions, expansions, cosmetics or a subscription.'),
     b6b_paid_chance: noul(
-      'Code B6(b). Is there a loot box, gacha, paid spin, or any purchase whose outcome is random?',
-      'A purchase with a random outcome.',
-      'No purchase has a random outcome.'),
+      'Code B6(b). Is there a loot box, gacha, paid spin, or other random purchase; or, in a game with combat, any random reward container even when earned in play, or any wager?',
+      'A random purchase, or a combat game\'s random reward or wager.',
+      'None of these.'),
     b6c_paid_skip: noul(
       'Code B6(c). Can the visitor pay to skip a wait, refill energy, end a timer, or skip grind?',
       'Paying skips a wait, energy, a timer or grind.',
@@ -673,9 +676,9 @@ export function buildJevQuestions() {
       'A reward for joining a group, following or inviting.',
       'Nothing is rewarded for joining, following or inviting.'),
     b6h_offsite_payment: noul(
-      'Code B6(h). Does the Space take or ask for payment off Eustress: a payment or donation link (Ko-fi, Patreon, PayPal.me, Buy Me a Coffee, Cash App, Venmo or the like), a cryptocurrency address, an unlock code sold elsewhere, or a store or checkout outside Eustress?',
-      'Payment taken or asked for off Eustress.',
-      'No payment off Eustress.'),
+      'Code B6(h). Does the Space ask for payment off Eustress in a way no review can check: a cryptocurrency address, or an unlock code or access sold elsewhere? A shop, payment or donation link is reviewed on its own and is not this.',
+      'A cryptocurrency address, or an unlock code or access sold off Eustress.',
+      'No cryptocurrency address and no unlock code sold off Eustress.'),
     copied_signal: noul(
       'Code B7. Does this read as a copy: a clone or re-upload of another work, an asset flip, an untouched template, a kit assembled from other people\'s work without authored change, or "inspired by" another work with nothing new added?',
       'A clone, re-upload, asset flip, untouched template, unchanged kit, or a homage with nothing new.',
@@ -1516,7 +1519,7 @@ export function deterministicSignals(sim, dossier, ctx = {}) {
   // listing, a signal; and a payment or donation link, crypto address or paid unlock code in the Space, a B6 system citation.
   s.statement = extractQualificationStatement(sim?.description);
   s.horror_terms = horrorTerms(sim);
-  s.payment = paymentFindings(d);
+  s.payment = paymentFindings(d, ctx.approvedLinks instanceof Set ? ctx.approvedLinks : new Set());
   // Guardian Code v2.1. The author's rating questionnaire (Part V), whether the tags label the Space as fiction (Part III), and
   // what the system knows about the author's account (attested property, a verified business), which the author cannot claim.
   s.questionnaire = questionnaireOf(sim);
@@ -1528,9 +1531,10 @@ export function deterministicSignals(sim, dossier, ctx = {}) {
   return s;
 }
 
-// Code B1(c): the listing or its tags call it horror, scary, creepy, haunted or a jumpscare game. Whole words, any case. A genre
-// from before tags is read as one of the tags (src/tags.mjs listingTags).
-const HORROR_WORDS = /\b(horror|scary|creepy|haunted|jumpscare|jump scare)\b/gi;
+// Code B1(c): the listing or its tags sell it as horror or a jumpscare game. Whole words, any case. Since v2.7 "scary", "creepy"
+// and "haunted" are mild fright and are not listed here. A genre from before tags is read as one of the tags (src/tags.mjs
+// listingTags).
+const HORROR_WORDS = /\b(horror|jumpscare|jump scare)\b/gi;
 
 function horrorTerms(sim) {
   const text = [sim?.name, sim?.description, ...tagsForReview(sim)].filter(v => typeof v === 'string').join('\n');
@@ -1546,18 +1550,27 @@ const ETH_ADDRESS = /\b0x[a-fA-F0-9]{40}\b/;
 const UNLOCK_CODE = /\b(?:unlock|access|activation|premium|vip)\s+(?:code|key)s?\b/i;
 const FOR_MONEY = /[$€£]\s?\d|\b\d+(?:\.\d{1,2})?\s?(?:usd|eur|gbp|dollars?|euros?|pounds?)\b|\b(?:buy|purchase|pay|paid|sell|sold|price|donat\w*|venmo|paypal|cash ?app)\b/i;
 
-function paymentFindings(dossier) {
+// Code v2.8 B6(h): a payment or donation link in the Space is allowed when the same URL is a link on the listing's page that
+// the link review approved (`approved`, normalized URLs: src/link_review.mjs approvedPageLinks); every other one is still
+// cited, as "not yet: add it to your Website links so it can be reviewed, or remove it" (paymentEdit). A cryptocurrency
+// address or an unlock code cannot be reviewed and is always cited.
+function paymentFindings(dossier, approved = new Set()) {
   const strings = Array.isArray(dossier?.strings) ? dossier.strings : [];
   const urls = Array.isArray(dossier?.signals?.urls) ? dossier.signals.urls : [];
   const found = [];
   for (const raw of [...urls, ...strings]) {
     if (typeof raw !== 'string') continue;
+    if (PAYMENT_LINK.test(raw) && !ETH_ADDRESS.test(raw) && !UNLOCK_CODE.test(raw)) {
+      const linked = textUrls(raw).filter(u => PAYMENT_LINK.test(u.raw));
+      if (linked.length && linked.every(u => u.url && approved.has(u.url))) continue;
+    }
     // A base58 address mixes letters and digits after its leading 1 or 3; a run of 26 letters is not one.
     const btc = BTC_ADDRESS.exec(raw)?.[0];
     const isBtc = !!btc && (btc.startsWith('bc1') || (/\d/.test(btc.slice(1)) && /[a-zA-Z]/.test(btc.slice(1))));
-    const hit = PAYMENT_LINK.test(raw) ? 'payment_link'
-      : ETH_ADDRESS.test(raw) || isBtc ? 'crypto_address'
+    // An address or a code sold for money is named as what it is even beside a link: no review can clear it (v2.8).
+    const hit = ETH_ADDRESS.test(raw) || isBtc ? 'crypto_address'
       : UNLOCK_CODE.test(raw) && FOR_MONEY.test(raw) ? 'paid_unlock_code'
+      : PAYMENT_LINK.test(raw) ? 'payment_link'
       : null;
     if (hit) found.push({ kind: hit, text: clip(raw, 120) });
     if (found.length >= 5) break;
@@ -1597,6 +1610,15 @@ function higherRating(a, b) {
   const ia = RATINGS.indexOf(a), ib = RATINGS.indexOf(b);
   if (ia < 0 && ib < 0) return null;
   return RATINGS[Math.max(ia, ib)];
+}
+
+/// Code v2.6 Part V: the least band violence allows. A game with combat is at least teen_13, and at least mature_17 when its
+/// violence is realistic or shows blood; the descriptors name it. Null when no violence is described.
+export function violenceFloor(descriptors) {
+  const d = new Set(Array.isArray(descriptors) ? descriptors : []);
+  if (d.has('realistic violence') || d.has('blood')) return 'mature_17';
+  if (d.has('fantasy violence')) return 'teen_13';
+  return null;
 }
 
 // The bands the Adult content setting gates (Part V): adult_18 and adult_21.
@@ -1927,7 +1949,9 @@ export function coverageGap(coverage) {
 /// Space's tags carry `fiction` first, the system's, and keep the judge's first genre tag (FICTION_GENRE_TAGS, or a tag
 /// ending in -fiction or -fi) inside the limit, so assigned tags meet Part III's fiction label whenever the judge named a genre.
 export function assignedTags(suggested, fiction) {
-  const all = judgeTags(suggested, Infinity);
+  // Code v2.8 (section 6 of docs/design/SIM_PAGE_THEME_AND_LINKS.md): the review never writes a link to a listing, so a
+  // suggested tag that holds a URL is dropped before it is read.
+  const all = judgeTags((Array.isArray(suggested) ? suggested : []).filter(s => !(typeof s === 'string' && hasUrl(s))), Infinity);
   if (!fiction) return judgeTags(all);
   const genre = all.find(tag => tag !== FICTION_TAG && fictionLabelled([FICTION_TAG, tag]));
   return judgeTags([FICTION_TAG, ...(genre ? [genre] : []), ...all.filter(tag => tag !== FICTION_TAG && tag !== genre)]);
@@ -1947,6 +1971,9 @@ function decideOutcome({ triage, judge, thresholds, reader = [] }) {
   out.rating = higherRating(higherRating(triage.rating, judge.rating_floor), questionnaire.band);
   const described = new Set([...(questionnaire.descriptors || []), ...(Array.isArray(judge.descriptors) ? judge.descriptors : [])]);
   out.descriptors = CONTENT_DESCRIPTORS.filter(d => described.has(d));
+  // Code v2.6 Part V: violence sets its own floor, whatever the bands said: fantasy violence at least teen_13, realistic
+  // violence or blood at least mature_17.
+  out.rating = higherRating(out.rating, violenceFloor(out.descriptors));
   // B6(h): never in an Adult listing, whatever the account. An answer the verified business connection allowed before the judge
   // ran is a citation or a signal after all when the judge's rating makes the listing Adult.
   const adult = isAdultBand(out.rating) || triage.statement?.category === 'Adult';
@@ -2190,9 +2217,17 @@ const testScores = judge => Object.fromEntries(CODE_TESTS.map(k => {
 }));
 const editOf = judge => (typeof judge?.suggested_edit_to_publish === 'string' && judge.suggested_edit_to_publish.trim() ? judge.suggested_edit_to_publish.trim() : null);
 // When the judge named no change and a payment link is what is in the way, the author is told which one.
+// Code v2.8 B6(h): a link is "not yet: add it to your Website links so it can be reviewed, or remove it"; an address or a
+// paid code cannot be reviewed and is to be removed.
 function paymentEdit(removable) {
-  const found = removable.flatMap(c => c.system).filter(s => s.key === 'payment_in_space').flatMap(s => s.found || []).map(f => f.text);
-  return found.length ? `Remove the payment or donation link, address or paid code from the Space: ${found.slice(0, 3).join('; ')}.` : null;
+  const found = removable.flatMap(c => c.system).filter(s => s.key === 'payment_in_space').flatMap(s => s.found || []);
+  if (!found.length) return null;
+  const links = found.filter(f => f.kind === 'payment_link').map(f => f.text);
+  const other = found.filter(f => f.kind !== 'payment_link').map(f => f.text);
+  return [
+    ...(links.length ? [`Add the payment or donation link to your Website links so it can be reviewed, or remove it from the Space: ${links.slice(0, 3).join('; ')}.`] : []),
+    ...(other.length ? [`Remove the cryptocurrency address or paid code from the Space: ${other.slice(0, 3).join('; ')}.`] : []),
+  ].join(' ');
 }
 // Part III and B9: the author's tags misdescribe the Space, or one is a slur, an insult or personal information.
 function tagsEdit(removable) {
@@ -2296,7 +2331,8 @@ export function statementDraftOf(raw) {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
   const named = typeof raw.category === 'string' ? raw.category.replace(/\.+$/, '').trim().toLowerCase() : '';
   const category = STATEMENT_CATEGORIES.find(c => c.toLowerCase() === named) || null;
-  const line = v => (typeof v === 'string' ? safeAuthorText(v.replace(/[\r\n]+/g, ' ').trim(), STATEMENT_VALUE_MAX) : null);
+  // Code v2.8: the review never writes a link to a listing; any URL in a drafted line is dropped before it is shown or written.
+  const line = v => (typeof v === 'string' ? safeAuthorText(stripUrls(v.replace(/[\r\n]+/g, ' ')).trim(), STATEMENT_VALUE_MAX) : null);
   const draft = { category, objective: line(raw.objective), lesson: line(raw.lesson), real_world_link: line(raw.real_world_link) };
   return Object.values(draft).every(Boolean) ? draft : null;
 }
@@ -2305,6 +2341,101 @@ export function statementDraftOf(raw) {
 export const statementLines = d => (d ? `Category: ${d.category}\nObjective: ${d.objective}\nLesson: ${d.lesson}\nReal-world link: ${d.real_world_link}` : null);
 // The most suggested tags an answer is read for: a list longer than this is cut, never scanned.
 const SUGGESTED_TAGS_READ = 4 * JUDGE_TAGS_MAX;
+
+// ── Automatic listing fixes (docs/moderation/AUTO_APPLY_LISTING_FIXES.md) ──────────────────────────────────────────────────
+// When a review asks for changes, one pass rewrites the listing's wording the findings point at: the four statement lines,
+// the fiction label, the tags and the Category line. Every word comes from the judge's answer on the case (its statement
+// draft, its tags, its fiction call), through the same filters the author view uses; the Worker writes no prose of its own.
+// The title, the author's other description lines and the Space are never touched. When every finding was fixed the listing
+// is reviewed again, by the same review; otherwise the rest stays with the author. One pass per publish.
+export const AUTO_FIX_CODES = ['statement_missing', 'statement_unclear', 'fiction_label_missing', 'not_yet_tags'];
+// src/world.mjs MAX_LISTING.description: a fix that would not fit is not made.
+export const LISTING_DESCRIPTION_MAX = 4000;
+const STATEMENT_LABEL = Object.fromEntries(STATEMENT_FIELDS);
+const statementKeyOf = label => (label === 'category' || label === 'objective' || label === 'lesson' ? label : 'real_world_link');
+
+/// The description with the given statement lines set (`values`: { category, objective, lesson, real_world_link }, any of
+/// them). A key the description already has a labelled line for is written in place of its first such line, and any later
+/// line with that label is dropped (extractQualificationStatement reads only the first). A key with no line is added at the
+/// end, in Part III's order, after a blank line. Every other line is kept as it was, with the description's own line breaks.
+export function setStatementLines(description, values) {
+  const text = typeof description === 'string' ? description : '';
+  const eol = text.includes('\r\n') ? '\r\n' : '\n';
+  const done = new Set();
+  const out = [];
+  for (const line of text.split(/\r\n|\r|\n/)) {
+    const m = STATEMENT_LINE.exec(line);
+    const key = m ? statementKeyOf(m[1].toLowerCase()) : null;
+    if (!key || !(key in values)) { out.push(line); continue; }
+    if (done.has(key)) continue;
+    done.add(key);
+    out.push(`${STATEMENT_LABEL[key]}: ${values[key]}`);
+  }
+  const added = STATEMENT_FIELDS.map(([key]) => key).filter(key => key in values && !done.has(key)).map(key => `${STATEMENT_LABEL[key]}: ${values[key]}`);
+  if (!added.length) return out.join(eol);
+  while (out.length && !out[out.length - 1].trim()) out.pop();
+  return [...out, ...(out.length ? [''] : []), ...added].join(eol);
+}
+
+/// The one pass, as a plan: what it would write and what it leaves to the author. Pure. `sim` is the listing the run read,
+/// `final` the run's decision (changes_requested), `judge` its parsed answer. Returns null when no finding is one the pass
+/// fixes. Otherwise { applied: [{ code, detail }], left: [codes], description, tags, tags_source, resubmit }, where `tags`
+/// is null when the tags are not changed and `resubmit` is true only when every finding was fixed.
+export function autoFixPlan({ sim, final, judge }, { textAllowed = true } = {}) {
+  const changes = Array.isArray(final?.changes) ? [...new Set(final.changes.filter(c => typeof c === 'string'))] : [];
+  if (!changes.some(c => AUTO_FIX_CODES.includes(c))) return null;
+  const left = changes.filter(c => !AUTO_FIX_CODES.includes(c));
+  const applied = [];
+  const before = typeof sim?.description === 'string' ? sim.description : '';
+  const tagsBefore = listingTags(sim);
+  const draft = statementDraftOf(judge?.suggested_statement);
+  const values = {};
+  let tags = null, tagsSource = null;
+
+  // The fiction label: `fiction`, one genre tag the judge named, and the Category line set to Fiction. All three, or none.
+  if (changes.includes('fiction_label_missing')) {
+    const genre = assignedTags(judge?.suggested_tags, true).find(tag => tag !== FICTION_TAG && fictionLabelled([FICTION_TAG, tag])) || null;
+    if (!genre || !textAllowed) left.push('fiction_label_missing');
+    else {
+      tags = [...new Set([FICTION_TAG, genre, ...tagsBefore])].slice(0, MAX_TAGS);
+      tagsSource = reviewChoosesTags(sim) ? 'judge' : 'author';
+      values.category = 'Fiction';
+      applied.push({ code: 'fiction_label_missing', detail: `Added the tags ${FICTION_TAG} and ${genre}, and set the Category line to Fiction.` });
+    }
+  }
+  // Tags that misdescribe the Space: the review's own choice, as when an author leaves the tags empty (the next review chooses
+  // them again). On a fiction Space assignedTags puts the label first.
+  if (changes.includes('not_yet_tags')) {
+    const chosen = assignedTags(judge?.suggested_tags, final?.is_fiction === true);
+    if (!chosen.length || (values.category === 'Fiction' && !fictionLabelled(chosen))) left.push('not_yet_tags');
+    else {
+      tags = chosen;
+      tagsSource = 'judge';
+      applied.push({ code: 'not_yet_tags', detail: `Replaced the tags with the review's choice: ${chosen.join(', ')}.` });
+    }
+  }
+  // The statement: a missing one keeps every line the author wrote that counts; an unclear one is rewritten whole.
+  const statementCode = changes.includes('statement_unclear') ? 'statement_unclear' : changes.includes('statement_missing') ? 'statement_missing' : null;
+  if (statementCode) {
+    if (!draft || !textAllowed) left.push(...changes.filter(c => c === 'statement_unclear' || c === 'statement_missing'));
+    else {
+      const current = extractQualificationStatement(before);
+      const keys = STATEMENT_FIELDS.map(([k]) => k).filter(k => statementCode === 'statement_unclear' || (k === 'category' ? !current.category : !current[k]));
+      for (const k of keys) if (!(k in values)) values[k] = draft[k];
+      const written = keys.map(k => STATEMENT_LABEL[k]);
+      applied.push({ code: statementCode, detail: statementCode === 'statement_unclear'
+        ? 'Rewrote the four Qualification Statement lines from what the review saw in your Space.'
+        : `Added the Qualification Statement line${written.length === 1 ? '' : 's'} ${written.join(', ')} from what the review saw in your Space.` });
+      // Both codes at once: the whole statement was written, which settles both.
+      if (statementCode === 'statement_unclear' && changes.includes('statement_missing')) applied.push({ code: 'statement_missing', detail: null });
+    }
+  }
+  const description = Object.keys(values).length ? setStatementLines(before, values) : before;
+  // A description over the listing's limit cannot be written: plan again with no text changes.
+  if (description.length > LISTING_DESCRIPTION_MAX) return autoFixPlan({ sim, final, judge }, { textAllowed: false });
+  if (!applied.length) return { applied, left, description: before, tags: null, tags_source: null, resubmit: false };
+  return { applied: applied.filter(a => a.detail), left: [...new Set(left)], description, tags, tags_source: tags ? tagsSource : null, resubmit: left.length === 0 };
+}
 
 export async function sha256Hex(text) {
   const bytes = new TextEncoder().encode(text);
@@ -2651,7 +2782,8 @@ export function judgeRequest({ summary, captures, policyText, policyHash, model 
 /// The SDK client the judge uses: `deps.claude` when a caller supplies one (tests: a client, or a function of the deps that
 /// returns one), else one built over `deps.anthropicFetch` or the platform's fetch. Retries are the SDK's, at most one,
 /// inside the judge's time bound.
-function judgeClient(env, deps) {
+/// Also the link review's client (src/link_review.mjs): one HTTP path to Claude for every judge.
+export function judgeClient(env, deps) {
   if (deps?.claude) return typeof deps.claude === 'function' ? deps.claude(deps) : deps.claude;
   return new Anthropic({ apiKey: env.ANTHROPIC_API_KEY, maxRetries: 1, ...(deps?.anthropicFetch ? { fetch: deps.anthropicFetch } : {}) });
 }
@@ -5825,24 +5957,24 @@ const REMOVED_WHAT = 'This content cannot be listed or played on Eustress, and e
 
 export const AUTHOR_COPY = {
   // The Guardian Code v2.0, Group B: what Eustress does not carry. One sentence each, citing the article.
-  code_B1: R('Built to frighten (Code B1)',
-    'Code B1: Eustress does not list horror, such as an unchosen startle, a pursuer that catches the visitor, a listing that calls itself horror, or gore and corpses as setting.',
-    'Remove what is built to frighten. A physical hazard at the intensity of real training, with nothing chasing the visitor, is fine.'),
+  code_B1: R('Fright beyond mild (Code B1)',
+    'Code B1: mild fright is fine, but Eustress does not list fear as the product: repeated jump scares (more than one in any two minutes, or as the main thing the Space does), a pursuer built to terrify that the visitor cannot fight or escape, a listing sold as horror or a jumpscare game, or gore and mutilated bodies as decoration.',
+    'Space out or remove the startles, give the visitor a way to fight or escape what hunts them, and describe it as something other than horror. Spooky places, monsters to fight and an occasional startle are fine.'),
   code_B2: R('Tragedy as play (Code B2)',
     'Code B2: a Space may teach about a tragedy, but the visitor may not cause, join or score the suffering of person-like characters, or play through a real disaster with victims.',
     'Make the tragedy something the visitor learns about, not something they play through.'),
-  code_B3: R('Killing as play (Code B3)',
-    'Code B3: force may be simulated, but no score, progress or win may come from harming a person-like character.',
-    'Score something other than harm to a person-like character, such as targets, accuracy or a correct decision.'),
+  code_B3: R('Combat beyond its limits (Code B3)',
+    'Code B3: a game may have combat in fiction or in history (a real conflict that ended at least 25 years ago), never against real life: no real person, real group or present-day real place as a target, no attack on civilians, children, a school, a place of worship, a hospital or a crowd, no harm to captives or the helpless, no torture or execution, and no excessive gore (blood, hit effects and brief pieces from a kill are fine; realistic dismemberment, remains left in the scene and harm to bodies after death are not).',
+    'Set the combat in an invented world or in history, and remove any real target, attack on civilians, harm to non-combatants, torture, execution or excessive gore. Or score something other than harm, such as targets, accuracy or a correct decision.'),
   code_B4: R('Meme bait (Code B4)',
     'Code B4: Eustress does not list meme or brainrot characters, names, sounds or images in the listing, the tags, a character or the GUI.',
     'Replace the meme material with your own.'),
   code_B5: R('Hollow loop (Code B5)',
-    'Code B5: time in a listed Space must buy something, so nothing in it may grow by clicking, waiting or resetting, or reward coming back after time away.',
+    'Code B5: time in a listed Space must buy something, so its main progress may not grow only by clicking or resetting, and nothing may reward coming back after time away (daily rewards, streaks, timers, energy). Passive income from what the visitor built or chose is fine.',
     'Remove the loop or the return reward, and let progress depend on decisions the visitor can get wrong.'),
   code_B6: R('Unfair economy (Code B6)',
-    'Code B6: skill and effort decide who wins, never money. A Space may sell itself, editions, expansions, cosmetics or a subscription at real-money prices, but nothing that buys progress, chance or a skip, no unasked or pressured sales, no hidden prices or social-reach rewards, and no payment off Eustress.',
-    'Remove the paid progress, paid chance, paid skip, purchase prompt, sales pressure, hidden price, reach reward or payment link.'),
+    'Code B6: skill and effort decide who wins, never money. A Space may sell itself, editions, expansions, cosmetics or a subscription at real-money prices, but nothing that buys progress, chance or a skip, no unasked or pressured sales, no hidden prices or social-reach rewards, and no payment off Eustress. A game with combat has no loot boxes, crates or spins at all, bought or earned, and no betting.',
+    'Remove the paid progress, paid chance, paid skip, purchase prompt, sales pressure, hidden price, reach reward or payment link, and in a game with combat any loot box, crate, spin or bet.'),
   code_B7: R('Copied work (Code B7)',
     'Code B7: Eustress lists work you made, not a clone, a re-upload, an asset flip or an untouched template.',
     'Add your own authored change: your layout, your scripts, your task.'),
@@ -5866,10 +5998,10 @@ export const AUTHOR_COPY = {
     'Code T2: a visitor must be able to tell what the Space is for, and the Space must give them a way to do it.',
     'Give the visitor a task, a question, a measurement or a system to operate, with the controls or readouts to do it.'),
   test_lesson: R('Lesson (Code T3)',
-    'Code T3: a listed Space teaches or lets a visitor practise something specific, and it is there in the Space, not only in the listing.',
-    'Build in the skill, concept or method your listing names, so a visitor can learn or practise it.'),
+    'Code T3: a listed Space teaches or lets a visitor practise something specific, and it is there in the Space, not only in the listing. A game\'s lesson can be the skill its play exercises, such as reaction time or spatial awareness.',
+    'Build in the skill, concept or method your listing names, so a visitor can learn or practise it, or make the play exercise a real skill.'),
   test_real_world: R('Real-world effect (Code T4)',
-    'Code T4: time in a listed Space connects to real life through a real place, system, data, skill, problem or knowledge, or through use: a working tool a visitor brings their own input to and leaves with a usable result.',
+    'Code T4: time in a listed Space connects to real life through a real place, system, data, skill, problem or knowledge, or through use: a working tool a visitor brings their own input to and leaves with a usable result. A game connects through the skill its play exercises, such as reaction time or spatial awareness.',
     'Connect the Space to something real, such as a named place and its source data, a model your scripts compute, measured data, or a tool a visitor uses on their own question or data, and say so in the statement. A map of your own framework counts when its structure ships in the Space.'),
   test_real_world_fiction: R('The idea in your fiction (Code T4 for Fiction)',
     'Code T4 for Fiction: a fiction Space carries a theme, a question or a speculative idea worth the visitor\'s time, and it is labelled as fiction.',
@@ -5943,10 +6075,10 @@ export const AUTHOR_COPY = {
     'Rewrite the statement so each line is true of the Space, or change the Space to match it.'),
   // Not yet: the rest of the Space qualifies, and one removable feature or one wording is in the way (Part IV rule 2).
   not_yet_B5: R('Not yet: remove the hollow loop (Code B5)',
-    'Code B5: the rest of the Space qualifies, but a loop that grows by clicking, waiting or resetting, or a reward for coming back, cannot be listed.',
+    'Code B5: the rest of the Space qualifies, but a loop that grows only by clicking or resetting, or a reward for coming back, cannot be listed. Passive income is fine.',
     'Remove the loop or the return reward, then publish again.'),
   not_yet_B6: R('Not yet: make the economy fair (Code B6)',
-    'Code B6: the rest of the Space qualifies, but something in it sells progress, chance or a skip, pushes a sale, hides a price, rewards social reach, or takes payment off Eustress.',
+    'Code B6: the rest of the Space qualifies, but something in it sells progress, chance or a skip, pushes a sale, hides a price, rewards social reach, takes payment off Eustress, or, in a game with combat, offers a loot box, crate, spin or bet.',
     'Remove it, then publish again.'),
   not_yet_B9: R('Not yet: fix the wording (Code B9)',
     'Code B9: the rest of the Space qualifies, but its title, description, thumbnail, tags, category, rating answers or fiction label say something the Space does not show.',
@@ -6104,6 +6236,8 @@ const HEADLINES = {
   in_review: 'We are reviewing your listing.',
   // The held copy. Held and quarantined read the same, so it gives no reason (Code v2.4: games and everything outside the
   // legal lane are decided automatically; a hold is a review that is taking longer, or one of the few a person decides).
+  // The automatic pass fixed every finding about the listing's wording, and the same review is running again.
+  in_review_auto_fix: 'We fixed your listing\'s wording and are reviewing it again. You will hear from us when it is decided.',
   in_review_person: 'Your listing is still being reviewed. Most reviews finish within minutes; a few take longer, and a few are decided by a person. You will hear from us when it is decided.',
   listed: 'Your Universe is listed in the Gallery.',
   approved_private: 'Your Universe passed review. It is private, so it is not shown in the Gallery.',
@@ -6114,6 +6248,43 @@ const HEADLINES = {
   removed: 'Your Universe was removed from Eustress. Your account and your other listings are not affected, and you can appeal.',
 };
 
+// The judge emulator (the Eustress MCP's judge_verdict, and the eustress-judge skill's scripts/verdict.mjs): the rules this
+// review applies, run over a listing and a judge answer the caller wrote itself, so an agent checking a Space before it is
+// published gets the findings and codes Studio's dialog would show. Pure: no model, no Jev, no research, nothing stored.
+// The caller's answer is final, as a live second reading is (rule 0 never asks for a third). Jev is absent, so the caller's
+// own citations stand in for what Jev would raise.
+const EMULATED_STATUS = { approve: 'approved', changes_requested: 'changes_requested', reject: 'rejected', quarantine: 'quarantined', hold: 'held' };
+export const EMULATE_MAX_BYTES = 256 * 1024;
+export function emulateReview({ listing, judge, dossier = null }) {
+  const judgeText = typeof judge === 'string' ? judge : JSON.stringify(judge ?? null);
+  const parsed = parseJudgeVerdict(judgeText);
+  if (parsed.malformed) return { policy_version: POLICY_VERSION, error: 'judge_malformed', detail: parsed.error || null };
+  parsed.second_opinion = true;
+  const l = listing && typeof listing === 'object' ? listing : {};
+  const tags = Array.isArray(l.tags) ? l.tags.filter(t => typeof t === 'string').slice(0, 32) : [];
+  // genre_migrated: tags are a listing's only categories (Code v2.3); a pre-tags genre is not read.
+  const sim = {
+    name: typeof l.name === 'string' ? l.name.slice(0, 120) : '', description: typeof l.description === 'string' ? l.description.slice(0, 4000) : '',
+    tags, genre_migrated: true, tags_source: 'author', is_public: l.is_public !== false,
+  };
+  const d = dossier && typeof dossier === 'object' ? dossier : null;
+  const signals = deterministicSignals(sim, d, {});
+  const triage = decideTriage({ signals, jev: null, thresholds: DEFAULT_THRESHOLDS });
+  const final = decideFinal({ triage, judge: parsed, thresholds: DEFAULT_THRESHOLDS });
+  const decision = {
+    ...final, featured: false, featured_candidate: final.featured_candidate === true, changes: final.changes,
+    suggested_edit: final.suggested_edit || null, suggested_statement: final.suggested_statement || null, assigned_tags: final.assigned_tags || [],
+  };
+  const rec = { status: EMULATED_STATUS[final.outcome] || 'held', decision, updated_at: new Date().toISOString(), policy_version: POLICY_VERSION };
+  return {
+    emulated: true, policy_version: POLICY_VERSION, policy_hash: POLICY_HASH_ANCHORED,
+    statement: signals.statement, fiction_labelled: signals.fiction_labelled, review_chooses_tags: signals.review_chooses_tags,
+    outcome: final.outcome,
+    trail: (final.reasons || []).map(r => ({ rule: r.rule ?? null, code: r.code, action: r.action, ...(r.article ? { article: r.article } : {}), ...(r.label ? { test: r.label, score: r.score } : {}) })),
+    view: authorView(rec, sim),
+  };
+}
+
 export function authorView(rec, sim) {
   if (!rec) return null;
   const d = rec.decision || {};
@@ -6121,7 +6292,11 @@ export function authorView(rec, sim) {
   // A removal the author has been told of reads as removed, or as an appeal while one is pending (removalNoticeReleased).
   const removal = removalNoticeReleased(rec) ? rec.removal_notice : null;
   const status = removal ? (rec.status === 'appealed' && rec.appeal?.status === 'pending' ? 'appeal_in_review' : 'removed') : authorStatusOf(rec.status, isPublic, !!rec.legal_hold);
+  // The automatic pass (applyAutoFix) is shown with the decision it belongs to: while the review runs again (never on a hold,
+  // which reads like any hold), and with the decision of that review or of the run that made the pass.
+  const fix = autoFixView(rec, status);
   const headline = status === 'in_review' && ['held', 'quarantined'].includes(rec.status) ? HEADLINES.in_review_person
+    : status === 'in_review' && fix?.reviewing_again ? HEADLINES.in_review_auto_fix
     : status === 'in_review' ? 'We are reviewing your listing. This page and your notifications update when it is decided.'
     : HEADLINES[status];
 
@@ -6189,8 +6364,44 @@ export function authorView(rec, sim) {
     updated_at: rec.updated_at,
     policy_version: rec.policy_version,
     review_schema: rec.review_schema ?? null,
+    // What the automatic pass changed in the listing, and its text before and after, so Studio keeps the fixed description
+    // and the author can undo it. Null when no pass was made for this publish.
+    auto_fix: fix,
+    // Code v2.8 (Part IX): the off-site links the link review removed from the description (each replaced by "[link
+    // removed]"), why, and the description before and after, which Studio adopts the way it adopts an auto-fix. Null when none.
+    link_fix: linkFixView(sim),
   };
 }
+
+/// The automatic pass as an author is shown it: what it applied (fixed copy, author-safe by construction), the listing's
+/// description and tags before and after, and whether the review is running again. Only an applied pass is shown, only with
+/// the review it belongs to: in review (not on a hold), changes requested, listed, approved private or not listed.
+export function autoFixView(rec, status) {
+  const f = rec?.auto_fix;
+  if (!f || (f.state !== 'applied' && f.state !== 'resubmitted')) return null;
+  if (status === 'in_review' && (f.state !== 'resubmitted' || !['pending', 'classifying'].includes(rec.status))) return null;
+  if (!['in_review', 'changes_requested', 'listed', 'approved_private', 'not_listed'].includes(status)) return null;
+  const applied = (Array.isArray(f.applied) ? f.applied : []).filter(a => AUTO_FIX_CODES.includes(a?.code) && typeof a.detail === 'string')
+    .map(a => ({ category: a.code, title: AUTO_FIX_TITLES[a.code], detail: safeAuthorText(a.detail, 400) || AUTO_FIX_TITLES[a.code] }));
+  if (!applied.length) return null;
+  const text = v => (typeof v === 'string' ? v : '');
+  const tagList = v => (Array.isArray(v) ? v.filter(t => typeof t === 'string') : []);
+  return {
+    applied,
+    reviewing_again: status === 'in_review',
+    applied_at: f.at || null,
+    description_before: text(f.before?.description), description_after: text(f.after?.description),
+    tags_before: tagList(f.before?.tags), tags_after: tagList(f.after?.tags),
+  };
+}
+
+// The titles of what the automatic pass applied, one per finding it fixes.
+export const AUTO_FIX_TITLES = {
+  statement_missing: 'Added your Qualification Statement',
+  statement_unclear: 'Rewrote your Qualification Statement',
+  fiction_label_missing: 'Labelled your fiction',
+  not_yet_tags: 'Replaced your tags',
+};
 
 /// The one line that tells an author which tags the review chose for their Space.
 export const tagsChosenLine = tags => `Tags chosen for your Space: ${tags.join(', ')}`;
@@ -7503,8 +7714,9 @@ export async function runModerationCase(simId, env, deps, opts = {}) {
   // What this run spends on models (review_costs.mjs). It is saved before the
   // lease is let go, whatever the run did, and it never touches the case.
   const meter = createReviewMeter(env, simId, opts.trigger || 'publish');
+  let out;
   try {
-    return await noteAiVerdict(env, await runLeased(simId, env, deps, opts, lease, meter), opts, lease);
+    out = await noteAiVerdict(env, await runLeased(simId, env, deps, opts, lease, meter), opts, lease);
   } catch (e) {
     if (e instanceof LeaseLost || e instanceof LegalLockConflict) {
       console.error('moderation: run stopped:', e.message);
@@ -7515,6 +7727,18 @@ export async function runModerationCase(simId, env, deps, opts = {}) {
     await persistReviewMeter(env, meter);
     await releaseLease(env, lease);
   }
+  return reviewAfterAutoFix(simId, env, deps, opts, out);
+}
+
+// The review again after the automatic pass fixed every finding (applyAutoFix): the same review from the start, Jev on the new
+// description included, under its own lease, started at once so the author has the result within minutes. It runs once: its
+// own case carries `auto_fix`, so it makes no pass. When the run cannot start it now (past the tick's deadline, or the day's
+// verdicts drawn), the listing is left `pending` and the stalled-pending sweep reviews it, exactly as an unstarted publish.
+async function reviewAfterAutoFix(simId, env, deps, opts, out) {
+  if (opts.trigger === 'auto_fix' || out?.status !== 'pending' || out.auto_fix?.state !== 'resubmitted') return out;
+  if (Number.isFinite(opts.deadline) && Date.now() >= opts.deadline) return out;
+  if (aiVerdictsToday(out) >= thresholdsFrom(env).max_ai_verdicts_per_day_per_listing) return out;
+  return runModerationCase(simId, env, deps, { trigger: 'auto_fix', tick: opts.tick, deadline: opts.deadline });
 }
 
 // Every verdict the AI draws that is not an approval counts against the
@@ -7574,7 +7798,9 @@ async function runLeased(simId, env, deps, opts, lease, meter = null) {
     ? { fp: rec.content_fp, epoch: rec.evidence_epoch, jev: rec.jev, research: rec.research, scripts: rec.scripts, stage: rec.status === 'held' ? 'held' : rec.stage } : null;
   if (!rec) rec = await newCase(env, sim, trigger);
   else {
-    if (trigger === 'publish') rec.notified = null; rec.trigger = trigger; rec.pak_etag = sim.pak_etag || rec.pak_etag; rec.pak_size = sim.scene_size_bytes || rec.pak_size; rec.content_root = sim.content_root || rec.content_root; pushHistory(rec, 'rerun', { trigger });
+    if (trigger === 'publish') rec.notified = null; rec.trigger = trigger;
+    // A new publish is the author's: it may get its own automatic pass (applyAutoFix). The last pass stays in the history.
+    if (trigger === 'publish' && rec.auto_fix) { pushHistory(rec, 'auto_fix_cleared', { state: rec.auto_fix.state ?? null }); delete rec.auto_fix; } rec.pak_etag = sim.pak_etag || rec.pak_etag; rec.pak_size = sim.scene_size_bytes || rec.pak_size; rec.content_root = sim.content_root || rec.content_root; pushHistory(rec, 'rerun', { trigger });
     // The tags an earlier run chose belong to its decision; this run's decision says its own.
     if (rec.decision) rec.decision = { ...rec.decision, assigned_tags: [] };
     if (!rec.reference) { try { rec.reference = await assignCaseReference(env, 'moderation', simId); } catch (e) { console.error('moderation: no case reference yet:', e?.message); } }
@@ -7621,7 +7847,8 @@ async function runLeased(simId, env, deps, opts, lease, meter = null) {
   rec.status = 'classifying';
   rec.classifying_since = new Date().toISOString();
   // The review's clock for src/review_latency.mjs: set by a publish (the author's submit time is on the listing), kept by a carried-on run, else none.
-  rec.review_clock = trigger === 'publish' ? { submitted_at: sim.moderation?.submitted_at || null, started_at: rec.classifying_since } : (carried ? rec.review_clock ?? null : null);
+  // The review again after the automatic pass (trigger 'auto_fix') is part of the publish's review: its clock runs on.
+  rec.review_clock = trigger === 'publish' ? { submitted_at: sim.moderation?.submitted_at || null, started_at: rec.classifying_since } : (carried || trigger === 'auto_fix' ? rec.review_clock ?? null : null);
   await saveCase(env, rec, prevStatus);
   await applyToSim(env, simId, opts.keepListed ? { evidence_epoch: epoch } : { status: 'classifying', evidence_epoch: epoch });
 
@@ -7639,8 +7866,13 @@ async function runLeased(simId, env, deps, opts, lease, meter = null) {
   const captureKeys = await listCaptures(env, simId, epoch);
   // What the system knows about the author's account (attested property, a verified business): the author cannot claim these.
   const account = await accountFacts(env, sim.author_id).catch(e => { console.error('moderation: account facts unreadable', e?.message); return null; });
-  const signals = deterministicSignals(sim, dossier, { capturesCount: captureKeys.length, publishesToday, thresholds: t, account: account || undefined });
+  // Code v2.8 B6(h): the page links the link review approved, so the Space's own payment link is allowed when it is one of them.
+  const approvedLinks = await approvedPageLinks(env, simId).catch(e => { console.error('moderation: page links unreadable', e?.message); return new Set(); });
+  const signals = deterministicSignals(sim, dossier, { capturesCount: captureKeys.length, publishesToday, thresholds: t, account: account || undefined, approvedLinks });
   rec.signals = signals;
+  // The listing's links (its description's and its page's) are queued for the link review, and their scans submitted; the
+  // moderation tick polls them. It decides nothing about this run and never throws.
+  await noteListingForLinkReview(env, sim, deps);
 
   // Dedup by the package's SHA-256 as R2 holds it (the identity this run took at its
   // start), never by the client's hash and never by an etag: an etag is an MD5 that
@@ -7883,6 +8115,19 @@ async function runLeased(simId, env, deps, opts, lease, meter = null) {
     return loadCase(env, simId);
   }
   if (final.outcome === 'changes_requested') {
+    // The one automatic pass (docs/moderation/AUTO_APPLY_LISTING_FIXES.md): the listing wording the findings point at is
+    // fixed from the judge's own answer. Every finding fixed: the listing goes back to the same review (runModerationCase
+    // starts it). Otherwise the author is told what was fixed and what is left.
+    const fix = await applyAutoFix(env, rec, sim, final, judge);
+    if (fix?.resubmit) {
+      pushHistory(rec, 'auto_fix', { applied: fix.applied.map(a => a.code), resubmit: true });
+      return setStatus(env, rec, 'pending', { ...rec.decision, outcome: 'auto_fix', first_changes: final.changes, changes: null, suggested_edit: null, suggested_statement: null }, 'auto_fix_resubmitted', { by: 'system', applied: fix.applied.map(a => a.code) });
+    }
+    if (fix) {
+      pushHistory(rec, 'auto_fix', { applied: fix.applied.map(a => a.code), left: fix.left, resubmit: false });
+      const statementLeft = fix.left.includes('statement_missing') || fix.left.includes('statement_unclear');
+      return setStatus(env, rec, 'changes_requested', { ...rec.decision, first_changes: final.changes, changes: fix.left, suggested_edit: final.suggested_edit || null, suggested_statement: statementLeft ? final.suggested_statement || null : null }, 'changes_requested', { by: 'judge', changes: fix.left, auto_fixed: fix.applied.map(a => a.code) });
+    }
     // Not yet (rules 0, 1, 2, 6 and 7): the author is told each change, by the Code's copy, the judge's suggested edit and, for a
     // missing or unclear statement, the judge's draft of it.
     return setStatus(env, rec, 'changes_requested', { ...rec.decision, changes: final.changes, suggested_edit: final.suggested_edit || null, suggested_statement: final.suggested_statement || null }, 'changes_requested', { by: 'judge', changes: final.changes });
@@ -7915,6 +8160,36 @@ async function runLeased(simId, env, deps, opts, lease, meter = null) {
   // The rules decide every case (decideFinal returns no other outcome, and a second reading never asks for a third). Anything
   // else is a fault in this code: the review could not decide, and the author is told so.
   return settleWithoutJudge(env, rec, base, triage, { change: 'review_undecided', code: `no_rule_for_${String(final.outcome).slice(0, 40)}` });
+}
+
+// The automatic pass, run once per publish on a "not yet" in the quality lane: never on a case a legal lock or a hold covers,
+// never twice (a case with `auto_fix` makes no pass until the author publishes again, which clears it). The listing is written
+// only while its description and tags are still the ones this run read, so an author's edit made during the review wins and
+// the pass is dropped. Returns the plan written (autoFixPlan, with `before` and `after`), or null when nothing was written.
+async function applyAutoFix(env, rec, sim, final, judge) {
+  if (rec.auto_fix || final.lane !== 'quality' || rec.legal_hold || caseLocksContent(rec) || !judge || judge.malformed) return null;
+  const plan = autoFixPlan({ sim, final, judge });
+  if (!plan?.applied.length) return null;
+  const at = new Date().toISOString();
+  const before = { description: typeof sim.description === 'string' ? sim.description : '', tags: listingTags(sim) };
+  const raw = await env.SOCIAL.get(`sim:${rec.sim_id}`);
+  const current = raw ? JSON.parse(raw) : null;
+  // The listing as it is now, through the R2 legal lock too: a hold or quarantine applied during the run stops the pass.
+  if (!current || await contentLockedFor(env, current, null)) return null;
+  if (!current || (typeof current.description === 'string' ? current.description : '') !== before.description || !sameTagSet(listingTags(current), before.tags)) {
+    rec.auto_fix = { pass: 1, at, state: 'skipped', reason: 'listing_changed' };
+    return null;
+  }
+  current.description = plan.description;
+  if (plan.tags) { current.tags = plan.tags; current.tags_source = plan.tags_source; current.genre_migrated = true; }
+  const after = { description: plan.description, tags: listingTags(current) };
+  // Read by src/world.mjs (src/listing_guard.mjs): a later commit that sends back the text from before the fix (a Studio that
+  // has not read the fix yet) keeps the fixed text. Any other text the author sends is theirs.
+  guardReplacedText(current, { old: before, after, by: 'auto_fix', at });
+  current.updated_at = at;
+  await env.SOCIAL.put(`sim:${rec.sim_id}`, JSON.stringify(withTagsWrittenBack(current)));
+  rec.auto_fix = { pass: 1, at, state: plan.resubmit ? 'resubmitted' : 'applied', applied: plan.applied, left: plan.left, before, after };
+  return { ...plan, before, after };
 }
 
 // Code v2.4: the judge's failures that asking again will not fix: a refusal, and an answer that arrived whole but is not usable
@@ -8337,7 +8612,9 @@ export async function resumeModeration(env, deps, { budgetMs = MODERATION_TICK_B
   const deadline = Date.now() + budgetMs;
   const resumed = await resumeClassifying(env, deps, t, { deadline, tick: true });
   const stalled = await resumeStalledPending(env, deps, t, { deadline, cursorKey: TICK_SWEEP_CURSOR_KEY, tick: true });
-  return { resumed, stalled };
+  // The link review's polls and 7-day re-reviews (Code Part IX), bounded per tick and inside the same deadline. Never throws.
+  const links = await linkReviewTick(env, deps, { deadline });
+  return { resumed, stalled, links };
 }
 
 /// A field of a listing's moderation marker written without touching its times (updated_at decides when the sweep retries).
@@ -8357,6 +8634,8 @@ export async function sweepModeration(env, deps, opts = {}) {
   out.resumed = await resumeClassifying(env, deps, t);
   out.stalled = await resumeStalledPending(env, deps, t);
   if (opts.backfill !== false) out.backfilled = await backfillLegacy(env, deps, t.backfill_per_run);
+  // The link review on the hourly tick too (the five-minute tick skips :00), bounded the same way. Never throws.
+  out.links = await linkReviewTick(env, deps, { deadline: Date.now() + MODERATION_TICK_BUDGET_MS });
   out.locks_removed = await sweepLocks(env).catch(e => { console.error('moderation lock sweep failed', e?.message); return 0; });
   // The review cost aggregates for yesterday and today, rebuilt from their runs (review_costs.mjs).
   out.cost_days = await rollupRecentReviewCosts(env).catch(e => { console.error('review cost rollup failed', e?.message); return 0; });
@@ -8430,6 +8709,23 @@ async function routeModeration(request, url, env, ctx, deps) {
   const m = request.method;
 
   let match;
+  // The judge emulator: public (an agent checks a Space before it has a listing), limited per address, pure rules.
+  if (path === '/api/moderation/emulate') {
+    if (m !== 'POST') return json({ error: 'POST only' }, 405, cors);
+    const ip = request.headers.get('CF-Connecting-IP') || 'unknown';
+    if (env.AUTH_RATE_LIMITER) {
+      const { success } = await env.AUTH_RATE_LIMITER.limit({ key: `judge-emulate:${ip}` });
+      if (!success) return json({ error: 'Too many emulated reviews; wait a minute.' }, 429, cors);
+    }
+    const body = await request.arrayBuffer();
+    if (!body.byteLength) return json({ error: 'Empty body' }, 400, cors);
+    if (body.byteLength > EMULATE_MAX_BYTES) return json({ error: `Body too large (max ${EMULATE_MAX_BYTES} bytes)` }, 413, cors);
+    let input;
+    try { input = JSON.parse(new TextDecoder().decode(body)); } catch { return json({ error: 'Body must be JSON: { listing, judge, dossier? }' }, 400, cors); }
+    if (!input || typeof input !== 'object' || !input.listing || input.judge == null) return json({ error: 'Body must be { listing, judge, dossier? }' }, 400, cors);
+    const result = emulateReview({ listing: input.listing, judge: input.judge, dossier: input.dossier ?? null });
+    return json(result, result.error ? 422 : 200, cors);
+  }
   if ((match = path.match(/^\/api\/simulations\/([a-f0-9-]+)\/dossier$/)) && m === 'PUT') {
     const { error, sim } = await ownedSim(request, match[1], env, deps);
     if (error) return error;

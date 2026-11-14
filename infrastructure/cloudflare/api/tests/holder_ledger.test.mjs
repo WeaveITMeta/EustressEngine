@@ -69,8 +69,12 @@ test('a request repeated under the same ref makes one entry', async () => {
   const again = await post(env, 'issue', { ref: 'sub-1', to: ADA, units: 100 });
   assert.equal(again.json.replay, true);
   assert.equal(again.json.entry.hash, first.json.entry.hash);
-  // Even with different words, the ref decides.
-  assert.equal((await post(env, 'issue', { ref: 'sub-1', to: BEN, units: 999 })).json.replay, true);
+  // The same ref with different contents is a mistake, refused, never a silent repeat.
+  const reused = await post(env, 'issue', { ref: 'sub-1', to: BEN, units: 999 });
+  assert.deepEqual([reused.status, reused.json.code], [409, 'ref_conflict']);
+  // Refs that begin sub: are kept for accepted subscriptions.
+  const kept = await post(env, 'issue', { ref: 'sub:12345678-1234-4234-8234-123456789012', to: BEN, units: 7 });
+  assert.deepEqual([kept.status, kept.json.code], [400, 'reserved_ref']);
   const list = await read(env, '/api/admin/holders');
   assert.deepEqual([list.issued_units, list.entries, list.holders.length], [100, 1, 1]);
 });

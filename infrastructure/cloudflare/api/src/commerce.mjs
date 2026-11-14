@@ -296,7 +296,15 @@ const WEBHOOK_BLOCKED_SUFFIXES = [
 /// Those reach what no URL check sees, and would first need the resolved
 /// address validated on every request.
 export function cleanWebhookUrl(value) {
-  if (typeof value !== 'string' || value.length > LIMITS.webhook_url) return '';
+  return publicHttpsUrl(value, LIMITS.webhook_url);
+}
+
+/// The host rules cleanWebhookUrl applies, for any URL Eustress shows or sends to: https on the default port, no
+/// credentials, never an IP literal, a public-shaped host name outside the blocked suffixes, at most `maxLength`
+/// characters. Returns the parsed href, or '' when any rule fails. A sim page's off-site links (src/page.mjs) are held to
+/// exactly these rules, so a link and a webhook can never disagree about what a public host is.
+export function publicHttpsUrl(value, maxLength) {
+  if (typeof value !== 'string' || value.length > maxLength) return '';
   let url;
   try {
     url = new URL(value);

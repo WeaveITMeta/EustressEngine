@@ -54,6 +54,8 @@ export { HolderLedger } from './holder_ledger.mjs';
 import { accountCall, accountState, keyReplaceTerms } from './account_auth.mjs';
 import { handleKeyRotationRoute, handleAdminReplaceKeyRoute, handleKeyRestoreRoute } from './identity_routes.mjs';
 import { handlePasskeyRoute, identityFileRequired } from './passkeys.mjs';
+import { handleDiscordRoute, currentDiscordLink, deleteDiscordLink } from './discord_link.mjs';
+import { handleDiscordInteraction, discordTick } from './discord_interactions.mjs';
 import { handleEmailRoute } from './email_routes.mjs';
 import { handleReleaseNotify } from './release_notify.mjs';
 import { handleReviewLatencyRoute } from './review_latency.mjs';
@@ -86,17 +88,23 @@ import {
 } from './moderation.mjs';
 import { handleWorldRoute, WORLD_FORMAT, PAK_FORMAT, DEFAULT_MAX_PLAYERS, checkMaxPlayers } from './world.mjs';
 import { checkTags, listingTags, tagFilter, queryMatchesTag, genreTag, listingTagFields, setAuthorTags, withTagsWrittenBack, genreAliasValues } from './tags.mjs';
+import { handleEditListing } from './listing_edit.mjs';
 import { handleIdentityRoute } from './identity.mjs';
 import { handlePlayPassRoute, withPlayPass } from './play_pass.mjs';
 import { handleEconomicsRoute } from './economics.mjs';
 import { handleBooksRoute } from './books.mjs';
 import { handleHolderAdminRoute, handleHoldings, holderLedgerCall } from './holder_ledger.mjs';
 import { handleSubscriptionRoute, handleSubscriptionAdminRoute } from './subscriptions.mjs';
+import { handleReportsRoute } from './reports.mjs';
 import {
   SPONSOR_KIND, handleSponsorCheckout, handleSponsorList, handleSponsorListing, settleSponsorCheckout, settleSponsorInvoice,
+  usdCentsOf, paymentIntentOf, invoiceTaxCents,
 } from './sponsor.mjs';
 import { handleTakedownRoute, sweepTakedowns, refuseBlockedUpload, hashStoredObject, checkCaptureUpload } from './takedown.mjs';
 import { handleCaseRoute } from './case_history.mjs';
+// The sim page (PageSpec v1) and its off-site link review (src/page.mjs, src/link_review.mjs; Code Part IX).
+import { handlePageRoute } from './page.mjs';
+import { maskDescriptionFor } from './link_review.mjs';
 // Illegal content: the evidence vault and the legal reports written from it (src/evidence_vault.mjs, src/legal_reports.mjs).
 import { handleEvidenceRoute, retryPendingEvidence } from './evidence_vault.mjs';
 import { handleLegalReportRoute, sweepLegalReports } from './legal_reports.mjs';
@@ -660,6 +668,10 @@ export default {
       if (event?.cron === MODERATION_TICK_CRON) {
         try { await resumeModeration(env, await moderationDeps({}, env)); }
         catch (e) { console.error('moderation five-minute tick failed:', e); }
+        // The Discord app (src/discord_interactions.mjs): register commands and Linked Roles metadata when they changed,
+        // post to followed channels, and update Linked Roles of creators whose listed Spaces changed. Never throws.
+        try { await discordTick(env, discordDeps(env), { now: new Date(event?.scheduledTime || Date.now()).getTime() }); }
+        catch (e) { console.error('discord five-minute tick failed:', e?.message || e); }
         return;
       }
       const at = new Date(event?.scheduledTime || Date.now());
@@ -815,6 +827,15 @@ export default {
         return handleMe(request, env, cors);
       if (url.pathname === '/api/avatar' && ['GET', 'PUT'].includes(request.method))
         return handleAvatar(request, env, cors, verifyAuth, json);
+
+      // Linking a Discord account (src/discord_link.mjs)
+      if (url.pathname.startsWith('/api/auth/discord/')) {
+        const handled = await handleDiscordRoute(request, url, env, { verifyAuth, authMethod, json, cors, publicUser, accountCall, listViews: discordDeps(env).listViews });
+        if (handled) return handled;
+      }
+      // The Discord app's interactions endpoint (src/discord_interactions.mjs): public, the Ed25519 signature is the gate.
+      if (url.pathname === '/api/discord/interactions')
+        return await handleDiscordInteraction(request, env, ctx, discordDeps(env));
 
       // Replacing the identity key (src/identity_routes.mjs)
       if (url.pathname.startsWith('/api/identity/rotate')) {
@@ -1052,6 +1073,12 @@ export default {
       }
       if (url.pathname === '/api/holdings' && request.method === 'GET')
         return handleHoldings(request, env, cors, { json, verifyAuth });
+      // Drafts of Form 1-K, Form 1-SA and the offering circular, from the books and the ledger. Admin only; reads only; files
+      // nothing. See src/reports.mjs.
+      if (url.pathname.startsWith('/api/admin/reports/')) {
+        const reports = await handleReportsRoute(request, url, env, cors, { json, requireAdmin });
+        if (reports) return reports;
+      }
       // The offering and its subscriptions: a person subscribes and signs, an administrator records funds and accepts. No
       // money moves through these routes. See src/subscriptions.mjs.
       if (url.pathname.startsWith('/api/admin/offerings') || url.pathname.startsWith('/api/admin/subscriptions')) {
@@ -1122,7 +1149,7 @@ export default {
       // status view, appeals, and the admin queue and tool surface. Dispatched
       // before the simulation routes because `/api/simulations/{id}/moderation`
       // would otherwise be swallowed by the `/api/simulations/{id}` catch-all.
-      if (url.pathname.startsWith('/api/simulations/') || url.pathname.startsWith('/api/admin/moderation/')) {
+      if (url.pathname.startsWith('/api/simulations/') || url.pathname.startsWith('/api/admin/moderation/') || url.pathname === '/api/moderation/emulate') {
         const handled = await handleModerationRoute(request, url, env, ctx, await moderationDeps(cors, env));
         if (handled) return handled;
       }
@@ -1169,6 +1196,9 @@ export default {
       // The author edits the listing's tags from the site (docs/networking/LISTING_TAGS.md).
       if (/^\/api\/simulations\/[a-f0-9-]+\/tags$/.test(url.pathname) && request.method === 'PATCH')
         return handleSetListingTags(request, url.pathname.split('/')[3], env, cors);
+      // The author edits the listing's title, description and visibility from its page (docs/networking/LISTING_EDIT.md).
+      if (/^\/api\/simulations\/[a-f0-9-]+\/listing$/.test(url.pathname) && request.method === 'PATCH')
+        return handleEditListing(request, url.pathname.split('/')[3], env, cors, { json, verifyAuth });
       if (url.pathname.match(/^\/api\/simulations\/[a-f0-9-]+\/space$/) && request.method === 'PUT')
         return handleUploadScene(request, url.pathname.split('/')[3], env, cors);
       if (url.pathname.match(/^\/api\/simulations\/[a-f0-9-]+\/space\/multipart\/create$/) && request.method === 'POST')
@@ -1216,6 +1246,11 @@ export default {
             await countVisit(env, sim, key);
           },
         });
+      // The sim page: its theme, images and off-site links, each served only once the review approves it (src/page.mjs).
+      if (url.pathname.startsWith('/api/simulations/') && /^[a-f0-9-]+\/page(?:\/|$)/.test(url.pathname.slice('/api/simulations/'.length))) {
+        const handled = await handlePageRoute(request, url, env, ctx, { verifyAuth, json, cors, sniffFileType, policyText: GUARDIAN_POLICY_TEXT });
+        if (handled) return handled;
+      }
       // Website manifest upload. Its own object and its own route, so a publish
       // can never overwrite the listing record the marketplace reads.
       if (url.pathname.match(/^\/api\/simulations\/[a-f0-9-]+\/website-manifest$/) && request.method === 'PUT')
@@ -4137,6 +4172,8 @@ async function handleAdminDeleteUser(request, env, cors) {
     if (held.ok && held.public_key) await env.USERS.delete(`pubkey:${held.public_key}`);
   }
   if (user.id_hash) await env.USERS.delete(`idhash:${user.id_hash}`);
+  // The Discord link and its claim on the Discord id (src/discord_link.mjs).
+  await deleteDiscordLink(env, userId);
   // The account's claim on its person (src/kyc_identity.mjs) goes with it.
   if (user.id_hash) await releaseIdHash(env, user.id_hash, userId);
   // What the account object kept in KV for it goes with the account.
@@ -4384,17 +4421,24 @@ async function handleStripeWebhook(request, env) {
     if (session.payment_status !== 'paid') return new Response('OK', { status: 200 });
     // What was paid for, without any tax Stripe collected on top of it.
     const grossCents = Math.max(0, Math.trunc((session.amount_total || 0) - (session.total_details?.amount_tax || 0)));
-    const amount = grossCents / 100; // dollars
     const userId = session.metadata?.user_id || session.client_reference_id;
 
     const sessionType = session.metadata?.type || null;
+    // The same in US cents: a session shown in another currency (Adaptive
+    // Pricing) states its amounts in that currency. Null when there is no
+    // exact figure; the goods are still delivered and the deposit waits for a
+    // person (finance-review:). Sponsorships convert in sponsor.mjs.
+    const usdCents = ['delta_purchase', 'ticket_purchase', 'treasury_fund', null].includes(sessionType)
+      ? await usdOrReview(env, `stripe:${session.id}`, session, grossCents, sessionType || 'treasury_fund')
+      : null;
+    const amount = (usdCents ?? 0) / 100; // dollars
 
     // A Delta pack, or the Checkout that starts a plan. A plan's grants come
     // with each paid invoice (invoice.paid below), its first one included.
-    if (sessionType === 'delta_purchase') return settleDeltaPurchase(session, grossCents, userId, env);
+    if (sessionType === 'delta_purchase') return settleDeltaPurchase(session, usdCents, userId, env);
     if (sessionType === 'subscription') return recordPlanCheckout(session, env);
     // A sponsorship of the engine: whole to Eustress's side, after the fee.
-    if (sessionType === SPONSOR_KIND) return settleSponsorCheckout(session, grossCents, userId, env, { treasuryCall });
+    if (sessionType === SPONSOR_KIND) return settleSponsorCheckout(session, grossCents, userId, env, { treasuryCall, stripeRequest });
     // Anything else that is not a Ticket pack or a treasury contribution was
     // not created by this Worker: acknowledge it and move no money.
     if (sessionType && sessionType !== 'ticket_purchase' && sessionType !== 'treasury_fund') {
@@ -4431,13 +4475,15 @@ async function handleStripeWebhook(request, env) {
       // top, then half of the net is the contributors' (splitSale in
       // treasury.mjs). The deposit is keyed by the session, so a redelivery
       // adds nothing, and a failure answers 500 so Stripe redelivers.
+      if (usdCents === null) return new Response('OK', { status: 200 });
       const channel = session.metadata?.channel || 'web';
-      const split = splitSale(grossCents, channel);
+      const split = splitSale(usdCents, channel);
+      const facts = await paymentFacts(env, session, session.invoice);
       const deposit = await treasuryCall(env, 'deposit', {
         ref: `stripe:${session.id}`, kind: 'ticket_purchase',
         gross_cents: split.gross_cents, fee_cents: split.fee_cents,
         treasury_cents: split.treasury_cents, platform_cents: split.platform_cents,
-        user_id: userId || null, payment_intent: session.payment_intent || null,
+        user_id: userId || null, ...facts,
         tickets: ticketsToCredit, channel,
       });
       if (!deposit.ok) {
@@ -4469,10 +4515,15 @@ async function handleStripeWebhook(request, env) {
     } else {
       // TREASURY FUNDING: the whole contribution goes to the treasury, keyed
       // by the session so a redelivery adds nothing.
+      if (usdCents === null) return new Response('OK', { status: 200 });
+      const facts = await paymentFacts(env, session, session.invoice);
+      if (!facts.payment_intent && usdCents > 0) {
+        await noteFinanceReview(env, `stripe:${session.id}`, { reason: 'no_payment_intent', kind: 'treasury_fund', object_id: session.id });
+      }
       const deposit = await treasuryCall(env, 'deposit', {
         ref: `stripe:${session.id}`, kind: 'treasury_fund',
-        gross_cents: grossCents, fee_cents: 0, treasury_cents: grossCents, platform_cents: 0,
-        user_id: userId || null, payment_intent: session.payment_intent || null,
+        gross_cents: usdCents, fee_cents: 0, treasury_cents: usdCents, platform_cents: 0,
+        user_id: userId || null, ...facts,
       });
       if (!deposit.ok) {
         console.error(`treasury deposit for session ${session.id} failed:`, deposit.error);
@@ -4496,16 +4547,21 @@ async function handleStripeWebhook(request, env) {
     const invoice = event.data.object;
     const meta = invoice.subscription_details?.metadata || invoice.parent?.subscription_details?.metadata || {};
     if (meta.type === 'subscription' && PLANS.includes(meta.eustress_plan)) return settlePlanInvoice(invoice, meta, env);
-    if (meta.type === SPONSOR_KIND) return settleSponsorInvoice(invoice, meta, env, { treasuryCall });
+    if (meta.type === SPONSOR_KIND) return settleSponsorInvoice(invoice, meta, env, { treasuryCall, stripeRequest });
     if (invoice.billing_reason !== 'subscription_cycle' || meta.type !== 'treasury_fund') {
       return new Response('OK', { status: 200 });
     }
-    const cents = Math.max(0, Math.trunc((invoice.amount_paid || 0) - (invoice.tax || 0)));
+    const paid = Math.max(0, Math.trunc((invoice.amount_paid || 0) - invoiceTaxCents(invoice)));
+    const cents = await usdOrReview(env, `stripe-invoice:${invoice.id}`, invoice, paid, 'treasury_fund');
     if (cents > 0) {
+      const facts = await paymentFacts(env, invoice, invoice.id);
+      if (!facts.payment_intent) {
+        await noteFinanceReview(env, `stripe-invoice:${invoice.id}`, { reason: 'no_payment_intent', kind: 'treasury_fund', object_id: invoice.id });
+      }
       const deposit = await treasuryCall(env, 'deposit', {
         ref: `stripe-invoice:${invoice.id}`, kind: 'treasury_fund',
         gross_cents: cents, fee_cents: 0, treasury_cents: cents, platform_cents: 0,
-        user_id: meta.user_id || null, payment_intent: invoice.payment_intent || null,
+        user_id: meta.user_id || null, ...facts,
       });
       if (!deposit.ok) {
         console.error(`treasury deposit for invoice ${invoice.id} failed:`, deposit.error);
@@ -4546,18 +4602,20 @@ async function handleStripeWebhook(request, env) {
       if (!obj.payment_intent) return new Response('OK', { status: 200 });
       result = await treasuryCall(env, 'refund', {
         payment_intent: obj.payment_intent, refunded_total_cents: Math.trunc(obj.amount_refunded || 0),
+        currency: obj.currency || null,
       });
     } else if (type === 'charge.dispute.created') {
       if (!obj.payment_intent) return new Response('OK', { status: 200 });
       result = await treasuryCall(env, 'dispute', {
         payment_intent: obj.payment_intent, dispute_id: obj.id, amount_cents: Math.trunc(obj.amount || 0),
+        currency: obj.currency || null,
       });
     } else {
       if (obj.status !== 'won') return new Response('OK', { status: 200 });
       result = await treasuryCall(env, 'dispute_won', { dispute_id: obj.id });
     }
     if (!result.ok) {
-      if (result.code === 'deposit_not_found' || result.code === 'reversal_not_found') {
+      if (result.code === 'deposit_not_found' || result.code === 'reversal_not_found' || result.code === 'currency_mismatch') {
         await env.PAYOUTS.put(`unmatched-reversal:${event.id}`, JSON.stringify({
           type, object_id: obj.id, payment_intent: obj.payment_intent || null,
           amount_cents: obj.amount_refunded ?? obj.amount ?? null, at: new Date().toISOString(),
@@ -4612,6 +4670,45 @@ async function handleStripeWebhook(request, env) {
 /// A Delta pack was paid for: credit the Delta, then deposit the payment's
 /// split in the Treasury. Both are keyed by the session, so a redelivery adds
 /// nothing, and a failure answers 500 so Stripe redelivers.
+/// What a deposit records about the payment besides its US cents: the
+/// PaymentIntent a refund or dispute is matched by (a subscription's sits on
+/// its invoice), and, for a payment shown in another currency, that currency
+/// and the charge's own amount, so a refund in it converts back in proportion.
+async function paymentFacts(env, obj, invoiceId) {
+  const payment_intent = await paymentIntentOf(env, { stripeRequest }, { payment_intent: obj.payment_intent, invoice: invoiceId });
+  const currency = typeof obj.currency === 'string' ? obj.currency.toLowerCase() : 'usd';
+  const presented = currency === 'usd' ? {} : {
+    presented_currency: currency,
+    presented_cents: Math.trunc(Number.isSafeInteger(obj.amount_total) ? obj.amount_total : obj.amount_paid || 0),
+  };
+  return { payment_intent: payment_intent || null, ...presented };
+}
+
+/// A payment the books could not record exactly, for a person to look at: its
+/// amount had no exact US dollar figure, or its PaymentIntent was not found
+/// (so a refund of it would not reverse). Never blocks the webhook.
+async function noteFinanceReview(env, ref, what) {
+  try {
+    await env.PAYOUTS.put(`finance-review:${ref}`, JSON.stringify({ ...what, at: new Date().toISOString() }), {
+      expirationTtl: 86400 * 365 * 3,
+    });
+  } catch (e) {
+    console.error(`finance review note ${ref} failed:`, e?.message || e);
+  }
+}
+
+/// A paid amount in US cents, or null with a review note when there is no
+/// exact figure (a foreign currency with tax, or an invoice in one).
+async function usdOrReview(env, ref, obj, taxFreeCents, kind) {
+  const usd = usdCentsOf(obj, taxFreeCents);
+  if (usd === null) {
+    await noteFinanceReview(env, ref, {
+      reason: 'currency', kind, currency: obj.currency || null, amount: taxFreeCents, object_id: obj.id || null,
+    });
+  }
+  return usd;
+}
+
 async function settleDeltaPurchase(session, grossCents, userId, env) {
   const delta = parseInt(session.metadata?.delta || '0', 10);
   if (!userId || !(delta > 0)) {
@@ -4625,13 +4722,17 @@ async function settleDeltaPurchase(session, grossCents, userId, env) {
     console.error(`Delta credit for session ${session.id} failed:`, credit.error);
     return new Response('Delta credit failed', { status: 500 });
   }
+  // No exact US figure (a foreign currency with tax): the Delta is delivered
+  // and the deposit waits for a person (finance-review:, written already).
+  if (grossCents === null) return new Response('OK', { status: 200 });
   const channel = session.metadata?.channel || 'web';
   const split = splitSale(grossCents, channel);
+  const facts = await paymentFacts(env, session, session.invoice);
   const deposit = await treasuryCall(env, 'deposit', {
     ref: `stripe:${session.id}`, kind: 'delta_purchase',
     gross_cents: split.gross_cents, fee_cents: split.fee_cents,
     treasury_cents: split.treasury_cents, platform_cents: split.platform_cents,
-    user_id: userId, payment_intent: session.payment_intent || null, delta, channel,
+    user_id: userId, ...facts, delta, channel,
   });
   if (!deposit.ok) {
     console.error(`treasury deposit for Delta session ${session.id} failed:`, deposit.error);
@@ -4695,14 +4796,22 @@ async function settlePlanInvoice(invoice, meta, env) {
       return new Response('Delta grant failed', { status: 500 });
     }
   }
-  const cents = Math.max(0, Math.trunc((invoice.amount_paid || 0) - (invoice.tax || 0)));
+  // The grants above are delivered either way; the deposit needs an exact US
+  // figure, and its PaymentIntent (on the invoice's payments from Stripe API
+  // 2025-03-31 on) so a refund or dispute of the renewal reverses it.
+  const paid = Math.max(0, Math.trunc((invoice.amount_paid || 0) - invoiceTaxCents(invoice)));
+  const cents = await usdOrReview(env, `stripe-invoice:${invoice.id}`, invoice, paid, 'subscription');
   if (cents > 0) {
     const split = splitSale(cents, 'web');
+    const facts = await paymentFacts(env, invoice, invoice.id);
+    if (!facts.payment_intent) {
+      await noteFinanceReview(env, `stripe-invoice:${invoice.id}`, { reason: 'no_payment_intent', kind: 'subscription', object_id: invoice.id });
+    }
     const deposit = await treasuryCall(env, 'deposit', {
       ref: `stripe-invoice:${invoice.id}`, kind: 'subscription',
       gross_cents: split.gross_cents, fee_cents: split.fee_cents,
       treasury_cents: split.treasury_cents, platform_cents: split.platform_cents,
-      user_id: userId, payment_intent: invoice.payment_intent || null, tickets, delta, channel: 'web',
+      user_id: userId, ...facts, tickets, delta, channel: 'web',
     });
     if (!deposit.ok) {
       console.error(`treasury deposit for invoice ${invoice.id} failed:`, deposit.error);
@@ -5838,7 +5947,8 @@ async function handleUserProjects(request, url, env, cors) {
 function galleryView(sim, origin) {
   const m = sim.moderation || {};
   return {
-    id: sim.id, name: sim.name, description: sim.description || '',
+    // Every URL in the description is shown only once the link review approved it (Code Part IX): else "[link pending review]".
+    id: sim.id, name: sim.name, description: maskDescriptionFor(sim),
     // `tags` is the only category, `tags_source` says who chose them, and `genre` is the deprecated mirror for one release.
     ...listingTagFields(sim), max_players: sim.max_players || 10,
     author_id: sim.author_id, author_name: sim.author_name,
@@ -5853,6 +5963,25 @@ function galleryView(sim, origin) {
     is_open_source: sim.open_source === true,
     // How players get the world: 'echk' chunks, or a 'pak' from before them.
     format: sim.format || (sim.r2_key ? 'pak' : null),
+  };
+}
+
+// The Discord app's reads (src/discord_interactions.mjs, src/discord_link.mjs): the Gallery's own listing read and live
+// strip at a rating the app has already worked out (`cap`, one of RATINGS). The live read passes a viewer whose own cap is
+// the highest, so `rating_max=cap` alone decides the slice, and no cache, so its plain cards never reach the public strip's.
+function discordDeps(env) {
+  const scope = new URL('https://api.eustress.dev/api/simulations');
+  return {
+    listViews: (cap) => handleListSimulations(scope, env, {}, { viewsOnly: true, cap }),
+    liveSessions: async (cap) => {
+      if (!RATINGS.includes(cap)) return [];
+      const res = await handleLiveNow(new URL(`${scope.origin}${scope.pathname}/live?rating_max=${cap}`), env, {}, {
+        json: (body, status) => ({ body, status }), isListable, cache: null,
+        viewer: { accountId: null, signedIn: true, adult: true, age21: true },
+        view: (sim) => galleryView(sim, scope.origin),
+      });
+      return res?.status === 200 && Array.isArray(res.body?.sessions) ? res.body.sessions : [];
+    },
   };
 }
 
@@ -6091,7 +6220,7 @@ async function handlePlaySimulation(request, simId, env, cors) {
   const out = {
     status: host?.link ? 'live' : 'solo',
     launch,
-    simulation: { id: sim.id, name: sim.name, description: sim.description, format: echk ? WORLD_FORMAT : 'pak' },
+    simulation: { id: sim.id, name: sim.name, description: maskDescriptionFor(sim), format: echk ? WORLD_FORMAT : 'pak' },
   };
   if (host) {
     out.live = { players: host.players, max_players: host.max_players };
@@ -7374,7 +7503,9 @@ async function publicUser(user, env) {
     username: user.username,
     email: (env ? await readAccountEmail(env, user) : user.email) || null,
     avatar_url: user.avatar_url || null,
-    discord_id: user.discord_id || null,
+    // The link this account shows (src/discord_link.mjs); keyFields below hides
+    // one a key replacement or an unlink revoked.
+    ...(await discordFields(env, user, null)),
     bliss_balance: fromMinor(minor),
     bliss_balance_minor: minor,
     // The web app deserializes this into User.ticket_balance, so it is always
@@ -7401,11 +7532,18 @@ async function keyFields(env, user) {
   return {
     key_epoch: held.key_epoch,
     key_prompt_seen_at: held.prompt_seen_at || null,
-    ...(held.discord_unlinked_at ? { discord_id: null } : {}),
+    ...(held.discord_unlinked_at ? await discordFields(env, user, held.discord_unlinked_at) : {}),
     email_verified_at: held.email_verified_at || null,
     email_change_pending: held.email_change_pending || null,
     key_replace_terms: keyReplaceTerms(),
   };
+}
+
+/// `discord_id` and `discord_username` for the account's view: the link made
+/// after `unlinkedAt`, or nulls.
+async function discordFields(env, user, unlinkedAt) {
+  const link = env ? await currentDiscordLink(env, user, unlinkedAt).catch(() => null) : (user?.discord_id ? { id: user.discord_id } : null);
+  return { discord_id: link ? link.id : null, discord_username: link ? link.username || null : null };
 }
 
 async function ticketBalanceMirror(env, user) {

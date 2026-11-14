@@ -198,7 +198,33 @@ present is "not yet" with the judge's change, no longer a rejection; the review 
 supporting files a package ships (.py, .json, .md, .txt, .csv), and the judge is told when a file
 or folder the description says ships is not in the package; a rejection decided only by
 the retired T4 rule is reviewed once more under v2.5.
-**Policy hash:** `sha256:4716b47bfbbdfb573eebdaf78b129c91328c8e02073abf3b4398eecfc7889a02`
+v2.6 (2026-11-14, founder direction: "allow video game violence with certain precautions. Must be
+historical or fictional. No loot boxes/gambling. No plots to harm or kill people that relate to
+real life."): B3 becomes combat's limits: combat is listed in fiction or history (a real conflict
+that ended at least 25 years ago), never with a real person, real group or present-day real place
+as a target, never as an attack on civilians, children, schools, places of worship, hospitals or
+crowds, never harming captives or the helpless, never torture, execution or graphic gore; in a
+game with combat, B6(b) covers every random reward container, bought or earned, and every wager;
+B1(b) and B2 no longer count enemies a visitor can see and fight in such a game; combat is rated
+at least teen_13, and at least mature_17 when realistic or bloody.
+v2.7 (2026-11-14, founder direction: "Allow passive income mechanisms, allow gore just not
+excessive, allow mild fright just not excessively spammy jump scares. Allow simple mind games like
+pong."): B1 carries only fright beyond mild (startles more than once in any two minutes or as the
+main thing, an unbeatable pursuer staged to terrify, a listing sold as horror, gore as decoration);
+B3(e) carries only excessive gore; B5 no longer counts passive income; a game's lesson and
+real-world connection can be the skill its play exercises, such as Pong's reaction time and spatial
+awareness (T3, T4(i)).
+v2.8 (2026-11-14, founder direction: "I want a free market, just nothing black market. ... Nothing
+risky is allowed. Real engineering shops, med stuff and real innovations need to be allowed." and
+"Allow legal gun stores."): off-site links, shop, payment and donation pages included, are allowed
+when the link review passes them (new Part IX): Cloudflare's URL Scanner visits each page (the
+Worker never does), the link judge reads it in a nonce frame and gives a risk score and flags under
+Part IX's rubric, and a link is shown only when the scanner is clean, the score is 25 or less and
+no flag applies; a removed link is taken out of the description and its author told; B6(h) allows
+a payment link in the Space when the same URL is an approved page link; cryptocurrency addresses
+and unlock codes sold off Eustress stay B6(h); no links on a child-directed listing, no shop links
+on an Adult one; page images are judged under the whole Code.
+**Policy hash:** `sha256:d3c4885dae0bd55950e5c7a199bdd568c93a9698368ac4f1f56d20547e5cfbd2`
 (computed over the stored file with its line endings normalized to LF, as the Worker ships it;
 recorded here because a self-referential hash inside the file would change the hash). Covers:
 Part 0 (purpose, principles and who reviews), the spatial intelligence review requirement
@@ -207,8 +233,8 @@ II's four tests and T4 for Fiction, Part III's Qualification Statement, tags (th
 the author gives none), fiction tags, Product
 category and rating questionnaire, Part IV's ordered verdict rules, Part V ratings, content
 descriptors and the Adult content setting, Part VI games, Part VII's strict JSON answer with
-mandatory spatial evidence, per-article and per-test evidence, `suggested_tags` and `suggested_statement`, and Part VIII's appeals, audit,
-versioning and review-schema loop.
+mandatory spatial evidence, per-article and per-test evidence, `suggested_tags` and `suggested_statement`, Part VIII's appeals, audit,
+versioning and review-schema loop, and Part IX's off-site link review and its rubric.
 
 ### Quality Gate — RESOLVED: Option 1, hard gate
 

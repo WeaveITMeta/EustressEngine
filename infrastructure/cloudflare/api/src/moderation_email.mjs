@@ -53,6 +53,15 @@ export function renderModerationEmail({ view, kind, simName, username, reviewUrl
   // Plain text: the same facts, in the order a person reads them.
   const lines = [hello, "", view.headline, ""];
   if (rating) lines.push(`Age rating: ${rating}`, "");
+  // The review's automatic pass (moderation.mjs autoFixView): what it fixed in the listing's wording, before what is left.
+  const fixed = Array.isArray(view.auto_fix?.applied) ? view.auto_fix.applied : [];
+  const stillHeading = fixed.length && (view.reasons || []).length ? "Still to change:" : null;
+  if (fixed.length) {
+    lines.push("Fixed for you:");
+    for (const a of fixed) lines.push(`* ${a.title}: ${a.detail}`);
+    lines.push("");
+  }
+  if (stillHeading) lines.push(stillHeading, "");
   for (const r of view.reasons || []) {
     lines.push(`* ${r.title}`);
     if (r.why) lines.push(`  Why: ${r.why}`);
@@ -92,6 +101,8 @@ export function renderModerationEmail({ view, kind, simName, username, reviewUrl
       <tr><td style="padding:10px 28px 6px;font-size:14px;color:#8b949e;">${esc(hello)}</td></tr>
       <tr><td style="padding:0 28px 16px;font-size:20px;line-height:1.35;font-weight:700;color:#f0f6fc;">${esc(view.headline)}</td></tr>
       ${rating ? block(`<span style="font-size:14px;color:#c9d1d9;">Age rating: <strong style="color:#f0f6fc;">${esc(rating)}</strong></span>`) : ""}
+      ${fixed.length ? block(`<div style="${label}">Fixed for you</div>${fixed.map(a => `<div style="font-size:14px;line-height:1.55;color:#c9d1d9;"><strong style="color:#f0f6fc;">${esc(a.title)}</strong>: ${esc(a.detail)}</div>`).join("")}`) : ""}
+      ${stillHeading ? block(`<div style="${label}">Still to change</div>`) : ""}
       ${reasonsHtml}
       ${view.suggested_edit ? block(`<div style="${label}">Suggested edit</div><div style="font-size:14px;line-height:1.55;color:#c9d1d9;">${esc(view.suggested_edit)}</div>`) : ""}
       ${view.suggested_statement?.text ? block(`<div style="${label}">Suggested statement (paste into your description)</div><div style="font-size:14px;line-height:1.55;color:#c9d1d9;white-space:pre-line;">${esc(view.suggested_statement.text)}</div>`) : ""}

@@ -212,16 +212,49 @@ Each of these is code in this repository, and each removes a line from the table
    - **Nothing is offered until an administrator opens an offering.** With none on file, or a draft, `GET /api/offering` answers that there is none. Opening one requires the SEC file number (`024-` and five digits) and the date of the notice of qualification, the circular and the subscription agreement each with the SHA-256 of its file, at least one state, and payment instructions. The code cannot check the file number against the SEC; the person who opens the offering carries that.
    - **Testing the waters (Stage 5)** is its own status. It takes one non-binding indication of interest per person at `/api/offering/interest`, shows the required legend, and accepts no subscription.
    - **A subscriber** is a signed-in account with a verified identity, a natural person, resident in the United States, in a state the offering names.
+   - **The name is the one verified at sign-up.** A subscription takes its legal name from the identity document the account was verified with: the name the document check read, kept on the account's linked verification record. A name the subscriber types is not used, and neither is the name typed at sign-up. An account whose record is missing, or whose document name could not be read, cannot subscribe until it verifies again. The state of residence stays the subscriber's own statement, because sign-up reads no address.
    - **The 10% limit.** A subscriber who is not accredited states annual income and net worth; the limit is 10% of the greater, counted across all of their subscriptions in the offering. Accredited status is the subscriber's own statement.
    - **Prepare, then sign.** `POST /api/subscriptions` prepares one and commits nobody, so the site, the API, a command line or an agent can do it. `POST /api/subscriptions/{id}/sign` is the person's act and needs a session that is good at that moment: their typed legal name, the hashes of the circular and agreement they were shown, and five statements, each true. Signing reserves the units, and no more are reserved or sold than the offering has.
-   - **No money moves through the code.** The subscriber pays by bank transfer, quoting a payment reference. An administrator records that the exact amount arrived, then accepts.
+   - **No money moves through the code.** The subscriber pays by bank transfer, quoting a payment reference. An administrator records that the exact amount arrived from an account in the subscriber's verified name (money from anyone else is returned), then accepts.
    - **Acceptance** records the holder and issues the units on the holder ledger in the same write, so a subscription is never accepted without its units or issued twice. It is refused while the offering is paused or closed, and when the circular changed after the subscriber signed, until they sign the current one.
    - **Leaving.** A subscriber can cancel before acceptance; an administrator can reject with a reason or expire signed subscriptions whose funds never arrived. Each frees the units. If funds had arrived, the subscription is marked as owed a refund until an administrator records the refund.
    
    Still to add: the pages on the site, the CLI and MCP tools (the API they would call is in place), email notices to the subscriber, subscribers that are companies or trusts, residents of other countries, and a card or bank-debit payment path, which waits on a payment provider that permits securities sales. Counsel confirms: the legend wording, that a typed-name signature and self-stated accredited status are sufficient, and whether any state where units are sold expects escrow.
-4. **Circular and report generator.** The offering circular, Form 1-K and Form 1-SA drafted from the books, the holder ledger and the use-of-proceeds budget, in the format EDGAR accepts. A person reads and signs every one.
+4. **Circular and report generator.** The offering circular, Form 1-K and Form 1-SA drafted from the books, the holder ledger and the offering, in the format EDGAR accepts. A person reads and signs every one. **Built, not deployed:** `GET /api/admin/reports/draft?kind=1-K|1-SA|circular&year=YYYY` (add `&format=html` for the document as a file), in [`reports.mjs`](../../infrastructure/cloudflare/api/src/reports.mjs). How it works:
+   - **A draft, never a filing.** It files and sends nothing. Every draft opens with "DRAFT. NOT FILED."
+   - **Filled from the records:** the statement of receipts and costs for the period (from the monthly books), the movement of the Stripe balance, the contributor treasury and outside payments, the units issued and the holder counts, every holder of 10% or more by legal name, each qualified offering's summary for the 1-K, and the circular's offering terms and plan of distribution.
+   - **Left for a person:** the business, risk factors, dilution, use of proceeds, management's discussion, the people and their pay, related-party dealings, and the rights of the units. Each sits in the draft as a marked gap, `[TO BE WRITTEN: ...]`, saying what goes there.
+   - **The figures are the company's own and unaudited.** The 1-K and the circular carry a gap where the auditor's statements go; the 1-SA carries one where the accountant's interim statements go.
+   - **Checks.** Each draft checks that the period is over, that every month's trial balance balances, that the holder ledger verifies, and that each offering's units match its subscriptions. A failed check is named at the top and the draft is marked NOT READY.
+   - **Periods and due dates.** The fiscal year ends in the month set by `FISCAL_YEAR_END_MONTH` (December when unset). A 1-SA covers its first six months. The draft states the due date: 120 days after the year for a 1-K, 90 days after the half for a 1-SA. The company's legal name comes from `COMPANY_LEGAL_NAME`.
+   - **EDGAR.** The HTML uses only plain tags (headings, paragraphs, tables, lists), with no scripts, images, links or style sheets, and ASCII text only; a character outside Latin-1 becomes a question mark and is counted in `characters_replaced`.
+
+   Still to add: the use-of-proceeds budget (piece 6 supplies it), ownership as of a past date (the ledger reads holdings as of the draft, which the draft says), the Form 1-A notification part and the 1-K cover data entered on EDGAR's own forms, and a balance sheet, which needs the books from the company's start. The item headings follow Forms 1-K and 1-SA as they read today; counsel checks them, and the circular's headings, against the current form instructions before the first filing.
 5. **Deadline tracker.** The report dates in Stage 9 and each state's renewal date, with reminders.
 6. **Budget-to-actual report.** Each raise's named budget against what was spent, published with every report.
+
+### Security review of pieces 1 to 3
+
+An independent review of the sponsorship, books, holder ledger and subscription code on 2026-11-13 found these problems, most of them reproduced through the Worker. Each is now fixed, with a test that fails when the fix is removed:
+
+| Problem | Fix |
+|---|---|
+| A hand entry under a subscription's ref made its acceptance issue nothing while reporting success | Refs that begin `sub:` are kept for acceptances, and an acceptance that would issue nothing is refused |
+| The same ref with different contents answered as a harmless repeat | Refused as `ref_conflict` |
+| A subscriber could reserve the whole offering without paying, or change their statements between subscriptions to escape the 10% limit | At most three unpaid subscriptions per account per offering, and one set of statements (name, residence, accredited, income, net worth) per account per offering |
+| A price change did not reach a subscription signed before it | Signing and acceptance both refuse a subscription made at another price; it is rejected and refunded |
+| The name on a subscription was the subscriber's own text | The name comes from the identity document verified at sign-up, and funds are recorded only from an account in that name, with who checked it recorded |
+| Money that arrived after a subscription ended had no place to be recorded | It is recorded and the subscription is marked as owed a refund |
+| The ledger check could not see a subscription its entries do not back | `verify` checks every accepted subscription's entry and every offering's counts |
+| The $75 million Tier 2 cap was checked per offering | Opening an offering counts every offering qualified in the twelve months before |
+| A sponsorship paid in another currency was deposited at the foreign figure, and a monthly sponsorship's first payment carried no payment reference, so its refund could not reverse it | Dollar amounts come from Stripe's conversion or the payment waits for a person; the payment reference is read from the invoice |
+
+Open, and not code's to settle:
+
+- **Who the subscriber is.** Decided (McKale, 2026-11-13): the identity verified at sign-up. The account record keeps no name; the linked verification record keeps the name read off the document, and subscriptions read it from there. Security reviews that new use of the record, and the subscriber's own subscription showing that name back to them. Sign-up reads no address, so residence is self-stated; whether an issuer-direct sale also needs anti-money-laundering screening beyond sign-up's background check is counsel's call.
+- **Accredited status** is the subscriber's own statement. Whether the company asks for evidence before relying on it is counsel's call.
+- **The same two webhook problems in Tickets, Delta and plans** sit in shared code and were sent to its owner.
+- Smaller items: a refunded sponsor stays on the public sponsor list; `/api/holdings` reads the whole ledger on each call; the hash chain's newest hash is published nowhere outside the Worker; the books reconciliation compares estimated fees with Stripe's actual fees and leaves out bank wires.
 
 ### The honest floor
 

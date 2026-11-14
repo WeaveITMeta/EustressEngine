@@ -25,6 +25,7 @@ import { deltaCall } from './delta.mjs';
 import { accountTimeZone } from './account_time_zone.mjs';
 import { renderKeyNotice, renderAdminActionNotice, noticeRecipients, sendNotice } from './account_notices.mjs';
 import { identityFileRequired } from './passkeys.mjs';
+import { currentDiscordLink, revokeStoredDiscordToken } from './discord_link.mjs';
 
 const MAX_REVOKE = 50;
 const RECORD_ID = /^[A-Za-z0-9_]{1,80}$/;
@@ -63,7 +64,7 @@ export async function accountHoldsValue(env, userId, user) {
 /// session floor: API keys, webhook endpoints, the Discord link, the payout
 /// connection. Listed so the owner can revoke them in the same step.
 export async function listCredentials(env, userId, user, discordUnlinkedAt = null) {
-  const out = { api_keys: [], webhooks: [], discord_linked: !!user?.discord_id && !discordUnlinkedAt, payout_connected: !!user?.stripe_connect_id, complete: true };
+  const out = { api_keys: [], webhooks: [], discord_linked: !!(await currentDiscordLink(env, user, discordUnlinkedAt)), payout_connected: !!user?.stripe_connect_id, complete: true };
   if (!env.COMMERCE_HUBS) return out;
   try {
     const hub = hubStub(env, userId);
@@ -119,6 +120,8 @@ async function revokeCredentials(env, userId, revoke) {
     // Recorded in the account's object, not in the user record (see unlink_discord).
     const r = await accountCall(env, userId, 'unlink_discord');
     if (r.ok) done.discord = true; else done.failed.push('discord');
+    // The Discord token kept for Linked Roles goes with the link: revoked at Discord (best effort) and deleted.
+    if (r.ok) await revokeStoredDiscordToken(env, userId).catch(() => {});
   }
   return done;
 }

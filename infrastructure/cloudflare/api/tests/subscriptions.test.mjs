@@ -25,7 +25,20 @@ function world() {
     env.USERS.store.set(`user:${id}`, JSON.stringify({ id, username, kyc_verified: kyc }));
   }
   env.USERS.store.set(`admin:${ADMIN}`, '1');
+  // The sign-up verification, linked to each verified account as sign-up leaves it: the name the document check read, and the
+  // name typed at sign-up as the fallback (which a subscription never uses).
+  env.KYC_STATUS = fakeKv();
+  for (const [id, name] of [[ADA, 'Ada Lovelace'], [BEN, 'Ben Franklin']]) {
+    env.KYC_STATUS.store.set(`kyc-${id}-front`, JSON.stringify(signUpRecord(id, name)));
+  }
   return env;
+}
+
+function signUpRecord(userId, documentName, extra = {}) {
+  return {
+    user_id: userId, status: 'linked', verified_at: '2026-10-01T12:00:00.000Z', jurisdiction: 'US', age_verified: true,
+    ocr_name: documentName || 'Typed At Signup', grok_analysis: { doc_decision: 'APPROVE', extracted_name: documentName }, ...extra,
+  };
 }
 
 const call = async (env, method, path, { as = ADMIN, body } = {}) => {
@@ -51,7 +64,8 @@ const prepare = (env, as, over = {}) => call(env, 'POST', '/api/subscriptions', 
 const sign = (env, as, id, over = {}) => call(env, 'POST', `/api/subscriptions/${id}/sign`, {
   as, body: { typed_name: 'Ada Lovelace', circular_sha256: CIRCULAR.sha256, agreement_sha256: AGREEMENT.sha256, attest: ALL_TRUE, ...over },
 });
-const admin = (env, id, act, body = {}) => call(env, 'POST', `/api/admin/subscriptions/${id}/${act}`, { body });
+// Recorded funds carry the administrator's check that the paying account is in the subscriber's name, unless a test says otherwise.
+const admin = (env, id, act, body = {}) => call(env, 'POST', `/api/admin/subscriptions/${id}/${act}`, { body: act === 'funds' ? { payer_name_matches: true, ...body } : body });
 const offering = async (env) => (await call(env, 'GET', '/api/admin/offerings')).json.offerings[0];
 
 async function signed(env, as = ADA, over = {}, signOver = {}) {
@@ -80,7 +94,10 @@ test('a subscription is prepared, signed, funded and accepted, and its units are
 
   assert.equal((await admin(env, id, 'accept')).json.code, 'funds_not_received', 'no acceptance before funds');
   assert.equal((await admin(env, id, 'funds', { amount_cents: 49_999, bank_ref: 'W1' })).json.code, 'amount_mismatch');
-  assert.equal((await admin(env, id, 'funds', { amount_cents: 50_000, bank_ref: 'W1' })).status, 200);
+  assert.equal((await admin(env, id, 'funds', { amount_cents: 50_000, bank_ref: 'W1', payer_name_matches: false })).json.code, 'payer_not_confirmed', 'money from an account in another name is not used');
+  const funded = await admin(env, id, 'funds', { amount_cents: 50_000, bank_ref: 'W1' });
+  assert.equal(funded.status, 200);
+  assert.equal(funded.json.subscription.funds.payer_confirmed_by, ADMIN);
   const accepted = await admin(env, id, 'accept');
   assert.equal(accepted.status, 200, JSON.stringify(accepted.json));
   assert.deepEqual([accepted.json.entry.kind, accepted.json.entry.units, accepted.json.entry.price_cents, accepted.json.entry.ref, accepted.json.entry.by], ['issue', 100, 500, `sub:${id}`, ADMIN]);
@@ -260,7 +277,10 @@ test('a paused or closed offering accepts and signs nothing, and its price is fi
   assert.equal((await call(env, 'PUT', '/api/admin/offerings', { body: { ...TERMS, price_cents: 600 } })).status, 200);
   assert.equal((await status('open')).status, 200, 'reopening needs no second qualification');
   assert.equal((await sign(env, BEN, draft, { typed_name: 'Ben Franklin' })).json.code, 'price_changed');
-  assert.equal((await admin(env, sub.id, 'accept')).status, 200, 'a signed subscription keeps the price it was signed at');
+  // Units are never issued at a price the circular no longer states: the old subscription is refused, rejected and refunded.
+  assert.equal((await admin(env, sub.id, 'accept')).json.code, 'price_changed');
+  assert.equal((await sign(env, ADA, sub.id)).json.code, 'price_changed', 'signing again does not carry the old price through');
+  assert.equal((await admin(env, sub.id, 'reject', { reason: 'the price changed' })).json.subscription.status, 'refund_due');
   assert.equal((await status('closed')).status, 200);
   assert.equal((await status('open')).json.code, 'bad_transition', 'closed is final');
   assert.equal((await call(env, 'GET', '/api/offering', { as: null })).json.offering, null);
@@ -310,4 +330,121 @@ test('an account that already holds units under another legal name is not accept
   const holders = (await call(env, 'GET', '/api/admin/holders')).json;
   assert.deepEqual([holders.holders[0].units, holders.issued_units], [105, 105]);
   assert.equal((await call(env, 'GET', '/api/admin/holders/verify')).json.sound, true);
+});
+
+// ── Review fixes (11-13) ─────────────────────────────────────────────────────
+
+test('one account makes one set of statements per offering, and holds at most three unpaid subscriptions in it', async () => {
+  const env = world();
+  await openOffering(env, { max_units: 100_000 });
+  await signed(env, ADA, { units: 10 });
+  // Accredited this time, to escape the limit: refused.
+  const story = await prepare(env, ADA, { units: 10, accredited: true, annual_income_cents: undefined, net_worth_cents: undefined });
+  assert.deepEqual([story.status, story.json.code], [409, 'statements_differ']);
+  assert.match(story.json.error, /accredited/);
+  assert.equal((await prepare(env, ADA, { units: 10, net_worth_cents: 9_000_000 })).json.code, 'statements_differ');
+  // Two drafts prepared before either is signed: the second signs only if it says the same.
+  const ada2 = (await prepare(env, ADA, { units: 10 })).json.subscription.id;
+  const ada3 = (await prepare(env, ADA, { units: 10 })).json.subscription.id;
+  const ada4 = (await prepare(env, ADA, { units: 10 })).json.subscription.id;
+  assert.equal((await sign(env, ADA, ada2)).status, 200);
+  assert.equal((await sign(env, ADA, ada3)).status, 200);
+  const fourth = await sign(env, ADA, ada4);
+  assert.deepEqual([fourth.status, fourth.json.code], [429, 'too_many_unpaid']);
+  assert.equal((await offering(env)).reserved_units, 30);
+});
+
+test('money that arrives after a subscription ended is recorded and owed back, never revives it', async () => {
+  const env = world();
+  await openOffering(env);
+  const sub = await signed(env);
+  await call(env, 'POST', `/api/subscriptions/${sub.id}/cancel`, { as: ADA });
+  const late = await admin(env, sub.id, 'funds', { amount_cents: 50_000, bank_ref: 'W9' });
+  assert.deepEqual([late.status, late.json.subscription.status, late.json.subscription.funds.after], [200, 'refund_due', 'cancelled']);
+  assert.equal((await admin(env, sub.id, 'accept')).json.code, 'funds_not_received');
+  assert.equal((await admin(env, sub.id, 'refunded', { bank_ref: 'R9' })).json.subscription.status, 'refunded');
+  assert.equal((await offering(env)).reserved_units, 0);
+});
+
+test('an acceptance never succeeds without issuing its units, and verify sees any subscription the ledger does not back', async () => {
+  const env = world();
+  await openOffering(env);
+  const sub = await signed(env);
+  await admin(env, sub.id, 'funds', { amount_cents: 50_000, bank_ref: 'W1' });
+  const storage = env.HOLDER_LEDGER.instances.get('units').storage;
+  // The review's case: an entry already under this subscription's ref. Hand entries cannot take sub: refs now, so it is planted.
+  await storage.put(`ref:sub:${sub.id}`, 1);
+  const taken = await admin(env, sub.id, 'accept');
+  // The planted ref names an entry unlike this subscription's issue, so the ledger refuses it as a conflict.
+  assert.deepEqual([taken.status, taken.json.code], [409, 'ref_conflict']);
+  assert.equal((await storage.get(`s:${sub.id}`)).status, 'funds_received', 'the subscription is not marked accepted');
+  assert.equal((await offering(env)).sold_units, 0, 'nothing counted as sold');
+  // An entry exactly like this subscription's issue already under its ref: still refused, since nothing would be issued now.
+  await storage.put('e:000000000077', { seq: 77, kind: 'issue', from: null, to: ADA, units: 100, price_cents: 500, ref: `sub:${sub.id}` });
+  await storage.put(`ref:sub:${sub.id}`, 77);
+  const twin = await admin(env, sub.id, 'accept');
+  assert.deepEqual([twin.status, twin.json.code], [409, 'ledger_ref_taken']);
+  await storage.delete('e:000000000077');
+  await storage.delete(`ref:sub:${sub.id}`);
+  assert.equal((await admin(env, sub.id, 'accept')).status, 200);
+  assert.equal((await call(env, 'GET', '/api/admin/holders/verify')).json.sound, true);
+  // Drift the ledger cannot see on its own: an accepted subscription pointing at the wrong entry, and counts off by some units.
+  const rec = await storage.get(`s:${sub.id}`);
+  await storage.put(`s:${sub.id}`, { ...rec, accepted: { ...rec.accepted, entry_seq: 99 } });
+  const o = await storage.get('o:units-2027');
+  await storage.put('o:units-2027', { ...o, sold_units: o.sold_units + 5 });
+  const v = (await call(env, 'GET', '/api/admin/holders/verify')).json;
+  assert.equal(v.sound, false);
+  assert.ok(v.problems.some((p) => p.includes(`subscription ${sub.id} is accepted`)), JSON.stringify(v.problems));
+  assert.ok(v.problems.some((p) => p.includes('offering units-2027 counts 105 units sold')), JSON.stringify(v.problems));
+});
+
+test('Tier 2\'s twelve-month cap counts every offering qualified in the twelve months before', async () => {
+  const env = world();
+  const big = { price_cents: 1000, max_units: 5_000_000 }; // $50,000,000 each
+  assert.equal((await call(env, 'PUT', '/api/admin/offerings', { body: { ...TERMS, ...big } })).status, 200);
+  assert.equal((await call(env, 'POST', '/api/admin/offerings/status', { body: QUALIFIED })).status, 200);
+  assert.equal((await call(env, 'POST', '/api/admin/offerings/status', { body: { offering_id: 'units-2027', status: 'closed' } })).status, 200);
+  // Closed having sold nothing: it counts at what it sold, so a second $50M offering fits.
+  await call(env, 'PUT', '/api/admin/offerings', { body: { ...TERMS, ...big, offering_id: 'units-2027b' } });
+  assert.equal((await call(env, 'POST', '/api/admin/offerings/status', { body: { ...QUALIFIED, offering_id: 'units-2027b', sec_file_number: '024-12346' } })).status, 200);
+  await call(env, 'POST', '/api/admin/offerings/status', { body: { offering_id: 'units-2027b', status: 'closed' } });
+  // Give the first one $40M of sales: now a third $50M offering is over the cap.
+  const storage = env.HOLDER_LEDGER.instances.get('units').storage;
+  const first = await storage.get('o:units-2027');
+  await storage.put('o:units-2027', { ...first, sold_units: 4_000_000 });
+  await call(env, 'PUT', '/api/admin/offerings', { body: { ...TERMS, ...big, offering_id: 'units-2027c' } });
+  const third = await call(env, 'POST', '/api/admin/offerings/status', { body: { ...QUALIFIED, offering_id: 'units-2027c', sec_file_number: '024-12347' } });
+  assert.deepEqual([third.status, third.json.code], [409, 'over_tier2_cap']);
+});
+
+// ── The name comes from sign-up (McKale, 11-13: "We can use KYC from their sign up") ───────────────────────────────────────
+
+test('a subscription carries the name read off the identity document at sign-up, whatever the body says', async () => {
+  const env = world();
+  await openOffering(env);
+  const made = await prepare(env, ADA, { legal_name: 'Somebody Else Entirely' });
+  assert.equal(made.status, 200);
+  assert.equal(made.json.subscription.legal_name, 'Ada Lovelace');
+  assert.deepEqual(made.json.subscription.identity, { source: 'sign_up_document', document_country: 'US', verified_at: '2026-10-01T12:00:00.000Z' });
+  // The signature is the document's name, not the one in the body.
+  assert.equal((await sign(env, ADA, made.json.subscription.id, { typed_name: 'Somebody Else Entirely' })).json.code, 'name_mismatch');
+  assert.equal((await sign(env, ADA, made.json.subscription.id)).status, 200);
+});
+
+test('without a readable, linked sign-up verification there is no subscription', async () => {
+  const env = world();
+  await openOffering(env);
+  // Unreadable on the document: the name typed at sign-up is never used in its place.
+  env.KYC_STATUS.store.set(`kyc-${ADA}-front`, JSON.stringify(signUpRecord(ADA, '')));
+  assert.equal((await prepare(env, ADA)).json.code, 'identity_name_unreadable');
+  // No record linked to the account.
+  env.KYC_STATUS.store.delete(`kyc-${ADA}-front`);
+  assert.equal((await prepare(env, ADA)).json.code, 'identity_record_missing');
+  // A record linked to someone else, or one that never passed the age check.
+  env.KYC_STATUS.store.set(`kyc-${ADA}-front`, JSON.stringify(signUpRecord(BEN, 'Ben Franklin')));
+  assert.equal((await prepare(env, ADA)).json.code, 'identity_record_missing');
+  env.KYC_STATUS.store.set(`kyc-${ADA}-front`, JSON.stringify(signUpRecord(ADA, 'Ada Lovelace', { age_verified: false })));
+  assert.equal((await prepare(env, ADA)).json.code, 'identity_record_missing');
+  assert.equal((await call(env, 'GET', '/api/admin/subscriptions')).json.total, 0);
 });

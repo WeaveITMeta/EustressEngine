@@ -214,3 +214,75 @@ test('a sponsor takes their name off the list and puts it back; an account that 
   assert.equal((await put({ listed: true }, null)).status, 401);
   assert.equal((await put({ listed: true }, mintToken('user-9'))).status, 404);
 });
+
+// ── Review fixes (11-13): the amount in dollars, and a PaymentIntent a refund can find ──────────────────────────────────────
+
+test('a sponsorship paid in another currency deposits its dollar amount, or is held for a person, never at the foreign figure', async () => {
+  const env = world();
+  await addUser(env, 'user-1', 'ada');
+  // Adaptive Pricing: shown in yen, the dollar figure in currency_conversion.
+  const yen = paidSession('cs_jpy', 1500);
+  Object.assign(yen.data.object, { currency: 'jpy', currency_conversion: { source_currency: 'usd', amount_total: 1000, fx_rate: '150' } });
+  assert.equal((await deliver(env, yen)).status, 200);
+  const snap = (await treasuryCall(env, 'period_totals', { months: [new Date().toISOString().slice(0, 7)] })).months[0];
+  assert.equal(snap.deposits[SPONSOR_KIND].gross_cents, 1000, 'ten dollars, not fifteen hundred cents of yen');
+  // No conversion: nothing is deposited, and the payment is noted for review.
+  const euro = paidSession('cs_eur', 900);
+  Object.assign(euro.data.object, { currency: 'eur' });
+  const res = await deliver(env, euro);
+  assert.equal(res.status, 200);
+  assert.match(await res.text(), /held for review/);
+  const after = (await treasuryCall(env, 'period_totals', { months: [new Date().toISOString().slice(0, 7)] })).months[0];
+  assert.equal(after.deposits[SPONSOR_KIND].count, 1);
+  assert.ok(env.PAYOUTS.store.has('sponsor-review:session:cs_eur'));
+});
+
+test('a monthly sponsorship\'s first payment is found through its invoice, so its refund reverses it', async () => {
+  const env = world();
+  await addUser(env, 'user-1', 'ada');
+  const first = paidSession('cs_month', 2500, { mode: 'subscription', pi: null });
+  first.data.object.invoice = 'in_first';
+  const real = globalThis.fetch;
+  const asked = [];
+  // A newer Stripe API version: the PaymentIntent is in the invoice's payments, not on the invoice.
+  globalThis.fetch = async (url) => {
+    asked.push(String(url));
+    return new Response(JSON.stringify({ id: 'in_first', payments: { data: [{ status: 'paid', payment: { type: 'payment_intent', payment_intent: 'pi_month_1' } }] } }), { status: 200 });
+  };
+  try {
+    assert.equal((await deliver(env, first)).status, 200);
+  } finally {
+    globalThis.fetch = real;
+  }
+  assert.deepEqual(asked, ['https://api.stripe.com/v1/invoices/in_first?expand[]=payments']);
+  const refund = await treasuryCall(env, 'refund', { payment_intent: 'pi_month_1', refunded_total_cents: 2500 });
+  assert.equal(refund.ok, true, JSON.stringify(refund));
+  assert.equal(env.PAYOUTS.store.has('sponsor-review:session:cs_month'), false);
+});
+
+test('a renewal on the current Stripe API counts no tax as a sponsorship, and a refund in the currency shown converts back', async () => {
+  const env = world();
+  await addUser(env, 'user-1', 'ada');
+  const month = new Date().toISOString().slice(0, 7);
+  // Stripe API 2025-03-31 on: no invoice.tax, the tax in total_taxes.
+  const renewal = {
+    id: 'evt_in_tax', type: 'invoice.paid',
+    data: { object: {
+      id: 'in_tax', billing_reason: 'subscription_cycle', currency: 'usd', amount_paid: 1100, payment_intent: 'pi_in_tax',
+      total_taxes: [{ amount: 100 }], parent: { subscription_details: { metadata: { type: SPONSOR_KIND, user_id: 'user-1', tier: 'supporter' } } },
+      subscription_details: { metadata: { type: SPONSOR_KIND, user_id: 'user-1', tier: 'supporter' } },
+      lines: { data: [{ metadata: { type: SPONSOR_KIND, user_id: 'user-1', tier: 'supporter' } }] },
+    } },
+  };
+  assert.equal((await deliver(env, renewal)).status, 200);
+  let totals = (await treasuryCall(env, 'period_totals', { months: [month] })).months[0];
+  assert.equal(totals.deposits[SPONSOR_KIND]?.gross_cents, 1000, 'ten dollars of sponsorship, not the dollar of tax');
+  // A sponsorship shown in yen, then refunded in yen: the refund converts back to the dollars deposited.
+  const yen = paidSession('cs_jpy2', 1500, { pi: 'pi_jpy2' });
+  Object.assign(yen.data.object, { currency: 'jpy', currency_conversion: { source_currency: 'usd', amount_total: 1000 } });
+  await deliver(env, yen);
+  const refund = await treasuryCall(env, 'refund', { payment_intent: 'pi_jpy2', refunded_total_cents: 1500, currency: 'jpy' });
+  assert.equal(refund.ok, true, JSON.stringify(refund));
+  totals = (await treasuryCall(env, 'period_totals', { months: [month] })).months[0];
+  assert.equal(totals.reversals[SPONSOR_KIND].gross_cents, 1000);
+});

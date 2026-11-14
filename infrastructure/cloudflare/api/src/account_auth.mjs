@@ -18,7 +18,7 @@
 //   bump_floor       end every token issued so far (sign out, ban, deletion)
 //   begin_rotation   a one-time challenge for replacing the key
 //   mark_prompt_seen the one-time prompt to replace the key has been shown
-//   unlink_discord   the owner unlinked Discord while replacing the key
+//   unlink_discord   the owner unlinked Discord (replacing the key, or in Settings)
 //   ack_notice       the route sent the notice of a key change
 //   rotate           replace the key: two signatures, one step
 //   admin_replace_key an administrator replaces the key after a manual identity check
@@ -522,7 +522,8 @@ export class AccountAuth {
     // once, and the alarm does what is left.
     if (revoke) {
       state.credentials_pending = { api_keys: [...(revoke.api_keys || [])], webhooks: [...(revoke.webhooks || [])], attempts: 0, next_at: this.now };
-      if (revoke.discord && !state.discord_unlinked_at) state.discord_unlinked_at = state.key_changed_at;
+      // Every replacement that revokes the link moves the time: a link made after an earlier unlink goes too.
+      if (revoke.discord) state.discord_unlinked_at = state.key_changed_at;
       if (!credentialsOwed(state)) state.credentials_pending = null;
     }
 
@@ -947,15 +948,19 @@ const OPS = {
     return { ok: true, pending: (state.notices_pending || []).length };
   },
 
-  /// The owner unlinked Discord when replacing the key. The link itself lives in
-  /// the user record; this is the account's word on it, so no write to that
-  /// record is needed (a read-modify-write of it could undo a ban that landed
-  /// meanwhile). A reader that shows the link treats it as gone when this is set.
+  /// The owner unlinked Discord, when replacing the key or in Settings. The link
+  /// itself lives in KV (src/discord_link.mjs); this is the account's word on it,
+  /// so no write to the user record is needed (a read-modify-write of it could
+  /// undo a ban that landed meanwhile). A reader shows only a link made after
+  /// this time. A link older than the last key change is revoked from that
+  /// change on, so a relink made after an earlier unlink is revoked too.
   async unlink_discord(args) {
     const { state, error } = await this.load(args);
     if (error) return error;
-    if (!state.discord_unlinked_at) {
-      state.discord_unlinked_at = new Date(this.now).toISOString();
+    const keyChange = state.key_changed_at || null;
+    const behind = !!keyChange && (!state.discord_unlinked_at || state.discord_unlinked_at < keyChange);
+    if (!state.discord_unlinked_at || behind) {
+      state.discord_unlinked_at = behind ? keyChange : new Date(this.now).toISOString();
       await this.commit(state, 'discord_unlinked', {});
     }
     return { ok: true, discord_unlinked_at: state.discord_unlinked_at };

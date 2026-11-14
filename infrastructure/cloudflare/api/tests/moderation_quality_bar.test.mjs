@@ -60,11 +60,11 @@ async function agentApproves(caseOver, args = {}) {
   return { res, status: JSON.parse(e.kv.get(`modcase:${SIM}`)).status };
 }
 
-test('the Code is version 2.5, and the text the judge reads is the one anchored', () => {
-  assert.equal(POLICY_VERSION, '2.5');
+test('the Code is version 2.8, and the text the judge reads is the one anchored', () => {
+  assert.equal(POLICY_VERSION, '2.8');
   assert.equal('sha256:' + createHash('sha256').update(GUARDIAN_POLICY_TEXT).digest('hex'), POLICY_HASH_ANCHORED);
-  assert.equal(POLICY_HASH_ANCHORED, 'sha256:4716b47bfbbdfb573eebdaf78b129c91328c8e02073abf3b4398eecfc7889a02');
-  assert.match(GUARDIAN_POLICY_TEXT, /^# Eustress Guardian Code v2\.5/);
+  assert.equal(POLICY_HASH_ANCHORED, 'sha256:d3c4885dae0bd55950e5c7a199bdd568c93a9698368ac4f1f56d20547e5cfbd2');
+  assert.match(GUARDIAN_POLICY_TEXT, /^# Eustress Guardian Code v2\.8/);
   assert.match(GUARDIAN_POLICY_TEXT, /## Part IV\. Verdict Rules/);
   // Written with a code point, not an escape, so no tool that decodes an escape in this file can change what it means.
   assert.equal(GUARDIAN_POLICY_TEXT.includes(String.fromCharCode(0x2014)), false, 'no em dashes in the Code');

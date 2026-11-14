@@ -44,17 +44,27 @@ listed.
   planning; a real business, bank, store, prison or home modelled with its security, or paired with a heist or
   break-in; a private person's home, workplace, vehicle, routine or likeness; or anything under a valid legal removal
   order. You may model your own property for its defence and security once Eustress has verified that it is yours;
-- is built to frighten: jump scares, something that chases you and catches you, a listing that calls itself horror, or
-  gore and corpses as the setting (a fire, flood or storm at the intensity of real training is fine);
-- lets you play through a tragedy, or scores you for hurting or killing a person-like character;
+- makes fear the product: jump scares more than once every two minutes, something that hunts you that you can neither
+  fight nor escape, a listing sold as horror, or gore and mutilated bodies as decoration (mild fright is fine: spooky
+  places, monsters and zombies you can fight or outrun, and an occasional startle);
+- lets you play through a tragedy, or has combat outside its limits. Combat is fine in fiction or history (a real
+  conflict that ended at least 25 years ago, between its fighters), and never against real life: no real person, real
+  group or present-day real place as a target; no attack on civilians, children, a school, a place of worship, a
+  hospital or a crowd, even in fiction; no torture or execution; no excessive gore (blood and brief hit effects are fine). A game with combat has no loot boxes,
+  crates or spins, bought or earned, and no betting, and it is rated teen or older;
 - is meme bait or brainrot;
-- is a hollow loop: something that grows by clicking, waiting or rebirths, or rewards you for coming back (daily
-  rewards, streaks, timers, offline earnings);
+- is a hollow loop: something that grows only by clicking or rebirths, or rewards you for coming back (daily rewards,
+  streaks, timers, refilling energy). Passive income from something you built is fine;
 - has an unfair economy: anything you can buy that raises progress, power or odds (single-player included), paid
   chance, paying to skip a wait, a purchase screen you did not open, countdown sales or fake scarcity, prices not shown
-  in real money, rewards for joining, following or inviting, or payment taken off Eustress (allowed only through a
-  business Eustress has verified, and never in an Adult listing). Selling the Space itself, a premium edition,
-  expansions, cosmetics or a subscription at a fixed real-money price is fine;
+  in real money, rewards for joining, following or inviting, or a cryptocurrency address or unlock code sold off
+  Eustress. Selling the Space itself, a premium edition, expansions, cosmetics or a subscription at a fixed real-money
+  price is fine. Eustress is a free market with nothing black market: your website, social profiles, shop, payment and
+  donation pages may be linked from your listing's page and description once our link review passes them (real
+  businesses, engineering and maker shops, licensed medical providers, legal gun stores, creators' pages and research
+  are welcome; nothing risky is linked). A link is shown only after it passes; a link that fails is removed and we tell
+  you why. A payment link inside your Space must also be one of your listing's approved links. No links at all on a
+  listing made for children, and no shop or payment links on an Adult listing;
 - copies someone else's work, or is a template or asset pack with nothing of your own;
 - is filler: empty or broken, defaults throughout, one asset repeated, or generator output with nothing you added;
 - says it is something it is not, or teaches something false as fact;
@@ -89,6 +99,12 @@ Real-world link: one sentence
 A Space whose statement is missing is told to add it; one whose statement says something the Space does not do is not
 listed. Fiction carries the tag `fiction` and at least one genre tag of its own (such as `science-fiction` or
 `fantasy`). The Product category is for a business Eustress has verified.
+
+**Wording the review fixes for you.** When a review asks only for wording (a missing or mismatched statement, a missing
+fiction label, tags that do not fit), Eustress fixes it once, from what the review saw and read in your Space, and reviews
+the listing again right away; if it passes, it is listed. Your title and the rest of your description are never changed.
+If the review also asks for a change inside your Space, the wording is still fixed and you are told what is left. You
+are shown every change, and your own edit always wins: publish again with your own words to replace it.
 
 **Tags.** Tags are how people find a Space: up to 8 short words such as `harbour`, `tides` or `co-op`. They say what
 the Space contains, and nothing else: a tag is never a phone number, an email address or a handle, never a slur or an

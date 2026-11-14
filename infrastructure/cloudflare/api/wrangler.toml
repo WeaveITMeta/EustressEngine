@@ -141,6 +141,25 @@ namespace_id = "2001"
 #                         For `wrangler dev`, put it in a .dev.vars file next to
 #                         this config (gitignored). The engine never holds it:
 #                         classification runs here, on the uploaded artifact.
+# DISCORD_CLIENT_ID,    - the Discord application Settings > Connect Discord links
+# DISCORD_CLIENT_SECRET   through (src/discord_link.mjs; scopes `identify role_connections.write`;
+#                         the secret also derives the key the kept refresh tokens are sealed
+#                         under, so replacing it ends every Linked Roles update until relink). In
+#                         each environment:
+#                           npx wrangler secret put DISCORD_CLIENT_ID
+#                           npx wrangler secret put DISCORD_CLIENT_SECRET
+#                         (and again with --env staging). The application's OAuth2
+#                         Redirects must list each site's {origin}/auth/discord/callback:
+#                         https://eustress.dev, https://www.eustress.dev, the staging
+#                         site, http://localhost:3000. Without both secrets the link
+#                         routes answer 503 discord_unavailable.
+# DISCORD_BOT_TOKEN     - the Discord application's bot token (Developer Portal > Bot), for the
+#                         Discord app (src/discord_interactions.mjs): the five-minute tick
+#                         registers the slash commands and the Linked Roles metadata with it,
+#                         and posts follow updates to the channels that asked. In each environment:
+#                           npx wrangler secret put DISCORD_BOT_TOKEN
+#                         (and again with --env staging). Without it the tick logs one line
+#                         and registers and posts nothing; the commands still answer.
 # STRIPE_SECRET_KEY     - Stripe secret key for payments + Connect
 # STRIPE_WEBHOOK_SECRET - Stripe webhook signing secret
 # KYC_ID_PEPPER         - the key id_hash is an HMAC-SHA-256 under (src/kyc_identity.mjs):
@@ -385,6 +404,10 @@ name = "EMAIL"
 
 [vars]
 FORK_ID = "eustress.dev"
+# The Discord app's public key (Developer Portal > General Information), not a secret:
+# POST /api/discord/interactions verifies every request's Ed25519 signature under it
+# (src/discord_interactions.mjs). Without it the endpoint answers 503.
+DISCORD_PUBLIC_KEY = "2c01880f7fd6ecb01d475da61a0186a500549b19dd10000c7a5515a6c71bc63f"
 # Hosted guest play (src/guest.mjs, docs/architecture/GUEST_PLAY.md section 13):
 # guest join tickets, guest admission, guest-only sessions and the guest chat
 # check. On only when this is exactly "on"; anything else, or unset, is off.
@@ -630,6 +653,8 @@ name = "EMAIL"
 enabled = true
 
 [env.staging.vars]
+# The Discord app's public key: one application serves both environments (see [vars]).
+DISCORD_PUBLIC_KEY = "2c01880f7fd6ecb01d475da61a0186a500549b19dd10000c7a5515a6c71bc63f"
 # Hosted guest play: off until switched on here, as in production (see [vars]).
 GUEST_PLAY = "off"
 # Deleting a published Space: on in staging so the code mail can be shown to arrive (production stays off; see [vars]).

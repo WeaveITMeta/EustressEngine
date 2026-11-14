@@ -862,15 +862,24 @@ const TREASURY_OPS = {
   },
 
   /// Money in: a Ticket sale's treasury share, or a donation to the treasury.
+  /// Amounts are US cents. A payment shown to the buyer in another currency
+  /// also gives `presented_currency` and `presented_cents` (the charge's own
+  /// amount), so a later refund or dispute, which Stripe states in that
+  /// currency, is converted back in proportion.
   async deposit(args) {
     const {
       ref, kind, gross_cents, fee_cents = 0, treasury_cents, platform_cents = 0,
       user_id = null, payment_intent = null, tickets = 0, delta = 0, channel = null,
+      presented_currency = null, presented_cents = null,
     } = args;
     if (typeof ref !== 'string' || !REF.test(ref)) return fail(400, 'invalid ref', 'invalid_request');
     if (!DEPOSIT_KINDS.includes(kind)) return fail(400, 'invalid kind', 'invalid_request');
     if (![gross_cents, fee_cents, treasury_cents, platform_cents, tickets, delta].every(isCents)) {
       return fail(400, 'amounts must be whole, non-negative cents', 'invalid_request');
+    }
+    const foreign = presented_currency != null && String(presented_currency).toLowerCase() !== 'usd';
+    if (foreign && (!/^[a-z]{3}$/i.test(String(presented_currency)) || !isCents(presented_cents) || !(presented_cents > 0))) {
+      return fail(400, 'a foreign-currency deposit needs its currency and a positive presented amount', 'invalid_request');
     }
     if (fee_cents + treasury_cents + platform_cents !== gross_cents) {
       return fail(400, 'fee, treasury and platform shares must add up to the gross', 'invalid_request');
@@ -890,6 +899,7 @@ const TREASURY_OPS = {
         user_id: typeof user_id === 'string' ? user_id : null,
         payment_intent: typeof payment_intent === 'string' ? payment_intent : null,
         channel: typeof channel === 'string' ? channel : null,
+        ...(foreign ? { presented_currency: String(presented_currency).toLowerCase(), presented_cents } : {}),
         at: nowIso(),
         refunded_cents: 0,
         reversed: { gross_cents: 0, treasury_cents: 0, platform_cents: 0, tickets: 0, delta: 0 },
@@ -906,12 +916,14 @@ const TREASURY_OPS = {
   /// A refund of a deposit's payment. `refunded_total_cents` is the charge's
   /// cumulative `amount_refunded`, so each refund event reverses only what
   /// is new, and a repeat of an event reverses nothing.
-  async refund({ payment_intent, refunded_total_cents }) {
-    if (typeof payment_intent !== 'string' || !isCents(refunded_total_cents)) return fail(400, 'invalid refund', 'invalid_request');
+  async refund({ payment_intent, refunded_total_cents: charged, currency = null }) {
+    if (typeof payment_intent !== 'string' || !isCents(charged)) return fail(400, 'invalid refund', 'invalid_request');
     return this.atomic(async () => {
       const depRef = await this.storage.get(`pi:${payment_intent}`);
       const dep = depRef ? await this.storage.get(`dep:${depRef}`) : null;
       if (!dep) return fail(404, 'No deposit for that payment', 'deposit_not_found');
+      const refunded_total_cents = depositUsdCents(dep, charged, currency);
+      if (refunded_total_cents === null) return fail(409, `The refund is in ${currency}; the deposit was not`, 'currency_mismatch');
       const delta = refunded_total_cents - (dep.refunded_cents || 0);
       const ref = `refund:${payment_intent}:${refunded_total_cents}`;
       const prior = await this.storage.get(`rev:${ref}`);
@@ -923,7 +935,7 @@ const TREASURY_OPS = {
 
   /// A dispute opened on a deposit's payment. The disputed amount leaves the
   /// balance when it opens, so it is reversed then; `dispute_won` restores it.
-  async dispute({ payment_intent, dispute_id, amount_cents }) {
+  async dispute({ payment_intent, dispute_id, amount_cents, currency = null }) {
     if (typeof payment_intent !== 'string' || typeof dispute_id !== 'string' || !isCents(amount_cents)) {
       return fail(400, 'invalid dispute', 'invalid_request');
     }
@@ -934,7 +946,9 @@ const TREASURY_OPS = {
       const depRef = await this.storage.get(`pi:${payment_intent}`);
       const dep = depRef ? await this.storage.get(`dep:${depRef}`) : null;
       if (!dep) return fail(404, 'No deposit for that payment', 'deposit_not_found');
-      return reverseDeposit.call(this, dep, { ref, kind: 'dispute', gross_cents: amount_cents });
+      const usd = depositUsdCents(dep, amount_cents, currency);
+      if (usd === null) return fail(409, `The dispute is in ${currency}; the deposit was not`, 'currency_mismatch');
+      return reverseDeposit.call(this, dep, { ref, kind: 'dispute', gross_cents: usd });
     });
   },
 
@@ -1016,6 +1030,16 @@ const TREASURY_OPS = {
     return { ok: true, last };
   },
 };
+
+/// `cents` of a deposit's charge, stated in `currency` (Stripe's refund and
+/// dispute amounts), as US cents of the deposit: unchanged for US dollars, in
+/// proportion for the currency the buyer was shown, null for any other.
+export function depositUsdCents(dep, cents, currency) {
+  const cur = typeof currency === 'string' ? currency.toLowerCase() : 'usd';
+  if (cur === 'usd') return cents;
+  if (dep.presented_currency !== cur || !(dep.presented_cents > 0)) return null;
+  return Math.min(dep.gross_cents, Math.floor((dep.gross_cents * cents) / dep.presented_cents));
+}
 
 /// Reverse part of a deposit, inside the caller's critical section. Shares
 /// are cumulative, so partial reversals of one deposit add up exactly to the

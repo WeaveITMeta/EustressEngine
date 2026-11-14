@@ -172,7 +172,7 @@ test('the judge is told whether the author gave tags, and the Code tells it what
   assert.equal(summary.listing.author_gave_tags, false);
   assert.equal('genre' in summary.listing, false);
   assert.match(GUARDIAN_POLICY_TEXT, /`suggested_tags` is always present\. Fill it only when the case summary says the author gave no tags/);
-  assert.match(GUARDIAN_POLICY_TEXT, /^# Eustress Guardian Code v2\.5/);
+  assert.match(GUARDIAN_POLICY_TEXT, /^# Eustress Guardian Code v2\.8/);
 });
 
 // ── the verdict rules ───────────────────────────────────────────────────────
@@ -246,7 +246,7 @@ test('the battery asks tag_fit and tag_content, and no longer genre_fit', () => 
   assert.equal('genre_fit' in q, false);
   assert.equal(q.tag_fit.instructions, 'Do the listing\'s tags describe what the Space contains? Tags that misdescribe the Space (claiming a topic, genre or audience it does not have) do not fit.');
   assert.equal(q.tag_content.instructions, 'Is any tag a slur, an insult aimed at a person or group, or personal information about a real person?');
-  assert.match(q.horror_framing.instructions, /Do the listing or its tags call the Space horror/);
+  assert.match(q.horror_framing.instructions, /Do the listing or its tags sell the Space as horror/);
 });
 
 test('a confident tag misfit, or a tag that is a slur or personal information, is not yet: "Fix your tags"', () => {
@@ -436,17 +436,32 @@ test('no judge tags on a quarantine or a harm rejection: the listing keeps what 
   }
 });
 
-test('an author\'s tags stand: the judge\'s suggestions are not written, and a misfit is not yet in the email', async () => {
+test('an author\'s tags stand: with no tags of its own to give, a misfit is not yet in the email', async () => {
   const env = modEnv();
   await publish(env, { tags: ['zombies', 'horde'] });
-  const rec = await runModerationCase(MSIM, env, pipelineDeps({ judge: judgeAnswer({ suggested_tags: ['harbour'] }), jev: jevAnswers({ tag_fit: 0.05 }) }));
+  const rec = await runModerationCase(MSIM, env, pipelineDeps({ judge: judgeAnswer({ suggested_tags: [] }), jev: jevAnswers({ tag_fit: 0.05 }) }));
   assert.equal(rec.status, 'changes_requested');
   assert.deepEqual(rec.decision.changes, ['not_yet_tags']);
   assert.deepEqual((await listing(env)).tags, ['zombies', 'horde']);
+  assert.equal(rec.auto_fix, undefined, 'the automatic pass had nothing to write');
   const mail = mailText(env.sent[0]);
   assert.match(mail, /Not yet: fix your tags \(Code B9\)/);
   assert.match(mail, /What to change: Fix your tags/);
   assert.ok(!mail.includes('Tags chosen'), 'no tags were chosen');
+  assert.ok(!mail.includes('Fixed for you'), 'nothing was fixed');
+});
+
+test('a misfit of the author\'s tags is fixed once with the judge\'s own tags, reviewed again, and listed; the author hears once', async () => {
+  const env = modEnv();
+  await publish(env, { tags: ['zombies', 'horde'] });
+  const rec = await runModerationCase(MSIM, env, pipelineDeps({ judge: judgeAnswer({ suggested_tags: ['harbour'] }), jev: jevAnswers({ tag_fit: 0.05 }) }));
+  assert.equal(rec.status, 'approved', 'the second review listed it');
+  assert.deepEqual(rec.auto_fix.applied.map(a => a.code), ['not_yet_tags']);
+  assert.deepEqual(rec.auto_fix.before.tags, ['zombies', 'horde']);
+  assert.deepEqual([(await listing(env)).tags, (await listing(env)).tags_source], [['harbour'], 'judge']);
+  assert.equal(env.sent.length, 1, 'one email: the final decision');
+  const mail = mailText(env.sent[0]);
+  assert.match(mail, /Fixed for you:\n\* Replaced your tags: Replaced the tags with the review's choice: harbour\./);
 });
 
 test('the rating is the same through the pipeline with and without tags', async () => {

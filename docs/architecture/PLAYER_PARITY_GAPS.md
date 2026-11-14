@@ -281,8 +281,10 @@ else, this diagnosis of his run is wrong and needs another look.
 4. **Shared systems that are not shared yet.** NPC humanoids, seats, vehicle
    seats, joints, pull's physics half and Rune live only in the engine
    crate, so a Player cannot run them even as Authority until they move.
-5. **The browser has no script VM.** mlua cannot build for wasm32; until a
-   Luau VM exists there, the browser runs no LocalScript, even when joined.
+5. **The browser's script VM.** Resolved 2026-11-13: mlua's Luau builds for
+   wasm32 against wasi-sysroot, and the browser Player runs the desktop
+   Player's VM and Rune, as the Authority when played alone
+   (docs/launch/BROWSER_PLAYER_STAGING.md).
 6. **Smaller divergences:** the client VM gets no terrain
    (`tree_scripts.rs:328`); two character-sync implementations (engine
    `pull.rs:389` and common `animation/character.rs`); two lighting plugins;
@@ -347,14 +349,13 @@ avatar, NPC, seats and joints (pure Rust), and Rune (pure Rust; common
 already has a `realism-wasm` feature naming `rune-wasm`,
 `common/Cargo.toml:175`).
 
-What cannot, today: Luau. mlua wraps the C++ Luau VM, and
-`wasm32-unknown-unknown` has no C++ standard library
-(`player-web/Cargo.toml:50-53`). A draft exists for one script interface
-with two backends (`common/src/scripting_vm/DRAFT_INTERFACE.md`, "pure" for
-wasm32); it is not wired. Until a browser Luau exists, a Space with Luau
-scripts opened in the browser must show a notice ("This Space's scripts need
-the desktop Player", with the download link), not a silent world. That is
-step 9.
+Luau runs there too (D2 settled as one VM for every shell, 2026-11-13). mlua
+wraps the C++ Luau VM; for `wasm32-unknown-unknown` it compiles against
+wasi-sysroot's libc and libc++ with WebAssembly exceptions
+(`eustress/scripts/wasm-luau-env.sh`, `player-web/build.rs`,
+`player-web/src/libc_shim.rs`), so the browser runs the same binding layer
+as the desktop Player: Authority when played alone, Replica when joined.
+Details and the run that proved it: docs/launch/BROWSER_PLAYER_STAGING.md.
 
 Other browser limits: no particle draw on WebGL2 (the sim runs;
 `particle_render.rs` `finish`), no blocking HTTP (HttpService calls are

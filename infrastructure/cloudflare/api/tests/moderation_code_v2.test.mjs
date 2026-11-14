@@ -392,11 +392,11 @@ test('B6: a payment link, a crypto address or a paid unlock code in the Space is
 });
 
 test('B1(c): the listing\'s own words for horror are an article signal, as whole words; the judge cites B1 or the signal is noted', () => {
-  assert.deepEqual(deterministicSignals({ name: 'Haunted Mill' }, null).horror_terms, ['haunted']);
+  assert.deepEqual(deterministicSignals({ name: 'Haunted Mill' }, null).horror_terms, [], 'v2.7: haunted, creepy and scary are mild fright');
   assert.deepEqual(deterministicSignals({ description: 'One JUMP SCARE per room.' }, null).horror_terms, ['jump scare']);
-  assert.deepEqual(deterministicSignals({ tags: ['horror-survival'], genre: 'Creepy' }, null).horror_terms.sort(), ['creepy', 'horror']);
+  assert.deepEqual(deterministicSignals({ tags: ['horror-survival'], genre: 'Creepy' }, null).horror_terms.sort(), ['horror']);
   assert.deepEqual(deterministicSignals({ name: 'Scarycat Labs', description: 'Horrors of the deep, a jumpscares compilation' }, null).horror_terms, []);
-  const t = decideTriage({ signals: deterministicSignals({ name: 'Haunted Mill', description: STATEMENT_TEXT }, null), jev: null });
+  const t = decideTriage({ signals: deterministicSignals({ name: 'Horror Mill', description: STATEMENT_TEXT }, null), jev: null });
   assert.deepEqual(t.articles.signals.map(s => [s.article, s.key]), [['B1', 'listing_horror_terms']]);
   assert.equal(t.outcome, 'judge', 'a signal does not end triage: the rules need the judge\'s scores');
   assert.deepEqual([decideFinal({ triage: t, judge: judge() }).outcome, last(decideFinal({ triage: t, judge: judge() })).code], ['approve', 'article_signal_not_cited']);
@@ -542,10 +542,10 @@ test('moderation_reject citing a Code article or a test shows that copy to the a
   assert.deepEqual(authorView(JSON.parse(e.kv.get(`modcase:${SIM}`)), {}).reasons.map(r => r.category), ['code_B5']);
 });
 
-test('the Code and the playbook both name v2.5 and the same rules', () => {
+test('the Code and the playbook both name v2.8 and the same rules', () => {
   assert.match(GUARDIAN_POLICY_TEXT, /The first rule that applies decides/);
-  assert.match(GUARDIAN_POLICY_TEXT, /^# Eustress Guardian Code v2\.5/);
-  assert.match(MODERATION_PLAYBOOK_TEXT, /Guardian Code v2\.5/);
+  assert.match(GUARDIAN_POLICY_TEXT, /^# Eustress Guardian Code v2\.8/);
+  assert.match(MODERATION_PLAYBOOK_TEXT, /Guardian Code v2\.8/);
   assert.match(GUARDIAN_POLICY_TEXT, /4\. Any test at 0: \*\*rejected\*\*/);
   assert.match(MODERATION_PLAYBOOK_TEXT, /\| judge \| 4 \| any test at 0 \|/);
   assert.doesNotMatch(MODERATION_PLAYBOOK_TEXT, /decision C|criterion \d|rejected_low_effort/);
@@ -645,7 +645,7 @@ test('pipeline control: a qualifying Space is approved, with featured left to a 
   await publish(env);
   const rec = await runModerationCase(SIM, env, pipelineDeps(judgeAnswer({ featured_candidate: true, tests: tests({ build_quality: 3, lesson: 3, real_world: 3 }) })));
   assert.equal(rec.status, 'approved');
-  assert.deepEqual([rec.decision.featured, rec.decision.featured_candidate, rec.policy_version, rec.review_schema], [false, true, '2.5', 2]);
+  assert.deepEqual([rec.decision.featured, rec.decision.featured_candidate, rec.policy_version, rec.review_schema], [false, true, '2.8', 2]);
   assert.equal(JSON.parse(env.SOCIAL.m.get(`sim:${SIM}`)).moderation.featured, false);
 });
 

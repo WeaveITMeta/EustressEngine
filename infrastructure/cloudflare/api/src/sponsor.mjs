@@ -160,23 +160,87 @@ async function recordSponsor(env, userId, { cents, monthly, tier, listed }) {
   return next;
 }
 
-/// Deposit one sponsorship payment. Resolves to the Treasury's answer.
-function depositSponsorship(env, treasuryCall, { ref, cents, userId, paymentIntent }) {
+/// Deposit one sponsorship payment. Resolves to the Treasury's answer. `presented` is { presented_currency, presented_cents } when
+/// the sponsor paid in another currency, so a refund or dispute in that currency converts back in proportion.
+function depositSponsorship(env, treasuryCall, { ref, cents, userId, paymentIntent, presented = {} }) {
   const split = splitSponsorship(cents);
   return treasuryCall(env, 'deposit', {
     ref, kind: SPONSOR_KIND,
     gross_cents: split.gross_cents, fee_cents: split.fee_cents,
     treasury_cents: split.treasury_cents, platform_cents: split.platform_cents,
     user_id: userId || null, payment_intent: paymentIntent || null, channel: 'web',
+    ...presented,
   });
 }
 
+/// The tax on an invoice, in its own cents: `total_taxes` from Stripe API 2025-03-31 on (the account's webhooks use a later
+/// version, where `tax` no longer exists), `tax` before.
+export function invoiceTaxCents(invoice) {
+  if (Array.isArray(invoice.total_taxes)) {
+    return invoice.total_taxes.reduce((n, t) => n + (Number.isSafeInteger(t?.amount) ? t.amount : 0), 0);
+  }
+  return Math.trunc(invoice.tax || 0);
+}
+
+/// The amount in US cents, or null when it cannot be known without guessing. Sponsorships are priced in dollars; a payment shown
+/// in another currency (Stripe's Adaptive Pricing) carries the dollar amount in `currency_conversion`. With tax in another
+/// currency there is no exact dollar figure for the sponsorship alone, so it is left for a person.
+export function usdCentsOf(obj, cents) {
+  const currency = typeof obj.currency === 'string' ? obj.currency.toLowerCase() : 'usd';
+  if (currency === 'usd') return cents;
+  const conv = obj.currency_conversion;
+  if (conv && String(conv.source_currency).toLowerCase() === 'usd' && !(obj.total_details?.amount_tax > 0) && Number.isSafeInteger(conv.amount_total)) {
+    return Math.max(0, conv.amount_total);
+  }
+  return null;
+}
+
+/// The PaymentIntent a payment was made with, so a refund or dispute of it finds its deposit. A Checkout Session in subscription
+/// mode carries none: it is on the session's first invoice, as `payment_intent` on older Stripe API versions and in `payments`
+/// on newer ones. Null when it cannot be found.
+export async function paymentIntentOf(env, deps, { payment_intent, invoice }) {
+  const direct = typeof payment_intent === 'string' ? payment_intent : payment_intent?.id;
+  if (direct) return direct;
+  const invoiceId = typeof invoice === 'string' ? invoice : invoice?.id;
+  if (!invoiceId || !deps.stripeRequest || !env.STRIPE_SECRET_KEY) return null;
+  try {
+    const inv = await deps.stripeRequest('GET', `/invoices/${encodeURIComponent(invoiceId)}?expand[]=payments`, null, env);
+    const old = typeof inv?.payment_intent === 'string' ? inv.payment_intent : inv?.payment_intent?.id;
+    if (old) return old;
+    const paid = (inv?.payments?.data || []).find((p) => p?.payment?.type === 'payment_intent' && (p.status === 'paid' || !p.status));
+    const pi = paid?.payment?.payment_intent;
+    return typeof pi === 'string' ? pi : pi?.id || null;
+  } catch (e) {
+    console.error(`could not read invoice ${invoiceId}:`, e?.message || e);
+    return null;
+  }
+}
+
+/// Note a payment for a person to look at: one whose amount or PaymentIntent could not be known. Never blocks the webhook.
+async function noteForReview(env, key, what) {
+  try {
+    await env.PAYOUTS.put(`sponsor-review:${key}`, JSON.stringify({ ...what, at: new Date().toISOString() }), { expirationTtl: 86400 * 365 });
+  } catch (e) {
+    console.error(`sponsor review note ${key} failed:`, e?.message || e);
+  }
+}
+
 /// A paid sponsorship Checkout Session (the first payment of a monthly one
-/// included). `deps`: { treasuryCall }.
-export async function settleSponsorCheckout(session, grossCents, userId, env, deps) {
+/// included). `deps`: { treasuryCall, stripeRequest }.
+export async function settleSponsorCheckout(session, taxFreeCents, userId, env, deps) {
+  const grossCents = usdCentsOf(session, taxFreeCents);
+  if (grossCents === null) {
+    // Nothing is deposited at a guessed amount. A person records it from the Stripe dashboard.
+    await noteForReview(env, `session:${session.id}`, { reason: 'currency', session_id: session.id, currency: session.currency, amount_total: session.amount_total, user_id: userId || null });
+    return new Response('OK: held for review (currency)', { status: 200 });
+  }
   if (grossCents > 0) {
+    const paymentIntent = await paymentIntentOf(env, deps, { payment_intent: session.payment_intent, invoice: session.invoice });
+    if (!paymentIntent) await noteForReview(env, `session:${session.id}`, { reason: 'no_payment_intent', session_id: session.id, user_id: userId || null });
+    const currency = typeof session.currency === 'string' ? session.currency.toLowerCase() : 'usd';
+    const presented = currency === 'usd' || !Number.isSafeInteger(session.amount_total) ? {} : { presented_currency: currency, presented_cents: session.amount_total };
     const deposit = await depositSponsorship(env, deps.treasuryCall, {
-      ref: `stripe:${session.id}`, cents: grossCents, userId, paymentIntent: session.payment_intent,
+      ref: `stripe:${session.id}`, cents: grossCents, userId, paymentIntent, presented,
     });
     if (!deposit.ok) {
       console.error(`sponsorship deposit for session ${session.id} failed:`, deposit.error);
@@ -186,7 +250,7 @@ export async function settleSponsorCheckout(session, grossCents, userId, env, de
       await env.PAYOUTS.put(`deposit:${session.id}`, JSON.stringify({
         id: session.id, type: SPONSOR_KIND, amount_usd: grossCents / 100,
         user_id: userId || 'anonymous', timestamp: new Date().toISOString(),
-        mode: session.mode, stripe_payment_intent: session.payment_intent || null,
+        mode: session.mode, stripe_payment_intent: paymentIntent || null,
       }));
       if (userId) {
         const tier = tierOf(session.metadata?.tier)?.id || null;
@@ -201,11 +265,17 @@ export async function settleSponsorCheckout(session, grossCents, userId, env, de
 /// its Checkout Session, so only the cycles after it are deposited here.
 export async function settleSponsorInvoice(invoice, meta, env, deps) {
   if (invoice.billing_reason !== 'subscription_cycle') return new Response('OK', { status: 200 });
-  const cents = Math.max(0, Math.trunc((invoice.amount_paid || 0) - (invoice.tax || 0)));
+  const userId = typeof meta.user_id === 'string' && meta.user_id ? meta.user_id : null;
+  if (typeof invoice.currency === 'string' && invoice.currency.toLowerCase() !== 'usd') {
+    await noteForReview(env, `invoice:${invoice.id}`, { reason: 'currency', invoice_id: invoice.id, currency: invoice.currency, amount_paid: invoice.amount_paid, user_id: userId });
+    return new Response('OK: held for review (currency)', { status: 200 });
+  }
+  const cents = Math.max(0, Math.trunc((invoice.amount_paid || 0) - invoiceTaxCents(invoice)));
   if (cents > 0) {
-    const userId = typeof meta.user_id === 'string' && meta.user_id ? meta.user_id : null;
+    const paymentIntent = await paymentIntentOf(env, deps, { payment_intent: invoice.payment_intent, invoice: invoice.id });
+    if (!paymentIntent) await noteForReview(env, `invoice:${invoice.id}`, { reason: 'no_payment_intent', invoice_id: invoice.id, user_id: userId });
     const deposit = await depositSponsorship(env, deps.treasuryCall, {
-      ref: `stripe-invoice:${invoice.id}`, cents, userId, paymentIntent: invoice.payment_intent,
+      ref: `stripe-invoice:${invoice.id}`, cents, userId, paymentIntent,
     });
     if (!deposit.ok) {
       console.error(`sponsorship deposit for invoice ${invoice.id} failed:`, deposit.error);

@@ -43,7 +43,9 @@
 //   POST /api/subscriptions/checkout    {plan, interval} -> {url}          bearer
 //
 // Plan state lives in USERS `plan:{account}` = {plan, status, subscription_id,
-// current_period_end, updated_at}, written only by the Stripe webhook.
+// current_period_end, updated_at}, written only by the Stripe webhook. A plan
+// held for life lives apart, in `plan_lifetime:{account}` (readLifetime), and
+// wins over that record; with `unlimited_delta` a charge spends nothing.
 // =============================================================================
 
 /// Delta granted once to an account that passes identity verification.
@@ -365,8 +367,34 @@ export const creditRefForDeposit = (depositRef) =>
     ? `sub:${depositRef.slice('stripe-invoice:'.length)}`
     : depositRef || null;
 
-/// The account's plan record, or null.
+/// A plan held for life, granted by hand rather than bought: USERS
+/// `plan_lifetime:{account}` = {plan, unlimited_delta, reason, granted_at}.
+/// Only someone with write access to the USERS namespace can grant one; no
+/// route writes it. Stripe's webhook writes `plan:{account}` and never this
+/// key, so a cancelled or lapsed subscription cannot end a lifetime plan.
+export const lifetimeKey = (accountId) => `plan_lifetime:${accountId}`;
+
+/// The account's lifetime grant, or null when it has none (or an unreadable one).
+export async function readLifetime(env, accountId) {
+  if (typeof accountId !== 'string' || !accountId) return null;
+  const raw = await env.USERS.get(lifetimeKey(accountId));
+  if (!raw) return null;
+  try {
+    const grant = JSON.parse(raw);
+    if (!grant || !PLANS.includes(grant.plan)) return null;
+    return { plan: grant.plan, unlimited_delta: grant.unlimited_delta === true };
+  } catch {
+    return null;
+  }
+}
+
+/// The account's plan record, or null. A lifetime grant comes first: it is
+/// always active and has no period to end.
 export async function readPlan(env, accountId) {
+  const lifetime = await readLifetime(env, accountId);
+  if (lifetime) {
+    return { plan: lifetime.plan, status: 'active', lifetime: true, subscription_id: null, current_period_end: null };
+  }
   const raw = await env.USERS.get(planKey(accountId));
   if (!raw) return null;
   try {
@@ -491,8 +519,10 @@ export async function handleDeltaRoute(request, url, env, cors, deps) {
       if (t.ok) b = await deltaCall(env, account, 'balance');
       if (!b.ok) return error(b.status || 500, b.error, b.code);
     }
+    const lifetime = await readLifetime(env, account);
     return reply({
       delta: b.balance, reserved: 0, plan: activePlan(await readPlan(env, account)), expiring: b.expiring ?? null,
+      ...(lifetime?.unlimited_delta ? { unlimited: true } : {}),
     });
   }
 
@@ -508,6 +538,13 @@ export async function handleDeltaRoute(request, url, env, cors, deps) {
     const cap = Math.min(MAX_CHARGE, isWhole(price.max_per_run) && price.max_per_run > 0 ? price.max_per_run : MAX_CHARGE);
     if (!isWhole(amount) || amount < 1 || amount > cap) return error(400, `amount must be a whole number from 1 to ${cap}`, 'invalid_request');
     if (typeof ref !== 'string' || !REF.test(ref)) return error(400, 'ref is invalid', 'invalid_request');
+    // An account with unlimited Delta runs every priced tool without spending any: nothing is debited, its balance is
+    // untouched, and the answer says the run was charged nothing, the same answer a family past its monthly cap gives.
+    if ((await readLifetime(env, account))?.unlimited_delta) {
+      const b = await deltaCall(env, account, 'balance');
+      if (!b.ok) return error(b.status || 500, b.error, b.code);
+      return reply({ ok: true, balance: b.balance, charged: 0, unlimited: true, replay: false });
+    }
     const family = typeof price.family === 'string' && price.family ? price.family : null;
     const familyCap = family ? catalog.families[family]?.monthly_cap : null;
     const r = await deltaDebit(env, account, {

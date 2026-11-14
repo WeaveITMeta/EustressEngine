@@ -254,9 +254,12 @@ async function sha256Hex(bytes) {
   return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, '0')).join('');
 }
 
-import { contentLockedFor, inReview, simForServing, sourceApproved, REVIEW_SCHEMA } from './moderation.mjs';
+import { contentLockedFor, inReview, simForServing, sourceApproved, readApproval, legalLockOf, REVIEW_SCHEMA } from './moderation.mjs';
 import { checkTags, listingTags, genreTag, setAuthorTags, withTagsWrittenBack, listingTagFields } from './tags.mjs';
-import { refuseAdult } from './adult_content.mjs';
+import { staleText, staleTags } from './listing_guard.mjs';
+import { refuseAdult, isAdultListing, withinSignedOutCap } from './adult_content.mjs';
+import { deletionMarkOf } from './space_delete_mark.mjs';
+import { mintPlayToken, readPlayToken, PLAY_TOKEN_HEADER, PLAY_TOKEN_EXPIRES_HEADER } from './world_play_token.mjs';
 import { authorFromServerCredential, bearerOf } from './live.mjs';
 import { accountFromPlayPass } from './play_pass.mjs';
 import { refuseBlockedUpload } from './takedown.mjs';
@@ -319,8 +322,19 @@ function applyListing(sim, listing, tags = null) {
       changed = true;
     }
   };
-  if (typeof listing.name === 'string' && listing.name.trim()) set('name', listing.name.trim().slice(0, MAX_LISTING.name));
-  if (typeof listing.description === 'string') set('description', listing.description.trim().slice(0, MAX_LISTING.description));
+  // The listing's text changed outside Studio: the review's automatic fix, the link review, or the author on the website
+  // (src/listing_guard.mjs). A commit that sends back a text the listing replaced comes from a Studio that has not read the
+  // change yet: the listing's own text stays for that field. Anything else the author sends is their own choice. The guard
+  // ends once a commit sends nothing stale.
+  const fix = sim.listing_fix && typeof sim.listing_fix === 'object' ? sim.listing_fix : null;
+  const staleName = staleText(sim, 'name', listing.name);
+  const staleDescription = staleText(sim, 'description', listing.description);
+  const staleTagSet = tags !== null && staleTags(sim, tags, listingTags(sim));
+  const sentText = typeof listing.name === 'string' || typeof listing.description === 'string' || tags !== null;
+  if (fix && sentText && !staleName && !staleDescription && !staleTagSet) delete sim.listing_fix;
+  if (typeof listing.name === 'string' && listing.name.trim() && !staleName) set('name', listing.name.trim().slice(0, MAX_LISTING.name));
+  if (staleTagSet) tags = null;
+  if (typeof listing.description === 'string' && !staleDescription) set('description', listing.description.trim().slice(0, MAX_LISTING.description));
   // Tags are the only category. A `genre` (an older Studio still sends one; an empty one is absent) is ignored, except when
   // the commit sends no tags and the listing has none: then a genre that is a valid tag, and not "all", becomes its one tag,
   // the author's, as a genre from before tags does (src/tags.mjs genreTag). It is a change the review reads.
@@ -570,7 +584,48 @@ async function handleGetManifest(request, simId, env, cors, deps) {
     'X-Eustress-Manifest-Sha256': sim.world.manifest_sha256,
   };
   if (sim.world.publish_hash) headers['X-Eustress-Publish-Hash'] = sim.world.publish_hash;
+  const pass = await playTokenFor(env, simId, sim, gate);
+  if (pass) {
+    headers[PLAY_TOKEN_HEADER] = pass.token;
+    headers[PLAY_TOKEN_EXPIRES_HEADER] = String(pass.expires);
+  }
   return new Response(obj.body, { headers });
+}
+
+/// A play token for the chunk GETs after this manifest (src/world_play_token.mjs), or null. Only where the manifest was
+/// served to anyone signed out: a listable listing that refuseAdult passes with no viewer at all (not adult content, within
+/// the signed-out cap), under an approval binding that stands. Anything else (an author's or admin's view of an unlisted
+/// listing, a play pass on a private one, adult content) gets no token, and its chunk GETs keep the full gate.
+async function playTokenFor(env, simId, sim, gate) {
+  if (!gate.listable || isAdultListing(sim) || !withinSignedOutCap(sim)) return null;
+  const binding = await readApproval(env, simId);
+  if (!binding || binding.revoked || typeof binding.content !== 'string' || !binding.content) return null;
+  return mintPlayToken(env, { simId, manifestSha: sim.world.manifest_sha256, ident: binding.content });
+}
+
+/// A chunk served on a play token, or null to run the full gate. The token fixes the listing, the manifest and the approval
+/// it was minted under; the legal lock, the deletion mark and the approval binding are read fresh from R2 (strongly
+/// consistent), and any of them moving since the mint sends the request to the full gate, which refuses it. The chunk must
+/// be one the token's own manifest names: a chunk only the source world names always takes the full gate.
+async function chunkByPlayToken(request, simId, hash, env, cors) {
+  const claims = await readPlayToken(env, request.headers.get(PLAY_TOKEN_HEADER), simId);
+  if (!claims) return null;
+  const [lock, deletion, binding] = await Promise.all([legalLockOf(env, simId), deletionMarkOf(env, simId), readApproval(env, simId)]);
+  if (lock || deletion || !binding || binding.revoked || binding.content !== claims.ident) return null;
+  if (!(await committedHashes(env, manifestKey(simId, claims.sha)))?.has(hash)) return null;
+  const obj = await env.SCENES.get(chunkKey(simId, hash));
+  if (!obj) return null;
+  return new Response(obj.body, {
+    headers: {
+      ...cors,
+      'Content-Type': 'application/octet-stream',
+      'Content-Length': String(obj.size),
+      // Only a listable listing's chunks are ever served on a token, so the full gate's listable caching applies.
+      'Cache-Control': 'private, max-age=86400, immutable',
+      ETag: `"${hash}"`,
+      'X-Eustress-Chunk-Gate': 'play-token',
+    },
+  });
 }
 
 /// Whether this viewer may read a listing's source world: anyone when its
@@ -604,6 +659,9 @@ async function handleGetSource(request, simId, env, cors, deps) {
 
 async function handleGetChunk(request, simId, hash, env, cors, deps) {
   if (!isContentHash(hash)) return deps.json({ error: 'Not a chunk name' }, 400, cors);
+  // The manifest GET's play token, when it holds, answers without the listing record or the viewer's credential.
+  const byToken = await chunkByPlayToken(request, simId, hash, env, cors);
+  if (byToken) return byToken;
   const gate = await servableListing(request, simId, env, cors, deps);
   if (gate.error) return gate.error;
   const sim = gate.sim;

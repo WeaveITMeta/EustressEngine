@@ -92,6 +92,8 @@ const COMMITTED = ['awaiting_funds', 'funds_received', 'accepted'];
 /// The five statements a signer makes. Every one must be true.
 export const ATTESTATIONS = ['read_circular', 'agree_subscription', 'own_account', 'information_true', 'electronic_signature'];
 const MAX_DRAFTS = 20;
+/// Signed subscriptions waiting on funds that one account may hold in one offering, so nobody reserves the offering unpaid.
+export const MAX_RESERVING_PER_SUBSCRIBER = 3;
 const MAX_UNITS = 1_000_000_000_000;
 
 /// The legend every testing-the-waters communication carries (Rule 255). Counsel confirms the wording before it is shown.
@@ -221,6 +223,15 @@ const OFFERING_OPS = {
         if (!o.circular || !o.agreement) return fail(409, 'An offering opens with its circular and its subscription agreement on file', 'documents_required');
         if (!o.states.length) return fail(409, 'An offering opens in at least one state', 'states_required');
         if (!o.payment_instructions) return fail(409, 'An offering opens with payment instructions on file', 'payment_instructions_required');
+        // Tier 2 caps what is offered in any twelve months, across offerings: each live one at its full size, each closed one at
+        // what it sold. The look-back runs from this offering's qualification date.
+        const since = new Date(Date.parse(`${day}T00:00:00Z`) - 365 * 86_400_000).toISOString().slice(0, 10);
+        let offered = o.price_cents * o.max_units;
+        for (const other of (await this.storage.list({ prefix: 'o:' })).values()) {
+          if (other.offering_id === offering_id || !other.qualified_on || other.qualified_on < since) continue;
+          offered += other.status === 'closed' ? other.price_cents * other.sold_units : other.price_cents * other.max_units;
+        }
+        if (offered > TIER2_CAP_CENTS) return fail(409, 'With the offerings of the last twelve months this is more than Tier 2 allows ($75,000,000)', 'over_tier2_cap');
         next.sec_file_number = file;
         next.qualified_on = day;
       }
@@ -309,6 +320,19 @@ function limitProblem(s, others) {
   return null;
 }
 
+/// What a subscriber states about themselves. One account makes one set of statements per offering: a second subscription that
+/// says something different (accredited on one and not the other, another income) is refused, so the 10% limit cannot be dodged
+/// by changing the story, and the company does not hold two accounts of the same person.
+const STATEMENTS = ['legal_name', 'country', 'state', 'accredited', 'annual_income_cents', 'net_worth_cents'];
+function statementsProblem(s, others) {
+  const prior = others.find((x) => x.id !== s.id && x.offering_id === s.offering_id && COMMITTED.includes(x.status));
+  if (!prior) return null;
+  const differ = STATEMENTS.filter((k) => (k === 'legal_name' ? !sameName(prior[k], s[k]) : prior[k] !== s[k]));
+  return differ.length
+    ? fail(409, `This says something different from your earlier subscription to this offering (${differ.join(', ')}). Cancel that one, or state the same`, 'statements_differ')
+    : null;
+}
+
 /// Take a subscription that holds reserved units out of the reservation.
 function release(offering, s) {
   return RESERVING.includes(s.status) ? { ...offering, reserved_units: offering.reserved_units - s.units } : offering;
@@ -316,12 +340,13 @@ function release(offering, s) {
 
 const SUB_OPS = {
   /// Prepare a subscription. It reserves nothing and commits nobody until the person signs it.
-  async sub_prepare({ id, holder_id, offering_id, units, legal_name, country, state, accredited, annual_income_cents = null, net_worth_cents = null }) {
+  /// `legal_name` and `identity` come from the identity verified at sign-up (verifiedIdentity, read by the route), never the body.
+  async sub_prepare({ id, holder_id, offering_id, units, legal_name, identity, country, state, accredited, annual_income_cents = null, net_worth_cents = null }) {
     if (typeof id !== 'string' || !SUB_ID.test(id)) return fail(400, 'invalid subscription id', 'invalid_request');
     if (typeof holder_id !== 'string' || !HOLDER_ID.test(holder_id)) return fail(400, 'invalid holder', 'invalid_request');
     if (!whole(units, 1) || units > MAX_UNITS) return fail(400, 'units is a whole number, at least 1', 'invalid_request');
     const name = text(legal_name, 200);
-    if (name.length < 2) return fail(400, 'legal_name is your full legal name', 'invalid_request');
+    if (name.length < 2 || !identity || typeof identity !== 'object') return fail(409, 'A subscription needs the identity verified at sign-up', 'identity_record_missing');
     if (country !== 'US') return fail(409, 'This offering is open to residents of the United States only', 'country_not_offered');
     if (typeof accredited !== 'boolean') return fail(400, 'accredited is true or false', 'invalid_request');
     if (!accredited && !(whole(annual_income_cents) && whole(net_worth_cents))) return fail(400, 'annual_income_cents and net_worth_cents are required from a subscriber who is not accredited', 'invalid_request');
@@ -337,12 +362,13 @@ const SUB_OPS = {
       const sub = {
         id, offering_id, holder_id, status: 'draft', units, price_cents: o.price_cents, amount_cents: units * o.price_cents,
         legal_name: name, country, state, accredited,
+        identity: { source: 'sign_up_document', document_country: text(identity.document_country, 2) || null, verified_at: text(identity.verified_at, 40) || null },
         annual_income_cents: accredited ? null : annual_income_cents, net_worth_cents: accredited ? null : net_worth_cents,
         limit_cents: accredited ? null : investmentLimitCents(annual_income_cents, net_worth_cents),
         circular_sha256: null, agreement_sha256: null, signatures: [], payment_ref: null,
         funds: null, accepted: null, rejected: null, refunded: null, created_at: now, updated_at: now,
       };
-      const over = limitProblem(sub, others);
+      const over = limitProblem(sub, others) || statementsProblem(sub, others);
       if (over) return over;
       await this.storage.put({ [`s:${id}`]: sub, [`sh:${holder_id}:${id}`]: 1 });
       return { ok: true, subscription: ownView(sub, o) };
@@ -362,6 +388,8 @@ const SUB_OPS = {
       const renewing = RESERVING.includes(s.status);
       if (s.status !== 'draft' && !renewing) return fail(409, `A subscription that is ${s.status} cannot be signed`, 'not_signable');
       if (circular_sha256 !== o.circular.sha256 || agreement_sha256 !== o.agreement.sha256) return fail(409, 'The offering circular or the subscription agreement changed. Read the current ones and sign again', 'documents_changed');
+      // A subscription is for the price it was prepared at. When the offering's price changed, it is cancelled and prepared anew.
+      if (s.price_cents !== o.price_cents) return fail(409, 'The price changed. Cancel this subscription and prepare a new one', 'price_changed');
       if (renewing && s.circular_sha256 === o.circular.sha256 && s.agreement_sha256 === o.agreement.sha256) return { ok: true, replay: true, subscription: ownView(s, o) };
       if (typeof typed_name !== 'string' || !sameName(typed_name, s.legal_name)) return fail(400, 'Type your full legal name exactly as on the subscription', 'name_mismatch');
       const now = new Date().toISOString();
@@ -369,9 +397,11 @@ const SUB_OPS = {
       const next = { ...s, circular_sha256, agreement_sha256, signatures: [...s.signatures, signature], updated_at: now };
       const writes = {};
       if (!renewing) {
-        if (s.price_cents !== o.price_cents) return fail(409, 'The price changed. Prepare a new subscription', 'price_changed');
         if (s.units > o.max_units - o.reserved_units - o.sold_units) return fail(409, 'Fewer units than that are left', 'sold_out');
-        const over = limitProblem(s, await subsOf(this, holder_id));
+        const others = await subsOf(this, holder_id);
+        const waiting = others.filter((x) => x.offering_id === s.offering_id && x.status === 'awaiting_funds').length;
+        if (waiting >= MAX_RESERVING_PER_SUBSCRIBER) return fail(429, `You have ${waiting} signed subscriptions waiting for payment. Pay or cancel one first`, 'too_many_unpaid');
+        const over = limitProblem(s, others) || statementsProblem(s, others);
         if (over) return over;
         next.status = 'awaiting_funds';
         next.signed_at = now;
@@ -415,32 +445,46 @@ const SUB_OPS = {
     return { ok: true, total: subs.length, subscriptions: subs.slice(0, PAGE) };
   },
 
-  /// An administrator records that the subscriber's bank transfer arrived. The amount must be the subscription's, to the cent.
-  async sub_funds({ id, amount_cents, bank_ref, by }) {
+  /// An administrator records that the subscriber's bank transfer arrived. The amount must be the subscription's, to the cent, and
+  /// `payer_name_matches` is the administrator's statement that the account the money came from is in the subscriber's verified
+  /// name (money from someone else is returned, not used). It is recorded with who made it.
+  async sub_funds({ id, amount_cents, bank_ref, payer_name_matches, by }) {
     const ref = text(bank_ref, 100);
     if (!ref) return fail(400, 'bank_ref is the bank\'s reference for the transfer', 'invalid_request');
     return this.atomic(async () => {
       const s = typeof id === 'string' ? await this.storage.get(`s:${id}`) : null;
       if (!s) return fail(404, 'No such subscription', 'not_found');
       if (s.funds && s.funds.bank_ref === ref) return { ok: true, replay: true, subscription: s };
+      const now = new Date().toISOString();
+      // Money that arrives for a subscription that already ended (cancelled, rejected or expired before it came) is recorded, so
+      // it is never lost track of, and is owed back. It never revives the subscription.
+      if (['cancelled', 'rejected', 'expired'].includes(s.status) && !s.funds) {
+        if (!whole(amount_cents, 1)) return fail(400, 'amount_cents is the whole amount that arrived, in cents', 'invalid_request');
+        const owed = { ...s, status: 'refund_due', funds: { received_at: now, amount_cents, bank_ref: ref, by: by || null, after: s.status }, updated_at: now };
+        await this.storage.put(`s:${id}`, owed);
+        return { ok: true, subscription: owed, refund_due: true };
+      }
       if (s.status !== 'awaiting_funds') return fail(409, `A subscription that is ${s.status} is not waiting for funds`, 'not_awaiting_funds');
       if (amount_cents !== s.amount_cents) return fail(409, `The subscription is for ${s.amount_cents} cents. Record funds only when that exact amount arrived`, 'amount_mismatch');
-      const now = new Date().toISOString();
-      const next = { ...s, status: 'funds_received', funds: { received_at: now, amount_cents, bank_ref: ref, by: by || null }, updated_at: now };
+      if (payer_name_matches !== true) return fail(400, `Confirm the paying account is in the name ${s.legal_name} (payer_name_matches: true). Money from anyone else is returned`, 'payer_not_confirmed');
+      const next = { ...s, status: 'funds_received', funds: { received_at: now, amount_cents, bank_ref: ref, by: by || null, payer_confirmed_by: by || null }, updated_at: now };
       await this.storage.put(`s:${id}`, next);
       return { ok: true, subscription: next };
     });
   },
 
-  /// Accept a subscription: record the holder, issue the units, and mark it accepted, in one write.
+  /// Accept a subscription: record the holder, issue the units, and mark it accepted, in one write. The holder's legal name is the
+  /// one on the identity document verified at sign-up, carried on the subscription.
   async sub_accept({ id, by }) {
     return this.atomic(async () => {
       const s = typeof id === 'string' ? await this.storage.get(`s:${id}`) : null;
       if (!s) return fail(404, 'No such subscription', 'not_found');
       if (s.status === 'accepted') return { ok: true, replay: true, subscription: s };
       if (s.status !== 'funds_received') return fail(409, `A subscription that is ${s.status} cannot be accepted: its funds are not recorded`, 'funds_not_received');
+      if (!s.identity) return fail(409, 'This subscription carries no verified identity. Reject it and refund the funds', 'identity_record_missing');
       const o = await this.storage.get(`o:${s.offering_id}`);
       if (!o || o.status !== 'open') return fail(409, 'The offering is not open', 'not_open');
+      if (s.price_cents !== o.price_cents) return fail(409, 'The price changed after this subscription was made. Reject it and refund the funds', 'price_changed');
       if (s.circular_sha256 !== o.circular.sha256 || s.agreement_sha256 !== o.agreement.sha256) return fail(409, 'The subscriber signed an earlier circular or agreement and must sign the current ones first', 'documents_changed');
       const now = new Date().toISOString();
       const prior = await this.storage.get(`h:${s.holder_id}`);
@@ -451,6 +495,8 @@ const SUB_OPS = {
         { [`h:${s.holder_id}`]: holder },
       );
       if (r.ok === false) return r;
+      // `sub:` refs are kept for acceptances, so an entry already under this one means the ledger and this subscription disagree.
+      if (r.replay) return fail(409, `The ledger already has an entry under sub:${id}; nothing was issued. Check the ledger before accepting`, 'ledger_ref_taken');
       const next = { ...s, status: 'accepted', accepted: { at: now, by: by || null, entry_seq: r.entry.seq }, updated_at: now };
       await this.storage.put({
         ...(r.writes || {}),
@@ -549,6 +595,27 @@ async function subscriber(request, env, cors, deps) {
   return { userId };
 }
 
+/// The identity verified when the account signed up: the name read off the identity document, the country the document was
+/// verified from, and when. Sign-up links the verification record to the account as `kyc-{account id}-front` in KYC_STATUS
+/// (kyc_identity.mjs, linkKycRecords). The name is the one the document check read (`grok_analysis.extracted_name`), never the
+/// name the person typed at sign-up, which the record also keeps as a fallback. Null when there is no linked, verified record;
+/// `legal_name` null when the document's name could not be read.
+export async function verifiedIdentity(env, userId) {
+  let rec = null;
+  try {
+    rec = JSON.parse((await env.KYC_STATUS?.get(`kyc-${userId}-front`)) || 'null');
+  } catch {
+    rec = null;
+  }
+  if (!rec || typeof rec !== 'object' || rec.user_id !== userId || rec.age_verified !== true) return null;
+  const read = typeof rec.grok_analysis?.extracted_name === 'string' ? rec.grok_analysis.extracted_name.trim().replace(/\s+/g, ' ') : '';
+  return {
+    legal_name: read.length >= 2 ? read.slice(0, 200) : null,
+    document_country: typeof rec.jurisdiction === 'string' ? rec.jurisdiction : null,
+    verified_at: typeof rec.verified_at === 'string' ? rec.verified_at : null,
+  };
+}
+
 /// Handle /api/offering* and /api/subscriptions*; null for any other path. `deps`: { json, verifyAuth, ledgerCall }.
 export async function handleSubscriptionRoute(request, url, env, cors, deps) {
   const p = url.pathname;
@@ -581,9 +648,16 @@ export async function handleSubscriptionRoute(request, url, env, cors, deps) {
   const body = await readBody(request);
   if (!body) return json({ error: 'JSON body required' }, 400, cors);
   if (p === '/api/subscriptions') {
-    const { offering_id, units, legal_name, country, state, accredited, annual_income_cents, net_worth_cents } = body;
+    const { offering_id, units, country, state, accredited, annual_income_cents, net_worth_cents } = body;
+    // The legal name is the one on the identity document verified at sign-up. A name in the body is not read.
+    const identity = await verifiedIdentity(env, holder_id);
+    if (!identity) return json({ error: 'Your identity verification is not on file for this account. Contact support to verify again before subscribing', code: 'identity_record_missing' }, 409, headers);
+    if (!identity.legal_name) return json({ error: 'The name on your identity document could not be read. Contact support to verify again before subscribing', code: 'identity_name_unreadable' }, 409, headers);
     // The id is made here and the holder is the session: neither comes from the body.
-    return answer(await ledgerCall(env, 'sub_prepare', { id: crypto.randomUUID(), holder_id, offering_id, units, legal_name, country, state, accredited, annual_income_cents, net_worth_cents }));
+    return answer(await ledgerCall(env, 'sub_prepare', {
+      id: crypto.randomUUID(), holder_id, offering_id, units, legal_name: identity.legal_name, identity,
+      country, state, accredited, annual_income_cents, net_worth_cents,
+    }));
   }
   const id = signMatch[1];
   const { typed_name, circular_sha256, agreement_sha256, attest } = body;
@@ -631,6 +705,6 @@ export async function handleSubscriptionAdminRoute(request, url, env, cors, deps
   if (p === '/api/admin/subscriptions/expire') return answer(await ledgerCall(env, 'sub_expire', { older_than_days: body.older_than_days, by }));
   const act = /^\/api\/admin\/subscriptions\/([a-f0-9-]{36})\/(funds|accept|reject|refunded)$/.exec(p);
   if (!act) return json({ error: 'Not found' }, 404, cors);
-  const { amount_cents, bank_ref, reason } = body;
-  return answer(await ledgerCall(env, ADMIN_ACTS[act[2]], { id: act[1], amount_cents, bank_ref, reason, by }));
+  const { amount_cents, bank_ref, reason, payer_name_matches } = body;
+  return answer(await ledgerCall(env, ADMIN_ACTS[act[2]], { id: act[1], amount_cents, bank_ref, reason, payer_name_matches, by }));
 }

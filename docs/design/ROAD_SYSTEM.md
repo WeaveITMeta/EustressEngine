@@ -84,6 +84,11 @@ A road is a `TerrainSpline` layer in Road mode. Its `RoadClass` property decides
   - A junction centres where its roads' centre lines meet (the point nearest all of them), not where a
     road's end happens to stop, and each leg is measured from that centre along its road, past an end
     that stops short of it, so every road's surface begins exactly at its mouth.
+  - Meetings closer than 40 m centre to centre that share a road are one junction: its centre is the
+    point nearest all their roads, and each leg starts from the foot of its road nearest that centre, so a
+    leg need not pass through the centre. A road ending there keeps both of its meetings' legs; a road
+    passing through keeps the one nearest the centre. Junctions closer than 40 m on no common road (at
+    different levels, or on roads that never meet) stay apart, and `Road:Audit` reports them.
   - Each junction is designed by `road_junction`: kerb returns, setbacks, control, crosswalks and stop bars.
     Neighbouring legs less than 30 degrees apart meet with a straight corner rather than a kerb return,
     and no setback reaches past 80 m, so no set of roads gives an unbounded box.
@@ -141,8 +146,8 @@ A road is a `TerrainSpline` layer in Road mode. Its `RoadClass` property decides
 - `terrain::road_surface` lays one flat ribbon mesh and a chain of box colliders along the stations, in
   the bed material's swatch colour.
 
-Either way, `terrain.layer_create` takes at most 64 points per spline, because each point reads its
-spline's folder back to number itself. `RoadClass`, `Profile`, `Lanes`, `OneWay`, `Parking` and `Edge`
+Either way, `terrain.layer_create` takes up to 4096 points per spline, numbered in one pass over the
+spline's folder. `RoadClass`, `Profile`, `Lanes`, `OneWay`, `Parking` and `Edge`
 are ordinary properties, set in the Properties panel or over MCP like any other.
 
 What plain roads give in practice (the Coastal Frontier rebuild, 2026-10-01):
@@ -384,7 +389,9 @@ Roads are classes like any other, so nothing about them needs a road-specific AP
 - **Methods:** a few operations change several instances at once and are not property edits:
   - `Road:Split(station)` and `Road:Join(other)`.
   - `Road:ConnectAt(other, station)`, which makes a junction.
-  - `Road:Audit()`, which returns the violations, earthwork and structures.
+  - `Road:Audit(network?)`, which returns the violations (radius, grade, and fill or cut too deep outside a
+    structure) and structures, and per junction the height step between each leg and the box at its
+    mouth, the lanes with no exit, and any junction nearer than the merge distance. `Road:Audit` is built; the others are not yet.
   - `RoadNetwork:Route(from, to)` and `RoadFurniture:Regenerate()`.
 
   They are class methods, callable from Luau and Rune and from the generic MCP method tool

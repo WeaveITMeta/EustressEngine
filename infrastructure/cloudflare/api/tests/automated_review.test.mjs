@@ -491,13 +491,18 @@ test('the rating questionnaire is not required: a listing without one is listed 
   assert.equal((rec.decision.changes || []).includes('questionnaire_unanswered'), false);
 });
 
-test('a missing statement is not yet, and the judge\'s draft of the four lines reaches the author ready to paste', async () => {
+test('a missing statement is written once from the judge\'s draft; a statement the next review still cannot match reaches the author ready to paste', async () => {
   const env = environment();
   await publish(env, { description: 'A space station that answers questions.' });
   const draft = { category: 'Simulation', objective: 'Ask the station a question and trace how it finds the answer.', lesson: 'How a lookup table answers a question.', real_world_link: 'Models a reference desk from published tables.' };
   const d = deps({ judge: () => verdict({ statement_check: 'missing', suggested_statement: draft }) });
   const rec = await runModerationCase(SIM, env, d);
-  assert.deepEqual([rec.status, rec.decision.changes], ['changes_requested', ['statement_missing']]);
+  // The automatic pass wrote the four lines and the same review ran again; its judge still found no match, so the author is
+  // asked to make the statement describe the Space, with the draft, and no second pass is made.
+  assert.equal(d.calls.judge.length, 2, 'one review, one review again, never a third');
+  assert.deepEqual([rec.status, rec.decision.changes], ['changes_requested', ['statement_unclear']]);
+  assert.deepEqual(rec.auto_fix.applied.map(a => a.code), ['statement_missing']);
+  assert.equal(extractQualificationStatement((await simOf(env)).description).present, true, 'the listing carries the statement');
   const view = authorView(rec, await simOf(env));
   assert.deepEqual({ ...view.suggested_statement, text: undefined }, { ...draft, text: undefined });
   assert.equal(view.suggested_statement.text, `Category: Simulation\nObjective: ${draft.objective}\nLesson: ${draft.lesson}\nReal-world link: ${draft.real_world_link}`);
@@ -561,7 +566,9 @@ test('the five-minute cron runs only the moderation resumes; the hourly tick run
   assert.ok(tick.listed.includes('modq:classifying:'), 'the stuck classifying resume ran');
   assert.ok(tick.listed.includes('sim:'), 'the stalled pending and held-case retries ran');
   assert.equal(tick.seen.has('TREASURY'), false, 'no settlement on the five-minute tick');
-  assert.deepEqual(tick.listed.filter(p => !['modq:classifying:', 'sim:'].includes(p)), [], 'nothing else is listed');
+  // Code v2.8: the link review's due polls and re-reviews (src/link_review.mjs linkReviewTick) are part of the moderation tick.
+  assert.ok(tick.listed.includes('linkq:'), 'the link review queue is read');
+  assert.deepEqual(tick.listed.filter(p => !['modq:classifying:', 'sim:', 'linkq:'].includes(p)), [], 'nothing else is listed');
   const hourly = await run('0 * * * *', '00');
   assert.ok(hourly.seen.has('TREASURY'), 'the hourly tick still starts the settlement');
   assert.ok(hourly.listed.some(p => !['modq:classifying:', 'sim:'].includes(p)), 'and its other sweeps');
@@ -592,8 +599,8 @@ test('the planner never cuts a script it can hold, and budgets by characters at 
 
 // -- the Code ------------------------------------------------------------------------------------------------------------------
 
-test('the Code is v2.5, its text hashes to the anchor, and the anchor is the one DECENTRALIZATION_PLAN.md section 5 records', () => {
-  assert.equal(POLICY_VERSION, '2.5');
+test('the Code is v2.8, its text hashes to the anchor, and the anchor is the one DECENTRALIZATION_PLAN.md section 5 records', () => {
+  assert.equal(POLICY_VERSION, '2.8');
   assert.equal('sha256:' + createHash('sha256').update(GUARDIAN_POLICY_TEXT).digest('hex'), POLICY_HASH_ANCHORED);
   const plan = readFileSync(new URL('../../../../docs/architecture/DECENTRALIZATION_PLAN.md', import.meta.url), 'utf8');
   assert.ok(plan.includes(`**Policy hash:** \`${POLICY_HASH_ANCHORED}\``));
@@ -1148,4 +1155,137 @@ test('Code v2.5 review: entries past max_review_entries (one file at many paths)
   const why = rec.decision.reasons.at(-1);
   assert.deepEqual([rec.status, rec.decision.changes, why.code, why.detail.entries], ['changes_requested', ['too_much_script'], 'too_many_files', 2501]);
   assert.equal(d.calls.judge.length + d.calls.reader.length, 0);
+});
+
+// -- The automatic listing fixes (docs/moderation/AUTO_APPLY_LISTING_FIXES.md) ------------------------------------------------
+
+const PONG_DRAFT = { category: 'Game', objective: 'Return the ball past the other paddle to score.', lesson: 'How the angle off a paddle sets the return.', real_world_link: 'Models the reflection of a ball off a moving surface.' };
+const pongJudge = (over = {}) => verdict({ is_fiction: true, statement_check: 'missing', suggested_statement: PONG_DRAFT, suggested_tags: ['science-fiction', 'arcade'], ...over });
+const mailOf = (view, name = 'Pong') => renderModerationEmail({ view, kind: 'decision', simName: name, username: 'ann', reviewUrl: 'https://eustress.dev/projects', unsubUrl: 'https://api.eustress.dev/u' });
+
+test('auto-fix, Pong\'s shape: the statement and the fiction label are fixed once, the lesson is left to the author, and nothing is reviewed again', async () => {
+  const env = environment();
+  await publish(env, { description: 'Pong against a friend.', extra: { name: 'Pong', tags: ['pong', 'arcade'] } });
+  const d = deps({ judge: () => pongJudge({ scores: { lesson: 1 } }) });
+  const rec = await runModerationCase(SIM, env, d);
+  assert.equal(d.calls.judge.length, 1, 'a Space change is left, so the review does not run again');
+  assert.deepEqual([rec.status, rec.decision.changes, rec.decision.first_changes], ['changes_requested', ['test_lesson'], ['test_lesson', 'statement_missing', 'fiction_label_missing']]);
+  const sim = await simOf(env);
+  assert.equal(sim.name, 'Pong', 'the title is never touched');
+  assert.ok(sim.description.startsWith('Pong against a friend.\n\n'), 'the author\'s own text stays first, as written');
+  const st = extractQualificationStatement(sim.description);
+  assert.deepEqual([st.present, st.category, st.lesson], [true, 'Fiction', PONG_DRAFT.lesson], 'the four lines from the draft, the Category set to Fiction');
+  assert.deepEqual(sim.tags, ['fiction', 'science-fiction', 'pong', 'arcade']);
+  assert.equal(sim.tags_source, 'author', 'the author\'s tags with the label added stay the author\'s');
+  assert.deepEqual(sim.listing_fix.before, { description: 'Pong against a friend.', tags: ['pong', 'arcade'] });
+  const view = authorView(rec, sim);
+  assert.deepEqual(view.auto_fix.applied.map(a => a.category), ['fiction_label_missing', 'statement_missing']);
+  assert.deepEqual(view.reasons.map(r => r.category), ['test_lesson'], 'only what is left is asked for');
+  assert.equal(view.suggested_statement, null, 'the statement was written, so no draft to paste');
+  assert.equal(view.auto_fix.description_after, sim.description);
+  const mail = mailOf(view).text;
+  assert.match(mail, /Fixed for you:\n\* Labelled your fiction: Added the tags fiction and science-fiction, and set the Category line to Fiction\./);
+  assert.match(mail, /Still to change:\n\n\* Lesson \(Code T3\)/);
+});
+
+test('auto-fix: when every finding was about wording, the same review runs again at once and lists it; the author hears once', async () => {
+  const env = environment();
+  await publish(env, { description: 'Pong against a friend.', extra: { name: 'Pong', tags: ['pong'] } });
+  const d = deps({ judge: (body, n) => (n === 1 ? pongJudge() : pongJudge({ statement_check: 'matches', suggested_statement: null })) });
+  const rec = await runModerationCase(SIM, env, d);
+  assert.equal(d.calls.judge.length, 2);
+  assert.equal(d.calls.jev.length, 2, 'the whole review again, Jev on the new description included');
+  assert.equal(rec.status, 'approved');
+  assert.equal(rec.auto_fix.state, 'resubmitted');
+  assert.ok(rec.history.some(h => h.event === 'auto_fix_resubmitted'));
+  assert.ok(rec.review_clock?.started_at && rec.review_clock?.decided_at, 'one clock from the publish to the final decision');
+  assert.ok(judgeText(d.calls.judge[1]).includes(`Lesson: ${PONG_DRAFT.lesson}`), 'the second judge read the fixed description');
+  const view = authorView(rec, await simOf(env));
+  assert.equal(view.status, 'listed');
+  assert.deepEqual(view.auto_fix.applied.map(a => a.category), ['fiction_label_missing', 'statement_missing']);
+  const announced = [...env.SOCIAL.m.keys()].filter(k => k.startsWith('notif:user-1:'));
+  assert.equal(announced.length, 1, 'one notice: the listing, not the first "changes requested"');
+});
+
+test('auto-fix: the review again decides like any review, a quality rejection included (McKale, 2026-11-14)', async () => {
+  const env = environment();
+  await publish(env, { description: 'Pong against a friend.', extra: { name: 'Pong', tags: ['pong'] } });
+  // Labelled fiction, T4 is scored as T4 for Fiction, and Pong carries no idea: 0 is "not listed" (rule 4).
+  const d = deps({ judge: (body, n) => (n === 1 ? pongJudge() : pongJudge({ statement_check: 'matches', scores: { real_world: 0 } })) });
+  const rec = await runModerationCase(SIM, env, d);
+  assert.deepEqual([rec.status, rec.decision.reasons.at(-1).code], ['rejected', 'test_real_world_fiction']);
+  const view = authorView(rec, await simOf(env));
+  assert.equal(view.status, 'not_listed');
+  assert.ok(view.auto_fix.applied.length, 'the author sees what was changed before the rejection');
+  assert.equal(view.can_appeal, true);
+});
+
+test('auto-fix: one pass per publish; a run that is not a publish makes none, and the author\'s next publish may make its own', async () => {
+  const env = environment();
+  await publish(env, { description: 'Pong against a friend.', extra: { name: 'Pong', tags: ['pong', 'arcade'] } });
+  await runModerationCase(SIM, env, deps({ judge: () => pongJudge({ scores: { lesson: 1 } }) }));
+  const first = await loadCase(env, SIM);
+  // The sweep runs it again and the tags now misfit: no second pass.
+  const misfit = () => pongJudge({ statement_check: 'matches', suggested_tags: ['science-fiction', 'paddle'] });
+  const again = await runModerationCase(SIM, env, deps({ judge: misfit, jev: jevAnswers({ tag_fit: 0.05 }) }), { trigger: 'sweep' });
+  assert.ok(again.decision.changes?.includes('not_yet_tags'), JSON.stringify([again.status, again.decision.outcome, again.decision.changes, again.decision.reasons]));
+  assert.deepEqual(again.auto_fix, first.auto_fix, 'the pass of this publish stands, and no other is made');
+  assert.deepEqual((await simOf(env)).tags, ['fiction', 'science-fiction', 'pong', 'arcade']);
+  // A new publish is the author's: its review may make one pass of its own.
+  const next = await runModerationCase(SIM, env, deps({ judge: misfit, jev: jevAnswers({ tag_fit: 0.05 }) }), { trigger: 'publish' });
+  assert.ok(next.history.some(h => h.event === 'auto_fix_cleared'));
+  assert.deepEqual(next.auto_fix.applied.map(a => a.code), ['not_yet_tags']);
+  assert.deepEqual((await simOf(env)).tags, ['fiction', 'science-fiction', 'paddle']);
+});
+
+test('auto-fix: an author\'s edit made during the review wins, and the pass is dropped', async () => {
+  const env = environment();
+  await publish(env, { description: 'Pong against a friend.', extra: { name: 'Pong', tags: ['pong', 'arcade'] } });
+  const d = deps({ judge: async () => {
+    const sim = await simOf(env);
+    await env.SOCIAL.put(`sim:${SIM}`, JSON.stringify({ ...sim, description: 'Pong, my words.' }));
+    return pongJudge({ scores: { lesson: 1 } });
+  } });
+  const rec = await runModerationCase(SIM, env, d);
+  assert.equal(rec.auto_fix.state, 'skipped');
+  assert.equal((await simOf(env)).description, 'Pong, my words.');
+  assert.deepEqual(rec.decision.changes, ['test_lesson', 'statement_missing', 'fiction_label_missing'], 'every finding stays the author\'s');
+  assert.equal(authorView(rec, await simOf(env)).auto_fix, null);
+});
+
+test('auto-fix: never on a quarantine or any outcome outside the quality lane', async () => {
+  const env = environment();
+  await publish(env, { description: 'Pong against a friend.', extra: { name: 'Pong', tags: ['pong'] } });
+  const rec = await runModerationCase(SIM, env, deps({ judge: () => pongJudge({ verdict: 'reject', articles: [{ id: 'A1', confidence: 0.9, evidence: 'Code A1: the poster in capture-0 sexualizes a child' }] }) }));
+  assert.equal(rec.status, 'quarantined');
+  assert.equal(rec.auto_fix, undefined);
+  assert.equal((await simOf(env)).description, 'Pong against a friend.');
+  // A quarantine applied to the listing while the review ran stops the pass: the listing is read as it is now.
+  const late = environment();
+  await publish(late, { description: 'Pong against a friend.', extra: { name: 'Pong', tags: ['pong'] } });
+  await runModerationCase(SIM, late, deps({ judge: async () => {
+    const sim = await simOf(late);
+    await late.SOCIAL.put(`sim:${SIM}`, JSON.stringify({ ...sim, moderation: { ...sim.moderation, status: 'quarantined' } }));
+    return pongJudge();
+  } }));
+  assert.equal((await simOf(late)).description, 'Pong against a friend.', 'nothing written under a quarantine');
+  assert.equal((await loadCase(late, SIM)).auto_fix, undefined);
+});
+
+test('auto-fix: a review again the day\'s cap does not allow waits as pending; the author sees it is being reviewed again, never on a hold', async () => {
+  const env = environment({ max_ai_verdicts_per_day_per_listing: 0 });
+  await publish(env, { description: 'Pong against a friend.', extra: { name: 'Pong', tags: ['pong'] } });
+  const d = deps({ judge: () => pongJudge() });
+  const rec = await runModerationCase(SIM, env, d);
+  assert.equal(d.calls.judge.length, 1);
+  assert.equal(rec.status, 'pending');
+  assert.equal((await simOf(env)).moderation.status, 'pending', 'the stalled-pending sweep reviews it once the day allows');
+  const view = authorView(rec, await simOf(env));
+  assert.equal(view.status, 'in_review');
+  assert.match(view.headline, /fixed your listing's wording and are reviewing it again/);
+  assert.equal(view.auto_fix.reviewing_again, true);
+  // A hold reads like any hold: nothing about a fix.
+  const held = authorView({ ...rec, status: 'held' }, await simOf(env));
+  assert.equal(held.auto_fix, null);
+  assert.doesNotMatch(held.headline, /fixed/);
 });

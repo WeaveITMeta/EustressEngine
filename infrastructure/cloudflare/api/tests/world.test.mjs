@@ -435,3 +435,50 @@ test('paths outside /world/ are left to the other routes', async () => {
   const url = new URL(`https://api.eustress.dev/api/simulations/${SIM}/download`);
   assert.equal(await handleWorldRoute(new Request(url), url, env, {}, deps), null);
 });
+
+test('a commit that sends back the description and tags from before the review fixed them keeps the fix; the author\'s own text ends it', async () => {
+  const env = environment();
+  const m = await committed(env);
+  const before = { description: 'Drive.', tags: ['cars'] };
+  const after = { description: 'Drive.\n\nCategory: Simulation\nObjective: Drive the loop.\nLesson: How grip limits a turn.\nReal-world link: Tyre data.', tags: ['driving', 'physics'] };
+  env.SOCIAL.m.set(`sim:${SIM}`, JSON.stringify({ ...listing(env), description: after.description, tags: after.tags, tags_source: 'judge', genre_migrated: true, listing_fix: { at: 'x', before, after } }));
+  approve(env);
+
+  // A Studio that has not read the fix sends what it had: nothing changes, and the listing is not sent back to review.
+  await call(env, 'POST', 'commit', { who: 'author', body: publish(m, { listing: { description: 'Drive.', tags: ['cars'] } }) });
+  assert.deepEqual([listing(env).description, listing(env).tags], [after.description, after.tags]);
+  assert.equal(listing(env).moderation.status, 'approved', 'the stale text is no change');
+  assert.ok(listing(env).listing_fix, 'the guard stays until the author sends their own text');
+
+  // The author's own description is theirs, and ends the guard.
+  await call(env, 'POST', 'commit', { who: 'author', body: publish(m, { listing: { description: 'Drive the coast road.' } }) });
+  assert.equal(listing(env).description, 'Drive the coast road.');
+  assert.equal(listing(env).listing_fix, undefined);
+  assert.equal(listing(env).moderation.status, 'pending');
+});
+
+test('a title and description edited on the website survive a Studio publish that still holds the old ones; new Studio text wins', async () => {
+  const env = environment();
+  const m = await committed(env);
+  const { applyListingEdit } = await import('../src/listing_edit.mjs');
+  const sim = { ...listing(env), name: 'Justice', description: 'A courtroom.' };
+  applyListingEdit(sim, { name: 'The Justice Super Station', description: 'A courtroom. https://rust-justice.miksunbot.workers.dev/' }, 'T1');
+  env.SOCIAL.m.set(`sim:${SIM}`, JSON.stringify(sim));
+  approve(env);
+
+  // Studio's publish.toml still has the title and description from before the web edit.
+  await call(env, 'POST', 'commit', { who: 'author', body: publish(m, { listing: { name: 'Justice', description: 'A courtroom.' } }) });
+  assert.deepEqual([listing(env).name, listing(env).description], ['The Justice Super Station', 'A courtroom. https://rust-justice.miksunbot.workers.dev/']);
+  assert.equal(listing(env).moderation.status, 'approved', 'the stale text is no change');
+  assert.ok(listing(env).listing_fix, 'the guard stays while Studio sends stale text');
+
+  // A Studio that read the edit sends the listing's own text: nothing stale, the guard ends, nothing to review.
+  await call(env, 'POST', 'commit', { who: 'author', body: publish(m, { listing: { name: 'The Justice Super Station', description: 'A courtroom. https://rust-justice.miksunbot.workers.dev/' } }) });
+  assert.equal(listing(env).listing_fix, undefined);
+  assert.equal(listing(env).moderation.status, 'approved');
+
+  // New text written in Studio is the author's, and is reviewed.
+  await call(env, 'POST', 'commit', { who: 'author', body: publish(m, { listing: { name: 'Justice Station', description: 'A courtroom.' } }) });
+  assert.deepEqual([listing(env).name, listing(env).description, listing(env).moderation.status], ['Justice Station', 'A courtroom.', 'pending'],
+    'once the guard has ended, an old text is the author\'s choice again');
+});

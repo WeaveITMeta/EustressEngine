@@ -207,6 +207,42 @@ test('only a tool the catalog prices can be charged, within its cap', async () =
   assert.deepEqual([broke.status, broke.body.code, broke.body.needed, broke.body.available], [402, 'insufficient_delta', 50, 20]);
 });
 
+test('a lifetime plan with unlimited Delta holds Professional forever and runs priced tools for nothing', async () => {
+  const { env, call } = world();
+  await env.PAYOUTS.put('delta:catalog', JSON.stringify({ tools: { 'cwtr:pipe_sizer': { base: 5, per_unit: 2, unit: '1k_entities', max_per_run: 50, byok: false } } }));
+  // Before the grant: an empty account is refused, as any other.
+  const before = await call('POST', '/api/delta/charge', { user: 'owner', body: { ref: 'r:1', tool_id: 'cwtr:pipe_sizer', amount: 40 } });
+  assert.deepEqual([before.status, before.body.code], [402, 'insufficient_delta']);
+  assert.equal(await planAllowsCashout(env, 'owner'), false);
+
+  await env.USERS.put('plan_lifetime:owner', JSON.stringify({ plan: 'professional', unlimited_delta: true, reason: 'founder' }));
+  // A Stripe record that lapsed or was cancelled does not end it.
+  await writePlan(env, 'owner', { plan: 'creator', status: 'canceled', current_period_end: Math.floor(Date.now() / 1000) - 90 * 86400 });
+  assert.equal(await planAllowsCashout(env, 'owner'), true);
+  const balance = await call('GET', '/api/delta/balance', { user: 'owner' });
+  assert.deepEqual([balance.body.plan, balance.body.unlimited], ['professional', true]);
+
+  const run = await call('POST', '/api/delta/charge', { user: 'owner', body: { ref: 'r:2', tool_id: 'cwtr:pipe_sizer', amount: 40 } });
+  assert.deepEqual([run.status, run.body.charged, run.body.balance, run.body.unlimited], [200, 0, 0, true]);
+  // The tool must still be one the catalog prices, within its cap.
+  assert.equal((await call('POST', '/api/delta/charge', { user: 'owner', body: { ref: 'r:3', tool_id: 'data:import', amount: 5 } })).status, 404);
+  assert.equal((await call('POST', '/api/delta/charge', { user: 'owner', body: { ref: 'r:4', tool_id: 'cwtr:pipe_sizer', amount: 51 } })).status, 400);
+  // The account cannot be sold a second plan on top.
+  const buy = await call('POST', '/api/subscriptions/checkout', { user: 'owner', body: { plan: 'creator', interval: 'monthly' } });
+  assert.equal(buy.body.code, 'already_subscribed');
+
+  // Another account is untouched, and a lifetime grant without unlimited Delta still spends.
+  const other = await call('POST', '/api/delta/charge', { user: 'u2', body: { ref: 'r:5', tool_id: 'cwtr:pipe_sizer', amount: 40 } });
+  assert.equal(other.status, 402);
+  await env.USERS.put('plan_lifetime:u3', JSON.stringify({ plan: 'professional' }));
+  assert.equal(await planAllowsCashout(env, 'u3'), true);
+  assert.equal((await call('POST', '/api/delta/charge', { user: 'u3', body: { ref: 'r:6', tool_id: 'cwtr:pipe_sizer', amount: 40 } })).status, 402);
+  // A grant naming no real plan grants nothing.
+  await env.USERS.put('plan_lifetime:u4', JSON.stringify({ plan: 'creator_pro', unlimited_delta: true }));
+  assert.equal(await planAllowsCashout(env, 'u4'), false);
+  assert.equal((await call('POST', '/api/delta/charge', { user: 'u4', body: { ref: 'r:7', tool_id: 'cwtr:pipe_sizer', amount: 40 } })).status, 402);
+});
+
 // ── Plans and the cash-out rule ───────────────────────────────────────────
 
 test('cash-out needs an active Creator, Professional or Bundle plan', async () => {

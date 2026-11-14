@@ -155,7 +155,14 @@ export class HolderLedger {
     const bad = entryProblem({ ref, from, to, units, price_cents });
     if (bad) return bad;
     const priorSeq = await this.storage.get(`ref:${ref}`);
-    if (priorSeq) return { ok: true, replay: true, entry: await this.storage.get(entryKey(priorSeq)) };
+    if (priorSeq) {
+      // A repeat of the same request is answered with its entry. The same ref with different contents is a mistake, never a
+      // repeat: it is refused, so nobody believes units moved that did not.
+      const prior = await this.storage.get(entryKey(priorSeq));
+      const same = prior && prior.kind === kind && prior.from === from && prior.to === to && prior.units === units && prior.price_cents === price_cents;
+      if (!same) return fail(409, `ref ${ref} was already used for a different entry (${prior?.seq ?? '?'})`, 'ref_conflict');
+      return { ok: true, replay: true, entry: prior };
+    }
     const state = await this.state();
     const writes = {};
     const now = new Date().toISOString();
@@ -184,6 +191,14 @@ export class HolderLedger {
     writes.state = { seq, head_hash: entry.hash, issued_units: issued };
     return { ok: true, writes, entry, issued_units: issued };
   }
+}
+
+/// Refs that begin `sub:` belong to accepted subscriptions (subscriptions.mjs). An entry an administrator records by hand may
+/// not take one, or an acceptance would find its ref already used. A refusal, or null.
+function reservedRef(ref) {
+  return typeof ref === 'string' && ref.startsWith('sub:')
+    ? fail(400, 'refs that begin sub: are kept for accepted subscriptions', 'reserved_ref')
+    : null;
 }
 
 /// What is wrong with an entry's fields, or null.
@@ -218,17 +233,20 @@ const OPS = {
 
   issue({ ref, to, units, price_cents = null, memo, by }) {
     if (typeof to !== 'string') return fail(400, 'to is the holder the units are issued to', 'invalid_request');
+    if (reservedRef(ref)) return reservedRef(ref);
     return this.append({ kind: 'issue', ref, to, units, price_cents, memo, by });
   },
 
   transfer({ ref, from, to, units, memo, by }) {
     if (typeof from !== 'string' || typeof to !== 'string') return fail(400, 'from and to are holders', 'invalid_request');
+    if (reservedRef(ref)) return reservedRef(ref);
     return this.append({ kind: 'transfer', ref, from, to, units, memo, by });
   },
 
   /// The company buys units back; they are no longer issued.
   repurchase({ ref, from, units, price_cents = null, memo, by }) {
     if (typeof from !== 'string') return fail(400, 'from is the holder the units are bought from', 'invalid_request');
+    if (reservedRef(ref)) return reservedRef(ref);
     return this.append({ kind: 'repurchase', ref, from, units, price_cents, memo, by });
   },
 
@@ -295,6 +313,22 @@ const OPS = {
     }
     const held = [...holders.values()].reduce((a, b) => a + b, 0);
     if (held !== issued) problems.push(`holders hold ${held} units and ${issued} are issued`);
+    // Each accepted subscription points at the entry that issued its units, and each offering's counts match its subscriptions.
+    const bySeq = new Map(entries.map((e) => [e.seq, e]));
+    const subs = await this.listAll('s:');
+    for (const s of subs.filter((x) => x.status === 'accepted')) {
+      const e = bySeq.get(s.accepted?.entry_seq);
+      if (!e || e.kind !== 'issue' || e.to !== s.holder_id || e.units !== s.units || e.ref !== `sub:${s.id}`) {
+        problems.push(`subscription ${s.id} is accepted and entry ${s.accepted?.entry_seq ?? '?'} did not issue its units`);
+      }
+    }
+    for (const o of (await this.storage.list({ prefix: 'o:' })).values()) {
+      const mine = subs.filter((s) => s.offering_id === o.offering_id);
+      const sold = mine.filter((s) => s.status === 'accepted').reduce((a, s) => a + s.units, 0);
+      const reserved = mine.filter((s) => s.status === 'awaiting_funds' || s.status === 'funds_received').reduce((a, s) => a + s.units, 0);
+      if (sold !== o.sold_units) problems.push(`offering ${o.offering_id} counts ${o.sold_units} units sold and its subscriptions say ${sold}`);
+      if (reserved !== o.reserved_units) problems.push(`offering ${o.offering_id} counts ${o.reserved_units} units reserved and its subscriptions say ${reserved}`);
+    }
     return { ok: true, sound: problems.length === 0, entries: entries.length, issued_units: issued, head_hash: prev, problems: problems.slice(0, 50) };
   },
 };

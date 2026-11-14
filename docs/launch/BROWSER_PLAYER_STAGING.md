@@ -11,23 +11,66 @@ Space.
   When `Players.CharacterAutoLoads` is on, the local character spawns on the
   Space's SpawnLocation and the avatar runtime follows it: WASD moves, Shift
   sprints, Space jumps, Ctrl crouches, and the right mouse button looks. A
-  Space that loads no character still flies its camera (click to look, Space
-  and Ctrl go up and down, Esc releases the mouse).
+  Space that loads no character shows its own camera, moved only by its
+  scripts, exactly as the desktop Player does: the page takes no mouse and
+  adds no fly camera (McKale, 2026-11-14: "It needs to be the same mechanic
+  as the player").
+- **Signed in.** A world refused to a signed-out request (an unlisted or
+  rated listing) is asked for again with the site's sign-in. The site stores
+  `auth_token` as JSON (`gloo_storage`), quotes included; the Player strips
+  them (`solo.rs` `token_from_storage`). Sent with the quotes, the API read
+  the request as signed out and answered 403.
+- **The mouse.** While the page holds the mouse, the browser keeps Esc for
+  itself and the page never sees the key, so the Player watches the
+  document's pointer lock (`mouse.rs`, `mouse_lock.rs`). When the browser
+  lets go, the cursor comes back and a first-person view steps out, as Esc
+  does on the desktop Player. A lock the browser refuses (zooming into first
+  person with the wheel is not a click) is given up after a second, and the
+  next click takes the mouse. In third person the mouse is held while the
+  right button turns the camera, so the turn does not stop at the screen's
+  edge, and let go when the button comes up.
 - **A live session.** The page passes the same `eustress-player://join/...` link
   the desktop Player gets, ticket included, in memory only. The Player opens it
   over the browser's WebTransport, pinned to the host certificate. The character
   stands where the host placed it.
 
-The browser build runs the same avatar runtime as the desktop Player. It does
-not run Luau. mlua's Luau is C++ (`mlua-sys`, `luau0-src`), and clang cannot
-compile it for `wasm32-unknown-unknown`: the target has no C++ standard library
-(`#include <iterator>` fails). That is why `eustress-player-web` does not enable
-common's `mlua` feature. Nothing in the avatar, physics, or spawn path is
-`cfg`-gated off for wasm32; those plugins were simply not added before. A
-`Script` (zombies, the tycoon authority) runs on the host in both Players, and
-a published world played alone runs no host. LocalScripts are the game logic
-the desktop Player runs, and they need the VM this target cannot build. A
-joined browser still shows what the host replicates.
+The browser build runs the same avatar runtime and the same scripts as the
+desktop Player:
+
+- **Played alone** it is the session's Authority (`PlayRole::Authority`): the
+  Luau VM (common `tree_scripts`, the desktop Player's mlua binding layer) runs
+  the Space's Scripts and LocalScripts, physics is live, and Rune runs every
+  SoulScript (`common::soul::rune_play`, `RuneScope::Everything`).
+- **Joined** it is a Replica: the host runs the Scripts, and this Player runs
+  its LocalScripts and its own Rune (`RuneScope::ClientOnly`).
+- HttpService's GetAsync, PostAsync and RequestAsync refuse in the browser
+  with a script error; the rest of HttpService (JSON, GUIDs, URL encoding)
+  works.
+
+### How Luau builds for the browser
+
+mlua's Luau is C++ (`mlua-sys`, `luau0-src`). clang has no C or C++ standard
+library of its own for `wasm32-unknown-unknown`, so the VM compiles against
+**wasi-sysroot 34** (libc, libc++, libc++abi, libunwind from
+[WebAssembly/wasi-sdk](https://github.com/WebAssembly/wasi-sdk/releases/tag/wasi-sdk-34)),
+with C++ exceptions as WebAssembly exceptions, because Luau raises script
+errors as C++ exceptions.
+
+- `eustress/scripts/wasm-luau-env.sh` sets the wasm32 C and C++ flags. Source it
+  before any wasm32 build of `eustress-player-web` (the staging script does).
+  Native builds are untouched.
+- The sysroot lives at `.tools/wasi-sysroot-34.0` at the repository root
+  (git-ignored), or wherever `WASI_SYSROOT` points. Only
+  `include/wasm32-wasip1` and `lib/wasm32-wasip1` are needed. clang 22 or later
+  is required (this machine: LLVM 23 in `C:\Program Files\LLVM`).
+- `crates/player-web/build.rs` links libc++, libc++abi, libunwind and libc
+  into the module. `crates/player-web/src/libc_shim.rs` defines the few calls
+  wasi-libc leaves to a WASI host (clocks, environment, standard streams), so
+  the module imports nothing a web page lacks.
+- The module uses WebAssembly exception handling (the standard `exnref`
+  instructions): Chrome and Edge 137+, Firefox 131+, Safari 18.4+. An older
+  browser cannot compile the module, and the page shows "The browser Player
+  could not load."
 
 ## Hosted join: what blocks it
 
@@ -81,12 +124,107 @@ Headless Chrome, WebGL2, SwiftShader, against
   WebGL2 device reports a limit of 0. A desktop WebGPU browser, which is the
   one that already drew this map, does not take that path. This machine's
   WebGPU device is lost on startup, so movement was not retried there.
-- Luau was attempted and does not build. `cargo check` of `eustress-player-web`
-  with common's `mlua` feature fails in `mlua-sys` while compiling Luau's
-  C++: `clang++ --target=wasm32-unknown-unknown` cannot find `<iterator>`.
-  This target has no C++ standard library. The browser Player therefore does
-  not enable `mlua`. LocalScripts do not run. A `Script` does not run in the
-  desktop Player either; the host runs those.
+- Luau did not build then: with no C++ standard library for
+  `wasm32-unknown-unknown`, `mlua-sys` failed on `<iterator>`. It builds
+  against wasi-sysroot since 2026-11-13 (see "How Luau builds for the
+  browser" and the run below).
+
+## Staging deploy (2026-11-14)
+
+The Luau build is on staging: deployment `2d073be2`, alias
+`https://staging.eustress-cbb.pages.dev`. `/player/webgpu/` serves the 83.0 MiB
+module as 5 parts, byte-identical to the build (SHA-256 checked after
+download). From the staging origin, `host.js` joined the parts, the module
+compiled and started, and the Player requested Box Head's world, which the
+API refused with 403 (the listing needs sign-in). No public Space is listed
+on staging, so no script has run there yet. WebGL2 was not built.
+
+## Production deploy (2026-11-14, mouse and sign-in)
+
+McKale: "Get it on production, I want browser to be stable." Pages deployment
+`05d020cf` (branch `main`, eustress.dev), after staging `5345e611`.
+
+- The upload was the site production already served (every page checked was
+  byte-identical to `crates/web/dist`), with only `/player` changed and no
+  `.well-known/assetlinks.json`. No other web change went with it.
+- `/player/host.js` names the new build's folder,
+  `webgpu/3b18266227074573/`. The previous build stays at `webgpu/` for
+  pages that cached the older `host.js`.
+- On eustress.dev the Player played The Super Station: loading, starting,
+  loading-world, in-world, and drew the station. A click that the browser
+  refused the mouse for (the pane was in the background) hid the cursor and
+  the Player gave it back about a second later. The previous build, run the
+  same way, kept the cursor hidden.
+- Not verified in a browser: Esc after a granted lock and the right-drag
+  hold (the test pane cannot hold the pointer lock; `mouse_lock.rs` tests
+  cover the decision), and the sign-in retry (no signed-in browser here;
+  `solo.rs` tests cover the token).
+
+### Production deploy (2026-11-14, no fly camera)
+
+McKale tried `05d020cf`: "Esc works, but the mouse is taken like it's first
+person and looks around wrongly. It needs to be the same mechanic as the
+player." The browser build had its own click-to-look fly camera
+(`explore.rs`, from before scripts ran in the browser); the desktop Player
+has none and lets the Space's scripts move the camera. It was removed.
+Pages `ce6e2db6` (after staging `8e0e872e`), build folder
+`webgpu/5f734e695b52d3c1/`, built from a source snapshot on F: because
+another session's `common/src/page_spec.rs` test module did not parse (the
+snapshot dropped only that test module; tests are not in a release build).
+
+On eustress.dev the new build played The Super Station, and a click on the
+world made no pointer-lock request (the cursor stayed). A tab still holding
+the 3:45 PM `host.js` loaded the `3b18266227074573` build whole and played:
+the cache case works. Locally the Station's own Top button took the camera
+straight down with nothing fighting it.
+
+### Why each build has its own folder
+
+eustress.dev serves `/player/host.js` and the glue `eustress_player.js` with
+`Cache-Control: public, max-age=14400` (the zone's browser cache TTL), while
+`host.js` fetches the wasm parts with `no-cache`. A glue file runs only the
+wasm it was generated with, so replacing both in place breaks every browser
+that loaded the Player in the last four hours: its cached glue meets the new
+wasm and the page shows "The browser Player could not load."
+
+`package_player.mjs` therefore writes each build to a folder named by its
+glue and wasm (`webgpu/<16 hex>/`) and rewrites `host.js`'s `BUILD_DIRS` line
+to name it. `--keep <dir>` copies in the builds the previous package's
+`host.js` names, so a cached `host.js` still finds a whole build. The staging
+script passes `--keep crates/web/dist/player` when it exists: keep that folder
+equal to what the site serves after every deploy.
+
+## What was run (2026-11-13, scripts)
+
+WebGPU release build with `mlua` and `realism-scripting`, packaged by
+`package_player.mjs` (82.3 MiB of wasm after wasm-bindgen), served from
+`http://localhost:3000` in Chrome 156 (NVIDIA, WebGPU).
+
+- Spike first: a standalone crate on mlua 0.10.5 with Luau, built for
+  `wasm32-unknown-unknown` against wasi-sysroot 34 and run through
+  wasm-bindgen 0.2.128. Six checks passed (compound assignment and
+  if-expressions, `error()` caught by `pcall`, a Rust callback's error caught
+  by `pcall` with its message, a syntax error returned as `Err`, an uncaught
+  runtime error returned as `Err`, coroutines). Flipping one expectation
+  dropped the result from 63 to 61, so the harness can fail.
+- Pong, packed from its Space folder into a manifest and a chunk with
+  `eustress-echk`'s encoder, and served to the Player in place of the API's
+  world download (staging's only listing needs sign-in, and staging lists no
+  public Space). The Player played it alone as the Authority:
+  `ServerScriptService.PongServer` started, printed "ready: first to 7" and
+  "player joined: Player", scored point after point, printed "Right wins 0
+  to 7" and "new game", and kept playing. The LocalScript
+  `StarterPlayerScripts.PongInput` started. No script error was logged.
+- Not verified: the picture. The app window was closed, so the browser pane
+  was hidden; a hidden page gets no animation frames, the test page drove
+  frames itself, and its canvas could not be captured. Keyboard input to the
+  paddle was not tried. No Space with Rune scripts was run (the four Player
+  Rune modules registered).
+- Fixed on the way: the module's static constructors never ran (nothing
+  called `__wasm_call_ctors`), so the first Luau state trapped dividing by
+  zero in its allocator; `start_player` now runs them once. That also runs
+  eustress-networking's `ctor` registrations, which had never run in the
+  browser.
 
 ## What was run earlier (2026-10-20)
 
@@ -143,9 +281,10 @@ npx wrangler pages deploy dist --project-name eustress --branch staging --commit
 
 Do not pass `--branch main`. Do not deploy the API Worker from this script.
 
-A single Pages file over 25 MiB is rejected by Cloudflare. The release build
-is about 71 MiB for WebGPU and about 73 MiB for WebGL2 (measured 2026-10-20,
-after `wasm-bindgen`). The script does not run `wasm-opt`: that rewrite drops
+A single Pages file over 25 MiB is rejected by Cloudflare. The WebGPU release
+build is 82.3 MiB after `wasm-bindgen` with the Luau VM and Rune (measured
+2026-11-13; 71 MiB before them). The WebGL2 build was about 73 MiB on
+2026-10-20, before them. The script does not run `wasm-opt`: that rewrite drops
 the module layout the generated glue calls. A wasm over the cap is removed
 from the upload and replaced with 20 MiB pieces,
 `eustress_player_bg.wasm.part0`, `part1`, and so on. `/player/host.js` fetches
