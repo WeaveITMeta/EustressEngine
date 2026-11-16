@@ -449,7 +449,7 @@ pub fn DocsEarningPage() -> impl IntoView {
                                 <tbody>
                                     <tr><td>"You edited text in a script tab"</td><td><code>"Development"</code></td><td>"3.0"</td></tr>
                                     <tr><td>"You made a change that lands on the undo stack"</td><td><code>"Creation"</code></td><td>"2.5"</td></tr>
-                                    <tr><td>"Neither: navigating, inspecting, testing"</td><td><code>"ActiveTime"</code></td><td>"0.1"</td></tr>
+                                    <tr><td>"Neither: navigating, inspecting, testing"</td><td><code>"ActiveTime"</code></td><td>"0.02"</td></tr>
                                 </tbody>
                             </table>
                             <p>
@@ -486,7 +486,7 @@ pub fn DocsEarningPage() -> impl IntoView {
                                     <tr><td><code>"Moderation"</code></td><td>"1.5"</td><td>"No"</td></tr>
                                     <tr><td><code>"Documentation"</code></td><td>"1.5"</td><td>"No"</td></tr>
                                     <tr><td><code>"Custom"</code></td><td>"1.0"</td><td>"No"</td></tr>
-                                    <tr><td><code>"ActiveTime"</code></td><td>"0.1"</td><td>"Yes"</td></tr>
+                                    <tr><td><code>"ActiveTime"</code></td><td>"0.02"</td><td>"Yes"</td></tr>
                                 </tbody>
                             </table>
                             <p>

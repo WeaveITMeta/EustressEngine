@@ -68,7 +68,7 @@ export const FULL_DAY_SCORE = 1440;
 /// The witness's weight per contribution type: a claim scores
 /// `weight x node bonus x minutes`. A type outside this table is refused.
 /// Time in Studio with nothing made (`ActiveTime`: navigating, inspecting,
-/// testing) is worth a tenth of a minute; Bliss is earned by building.
+/// testing) is worth a fiftieth of a minute; Bliss is earned by building.
 export const CONTRIBUTION_WEIGHTS = Object.freeze({
   Development: 3.0,
   Creation: 2.5,
@@ -79,7 +79,7 @@ export const CONTRIBUTION_WEIGHTS = Object.freeze({
   Moderation: 1.5,
   Documentation: 1.5,
   Custom: 1.0,
-  ActiveTime: 0.1,
+  ActiveTime: 0.02,
 });
 
 /// Checkpoints fold in only entries older than this. The nightly settlement

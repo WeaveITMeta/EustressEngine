@@ -17,7 +17,7 @@
 //! |-----------------------------------------------|---------------|--------|
 //! | Script editor content changed                 | `Development` | 3.0x   |
 //! | Undoable scene edit (`UndoStack` push)        | `Creation`    | 2.5x   |
-//! | Input only (navigating, inspecting, testing)  | `ActiveTime`  | 0.1x   |
+//! | Input only (navigating, inspecting, testing)  | `ActiveTime`  | 0.02x  |
 //!
 //! Weights are applied by the **witness**, not here — the client only reports
 //! type + duration. The witness also applies the +10% Full-node bonus and
