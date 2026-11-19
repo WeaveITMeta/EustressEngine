@@ -1,0 +1,16 @@
+# Detached probe. Asks Slint for FemtoVG-wgpu on this target.
+[workspace]
+
+[package]
+name = "femtovg-android-probe"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+slint = { git = "https://github.com/slint-ui/slint", rev = "2447c697327e7f87c5044af229e0be6c18608fcc", default-features = false, features = [
+    "std",
+    "compat-1-2",
+    "renderer-femtovg-wgpu",
+    "unstable-wgpu-29",
+] }

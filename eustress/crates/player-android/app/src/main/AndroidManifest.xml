@@ -1,17 +1,10 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- =============================================================================
-     Eustress Player Android - Manifest
-     ============================================================================= -->
+<!-- Phase 0 spike. Stock GameActivity loads libeustress_player_mobile.so. -->
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
-    <!-- Permissions -->
     <uses-permission android:name="android.permission.INTERNET" />
-    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
-    
-    <!-- OpenGL ES 3.2 for Vulkan fallback -->
-    <uses-feature android:glEsVersion="0x00030002" android:required="false" />
-    
-    <!-- Vulkan support -->
+
+    <uses-feature android:glEsVersion="0x00030000" android:required="false" />
     <uses-feature android:name="android.hardware.vulkan.level" android:required="false" />
     <uses-feature android:name="android.hardware.vulkan.version" android:required="false" />
 
@@ -22,20 +15,24 @@
         android:theme="@style/Theme.EustressPlayer"
         android:hardwareAccelerated="true">
 
-        <meta-data android:name="android.app.lib_name"
-                   android:value="eustress_player_mobile" />
+        <meta-data
+            android:name="android.app.lib_name"
+            android:value="eustress_player_mobile" />
 
         <activity
-            android:name=".MainActivity"
+            android:name="com.google.androidgamesdk.GameActivity"
             android:exported="true"
             android:launchMode="singleTask"
-            android:configChanges="orientation|screenLayout|screenSize|smallestScreenSize|keyboard|keyboardHidden"
-            android:theme="@android:style/Theme.NoTitleBar.Fullscreen">
+            android:screenOrientation="landscape"
+            android:configChanges="orientation|screenLayout|screenSize|smallestScreenSize|keyboard|keyboardHidden|navigation"
+            android:theme="@style/Theme.EustressPlayer">
+            <meta-data
+                android:name="android.app.lib_name"
+                android:value="eustress_player_mobile" />
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
     </application>
-
 </manifest>

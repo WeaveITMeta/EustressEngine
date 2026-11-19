@@ -1,10 +1,7 @@
-// =============================================================================
-// Eustress Player Android - App Module
-// =============================================================================
+// Phase 0 spike. No Kotlin. Native code is the cargo-ndk cdylib in jniLibs.
 
 plugins {
     id 'com.android.application'
-    id 'org.jetbrains.kotlin.android'
 }
 
 android {
@@ -13,21 +10,24 @@ android {
 
     defaultConfig {
         applicationId "dev.eustress.player"
-        minSdk 29  // Android 10
+        minSdk 29
         targetSdk 34
         versionCode 1
-        versionName "0.1.0"
+        versionName "0.1.0-phase0"
 
         ndk {
-            abiFilters 'arm64-v8a', 'armeabi-v7a', 'x86_64'
+            // arm64-v8a is the spike artifact. An emulator check can pass
+            // -PeustressAbi=x86_64 (or a comma-separated list).
+            def eustressAbi = findProperty('eustressAbi') ?: 'arm64-v8a'
+            eustressAbi.toString().split(',').each { abi ->
+                abiFilters abi.trim()
+            }
         }
     }
 
     buildTypes {
         release {
-            minifyEnabled true
-            shrinkResources true
-            proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
+            minifyEnabled false
         }
         debug {
             applicationIdSuffix ".debug"
@@ -40,20 +40,37 @@ android {
         targetCompatibility JavaVersion.VERSION_17
     }
 
-    kotlinOptions {
-        jvmTarget = '17'
-    }
-
     sourceSets {
         main {
-            // Native libraries built by cargo-ndk go here
-            jniLibs.srcDirs = ['src/main/jniLibs']
+            // emulator-jni holds x86_64/wrap.sh (WGPU_BACKEND=gl). AGP
+            // packages only .so from jniLibs; the spike APK gets wrap.sh
+            // from a zip after packageDebug. See PHASE0_SPIKE.md.
+            jniLibs.srcDirs = ['src/main/jniLibs', 'src/emulator-jni']
+        }
+    }
+
+    packaging {
+        jniLibs {
+            useLegacyPackaging = true
+        }
+    }
+}
+
+configurations.configureEach {
+    resolutionStrategy.eachDependency { details ->
+        if (details.requested.group == 'org.jetbrains.kotlin'
+                && details.requested.name.startsWith('kotlin-stdlib')) {
+            details.useVersion '1.8.22'
+            details.because 'games-activity 2.0.2 and appcompat disagree on kotlin-stdlib'
         }
     }
 }
 
 dependencies {
-    implementation 'androidx.core:core-ktx:1.12.0'
-    implementation 'androidx.appcompat:appcompat:1.6.1'
-    implementation 'androidx.games:games-activity:2.0.2'
+    // games-activity 2.0.2's POM lists no dependencies, but GameActivity
+    // extends AppCompatActivity. No app code; this is the support library.
+    implementation 'androidx.appcompat:appcompat:1.7.0'
+    // Must match android-activity 0.6.1 (Bevy 0.19). 2.0.2's Java
+    // onTouchEventNative signature does not match the native glue.
+    implementation 'androidx.games:games-activity:4.4.0'
 }
