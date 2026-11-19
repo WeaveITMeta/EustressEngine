@@ -89,10 +89,16 @@ Those chunk GETs keep the full gate on every request.
    the one in the token, and the token was minted after the listing's
    play-token floor (`locks/play-token-floor/{id}.json`). Every rating write
    (`moderation.mjs` `applyToSim`: a decision, or `moderation_set_rating`)
-   moves the floor to one second past now (`retirePlayTokens`). The floor is
-   its own object, never a field of the binding, so writing it cannot race a
-   write or revocation of the binding. A floor that cannot be read honours
-   no token.
+   first moves the floor to two minutes past now (`retirePlayTokens`,
+   `PLAY_TOKEN_FLOOR_LEAD_SECONDS`), which covers KV's propagation of the
+   old rating to other locations. The floor is tried three times; a rating
+   change whose floor still cannot be written is refused before anything is
+   saved (`PlayTokenFloorUnavailable`), and a write that keeps the rating is
+   not held up. A token's mint time is taken before its manifest GET reads
+   the listing, so a GET in flight across the write mints a token the floor
+   retires. The floor is its own object, never a field of the binding, so
+   writing it cannot race a write or revocation of the binding. A floor that
+   cannot be read honours no token.
 5. The chunk is named by the manifest the token names
    (`universes/{id}/manifests/{sha}.json`). A chunk only the source world
    names never takes the token path.

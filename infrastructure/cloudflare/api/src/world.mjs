@@ -596,6 +596,9 @@ async function handleCommit(request, simId, env, cors, deps) {
 // ─────────────────────────────────────────────────────────────────────────────
 
 async function handleGetManifest(request, simId, env, cors, deps) {
+  // The token's mint time is taken before the listing is read: a rating written while this request is in flight moves the
+  // play-token floor past it, so a token minted from the old rating is never honoured after the floor.
+  const mintedAt = Math.floor(Date.now() / 1000);
   const gate = await servableListing(request, simId, env, cors, deps);
   if (gate.error) return gate.error;
   const sim = gate.sim;
@@ -617,7 +620,7 @@ async function handleGetManifest(request, simId, env, cors, deps) {
     'X-Eustress-Manifest-Sha256': sim.world.manifest_sha256,
   };
   if (sim.world.publish_hash) headers['X-Eustress-Publish-Hash'] = sim.world.publish_hash;
-  const pass = await playTokenFor(env, simId, sim, gate);
+  const pass = await playTokenFor(env, simId, sim, gate, mintedAt);
   if (pass) {
     headers[PLAY_TOKEN_HEADER] = pass.token;
     headers[PLAY_TOKEN_EXPIRES_HEADER] = String(pass.expires);
@@ -629,11 +632,11 @@ async function handleGetManifest(request, simId, env, cors, deps) {
 /// served to anyone signed out: a listable listing that refuseAdult passes with no viewer at all (not adult content, within
 /// the solo signed-out cap, mature_17), under an approval binding that stands. Anything else (an author's or admin's view
 /// of an unlisted listing, a play pass on a private one, adult content) gets no token, and its chunk GETs keep the full gate.
-async function playTokenFor(env, simId, sim, gate) {
+async function playTokenFor(env, simId, sim, gate, mintedAt) {
   if (!gate.listable || isAdultListing(sim) || !withinSignedOutCap(sim, SOLO)) return null;
   const binding = await readApproval(env, simId);
   if (!binding || binding.revoked || typeof binding.content !== 'string' || !binding.content) return null;
-  return mintPlayToken(env, { simId, manifestSha: sim.world.manifest_sha256, ident: binding.content });
+  return mintPlayToken(env, { simId, manifestSha: sim.world.manifest_sha256, ident: binding.content }, mintedAt);
 }
 
 /// A chunk served on a play token, or null to run the full gate. The token fixes the listing, the manifest and the approval

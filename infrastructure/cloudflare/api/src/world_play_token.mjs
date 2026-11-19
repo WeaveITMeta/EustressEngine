@@ -20,8 +20,10 @@
 //     binding and the listing's play-token floor. A lock, a deletion, a revoked approval, a new approval (a republish that
 //     was reviewed) or a rating written since the mint all make the token worth nothing, and the request falls through to
 //     the full gate, which gives the right refusal. Every rating write (moderation.mjs applyToSim: a decision, or
-//     moderation_set_rating) moves the floor (retirePlayTokens), so a token minted at mature_17 never serves a chunk after
-//     a re-rate to adult_18.
+//     moderation_set_rating) moves the floor first (retirePlayTokens), so a token minted at mature_17 never serves a chunk
+//     after a re-rate to adult_18; a rating change whose floor cannot be written is refused. A token's mint time is taken
+//     before its manifest GET reads the listing (world.mjs handleGetManifest), so a GET in flight across the write mints a
+//     token the floor retires.
 //   - What a token does NOT see until it expires: changes that live only in the KV listing record and are not a rating (the
 //     author makes the listing private or archives it). Those reach chunk GETs within 15 minutes and reach every manifest
 //     GET at once, so no new download starts after them.
@@ -127,13 +129,16 @@ export async function readPlayToken(env, token, simId, now = nowSeconds()) {
 /// the binding and bring an old approval back.
 export const playTokenFloorKey = (simId) => `locks/play-token-floor/${simId}.json`;
 
-/// Retire every play token of `simId` minted up to now. Called on every rating write (moderation.mjs applyToSim). The floor is
-/// one second past now, so a mint that read the old rating and finished in the next second is retired too; a token minted
-/// in that second for a rating that still allows one only sends its chunks through the full gate. False when there is no
-/// R2 binding to write to.
+/// How far past the rating write the floor is set. KV is eventually consistent: a manifest GET elsewhere can read the old
+/// rating for up to about 60 seconds after the write, so every token minted in the next two minutes is retired too. A token
+/// minted then for a rating that still allows one only sends its chunks through the full gate.
+export const PLAY_TOKEN_FLOOR_LEAD_SECONDS = 120;
+
+/// Retire every play token of `simId` minted up to PLAY_TOKEN_FLOOR_LEAD_SECONDS from now. Called before every rating write
+/// (moderation.mjs applyToSim). False when there is no R2 binding to write to; a failed write throws.
 export async function retirePlayTokens(env, simId, now = nowSeconds()) {
   if (!env?.SCENES?.put || typeof simId !== 'string' || !simId) return false;
-  await env.SCENES.put(playTokenFloorKey(simId), JSON.stringify({ v: 1, floor: now + 1 }), { httpMetadata: { contentType: 'application/json' } });
+  await env.SCENES.put(playTokenFloorKey(simId), JSON.stringify({ v: 1, floor: now + PLAY_TOKEN_FLOOR_LEAD_SECONDS }), { httpMetadata: { contentType: 'application/json' } });
   return true;
 }
 

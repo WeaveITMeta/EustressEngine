@@ -6446,10 +6446,36 @@ export function canServe(sim, viewerId, isAdmin) {
 // `chosen` is the tags a review chose (Code v2.3 Part III): `{ tags, read }`, the judge's assigned tags and the tags the run
 // read. They are written with `tags_source: "judge"` only while the listing still has the tags the run read and the review
 // still chooses them, so an author's own tags set during the review are never overwritten.
-async function applyToSim(env, simId, patch, chosen = null) {
+/// A rating change refused because the listing's play-token floor could not be written (writePlayTokenFloor).
+export class PlayTokenFloorUnavailable extends Error {
+  constructor(simId) { super(`the play-token floor of ${simId} could not be written, so its rating was not changed`); this.name = 'PlayTokenFloorUnavailable'; this.code = 'play_token_floor_unavailable'; }
+}
+const PLAY_TOKEN_FLOOR_TRIES = 3;
+
+/// Move the listing's play-token floor (src/world_play_token.mjs retirePlayTokens) before a rating is written, trying three
+/// times. When it still cannot be written: `required` (the write changes the rating) throws PlayTokenFloorUnavailable, so
+/// the change is refused and no token minted under the old rating outlives it; otherwise it is logged and the write goes on.
+async function writePlayTokenFloor(env, simId, required) {
+  for (let i = 0; i < PLAY_TOKEN_FLOOR_TRIES; i++) {
+    try { await retirePlayTokens(env, simId); return true; }
+    catch (e) { console.error('moderation: play-token floor write failed', simId, i + 1, e?.message); }
+  }
+  if (required) throw new PlayTokenFloorUnavailable(simId);
+  return false;
+}
+
+/// `opts.floorWritten`: the caller already wrote the play-token floor for this write. `opts.floorRequired: false`: the caller
+/// already decided whether the write may go on without it (setStatus, after the case is saved), so it is never refused here.
+async function applyToSim(env, simId, patch, chosen = null, opts = {}) {
   const raw = await env.SOCIAL.get(`sim:${simId}`);
   if (!raw) return null;
   const sim = JSON.parse(raw);
+  // A rating write (a decision, or moderation_set_rating) retires every world play token minted before it, FIRST
+  // (src/world_play_token.mjs): a token minted at mature_17 never serves a chunk after a re-rate to adult_18. A write that
+  // changes the rating is refused when the floor cannot be written; one that keeps it is not held up.
+  if (Object.prototype.hasOwnProperty.call(patch || {}, 'rating') && !opts.floorWritten) {
+    await writePlayTokenFloor(env, simId, opts.floorRequired !== false && (patch.rating ?? null) !== (sim.moderation?.rating ?? null));
+  }
   sim.moderation = { ...(sim.moderation || {}), ...patch, updated_at: new Date().toISOString() };
   sim.updated_at = sim.moderation.updated_at;
   if (chosen?.tags?.length && reviewChoosesTags(sim) && sameTagSet(listingTags(sim), chosen.read || [])) {
@@ -6458,13 +6484,6 @@ async function applyToSim(env, simId, patch, chosen = null) {
     sim.genre_migrated = true;
   }
   await env.SOCIAL.put(`sim:${simId}`, JSON.stringify(withTagsWrittenBack(sim)));
-  // A rating write (a decision, or moderation_set_rating) retires every world play token minted before it
-  // (src/world_play_token.mjs): a token minted at mature_17 never serves a chunk after a re-rate to adult_18. Written after
-  // the listing, so no token minted from here on reads the old rating. A failure is logged and does not undo the rating.
-  if (Object.prototype.hasOwnProperty.call(patch || {}, 'rating')) {
-    try { await retirePlayTokens(env, simId); }
-    catch (e) { console.error('moderation: play tokens not retired', simId, e?.message); }
-  }
   return sim;
 }
 
@@ -6494,6 +6513,12 @@ async function setStatus(env, rec, status, decisionPatch, event, detail) {
   if (status === 'approved' && prev !== 'classifying' && (rec.content_fp || rec.reviewed)) {
     if (await contentMoved(env, rec, true)) throw new ContentChangedSinceReview(rec.sim_id);
   }
+  // The play-token floor before anything is saved (writePlayTokenFloor): a decision that changes the listing's rating is
+  // refused whole when the floor cannot be written, and runs again later like any decision a storage fault stopped.
+  // The case's own decision says whether the rating changes (applyToSim writes the listing's rating from it), so no read is
+  // added before the case is saved. Anything later in the decision never waits on the floor.
+  const nextRating = ({ ...(rec.decision || {}), ...(decisionPatch || {}) }).rating || null;
+  const floorWritten = nextRating !== (rec.decision?.rating || null) ? await writePlayTokenFloor(env, rec.sim_id, true) : false;
   rec.status = status;
   if (decisionPatch) rec.decision = { ...(rec.decision || {}), ...decisionPatch };
   // A decision ends the count of runs that stalled (Code v2.4): a later stall starts from zero.
@@ -6527,7 +6552,7 @@ async function setStatus(env, rec, status, decisionPatch, event, detail) {
     ...(infrastructureHold(rec) ? {} : { infra_retries: 0 }),
     // What kind of hold this is, so the sweep can pass over a person's case without reading it (Code v2.4).
     hold_kind: status === 'held' ? (infrastructureHold(rec) ? 'infrastructure' : 'person') : null,
-  }, chosen);
+  }, chosen, { floorWritten, floorRequired: false });
   // Code v2.1: what the rules send to a person goes to the Review Workspace, and its members are told. A case that leaves a
   // held or quarantined status is no longer waiting there.
   // A hold the AI caused by failing is the system's to retry: nobody is told (Code v2.4).
@@ -7456,10 +7481,17 @@ export function makeToolExecutor(env, deps, ctx = {}) {
           const rec = await load(args.sim_id);
           if (!rec) return { ok: false, error: 'no case' };
           if (!RATINGS.includes(args.rating)) return { ok: false, error: 'bad rating' };
+          // The listing first, and its play-token floor before it (applyToSim): a re-rate whose floor cannot be written is
+          // refused with nothing written, the case included, so the person can try again.
+          try {
+            await applyToSim(env, rec.sim_id, { rating: args.rating, ...(typeof args.child_directed === 'boolean' ? { child_directed: args.child_directed } : {}) });
+          } catch (e) {
+            if (e instanceof PlayTokenFloorUnavailable) return { ok: false, code: e.code, error: 'storage is not taking writes right now, so the rating was not changed; try again in a minute' };
+            throw e;
+          }
           rec.decision = { ...(rec.decision || {}), rating: args.rating, ...(typeof args.child_directed === 'boolean' ? { child_directed: args.child_directed } : {}) };
           pushHistory(rec, 'rating_set', { actor, rating: args.rating, child_directed: args.child_directed });
           await saveCase(env, rec);
-          await applyToSim(env, rec.sim_id, { rating: args.rating, ...(typeof args.child_directed === 'boolean' ? { child_directed: args.child_directed } : {}) });
           return { ok: true, summary: `rating ${args.rating} on ${rec.sim_id}` };
         }
         case 'moderation_quarantine': {

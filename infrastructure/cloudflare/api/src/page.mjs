@@ -261,13 +261,15 @@ async function signedPageView(env, origin, view) {
   return out;
 }
 
-/// The listing GET's own answer (index.js handleGetSimulation: 404 `Simulation not found`) when the listing is not public
-/// (`listed` from servingListing, moderation.mjs isListable: approved and public, so a pending listing is held back too) and
-/// the viewer is neither its author nor an admin; null when the page may be shown. `deps.requireAdmin` is index.js's;
-/// without it nobody is an admin.
+/// The listing GET's own answer (index.js handleGetSimulation: 404 `Simulation not found`, no-store) when the listing is
+/// missing, withheld (pageWithheld) or not public (`listed` from servingListing, moderation.mjs isListable: approved and
+/// public, so a pending listing is held back too) and the viewer is neither its author nor an admin; null when the page may
+/// be looked up. One answer for all of them, so the page routes never tell a stranger whether a listing exists or whether
+/// it is held or pending (a distinct answer must never reveal a legal hold). `deps.requireAdmin` is index.js's; without it
+/// nobody is an admin.
 async function hiddenAsListingGet(request, env, listing, listed, authenticate, deps) {
-  if (listed) return null;
-  const auth = await authenticate(request, env);
+  if (listing && listed && !pageWithheld(listing)) return null;
+  const auth = listing ? await authenticate(request, env) : null;
   const admin = auth && auth !== listing.author_id && deps.requireAdmin ? await deps.requireAdmin(request, env) : null;
   if (auth && (auth === listing.author_id || admin)) return null;
   return deps.json({ error: 'Simulation not found' }, 404, { ...deps.cors, 'Cache-Control': 'no-store' });
@@ -320,9 +322,10 @@ export async function handlePageRoute(request, url, env, ctx, deps) {
       // adult_21, no rating) needs a signed-in account that turned Adult content on; every other listing passes for anyone.
       // A listing that is not public shows its page only where its listing GET shows it: to its author and an admin.
       const authenticate = withPlayPass(deps.verifyAuth, simId);
+      // Missing, withheld and not public all answer alike to anyone but the author and an admin.
+      const hidden = await hiddenAsListingGet(request, env, listing, listed, authenticate, deps);
+      if (hidden) return hidden;
       if (open) {
-        const hidden = await hiddenAsListingGet(request, env, listing, listed, authenticate, deps);
-        if (hidden) return hidden;
         const refused = await refuseAdult(request, env, listing, { authenticate, json, cors, surface: SOLO });
         if (refused) return refused;
       }
@@ -410,10 +413,11 @@ export async function handlePageRoute(request, url, env, ctx, deps) {
       const notFound = () => json({ error: 'Image not found' }, 404, { ...cors, 'Cache-Control': 'no-store' });
       if (!PAGE_IMAGE_SLOTS.includes(slot)) return notFound();
       const { listing, listed } = await servingListing(env, simId);
-      if (pageWithheld(listing)) return notFound();
-      // A listing that is not public (`listed`, isListable): its page images only on the signed URL its page GET gave its
-      // author or an admin; anyone else gets the listing GET's own answer.
-      if (!listed && !(await verifyImageUrl(env, request.url)).ok) return json({ error: 'Simulation not found' }, 404, { ...cors, 'Cache-Control': 'no-store' });
+      // Missing, withheld, or not public without the signed URL its page GET gave its author or an admin: the listing GET's
+      // own answer, the same for each, so no stranger learns whether a listing exists or is held or pending.
+      const hiddenAnswer = () => json({ error: 'Simulation not found' }, 404, { ...cors, 'Cache-Control': 'no-store' });
+      if (pageWithheld(listing)) return hiddenAnswer();
+      if (!listed && !(await verifyImageUrl(env, request.url)).ok) return hiddenAnswer();
       // An adult listing's page image needs the signed URL its page gives an allowed viewer, whoever asks: an image tag
       // carries no session (src/adult_content.mjs), so the signature is the proof the page GET's gate passed.
       const unsigned = await refuseUnsignedImage(request, env, listing, json, cors);

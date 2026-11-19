@@ -256,3 +256,139 @@ test('a pending listing\'s page and page image get the listing GET\'s own answer
   assert.equal(img.status, 200);
   assert.match(img.headers.get('Cache-Control'), /^private, max-age=\d+$/);
 });
+
+// ── 4. review follow-ups M1, L1, L2 ──────────────────────────────────────────
+
+test('M1: a missing, held, quarantined, pending or private listing\'s page and page image answer alike, signed out and as a stranger', async () => {
+  const AUTHOR_ID = '11111111-1111-4111-8111-111111111111';
+  const author = mintToken(AUTHOR_ID);
+  const stranger = mintToken('22222222-2222-4222-8222-222222222222');
+  const env = { ...fakeEnv(), KYC_STATUS: fakeKv() };
+  env.LIVE_HOSTS = fakeDoNamespace(LiveHost, env);
+  for (const [id, username] of [[AUTHOR_ID, 'maker'], ['22222222-2222-4222-8222-222222222222', 'stranger']]) await env.USERS.put(`user:${id}`, JSON.stringify({ kyc_verified: true, id, username }));
+  const req = async (method, simId, path, token, body) => {
+    const res = await worker.fetch(new Request(`${ORIGIN}/api/simulations/${simId}${path}`, { method, headers: { 'CF-Connecting-IP': '203.0.113.7', ...(token ? { Authorization: `Bearer ${token}` } : {}) }, ...(body ? { body } : {}) }), env, ctx);
+    return { status: res.status, cache: res.headers.get('Cache-Control'), text: await res.text() };
+  };
+  const spec = { schema: 1, theme: { preset: 'studio', colors: {}, font: 'inter', layout: 'classic', motion: 'subtle', slideshow_interval_s: 6, banner_fade_ms: 600 }, images: { logo: 'logo', banner: null, gallery: [] }, links: [] };
+  const record = (id, moderation, extra = {}) => JSON.stringify({ id, author_id: AUTHOR_ID, author_name: 'maker', name: 'Lab', description: 'Lab', is_public: true, published_at: '2026-03-01T00:00:00.000Z', moderation, ...extra });
+  const ids = {
+    missing: 'dddddddd-0000-4000-8000-0000000000a0',
+    held: 'dddddddd-0000-4000-8000-0000000000a1',
+    quarantined: 'dddddddd-0000-4000-8000-0000000000a2',
+    pending: 'dddddddd-0000-4000-8000-0000000000a3',
+    private: 'dddddddd-0000-4000-8000-0000000000a4',
+  };
+  const finalRecord = {
+    held: (id) => record(id, { status: 'held', rating: 'teen_13' }),
+    quarantined: (id) => record(id, { status: 'quarantined', rating: 'teen_13' }),
+    pending: (id) => record(id, { status: 'pending', rating: 'teen_13' }),
+    private: (id) => record(id, { status: 'approved', rating: 'teen_13' }, { is_public: false }),
+  };
+  // Each one has a full page whose review passed; only its listing's state differs.
+  for (const [kind, make] of Object.entries(finalRecord)) {
+    const id = ids[kind];
+    await env.SOCIAL.put(`sim:${id}`, record(id, { status: 'pending', rating: 'teen_13' }));
+    assert.equal((await req('PUT', id, '/page', author, JSON.stringify(spec))).status, 200, kind);
+    assert.equal((await req('PUT', id, '/page/image/logo', author, png())).status, 200, kind);
+    const state = await readLinkState(env, id);
+    state.images.logo = { ...state.images.logo, status: 'approved' };
+    await writeLinkState(env, id, state);
+    await env.SOCIAL.put(`sim:${id}`, make(id));
+  }
+  for (const [who, token] of [['signed out', null], ['a stranger', stranger]]) {
+    for (const path of ['/page', '/page/image/logo']) {
+      const answers = {};
+      for (const [kind, id] of Object.entries(ids)) answers[kind] = await req('GET', id, path, token);
+      for (const [kind, a] of Object.entries(answers)) {
+        assert.deepEqual(a, { status: 404, cache: 'no-store', text: JSON.stringify({ error: 'Simulation not found' }) }, `${who} ${path} ${kind}`);
+      }
+    }
+  }
+  // The author still reaches the pending and the private page.
+  for (const kind of ['pending', 'private']) assert.equal((await req('GET', ids[kind], '/page', author)).status, 200, kind);
+});
+
+/// A listing at mature_17 with a world and an approval binding (worldEnv), its token, and the moderation tool executor.
+async function tokenAtMature() {
+  const env = await worldEnv();
+  const token = (await get(env, '/world/manifest')).headers.get(PLAY_TOKEN_HEADER);
+  assert.ok(token, 'a token is minted at mature_17');
+  return { env, token, exec: makeToolExecutor(env, { auditLog: async () => {} }, { actor: 'admin', actorId: ADMIN }) };
+}
+const ratingOfWorld = async (env) => JSON.parse(await env.SOCIAL.get(`sim:${WORLD}`)).moderation.rating;
+const caseRatingOfWorld = async (env) => JSON.parse(await env.SOCIAL.get(`modcase:${WORLD}`)).decision.rating;
+
+test('L1: a floor write that throws never leaves a re-rated listing serving old tokens: the re-rate is refused, or retried until the floor is written', async () => {
+  // Storage refuses the floor every time: the re-rate is refused with nothing written, so the listing is not re-rated.
+  {
+    const { env, token, exec } = await tokenAtMature();
+    const put = env.SCENES.put.bind(env.SCENES);
+    let tries = 0;
+    env.SCENES.put = async (key, ...rest) => { if (key === playTokenFloorKey(WORLD)) { tries += 1; throw new Error('R2 unavailable'); } return put(key, ...rest); };
+    const set = await exec('moderation_set_rating', { sim_id: WORLD, rating: 'adult_18' });
+    assert.deepEqual([set.ok, set.code], [false, 'play_token_floor_unavailable'], JSON.stringify(set));
+    assert.equal(tries, 3, 'tried three times');
+    assert.equal(await ratingOfWorld(env), 'mature_17', 'the listing was not re-rated');
+    assert.equal(await caseRatingOfWorld(env), 'mature_17', 'nor the case');
+    // The token serves what the listing still is.
+    assert.equal((await get(env, `/world/chunks/${H}`, { [PLAY_TOKEN_HEADER]: token })).status, 200);
+  }
+  // Storage refuses it twice, then takes it: the re-rate goes through, and the old token is refused.
+  {
+    const { env, token, exec } = await tokenAtMature();
+    const put = env.SCENES.put.bind(env.SCENES);
+    let fails = 2;
+    env.SCENES.put = async (key, ...rest) => { if (key === playTokenFloorKey(WORLD) && fails > 0) { fails -= 1; throw new Error('R2 unavailable'); } return put(key, ...rest); };
+    assert.equal((await exec('moderation_set_rating', { sim_id: WORLD, rating: 'adult_18' })).ok, true);
+    assert.equal(await ratingOfWorld(env), 'adult_18');
+    const after = await get(env, `/world/chunks/${H}`, { [PLAY_TOKEN_HEADER]: token });
+    assert.deepEqual([after.status, after.headers.get('X-Eustress-Chunk-Gate')], [403, null]);
+  }
+});
+
+test('L1: a decision that changes the rating is refused whole, before the case is saved, when the floor cannot be written', async () => {
+  const { env, token, exec } = await tokenAtMature();
+  const put = env.SCENES.put.bind(env.SCENES);
+  env.SCENES.put = async (key, ...rest) => { if (key === playTokenFloorKey(WORLD)) throw new Error('R2 unavailable'); return put(key, ...rest); };
+  let answer;
+  try { answer = await exec('moderation_approve', { sim_id: WORLD, rating: 'adult_18', rationale: 'Re-rated by a person after a second look.' }); }
+  catch (e) { answer = { thrown: e.name }; }
+  assert.ok(answer?.ok !== true, JSON.stringify(answer));
+  assert.equal(await caseRatingOfWorld(env), 'mature_17', 'the case was not saved with the new rating');
+  assert.equal(await ratingOfWorld(env), 'mature_17', 'nor the listing');
+  assert.equal((await get(env, `/world/chunks/${H}`, { [PLAY_TOKEN_HEADER]: token })).status, 200, 'the token serves what the listing still is');
+});
+
+test('L2: a token whose manifest GET read the listing before the floor was written is refused, however late it was minted', async () => {
+  const env = await worldEnv();
+  const exec = makeToolExecutor(env, { auditLog: async () => {} }, { actor: 'admin', actorId: ADMIN });
+  const realNow = Date.now;
+  let now = realNow();
+  Date.now = () => now;
+  try {
+    // The manifest GET reads the listing at mature_17; while it is in flight the listing is re-rated adult_18, and the GET
+    // then takes five minutes more before it mints (past the floor's lead).
+    const get0 = env.SOCIAL.get.bind(env.SOCIAL);
+    let armed = true;
+    env.SOCIAL.get = async (key, ...rest) => {
+      const value = await get0(key, ...rest);
+      if (armed && key === `sim:${WORLD}`) {
+        armed = false;
+        assert.equal((await exec('moderation_set_rating', { sim_id: WORLD, rating: 'adult_18' })).ok, true);
+        now += 300_000;
+      }
+      return value;
+    };
+    const manifest = await get(env, '/world/manifest');
+    env.SOCIAL.get = get0;
+    assert.equal(manifest.status, 200, 'served from the read made before the re-rate');
+    const token = manifest.headers.get(PLAY_TOKEN_HEADER);
+    assert.ok(token, 'and a token was minted from it');
+    const chunk = await get(env, `/world/chunks/${H}`, { [PLAY_TOKEN_HEADER]: token });
+    assert.notEqual(chunk.headers.get('X-Eustress-Chunk-Gate'), 'play-token', 'the token is not honoured');
+    assert.deepEqual([chunk.status, chunk.body?.code], [403, 'adult_content_off']);
+  } finally {
+    Date.now = realNow;
+  }
+});
