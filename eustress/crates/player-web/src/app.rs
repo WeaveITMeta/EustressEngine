@@ -3,9 +3,12 @@
 //! runtime draws the tree. The avatar runtime spawns the local character and
 //! follows it.
 //!
-//! LocalScripts do not run. The desktop Player's VM is mlua's C++ Luau, and
-//! that library does not build for `wasm32-unknown-unknown` (no C++ standard
-//! library for the target). A `Script` stays on the host in both Players.
+//! Scripts run as they do in the desktop Player. Played alone, this Player is
+//! the session's Authority: its Luau VM (common `tree_scripts`, mlua's Luau
+//! compiled against wasi-sysroot) runs the Space's Scripts and LocalScripts,
+//! physics is live, and Rune runs every SoulScript. Joined to a host, it is a
+//! Replica: the host runs the Scripts, this Player runs its LocalScripts and
+//! its own Rune.
 //!
 //! Left out, because a page has no use for them: files on disk, the window
 //! icon, frame capture, agent control, enhancement, Rune, and the shop.
@@ -54,6 +57,15 @@ pub(crate) fn build(start: Start) -> App {
         stop,
     } = start;
     let mut app = App::new();
+    // Joined to a host, this Player draws the host's session (a replica);
+    // played alone, nobody else will run it, so it runs it itself, as Studio's
+    // Play and the desktop Player do: server scripts, live physics, `Touched`.
+    let joined = plan.is_some();
+    let play_role = if joined {
+        eustress_common::play_session::PlayRole::Replica
+    } else {
+        eustress_common::play_session::PlayRole::Authority
+    };
 
     // Sources first: AssetPlugin freezes the table when it builds.
     // `space://` is the opened world's own files, in memory, filled when the
@@ -123,24 +135,34 @@ pub(crate) fn build(start: Start) -> App {
     .insert_resource(eustress_networking::session::AppVersion(
         concat!("eustress-player-web ", env!("CARGO_PKG_VERSION")).to_string(),
     ))
-    // The Play runtime Studio shares draws that tree as a replica: parts,
-    // lights, the HUD, billboards, sounds, particles and the camera.
-    .add_plugins(eustress_play_runtime::PlayRuntimePlugin {
-        role: eustress_common::play_session::PlayRole::Replica,
-    })
+    // The Play runtime Studio shares draws that tree: parts, lights, the HUD,
+    // billboards, sounds, particles and the camera. Joined, replication writes
+    // into it; played alone, this Player simulates it.
+    .add_plugins(eustress_play_runtime::PlayRuntimePlugin { role: play_role })
     .add_plugins(eustress_common::data_mesh::DataMeshPlugin)
     // The sealed avatar runtime: the same plugin, descriptor and physics body
-    // as the desktop Player. It spawns the follow camera; the fly camera
-    // stands down while that camera exists.
+    // as the desktop Player. It spawns the follow camera; the Space's
+    // scripted camera stands down while that camera exists.
     .add_plugins(eustress_common::avatar::AvatarRuntimePlugin::new(
         eustress_common::avatar::AvatarHost::Client,
     ))
     .add_plugins(eustress_common::plugins::SkinnedCharacterPlugin)
     .add_plugins(eustress_common::plugins::SharedAnimationPlugin)
     .add_plugins(eustress_common::animation::AnimatorPlugin)
-    // LocalScripts are the desktop Player's `TreeScriptsPlugin`. That plugin
-    // is the mlua VM, which does not build for this target (see the module
-    // doc). A `Script` does not run in either Player: the host owns it.
+    // The tree's scripts, in the Play VM the desktop Player runs (common
+    // `tree_scripts`): LocalScripts always, and the Scripts too when this
+    // Player is the Authority. Before the apply step, so a script's writes
+    // draw in the frame it made them.
+    .add_plugins(eustress_common::tree_scripts::TreeScriptsPlugin)
+    // The tree's Rune SoulScripts, after the Luau ones, as Studio runs them:
+    // all of them played alone, only this player's own when joined.
+    .add_plugins(eustress_common::soul::rune_play::TreeRunePlugin)
+    .insert_resource(if joined {
+        eustress_common::soul::rune_play::RuneScope::ClientOnly
+    } else {
+        eustress_common::soul::rune_play::RuneScope::Everything
+    })
+    .add_systems(Startup, register_player_rune_modules)
     .add_systems(
         Update,
         eustress_common::animation::character::sync_local_character
@@ -153,27 +175,36 @@ pub(crate) fn build(start: Start) -> App {
     // This page's own.
     .insert_non_send_resource(PageState::new(on_state))
     .insert_non_send_resource(StopSwitch(stop))
-    .insert_resource(crate::explore::Explore)
-    .add_systems(Last, stop_when_asked)
-    // After the Play runtime has copied the tree camera onto the view. While
-    // an avatar camera exists this system returns immediately, so WASD belongs
-    // to the character controller.
-    .add_systems(
-        Update,
-        crate::explore::drive.after(eustress_common::play_session::PlayScriptSet::Apply),
-    );
-    let joined = plan.is_some();
+    // A Space with no character shows its own camera, moved only by its
+    // scripts, as on the desktop Player: this page adds no free-look camera.
+    .add_systems(Last, stop_when_asked);
     if let Some(plan) = plan {
         crate::link::add(&mut app, plan, name.clone());
     } else if let Some(sim_id) = sim_id {
         crate::fetch::add(&mut app, api_base, sim_id);
     }
     crate::world::add(&mut app, space, name, joined);
+    // Esc in the browser frees the mouse without the page seeing the key.
+    crate::mouse::add(&mut app);
     // WebGL2 panics where `texStorage2DMultisample` is missing, and this
     // engine's WebGPU cameras are MSAA-off. Turn it off as each camera arrives,
     // before the first frame prepares its targets.
     app.add_observer(msaa_off);
     app
+}
+
+/// The Rune modules a Player's scripts compile against, the shared Player set
+/// the desktop Player registers (`eustress::dm`, `eustress::Vector3`, the GUI
+/// and log functions, `event_bus`).
+fn register_player_rune_modules(
+    mut registry: ResMut<eustress_common::soul::rune_runtime::RuneModuleRegistry>,
+) {
+    let modules = eustress_common::soul::rune_play::player_rune_modules();
+    let count = modules.len();
+    for module in modules {
+        registry.add_module(module);
+    }
+    info!("Registered {count} Rune module(s) for the Player");
 }
 
 fn msaa_off(

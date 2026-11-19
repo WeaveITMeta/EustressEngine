@@ -9,7 +9,8 @@ proves it.
 ## Setup
 
 1. Studio: open a Space with a character (Box Head works; Vehicle Simulator
-   for the seat checks), press F9. Log: `Preparing to host ...`, then
+   for the seat checks), press Play, then F9 (F9 from Edit hosts as the
+   server alone, with no character for Studio). Log: `Preparing to host ...`, then
    `multiplayer: replicating the Play session`.
 2. Player: join with the link Studio shows. Studio's log:
    `net: <name> (<addr>) joined as peer 1, running eustress-client 0.1.0`.

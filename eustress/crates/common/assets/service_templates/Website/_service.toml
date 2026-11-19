@@ -135,6 +135,68 @@ rotate_key = false
 build_key_id = ""
 build_key_created_at = ""
 
+# Page
+#
+# How this Space's public sim page looks, and the images it shows. Publish
+# bakes these (and the PageLink children of this service) into one PageSpec v1
+# document and uploads it; the Worker reviews it and the website renders only
+# what review approved. Design: docs/design/SIM_PAGE_THEME_AND_LINKS.md.
+#
+# "default" in an enum field, an empty colour and an empty image path all mean
+# "the author chose nothing". A Space with nothing chosen here and no PageLink
+# children bakes no page at all, so every existing Space publishes as before.
+#
+# Flat scalars under [service] for the reason given above: a nested [page]
+# table would be dropped by the loader and lost on the first save.
+#
+# theme_preset: default | studio | daylight | blueprint | laboratory | arcade |
+# paper. A preset is a full colour set (common/src/page_spec.rs, PRESETS); the
+# five colour fields below override single colours of it, as "#RRGGBB".
+theme_preset = "default"
+theme_color_primary = ""
+theme_color_accent = ""
+theme_color_background = ""
+theme_color_surface = ""
+theme_color_text = ""
+
+# theme_font: default | inter | space-grotesk | ibm-plex-sans | jetbrains-mono |
+# merriweather.   theme_layout: default | classic | wide | compact.
+# theme_motion: default | none | subtle | full (the page always honours the
+# visitor's reduced-motion setting).
+theme_font = "default"
+theme_layout = "default"
+theme_motion = "default"
+
+# Gallery slideshow interval in seconds (3 to 30) and banner fade in
+# milliseconds (0 to 2000).
+slideshow_interval_s = 6
+banner_fade_ms = 600
+
+# Images, as paths relative to the Space root (for example
+# "Assets/page/logo.png"). PNG, JPEG or WebP, at most 2 MB each. Up to six
+# gallery images; empty slots are skipped.
+image_logo = ""
+image_banner = ""
+image_gallery_0 = ""
+image_gallery_1 = ""
+image_gallery_2 = ""
+image_gallery_3 = ""
+image_gallery_4 = ""
+image_gallery_5 = ""
+
+# README (the About tab)
+#
+# Not a field here: add a README.md file to this Website folder and the sim
+# page shows it, rendered, under an About tab. It publishes on its own, so a
+# README with nothing above chosen still uploads; with no README, publish
+# removes one published before. At most 32 KiB of UTF-8. Images are files
+# inside this Space, written relative to this folder the way GitHub resolves a
+# README ("Assets/diagram.png" is Website/Assets/diagram.png,
+# "../Assets/diagram.png" is the Space's own Assets folder): at most 8, PNG,
+# JPEG or WebP, 2 MB each. A remote image is never loaded and shows its alt
+# text. Raw HTML is dropped. Its text, links and images are reviewed before
+# any of it shows. Design: docs/design/SIM_PAGE_README_AND_TABS.md.
+
 [metadata]
 id = "website-service"
 created = ""

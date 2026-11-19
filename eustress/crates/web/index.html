@@ -13,6 +13,7 @@
     <meta name="robots" content="index, follow">
     <meta name="language" content="English">
     <meta name="theme-color" content="#0a0a12">
+    <meta name="slack-app-id" content="A0CHNKPQCKX">
     
     <!-- Canonical URL -->
     <link rel="canonical" href="https://eustress.dev/">
@@ -69,7 +70,10 @@
     <link rel="manifest" href="/assets/site.webmanifest">
     
     <!-- Fonts -->
-    <!-- Inter and JetBrains Mono, self-hosted (style/fonts.css, assets/fonts): no second and third origin before the first paint. -->
+    <!-- Inter and JetBrains Mono, self-hosted (style/fonts.css, assets/fonts): no second and third origin before the first paint.
+         The Latin files are fetched at once, so they arrive before the first layout and the page is not laid out twice. -->
+    <link rel="preload" href="/assets/fonts/inter-latin.woff2" as="font" type="font/woff2" crossorigin>
+    <link rel="preload" href="/assets/fonts/jetbrains-mono-latin.woff2" as="font" type="font/woff2" crossorigin>
     <link data-trunk rel="css" href="style/fonts.css">
     
     <!-- Styles. (model-viewer, 0.9 MB, is loaded by the avatar customizer when it opens, not here.) -->
@@ -89,6 +93,8 @@
     <link data-trunk rel="css" href="style/play.css">
     <!-- The Gallery, a Space's page, the Play chooser and the search box. -->
     <link data-trunk rel="css" href="style/gallery.css">
+    <!-- A Space's themed page: colours, fonts, layout, banner, gallery slideshow and links (src/pages/sim_page.rs). -->
+    <link data-trunk rel="css" href="style/sim_page.css">
     <link data-trunk rel="css" href="style/profile.css">
     <!-- The home page: hero and closing-band backdrops, reference-build cards, folded comparison. -->
     <link data-trunk rel="css" href="style/home.css">
@@ -100,8 +106,14 @@
     <!-- The top bar (components/nav.rs). Last, so it wins over the sheets above. -->
     <link data-trunk rel="css" href="style/login.css">
     <link data-trunk rel="css" href="style/community.css">
+    <!-- The Discord pages (src/pages/discord.rs, discord_roles.rs). -->
+    <link data-trunk rel="css" href="style/discord.css">
+    <!-- The Slack page (src/pages/slack.rs). -->
+    <link data-trunk rel="css" href="style/slack.css">
     <link data-trunk rel="css" href="style/marketplace.css">
     <link data-trunk rel="css" href="style/projects.css">
+    <!-- The Learn hub and every guide (/learn, /learn/*, /docs/*): reading rhythm, table of contents, code, tables, callouts, picture slots. Scoped to .page-learn-industrial and .page-docs. -->
+    <link data-trunk rel="css" href="style/learn.css">
     <link data-trunk rel="css" href="style/topbar.css">
     
     <!-- Structured Data - Organization -->

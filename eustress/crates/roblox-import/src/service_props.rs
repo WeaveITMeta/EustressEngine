@@ -340,7 +340,15 @@ fn material_service(key: &str, v: &Variant, _all: &HashMap<String, Variant>, t: 
 pub fn service_toml(class: &str, mapped: &ServiceProps) -> Option<String> {
     let path = eustress_common::service_templates_dir().join(class).join("_service.toml");
     let template = std::fs::read_to_string(path).ok()?;
-    let mut doc: toml::Value = template.parse().ok()?;
+    service_toml_over(&template, class, mapped)
+}
+
+/// `props` laid over the `[properties]` of `base`, a service file's text: the
+/// engine's template, or the `_service.toml` a Space already holds (a
+/// scaffolded Space holds the template for every service). Every key the
+/// place does not set keeps what `base` had. `None` when `base` is not TOML.
+pub fn service_toml_over(base: &str, class: &str, mapped: &ServiceProps) -> Option<String> {
+    let mut doc: toml::Value = base.parse().ok()?;
     let root = doc.as_table_mut()?;
     let props = root
         .entry("properties".to_string())
@@ -365,6 +373,37 @@ pub fn service_toml(class: &str, mapped: &ServiceProps) -> Option<String> {
                 toml::Value::String(eustress_common::units::Unit::Stud.symbol().to_string()),
             );
         }
+    }
+    toml::to_string_pretty(&doc).ok()
+}
+
+/// `attributes` laid over the `[attributes]` of `base`, a service file's
+/// text; with no `base`, over a file that names only the service's class.
+/// `[attributes]` is where both loaders read a service's attributes, so a
+/// value object that sat directly under the service is found by
+/// `GetAttribute` on it. `None` when `base` is not a TOML table.
+pub fn service_attributes_over(
+    base: Option<&str>,
+    class: &str,
+    attributes: &HashMap<String, toml::Value>,
+) -> Option<String> {
+    let mut doc: toml::Value = match base {
+        Some(text) => text.parse().ok()?,
+        None => {
+            let mut service = toml::value::Table::new();
+            service.insert("class_name".to_string(), toml::Value::String(class.to_string()));
+            let mut root = toml::value::Table::new();
+            root.insert("service".to_string(), toml::Value::Table(service));
+            toml::Value::Table(root)
+        }
+    };
+    let section = doc
+        .as_table_mut()?
+        .entry("attributes".to_string())
+        .or_insert_with(|| toml::Value::Table(toml::value::Table::new()));
+    let table = section.as_table_mut()?;
+    for (name, value) in attributes {
+        table.insert(name.clone(), value.clone());
     }
     toml::to_string_pretty(&doc).ok()
 }
@@ -457,6 +496,40 @@ mod tests {
         let doc: toml::Value = text.parse().unwrap();
         assert_eq!(doc["metadata"]["unit"].as_str(), Some(eustress_common::units::Unit::Stud.symbol()));
         assert_eq!(doc["properties"]["character_walk_speed"].as_float(), Some(24.0));
+    }
+
+    /// A Space made by Studio already holds each service's file. The place's
+    /// values go over it, and the keys the place does not set stay.
+    #[test]
+    fn a_place_lays_its_values_over_the_file_a_space_already_holds() {
+        let m = map_service_properties("Lighting", &props(vec![("ClockTime", Variant::Float32(18.5))])).unwrap();
+        let existing = "[service]\nclass_name = \"Lighting\"\n\n[properties]\nclock_time = 14.0\nbrightness = 2.0\n";
+        let doc: toml::Value = service_toml_over(existing, "Lighting", &m).expect("TOML").parse().unwrap();
+        assert_eq!(doc["properties"]["clock_time"].as_float(), Some(18.5), "the place's time of day wins");
+        assert_eq!(doc["properties"]["brightness"].as_float(), Some(2.0), "a key the place does not set is kept");
+        assert_eq!(doc["service"]["class_name"].as_str(), Some("Lighting"));
+        assert!(service_toml_over("not [toml", "Lighting", &m).is_none());
+    }
+
+    /// A service's folded value objects go under `[attributes]`, over the
+    /// file the Space holds or a file of the service's class alone.
+    #[test]
+    fn a_services_attributes_go_over_its_file() {
+        let attributes: HashMap<String, toml::Value> =
+            [("RoundTime".to_string(), toml::Value::Integer(90))].into_iter().collect();
+        let existing = "[service]\nclass_name = \"ReplicatedStorage\"\n\n[attributes]\nKept = true\n";
+        let doc: toml::Value = service_attributes_over(Some(existing), "ReplicatedStorage", &attributes)
+            .expect("TOML")
+            .parse()
+            .unwrap();
+        assert_eq!(doc["attributes"]["RoundTime"].as_integer(), Some(90));
+        assert_eq!(doc["attributes"]["Kept"].as_bool(), Some(true), "an attribute already there stays");
+        assert_eq!(doc["service"]["class_name"].as_str(), Some("ReplicatedStorage"));
+
+        let bare: toml::Value = service_attributes_over(None, "Teams", &attributes).expect("TOML").parse().unwrap();
+        assert_eq!(bare["service"]["class_name"].as_str(), Some("Teams"));
+        assert_eq!(bare["attributes"]["RoundTime"].as_integer(), Some(90));
+        assert!(service_attributes_over(Some("not [toml"), "Teams", &attributes).is_none());
     }
 
     #[test]

@@ -202,8 +202,8 @@ component EustressTextEdit inherits Rectangle {
     // output for sibling overlays (line-number gutter, diagnostic
     // squiggles) that aren't children of this component and therefore
     // have to offset themselves. Exposed as read-only.
-    out property <length> scroll-x: flick.viewport-x;
-    out property <length> scroll-y: flick.viewport-y;
+    out property <length> scroll-x: flick.content-x;
+    out property <length> scroll-y: flick.content-y;
 
     callback edited(text: string);
     callback key-pressed(event: KeyEvent) -> EventResult;
@@ -232,8 +232,8 @@ component EustressTextEdit inherits Rectangle {
     /// `script-scroll-to-line` property it set was declared in `main.slint`
     /// and read by nobody.
     public function scroll-to-line(line: int) {
-        flick.viewport-y = max(
-            min(0px, -(flick.viewport-height - flick.height)),
+        flick.content-y = max(
+            min(0px, -(flick.content-height - flick.height)),
             -(line - 1) * root.line-height,
         );
     }
@@ -310,7 +310,7 @@ component EustressTextEdit inherits Rectangle {
 
     /// The first line in view (0-based) and how many lines fit, for a host
     /// that draws only the visible part of the file.
-    out property <int> first-visible-line: max(0, -flick.viewport-y / root.line-height);
+    out property <int> first-visible-line: max(0, -flick.content-y / root.line-height);
     out property <int> visible-line-count: flick.height / root.line-height + 2;
 
     /// Fired whenever the caret moves, with 1-based (line, column). The host
@@ -372,7 +372,7 @@ component EustressTextEdit inherits Rectangle {
             x: 0px; y: 0px;
             width: parent.width;
             height: parent.height;
-            viewport-width: root.wrap == TextWrap.no-wrap
+            content-width: root.wrap == TextWrap.no-wrap
                 ? max(self.width, text-input.preferred-width, text-input.width)
                 : self.width;
             // Content height drives scroll: prefer the TextInput's reported
@@ -384,15 +384,15 @@ component EustressTextEdit inherits Rectangle {
             // Plus the inset above the first line, and the horizontal
             // scrollbar's strip when lines scroll sideways, so the last line
             // never sits under the bar.
-            viewport-height: max(self.height, root.text-inset-y + text-input.preferred-height
-                + (self.viewport-width > self.width ? 14px : 0px));
+            content-height: max(self.height, root.text-inset-y + text-input.preferred-height
+                + (self.content-width > self.width ? 14px : 0px));
 
             // The caret's line: a faint band while the editor has focus.
             // Drawn first, so the coloured text and the caret sit above it.
             if text-input.has-focus && !root.read-only: Rectangle {
                 x: 0px;
                 y: (root.caret-line - 1) * root.line-height + root.text-inset-y;
-                width: flick.viewport-width;
+                width: flick.content-width;
                 height: root.line-height;
                 background: Theme.accent-cyan.with-alpha(0.07);
             }
@@ -471,7 +471,7 @@ component EustressTextEdit inherits Rectangle {
                 // Height MUST match the Flickable's viewport-height, not the
                 // visible viewport. Otherwise the TextInput is clipped to
                 // one page of text and lines beyond that never render.
-                height: flick.viewport-height;
+                height: flick.content-height;
                 enabled: true;
                 single-line: false;
                 wrap <=> root.wrap;
@@ -518,16 +518,16 @@ component EustressTextEdit inherits Rectangle {
                     // margin, never past the content's edges. Skipped until the
                     // view has a real size, so a first layout cannot scroll it.
                     if (flick.width > 80px && flick.height > 40px) {
-                        if (root.caret-px < -flick.viewport-x + 4px) {
-                            flick.viewport-x = min(0px, 24px - root.caret-px);
-                        } else if (root.caret-px > -flick.viewport-x + flick.width - 40px) {
-                            flick.viewport-x = max(min(0px, flick.width - flick.viewport-width),
+                        if (root.caret-px < -flick.content-x + 4px) {
+                            flick.content-x = min(0px, 24px - root.caret-px);
+                        } else if (root.caret-px > -flick.content-x + flick.width - 40px) {
+                            flick.content-x = max(min(0px, flick.width - flick.content-width),
                                 flick.width - 64px - root.caret-px);
                         }
-                        if (root.caret-py < -flick.viewport-y) {
-                            flick.viewport-y = min(0px, -root.caret-py);
-                        } else if (root.caret-py + root.line-height > -flick.viewport-y + flick.height - 14px) {
-                            flick.viewport-y = max(min(0px, flick.height - flick.viewport-height),
+                        if (root.caret-py < -flick.content-y) {
+                            flick.content-y = min(0px, -root.caret-py);
+                        } else if (root.caret-py + root.line-height > -flick.content-y + flick.height - 14px) {
+                            flick.content-y = max(min(0px, flick.height - flick.content-height),
                                 flick.height - 18px - root.caret-py - root.line-height);
                         }
                     }
@@ -573,11 +573,11 @@ component EustressTextEdit inherits Rectangle {
     // across. Both floored at 1px so the ratios below can never divide by zero
     // mid-relayout. Declared on the component root rather than on the bar so
     // they survive the bar being instantiated and dropped as content changes.
-    property <length> vbar-scroll-range: max(1px, flick.viewport-height - flick.height);
-    property <length> vbar-thumb-height: max(28px, self.height * (flick.height / flick.viewport-height));
+    property <length> vbar-scroll-range: max(1px, flick.content-height - flick.height);
+    property <length> vbar-thumb-height: max(28px, self.height * (flick.height / flick.content-height));
     property <length> vbar-track-range: max(1px, self.height - self.vbar-thumb-height);
 
-    if flick.viewport-height > flick.height: Rectangle {
+    if flick.content-height > flick.height: Rectangle {
         x: parent.width - 12px;
         y: 0px;
         width: 12px;
@@ -590,16 +590,16 @@ component EustressTextEdit inherits Rectangle {
             // priority over this one wherever the two overlap.
             clicked => {
                 if (self.mouse-y < thumb.y) {
-                    flick.viewport-y = min(0px, flick.viewport-y + flick.height);
+                    flick.content-y = min(0px, flick.content-y + flick.height);
                 } else if (self.mouse-y > thumb.y + thumb.height) {
-                    flick.viewport-y = max(-root.vbar-scroll-range, flick.viewport-y - flick.height);
+                    flick.content-y = max(-root.vbar-scroll-range, flick.content-y - flick.height);
                 }
             }
         }
 
         thumb := Rectangle {
             x: 2px;
-            y: root.vbar-track-range * (-flick.viewport-y / root.vbar-scroll-range);
+            y: root.vbar-track-range * (-flick.content-y / root.vbar-scroll-range);
             width: parent.width - 4px;
             height: root.vbar-thumb-height;
             border-radius: self.width / 2;
@@ -618,13 +618,13 @@ component EustressTextEdit inherits Rectangle {
 
                 pointer-event(ev) => {
                     if (ev.kind == PointerEventKind.down) {
-                        self.origin = flick.viewport-y;
+                        self.origin = flick.content-y;
                     }
                 }
 
                 moved => {
                     if (self.pressed) {
-                        flick.viewport-y = max(-root.vbar-scroll-range, min(0px,
+                        flick.content-y = max(-root.vbar-scroll-range, min(0px,
                             self.origin
                             - (self.mouse-y - self.pressed-y)
                               * (root.vbar-scroll-range / root.vbar-track-range)));
@@ -639,11 +639,11 @@ component EustressTextEdit inherits Rectangle {
     // The vertical bar's design along the bottom edge, shown when a line is
     // wider than the view. It stops short of the vertical bar's corner.
     // `viewport-x` is <= 0 and grows negative rightward.
-    property <length> hbar-scroll-range: max(1px, flick.viewport-width - flick.width);
-    property <length> hbar-thumb-width: max(28px, (self.width - 12px) * (flick.width / flick.viewport-width));
+    property <length> hbar-scroll-range: max(1px, flick.content-width - flick.width);
+    property <length> hbar-thumb-width: max(28px, (self.width - 12px) * (flick.width / flick.content-width));
     property <length> hbar-track-range: max(1px, self.width - 12px - self.hbar-thumb-width);
 
-    if flick.viewport-width > flick.width: Rectangle {
+    if flick.content-width > flick.width: Rectangle {
         x: 0px;
         y: parent.height - 12px;
         width: parent.width - 12px;
@@ -653,15 +653,15 @@ component EustressTextEdit inherits Rectangle {
         htrack-area := TouchArea {
             clicked => {
                 if (self.mouse-x < hthumb.x) {
-                    flick.viewport-x = min(0px, flick.viewport-x + flick.width);
+                    flick.content-x = min(0px, flick.content-x + flick.width);
                 } else if (self.mouse-x > hthumb.x + hthumb.width) {
-                    flick.viewport-x = max(-root.hbar-scroll-range, flick.viewport-x - flick.width);
+                    flick.content-x = max(-root.hbar-scroll-range, flick.content-x - flick.width);
                 }
             }
         }
 
         hthumb := Rectangle {
-            x: root.hbar-track-range * (-flick.viewport-x / root.hbar-scroll-range);
+            x: root.hbar-track-range * (-flick.content-x / root.hbar-scroll-range);
             y: 2px;
             width: root.hbar-thumb-width;
             height: parent.height - 4px;
@@ -677,13 +677,13 @@ component EustressTextEdit inherits Rectangle {
 
                 pointer-event(ev) => {
                     if (ev.kind == PointerEventKind.down) {
-                        self.origin = flick.viewport-x;
+                        self.origin = flick.content-x;
                     }
                 }
 
                 moved => {
                     if (self.pressed) {
-                        flick.viewport-x = max(-root.hbar-scroll-range, min(0px,
+                        flick.content-x = max(-root.hbar-scroll-range, min(0px,
                             self.origin
                             - (self.mouse-x - self.pressed-x)
                               * (root.hbar-scroll-range / root.hbar-track-range)));
@@ -1224,8 +1224,8 @@ export component ScriptEditor inherits Rectangle {
                         // Row pitch comes from the editor's measured line
                         // height, so gutter numbers stay welded to their lines
                         // whatever font actually resolves.
-                        viewport-height: max(self.height, root.line-numbers-array.length * summary-edit.line-height + 10px);
-                        viewport-y: summary-edit.scroll-y;
+                        content-height: max(self.height, root.line-numbers-array.length * summary-edit.line-height + 10px);
+                        content-y: summary-edit.scroll-y;
 
                         for num[idx] in root.line-numbers-array: Text {
                             x: 0px;
@@ -1323,13 +1323,13 @@ export component ScriptEditor inherits Rectangle {
                     code-gutter-flick := Flickable {
                         interactive: false;
                         x: 0px; y: 0px; width: 100%; height: 100%;
-                        viewport-height: max(self.height, root.line-numbers-array.length * editor-area.line-height + 10px);
-                        viewport-y: editor-area.scroll-y;
+                        content-height: max(self.height, root.line-numbers-array.length * editor-area.line-height + 10px);
+                        content-y: editor-area.scroll-y;
 
                         // Colored accent strips — 3px left-edge, one per line
                         if root.has-highlights: Rectangle {
                             x: 0; y: 0; width: 3px;
-                            height: code-gutter-flick.viewport-height;
+                            height: code-gutter-flick.content-height;
 
                             for hl[idx] in root.highlight-lines: Rectangle {
                                 x: 0;

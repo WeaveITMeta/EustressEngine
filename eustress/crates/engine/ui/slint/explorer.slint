@@ -56,7 +56,7 @@ export component ExplorerPanel inherits Rectangle {
     in property <int> scroll-pulse: 0;
     in property <length> scroll-target-y: 0px;
     changed scroll-pulse => {
-        tree-scroll.viewport-y = -root.scroll-target-y;
+        tree-scroll.content-y = -root.scroll-target-y;
     }
     
     // Callbacks — ctrl/shift booleans for multi-select
@@ -282,7 +282,7 @@ export component ExplorerPanel inherits Rectangle {
                         // Keep the plus button clear of the vertical
                         // scrollbar, which is 14px wide and shown only while
                         // the tree is taller than the panel.
-                        right-inset: tree-scroll.viewport-height > tree-scroll.visible-height ? 14px : 0px;
+                        right-inset: tree-scroll.content-height > tree-scroll.visible-height ? 14px : 0px;
                         // drop-target is driven by drag-target-id which is
                         // set in drag-moved below (math-based row resolver
                         // using visible-node-ids + scroll offset). No
@@ -359,7 +359,7 @@ export component ExplorerPanel inherits Rectangle {
                             // hover events — we MUST resolve from the
                             // source's drag-moved callback.
                             if root.visible-node-ids.length > 0 {
-                                let local-y = abs-y - tree-scroll-area.absolute-position.y - tree-scroll.viewport-y;
+                                let local-y = abs-y - tree-scroll-area.absolute-position.y - tree-scroll.content-y;
                                 let row-idx = floor(local-y / 22px);
                                 if row-idx >= 0 && row-idx < root.visible-node-ids.length {
                                     let candidate = root.visible-node-ids[row-idx];

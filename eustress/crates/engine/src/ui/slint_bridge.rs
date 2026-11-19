@@ -213,7 +213,7 @@ pub struct PropertyData {
     pub y_value: String,
     pub z_value: String,
     /// Pre-parsed RGB triple (0..=255) for color rows. Used by the
-    /// Slint→Rust mapping in `slint_main` to populate the `color-value`
+    /// Slint→Rust mapping in the removed overlay-thread module to populate the `color-value`
     /// chip on the ColorRow. `None` for non-color rows.
     pub color_rgb: Option<(u8, u8, u8)>,
     pub description: String,

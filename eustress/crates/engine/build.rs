@@ -19,7 +19,10 @@ fn main() {
         .stack_size(64 * 1024 * 1024)
         .spawn(|| {
             let slint_config = slint_build::CompilerConfiguration::new()
-                .with_style("fluent-dark".into());
+                .with_style("fluent-dark".into())
+                // The Slint language edition: 1.19 sizes a parent from its `if` and `for`
+                // children and a ScrollView from its repeated content.
+                .with_edition((1, 19));
 
             slint_build::compile_with_config(
                 "ui/slint/main.slint",

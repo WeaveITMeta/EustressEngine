@@ -1,0 +1,9 @@
+{
+  "title": "G6.30 negative control: a demo script whose step 3 uses a tool that is declared and not shipped",
+  "note": "Gate must exit 2. Steps 1 and 2 are shipped; step 3 is a Government mode tool with no dispatch site.",
+  "steps": [
+    {"step": 1, "tool": "data:import", "say": "Import a CSV as a Dataset"},
+    {"step": 2, "tool": "insert:part", "say": "Insert a Part"},
+    {"step": 3, "tool": "gov:provenance_inspector", "say": "Inspect the provenance of the imported data"}
+  ]
+}

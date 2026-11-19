@@ -97,7 +97,7 @@ pub struct ViewportContextTarget {
 /// id to.
 ///
 /// This is a cross-thread hand-off, not a convenience, and it exists only
-/// for the separate-overlay-thread path: `slint_main`'s `apply_bridge_state`
+/// for the separate-overlay-thread path: the removed overlay-thread module's `apply_bridge_state`
 /// has no World access, so it cannot read [`ViewportContextTarget`] directly
 /// — the same reason `slint_ui::OVERLAY_INPUT_FOCUSED` exists. The producer
 /// stores here BEFORE stamping `request_viewport_context_menu` onto the

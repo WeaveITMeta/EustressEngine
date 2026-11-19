@@ -99,6 +99,12 @@ pub fn LoginPage() -> impl IntoView {
     // Register: form state
     let reg_username = RwSignal::new(String::new());
     let reg_email = RwSignal::new(String::new());
+    // The Marketing Emails box. It starts empty and is ticked only when the
+    // Worker's jurisdiction answer says the visitor's country allows a box that
+    // starts ticked (`marketing.prechecked`, the US under CAN-SPAM); everywhere
+    // else only the visitor's own tick turns it on. Once touched, it is theirs.
+    let reg_marketing = RwSignal::new(false);
+    let reg_marketing_touched = RwSignal::new(false);
     let reg_birthday = RwSignal::new(String::new());
     let reg_id_type = RwSignal::new("passport".to_string());
     let reg_id_number = RwSignal::new(String::new());
@@ -296,6 +302,14 @@ pub fn LoginPage() -> impl IntoView {
         if let Ok(resp) = gloo_net::http::Request::get(&format!("{}/api/kyc/jurisdiction", crate::state::api_base())).send().await {
             if resp.ok() {
                 if let Ok(data) = resp.json::<serde_json::Value>().await {
+                    let prechecked = data
+                        .get("marketing")
+                        .and_then(|m| m.get("prechecked"))
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(false);
+                    if !reg_marketing_touched.get_untracked() {
+                        reg_marketing.set(prechecked);
+                    }
                     if let Some(iso2) = data.get("iso2").and_then(|v| v.as_str()) {
                         detected_country.set(iso2.to_string());
                         if let Some(name) = data.get("name").and_then(|v| v.as_str()) {
@@ -668,6 +682,9 @@ pub fn LoginPage() -> impl IntoView {
                                             prop:value=move || reg_username.get()
                                             on:input=move |e| reg_username.set(event_target_value(&e))
                                         />
+                                        <Show when=move || username_reserved_words(&reg_username.get()).is_some()>
+                                            <p class="form-error-inline">{move || username_reserved_words(&reg_username.get()).unwrap_or_default()}</p>
+                                        </Show>
                                     </div>
 
                                     <div class="form-field">
@@ -683,6 +700,21 @@ pub fn LoginPage() -> impl IntoView {
                                             on:input=move |e| reg_email.set(event_target_value(&e))
                                         />
                                         <p class="form-hint">"A backup copy of your identity file will be emailed to you."</p>
+                                    </div>
+
+                                    <div class="form-field form-checkbox-field">
+                                        <label class="form-checkbox">
+                                            <input
+                                                type="checkbox"
+                                                prop:checked=move || reg_marketing.get()
+                                                on:change=move |e| {
+                                                    reg_marketing_touched.set(true);
+                                                    reg_marketing.set(event_target_checked(&e));
+                                                }
+                                            />
+                                            <span>"Marketing Emails "<span class="form-optional">"(Optional)"</span></span>
+                                        </label>
+                                        <p class="form-hint">"Eustress news, release notes, your stats and holiday promotions. Unsubscribe anytime."</p>
                                     </div>
 
                                     <div class="form-field">
@@ -727,6 +759,7 @@ pub fn LoginPage() -> impl IntoView {
                                         class="btn btn-primary"
                                         disabled=move || {
                                             reg_username.get().trim().is_empty()
+                                            || username_reserved_words(&reg_username.get()).is_some()
                                             || reg_email.get().trim().is_empty()
                                             || !reg_email.get().contains('@')
                                             || age_from_dob(&reg_birthday.get()).map_or(true, |a| a < MIN_AGE)
@@ -1157,6 +1190,7 @@ pub fn LoginPage() -> impl IntoView {
                                                                 Some(&claim),
                                                                 email_for_register,
                                                                 toml_for_register,
+                                                                Some(reg_marketing.get_untracked()),
                                                             ).await {
                                                                 Ok(response) => {
                                                                     // Used: the claim secret is not kept.
@@ -1493,6 +1527,15 @@ async fn poll_kyc_status(
     kyc_rejected_signal.set(true);
 }
 
+/// Why a person may not take this username, or None. The Worker's `humanNameProblem` (src/agents.mjs) is the rule;
+/// this says it at step 1, before any document is uploaded.
+pub(crate) fn username_reserved_words(username: &str) -> Option<String> {
+    username
+        .to_ascii_lowercase()
+        .contains("bot")
+        .then(|| "Usernames cannot contain \"bot\". Names with \"bot\" are kept for agent accounts.".to_string())
+}
+
 /// Generate the README file that accompanies identity.toml downloads.
 fn identity_readme(username: &str) -> String {
     format!(r#"========================================================
@@ -1702,6 +1745,16 @@ fn base64_encode(input: &[u8]) -> String {
 #[cfg(test)]
 mod login_signing_tests {
     use super::*;
+
+    #[test]
+    fn a_persons_username_cannot_hold_bot_in_any_case() {
+        for name in ["ClaudeBot9000", "robot", "BOTANY", "my_bot"] {
+            assert!(username_reserved_words(name).is_some(), "{name}");
+        }
+        for name in ["ada", "Simbuilder", "agent_smith"] {
+            assert_eq!(username_reserved_words(name), None, "{name}");
+        }
+    }
 
     fn a_user() -> User {
         serde_json::from_value(serde_json::json!({

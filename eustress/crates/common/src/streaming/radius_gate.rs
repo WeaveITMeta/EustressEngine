@@ -18,6 +18,8 @@
 //! - Eviction pass: 4.7ms @ 2.10M total
 //! - Active cap: ~2.10M entities @ 24 FPS
 
+use std::collections::HashSet;
+
 use super::types::{ChunkCoord, StreamingConfig, Tier};
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -60,6 +62,10 @@ pub struct GateStats {
     pub active_total: usize,
     /// Total hot cache instances after this pass.
     pub hot_total: usize,
+    /// Chunks promoted ahead of need because prefetch predicted them.
+    pub prefetch_promoted_chunks: usize,
+    /// Demotions held back because prefetch pins the chunk.
+    pub pinned_holds: usize,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -204,5 +210,162 @@ impl HysteresisRadiusGate {
 
         stats.active_total = running_active;
         (decisions, stats)
+    }
+
+    /// [`Self::evaluate_all`] with predictive prefetch folded in:
+    ///
+    /// - a chunk in `admitted` (prefetch asked for it this tick, inside its
+    ///   I/O budget) is promoted before it enters the active radius, under
+    ///   the same active cap;
+    /// - a chunk in `pinned` (predicted, or lingering in the hysteresis
+    ///   window) is never demoted: nothing evicts what is about to be used.
+    ///
+    /// With both sets empty this is exactly `evaluate_all`.
+    pub fn evaluate_all_with_prefetch(
+        &self,
+        chunks: &[(ChunkCoord, Tier, usize)],
+        chunk_size: f32,
+        camera_x: f32,
+        camera_z: f32,
+        current_active_count: usize,
+        admitted: &HashSet<ChunkCoord>,
+        pinned: &HashSet<ChunkCoord>,
+    ) -> (Vec<(ChunkCoord, GateDecision)>, GateStats) {
+        let mut decisions = Vec::new();
+        let mut stats = GateStats::default();
+        let mut running_active = current_active_count;
+
+        let mut sorted: Vec<_> = chunks.iter().collect();
+        sorted.sort_by(|a, b| {
+            let da = a.0.distance_squared_to(camera_x, camera_z, chunk_size);
+            let db = b.0.distance_squared_to(camera_x, camera_z, chunk_size);
+            da.partial_cmp(&db)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then((a.0.x, a.0.z).cmp(&(b.0.x, b.0.z)))
+        });
+
+        for &&(coord, tier, count) in &sorted {
+            let mut decision = self.evaluate(
+                coord, chunk_size, camera_x, camera_z,
+                tier, running_active, count,
+            );
+            match decision {
+                GateDecision::DemoteToHot | GateDecision::DemoteToCold if pinned.contains(&coord) => {
+                    stats.pinned_holds += 1;
+                    decision = GateDecision::Hold;
+                }
+                GateDecision::Hold
+                    if tier != Tier::Active
+                        && admitted.contains(&coord)
+                        && running_active + count <= self.active_cap =>
+                {
+                    stats.prefetch_promoted_chunks += 1;
+                    decision = GateDecision::Promote;
+                }
+                _ => {}
+            }
+
+            match decision {
+                GateDecision::Hold => continue,
+                GateDecision::Promote => {
+                    running_active += count;
+                    stats.promoted_chunks += 1;
+                    stats.promoted_instances += count;
+                }
+                GateDecision::DemoteToHot => {
+                    running_active = running_active.saturating_sub(count);
+                    stats.demoted_to_hot_chunks += 1;
+                    stats.demoted_to_hot_instances += count;
+                }
+                GateDecision::DemoteToCold => {
+                    stats.demoted_to_cold_chunks += 1;
+                    stats.demoted_to_cold_instances += count;
+                }
+            }
+            decisions.push((coord, decision));
+        }
+
+        stats.active_total = running_active;
+        (decisions, stats)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn gate() -> HysteresisRadiusGate {
+        HysteresisRadiusGate::new(&StreamingConfig {
+            chunk_size: 100.0,
+            active_radius: 150.0,
+            evict_radius: 200.0,
+            cold_radius: 1_000.0,
+            active_cap: 1_000,
+            ..StreamingConfig::default()
+        })
+    }
+
+    fn cc(x: i32, z: i32) -> ChunkCoord {
+        ChunkCoord { x, z }
+    }
+
+    #[test]
+    fn rage_gate_promotes_an_admitted_chunk_before_it_is_in_range() {
+        let g = gate();
+        // Chunk (5,0) centre x=550: far outside the 150 m active radius.
+        let chunks = [(cc(5, 0), Tier::Hot, 10)];
+        let none = HashSet::new();
+        let (plain, _) = g.evaluate_all_with_prefetch(&chunks, 100.0, 50.0, 50.0, 0, &none, &none);
+        assert!(plain.is_empty(), "out of range and not predicted: held");
+        let admitted: HashSet<_> = [cc(5, 0)].into_iter().collect();
+        let (d, stats) = g.evaluate_all_with_prefetch(&chunks, 100.0, 50.0, 50.0, 0, &admitted, &none);
+        assert_eq!(d, vec![(cc(5, 0), GateDecision::Promote)]);
+        assert_eq!(stats.prefetch_promoted_chunks, 1);
+    }
+
+    #[test]
+    fn rage_gate_never_demotes_a_pinned_chunk() {
+        let g = gate();
+        // Active chunk past the evict radius.
+        let chunks = [(cc(-5, 0), Tier::Active, 10)];
+        let none = HashSet::new();
+        let (d, _) = g.evaluate_all_with_prefetch(&chunks, 100.0, 50.0, 50.0, 10, &none, &none);
+        assert_eq!(d, vec![(cc(-5, 0), GateDecision::DemoteToHot)]);
+        let pinned: HashSet<_> = [cc(-5, 0)].into_iter().collect();
+        let (d, stats) = g.evaluate_all_with_prefetch(&chunks, 100.0, 50.0, 50.0, 10, &none, &pinned);
+        assert!(d.is_empty(), "pinned chunk held: {d:?}");
+        assert_eq!(stats.pinned_holds, 1);
+        assert_eq!(stats.active_total, 10);
+    }
+
+    #[test]
+    fn rage_gate_prefetch_respects_the_active_cap() {
+        let g = HysteresisRadiusGate::new(&StreamingConfig {
+            chunk_size: 100.0,
+            active_radius: 150.0,
+            evict_radius: 200.0,
+            cold_radius: 1_000.0,
+            active_cap: 15,
+            ..StreamingConfig::default()
+        });
+        let chunks = [(cc(5, 0), Tier::Hot, 10)];
+        let admitted: HashSet<_> = [cc(5, 0)].into_iter().collect();
+        let (d, _) = g.evaluate_all_with_prefetch(&chunks, 100.0, 50.0, 50.0, 10, &admitted, &HashSet::new());
+        assert!(d.is_empty(), "10 + 10 would pass the cap of 15");
+    }
+
+    #[test]
+    fn rage_gate_matches_the_plain_pass_without_prefetch() {
+        let g = gate();
+        let chunks = [
+            (cc(0, 0), Tier::Hot, 3),
+            (cc(1, 0), Tier::Active, 4),
+            (cc(3, 0), Tier::Active, 5),
+            (cc(12, 0), Tier::Hot, 6),
+        ];
+        let (a, sa) = g.evaluate_all(&chunks, 100.0, 50.0, 50.0, 9);
+        let (b, sb) = g.evaluate_all_with_prefetch(&chunks, 100.0, 50.0, 50.0, 9, &HashSet::new(), &HashSet::new());
+        assert_eq!(a, b);
+        assert_eq!(sa.active_total, sb.active_total);
     }
 }

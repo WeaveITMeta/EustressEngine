@@ -753,7 +753,9 @@ impl ReelControls {
     }
 
     fn check_after(self, ms: f64) {
-        set_timeout(
+        // The handle is only for cancelling, and this check is never cancelled:
+        // check_idle reads the latest activity time whenever it runs.
+        let _ = set_timeout(
             move || self.check_idle(),
             std::time::Duration::from_millis(ms.max(16.0) as u64),
         );

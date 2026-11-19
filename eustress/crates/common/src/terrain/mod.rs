@@ -174,6 +174,21 @@ pub mod road_furniture;
 /// built from the stations its corridor was baked along. Added by
 /// `TerrainLayersPlugin`; referenced via the explicit `road_surface::` path.
 pub mod road_surface;
+/// What `Road:Audit` reports: each road's violations and structures, and
+/// per junction it meets the step at each mouth, lanes with no exit and
+/// junctions too close. Pure math over the bake's designs and junctions.
+/// Referenced via the explicit `road_audit::` path.
+pub mod road_audit;
+/// What a ray or contact on a road met: the road instance, and the surface
+/// and material under the hit. Referenced via the explicit `road_hit::` path.
+pub mod road_hit;
+
+/// Test builds only (`EUS_MUTATE`): whether a run breaks `site` on purpose, to
+/// prove the tests over it can fail. Removed before landing.
+#[cfg(test)]
+pub(crate) fn mutant(site: &str) -> bool {
+    std::env::var("EUS_MUTATE").is_ok_and(|v| v == site)
+}
 /// Wave 9.C: imported-terrain voxel decode + multi-span column extractor +
 /// `TerrainData` cache fill. Engine-free (no worlddb dep); the
 /// `voxel_import` build calls into this. Referenced via the

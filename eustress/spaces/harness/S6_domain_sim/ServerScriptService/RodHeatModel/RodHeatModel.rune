@@ -1,0 +1,82 @@
+// Copper rod heat conduction, emitted by harness-scenes (G1.03). Never edit by hand.
+// State lives in sim values so it persists between frames; every frame advances one step.
+
+pub fn on_init() {
+    if get_sim_value("rod_initialised") < 0.5 {
+        set_sim_value("rod_T00", 373.15);
+        set_sim_value("rod_T01", 293.161546);
+        set_sim_value("rod_T02", 293.150027);
+        set_sim_value("rod_T03", 293.106538);
+        set_sim_value("rod_T04", 293.146801);
+        set_sim_value("rod_T05", 293.180997);
+        set_sim_value("rod_T06", 293.105548);
+        set_sim_value("rod_T07", 293.197931);
+        set_sim_value("rod_T08", 293.183522);
+        set_sim_value("rod_T09", 293.165344);
+        set_sim_value("rod_T10", 293.174031);
+        set_sim_value("rod_T11", 293.151248);
+        set_sim_value("rod_T12", 293.122473);
+        set_sim_value("rod_T13", 293.128503);
+        set_sim_value("rod_T14", 293.160958);
+        set_sim_value("rod_T15", 293.17794);
+        set_sim_value("rod_step_count", 0.0);
+        set_sim_value("rod_sim_time_s", 0.0);
+        set_sim_value("rod_initialised", 1.0);
+    }
+}
+
+pub fn on_update(_dt) {
+    let r = 0.290613;
+    let t0 = get_sim_value("rod_T00");
+    let t1 = get_sim_value("rod_T01");
+    let t2 = get_sim_value("rod_T02");
+    let t3 = get_sim_value("rod_T03");
+    let t4 = get_sim_value("rod_T04");
+    let t5 = get_sim_value("rod_T05");
+    let t6 = get_sim_value("rod_T06");
+    let t7 = get_sim_value("rod_T07");
+    let t8 = get_sim_value("rod_T08");
+    let t9 = get_sim_value("rod_T09");
+    let t10 = get_sim_value("rod_T10");
+    let t11 = get_sim_value("rod_T11");
+    let t12 = get_sim_value("rod_T12");
+    let t13 = get_sim_value("rod_T13");
+    let t14 = get_sim_value("rod_T14");
+    let t15 = get_sim_value("rod_T15");
+    let n0 = 373.15;
+    let n1 = t1 + r * (t0 - 2.0 * t1 + t2);
+    let n2 = t2 + r * (t1 - 2.0 * t2 + t3);
+    let n3 = t3 + r * (t2 - 2.0 * t3 + t4);
+    let n4 = t4 + r * (t3 - 2.0 * t4 + t5);
+    let n5 = t5 + r * (t4 - 2.0 * t5 + t6);
+    let n6 = t6 + r * (t5 - 2.0 * t6 + t7);
+    let n7 = t7 + r * (t6 - 2.0 * t7 + t8);
+    let n8 = t8 + r * (t7 - 2.0 * t8 + t9);
+    let n9 = t9 + r * (t8 - 2.0 * t9 + t10);
+    let n10 = t10 + r * (t9 - 2.0 * t10 + t11);
+    let n11 = t11 + r * (t10 - 2.0 * t11 + t12);
+    let n12 = t12 + r * (t11 - 2.0 * t12 + t13);
+    let n13 = t13 + r * (t12 - 2.0 * t13 + t14);
+    let n14 = t14 + r * (t13 - 2.0 * t14 + t15);
+    let n15 = t15 + r * (t14 - t15) - 0.01 * (t15 - 293.15);
+    set_sim_value("rod_T00", n0);
+    set_sim_value("rod_T01", n1);
+    set_sim_value("rod_T02", n2);
+    set_sim_value("rod_T03", n3);
+    set_sim_value("rod_T04", n4);
+    set_sim_value("rod_T05", n5);
+    set_sim_value("rod_T06", n6);
+    set_sim_value("rod_T07", n7);
+    set_sim_value("rod_T08", n8);
+    set_sim_value("rod_T09", n9);
+    set_sim_value("rod_T10", n10);
+    set_sim_value("rod_T11", n11);
+    set_sim_value("rod_T12", n12);
+    set_sim_value("rod_T13", n13);
+    set_sim_value("rod_T14", n14);
+    set_sim_value("rod_T15", n15);
+    set_sim_value("rod_mean_T", (n0 + n1 + n2 + n3 + n4 + n5 + n6 + n7 + n8 + n9 + n10 + n11 + n12 + n13 + n14 + n15) / 16.0);
+    let steps = get_sim_value("rod_step_count") + 1.0;
+    set_sim_value("rod_step_count", steps);
+    set_sim_value("rod_sim_time_s", steps * 1.0);
+}

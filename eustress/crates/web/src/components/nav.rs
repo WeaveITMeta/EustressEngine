@@ -308,7 +308,7 @@ pub fn CentralNav(
                                     // Delta, to the right of Bliss: a usage currency for premium
                                     // Studio tools. No chip until the Worker has answered.
                                     {move || match delta.get() {
-                                        DeltaState::Balance(balance) => Some(delta_pill(balance.whole())),
+                                        DeltaState::Balance(balance) => Some(delta_pill(balance.whole(), balance.unlimited)),
                                         _ => None,
                                     }}
 
@@ -495,7 +495,7 @@ pub fn CentralNav(
                                                 DeltaState::Balance(balance) => Some(view! {
                                                     <span class="drawer-bliss drawer-delta">
                                                         <img src="/assets/icons/delta.svg" alt="Delta" />
-                                                        {format_count(balance.whole())}" Delta"
+                                                        {if balance.unlimited { "Unlimited".to_string() } else { format_count(balance.whole()) }}" Delta"
                                                     </span>
                                                 }),
                                                 _ => None,
@@ -684,11 +684,16 @@ fn bliss_pill(balance: f64) -> impl IntoView {
 }
 
 /// The Delta pill, from the whole Delta.
-fn delta_pill(whole: u64) -> impl IntoView {
+fn delta_pill(whole: u64, unlimited: bool) -> impl IntoView {
+    let (title, shown) = if unlimited {
+        ("Unlimited Delta: usage credit for premium Studio tools".to_string(), "\u{221e}".to_string())
+    } else {
+        (format!("{} Delta: usage credit for premium Studio tools", format_count(whole)), format_short_count(whole))
+    };
     view! {
-        <a href="/delta" class="nav-delta" title=format!("{} Delta: usage credit for premium Studio tools", format_count(whole))>
+        <a href="/delta" class="nav-delta" title=title>
             <img src="/assets/icons/delta.svg" alt="Delta" class="delta-icon" />
-            <span class="delta-amount">{format_short_count(whole)}</span>
+            <span class="delta-amount">{shown}</span>
         </a>
     }
 }
@@ -828,7 +833,7 @@ mod tests {
         let who = at("match auth.get()");
         let tickets = at("{tickets_pill(user.ticket_balance)}");
         let bliss = at("{bliss_pill(user.bliss_balance)}");
-        let delta = at("Some(delta_pill(balance.whole()))");
+        let delta = at("Some(delta_pill(balance.whole(), balance.unlimited))");
         assert!(button < who && button < tickets && button < bliss, "the button comes before the pills and outside the auth split");
         assert!(tickets < bliss && bliss < delta, "Tickets, Bliss, Delta");
         assert_eq!(code.matches("<NavDownloads />").count(), 1);
@@ -898,8 +903,10 @@ mod tests {
         let bliss = owner.with(|| bliss_pill(1_234_567.5).to_html());
         assert!(bliss.contains("title=\"1,234,567.50 Bliss\"") && bliss.contains(">1.2M</span>"), "{bliss}");
         assert!(bliss.contains("href=\"/bliss/history\""), "the Bliss menu stays: {bliss}");
-        let delta = owner.with(|| delta_pill(1_000).to_html());
+        let delta = owner.with(|| delta_pill(1_000, false).to_html());
         assert!(delta.contains("title=\"1,000 Delta: usage credit for premium Studio tools\"") && delta.contains(">1,000</span>"), "{delta}");
+        let unlimited = owner.with(|| delta_pill(0, true).to_html());
+        assert!(unlimited.contains("title=\"Unlimited Delta: usage credit for premium Studio tools\"") && unlimited.contains(">\u{221e}</span>"), "{unlimited}");
         // the account name is in its title too, for when it truncates
         assert!(code().contains("<span class=\"nav-username\" title=username.clone()>"));
     }

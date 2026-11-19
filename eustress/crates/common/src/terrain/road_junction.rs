@@ -163,12 +163,23 @@ pub struct Approach {
     pub heading: f64,
     pub standard: RoadStandard,
     pub flow: Flow,
+    /// Where the leg's centreline starts (its foot), from the junction's
+    /// centre: `along` its heading and `offset` to the right of it, metres.
+    /// Both 0 for a leg straight out of the centre; a junction merged from
+    /// two close ones has legs whose roads pass to one side of it.
+    pub along: f64,
+    pub offset: f64,
+}
+
+/// Where approach `a`'s centreline starts in a junction centred at `centre`.
+fn foot_of(centre: P2, a: &Approach) -> P2 {
+    add(centre, add(mul(dir(a.heading), a.along), mul(P2::normal(a.heading), a.offset)))
 }
 
 impl Approach {
-    /// A two-way road leaving at `heading`.
+    /// A two-way road leaving at `heading`, straight out of the centre.
     pub fn new(heading: f64, standard: RoadStandard) -> Self {
-        Self { heading, standard, flow: Flow::Both }
+        Self { heading, standard, flow: Flow::Both, along: 0.0, offset: 0.0 }
     }
 
     /// Lanes that come into the junction.
@@ -360,6 +371,68 @@ fn intersect(p: P2, u: P2, q: P2, v: P2) -> Option<P2> {
     Some(add(p, mul(u, t)))
 }
 
+/// Twice the signed area of triangle `o a b`: positive when it turns
+/// counter-clockwise (by heading).
+fn cross3(o: P2, a: P2, b: P2) -> f64 {
+    (a.x - o.x) * (b.z - o.z) - (a.z - o.z) * (b.x - o.x)
+}
+
+/// Whether the closed counter-clockwise outline `poly` is star-shaped about
+/// `c`: every edge faces it, so a fan from `c` covers it without folds.
+fn star_shaped(c: P2, poly: &[P2]) -> bool {
+    let n = poly.len();
+    n >= 3 && (0..n).all(|k| cross3(c, poly[k], poly[(k + 1) % n]) >= -1e-6)
+}
+
+/// Triangles (indices into `poly`) that cut the simple counter-clockwise
+/// outline `poly` into ears. Points on a straight run (a mouth's crown
+/// breaks) are kept as corners of the triangles beside them, so the run's
+/// heights hold along the edge.
+fn ear_clip(poly: &[P2]) -> Vec<[usize; 3]> {
+    let same = |a: usize, b: usize| len(sub(poly[a], poly[b])) < 1e-9;
+    let mut idx: Vec<usize> = Vec::with_capacity(poly.len());
+    for k in 0..poly.len() {
+        if idx.last().is_none_or(|&l| !same(l, k)) {
+            idx.push(k);
+        }
+    }
+    while idx.len() > 1 && same(idx[0], idx[idx.len() - 1]) {
+        idx.pop();
+    }
+    let inside = |q: P2, a: P2, b: P2, c: P2| cross3(a, b, q) >= -1e-9 && cross3(b, c, q) >= -1e-9 && cross3(c, a, q) >= -1e-9;
+    let mut out = Vec::with_capacity(idx.len().saturating_sub(2));
+    while idx.len() > 3 {
+        let m = idx.len();
+        let corner = |k: usize| (idx[(k + m - 1) % m], idx[k], idx[(k + 1) % m]);
+        let mut ear = None;
+        let mut widest: Option<(usize, f64)> = None;
+        for k in 0..m {
+            let (a, b, c) = corner(k);
+            let area = cross3(poly[a], poly[b], poly[c]);
+            if area <= 1e-9 {
+                continue; // reflex, or a point on a straight run
+            }
+            if widest.is_none_or(|(_, w)| area > w) {
+                widest = Some((k, area));
+            }
+            if !idx.iter().any(|&q| q != a && q != b && q != c && inside(poly[q], poly[a], poly[b], poly[c])) {
+                ear = Some(k);
+                break;
+            }
+        }
+        // An outline no ear can be cut from cleanly (it crosses itself) still
+        // gets covered, its widest corner first.
+        let Some(k) = ear.or(widest.map(|(k, _)| k)) else { break };
+        let (a, b, c) = corner(k);
+        out.push([a, b, c]);
+        idx.remove(k);
+    }
+    if idx.len() == 3 && cross3(poly[idx[0]], poly[idx[1]], poly[idx[2]]) > 1e-9 {
+        out.push([idx[0], idx[1], idx[2]]);
+    }
+    out
+}
+
 /// Design the junction at `centre` from the roads that leave it.
 pub fn design_junction(centre: P2, approaches: &[Approach]) -> Option<Junction> {
     if approaches.len() < 2 {
@@ -377,6 +450,7 @@ pub fn design_junction(centre: P2, approaches: &[Approach]) -> Option<Junction> 
     let u: Vec<P2> = ap.iter().map(|a| dir(a.heading)).collect();
     let nrm: Vec<P2> = ap.iter().map(|a| P2::normal(a.heading)).collect();
     let h: Vec<f64> = ap.iter().map(|a| kerb_offset(&a.standard)).collect();
+    let foot: Vec<P2> = ap.iter().map(|a| foot_of(centre, a)).collect();
 
     // Corners: approach i's positive-side kerb meets approach j's negative-side kerb.
     let mut corners = Vec::with_capacity(n);
@@ -385,8 +459,8 @@ pub fn design_junction(centre: P2, approaches: &[Approach]) -> Option<Junction> 
         let j = (i + 1) % n;
         let phi = wrap(ap[j].heading - ap[i].heading + if n == 2 && j == 0 { 0.0 } else { 0.0 });
         let phi = if phi < 1e-6 { 2.0 * PI } else { phi };
-        let pi_line = add(centre, mul(nrm[i], h[i]));
-        let pj_line = sub(centre, mul(nrm[j], h[j]));
+        let pi_line = add(foot[i], mul(nrm[i], h[i]));
+        let pj_line = sub(foot[j], mul(nrm[j], h[j]));
         if phi > MIN_RETURN_ANGLE && phi < PI - 0.15 {
             let r = corner_radius(&ap[i].standard, &ap[j].standard);
             let p = intersect(pi_line, u[i], pj_line, u[j])?;
@@ -406,8 +480,8 @@ pub fn design_junction(centre: P2, approaches: &[Approach]) -> Option<Junction> 
             let kerb: Vec<P2> = (0..=steps)
                 .map(|k| add(q, mul(dir(a0 + sweep * k as f64 / steps as f64), r)))
                 .collect();
-            reach[i] = reach[i].max(dot(sub(ti, centre), u[i]));
-            reach[j] = reach[j].max(dot(sub(tj, centre), u[j]));
+            reach[i] = reach[i].max(dot(sub(ti, foot[i]), u[i]));
+            reach[j] = reach[j].max(dot(sub(tj, foot[j]), u[j]));
             corners.push(Corner {
                 a: i,
                 b: j,
@@ -423,15 +497,20 @@ pub fn design_junction(centre: P2, approaches: &[Approach]) -> Option<Junction> 
             });
         }
     }
-    // Setbacks: past every corner, and past the kerbs of every road it crosses.
+    // Setbacks: past every corner, and past the kerbs of every road it
+    // crosses: where its centreline, out from its foot, clears both of that
+    // road's kerb lines.
     let setbacks: Vec<f64> = (0..n)
         .map(|i| {
             let crossing = (0..n)
                 .filter(|&k| k != i)
                 .map(|k| {
-                    let s = angle_diff(ap[k].heading, ap[i].heading).sin().abs();
-                    if s > 0.2 {
-                        h[k] / s
+                    let across = dot(u[i], nrm[k]);
+                    if angle_diff(ap[k].heading, ap[i].heading).sin().abs() > 0.2 {
+                        [-1.0, 1.0]
+                            .map(|side| dot(sub(add(foot[k], mul(nrm[k], side * h[k])), foot[i]), nrm[k]) / across)
+                            .into_iter()
+                            .fold(0.0, f64::max)
                     } else {
                         0.0
                     }
@@ -444,11 +523,11 @@ pub fn design_junction(centre: P2, approaches: &[Approach]) -> Option<Junction> 
     for c in &mut corners {
         if c.ret.is_none() {
             let a = add(
-                centre,
+                foot[c.a],
                 add(mul(u[c.a], setbacks[c.a]), mul(nrm[c.a], h[c.a])),
             );
             let b = add(
-                centre,
+                foot[c.b],
                 sub(mul(u[c.b], setbacks[c.b]), mul(nrm[c.b], h[c.b])),
             );
             c.kerb = vec![a, b];
@@ -457,7 +536,7 @@ pub fn design_junction(centre: P2, approaches: &[Approach]) -> Option<Junction> 
     // The box: each approach's mouth, then its corner's kerb to the next approach.
     let mut boundary = Vec::new();
     for i in 0..n {
-        let mouth = add(centre, mul(u[i], setbacks[i]));
+        let mouth = add(foot[i], mul(u[i], setbacks[i]));
         boundary.push(sub(mouth, mul(nrm[i], h[i])));
         boundary.push(add(mouth, mul(nrm[i], h[i])));
         boundary.extend(corners[i].kerb.iter().copied());
@@ -535,8 +614,8 @@ pub fn design_junction(centre: P2, approaches: &[Approach]) -> Option<Junction> 
                 Movement::Left => vec![(0, 0)],
             };
             for (fl, tl) in pairs {
-                let s0 = add(centre, add(mul(u[i], setbacks[i] + stop_line), mul(nrm[i], ap[i].lane_in_offset(fl))));
-                let s3 = add(centre, add(mul(u[j], setbacks[j] + stop_line), mul(nrm[j], ap[j].lane_out_offset(tl))));
+                let s0 = add(foot[i], add(mul(u[i], setbacks[i] + stop_line), mul(nrm[i], ap[i].lane_in_offset(fl))));
+                let s3 = add(foot[j], add(mul(u[j], setbacks[j] + stop_line), mul(nrm[j], ap[j].lane_out_offset(tl))));
                 let l = len(sub(s3, s0));
                 let s1 = add(s0, mul(u[i], -l / 3.0));
                 let s2 = sub(s3, mul(u[j], l / 3.0));
@@ -589,12 +668,25 @@ pub fn design_junction(centre: P2, approaches: &[Approach]) -> Option<Junction> 
 }
 
 impl Junction {
+    /// Where approach `i`'s centreline starts: the centre, unless the leg's
+    /// road passes to one side of it ([`Approach::offset`]).
+    pub fn foot(&self, i: usize) -> P2 {
+        foot_of(self.centre, &self.approaches[i])
+    }
+
+    /// The point `d` metres along approach `i` from its foot and `o` across
+    /// it (positive to the right of its outward heading).
+    pub fn at(&self, i: usize, d: f64, o: f64) -> P2 {
+        let a = &self.approaches[i];
+        add(self.foot(i), add(mul(dir(a.heading), d), mul(P2::normal(a.heading), o)))
+    }
+
     /// Stations for approach `i`'s road: straight from its mouth outward, `length`
     /// metres at `step` spacing (the start of the road the approach belongs to).
     pub fn approach_stations(&self, i: usize, length: f64, step: f64) -> Vec<Station> {
         let a = &self.approaches[i];
         let u = dir(a.heading);
-        let mouth = add(self.centre, mul(u, self.setbacks[i]));
+        let mouth = self.at(i, self.setbacks[i], 0.0);
         let n = (length / step).ceil() as usize;
         (0..=n)
             .map(|k| {
@@ -652,7 +744,7 @@ impl Junction {
             offs.push(h);
             offs.sort_by(f64::total_cmp);
             offs.dedup_by(|a, b| (*a - *b).abs() < 1e-6);
-            let mouth = add(self.centre, mul(u[i], self.setbacks[i]));
+            let mouth = self.at(i, self.setbacks[i], 0.0);
             for o in offs {
                 let p = add(mouth, mul(nrm[i], o));
                 out.push([p.x, hgt(i, self.setbacks[i], o), p.z]);
@@ -664,8 +756,8 @@ impl Junction {
                 continue;
             }
             let hj = kerb_offset(&self.approaches[j].standard);
-            let ha = hgt(i, dot(sub(c.kerb[0], self.centre), u[i]), h);
-            let hb = hgt(j, dot(sub(c.kerb[m - 1], self.centre), u[j]), -hj);
+            let ha = hgt(i, dot(sub(c.kerb[0], self.foot(i)), u[i]), h);
+            let hb = hgt(j, dot(sub(c.kerb[m - 1], self.foot(j)), u[j]), -hj);
             for (k, p) in c.kerb.iter().enumerate() {
                 let t = if m > 1 { k as f64 / (m - 1) as f64 } else { 0.0 };
                 let s = t * t * (3.0 - 2.0 * t);
@@ -687,28 +779,41 @@ impl Junction {
         let hgt = |i: usize, d: f64, o: f64| surfaces.get(i).map_or(0.0, |s| s.height(d, o));
         let u: Vec<P2> = self.approaches.iter().map(|a| dir(a.heading)).collect();
         let nrm: Vec<P2> = self.approaches.iter().map(|a| P2::normal(a.heading)).collect();
-        // The box: a fan from the centre (it is star-shaped about the centre).
+        // The box: a fan from the centre where it is star-shaped about the
+        // centre (every leg runs out of it), else its outline cut into ears
+        // (a merged junction whose roads pass to one side of the centre).
         {
             let boundary = self.draped_boundary(surfaces);
-            let centre_h = (0..n).map(|i| hgt(i, 0.0, 0.0)).sum::<f64>() / n.max(1) as f64;
             let m = out.part(Surface::Carriageway);
             let base = m.positions.len() as u32;
-            m.positions.push([self.centre.x as f32, (centre_h + lift) as f32, self.centre.z as f32]);
-            m.uvs.push([self.centre.x as f32, self.centre.z as f32]);
-            m.normals.push([0.0, 1.0, 0.0]);
+            let flat: Vec<P2> = boundary.iter().map(|p| P2::new(p[0], p[2])).collect();
+            let fan = star_shaped(self.centre, &flat);
+            if fan {
+                let centre_h = (0..n).map(|i| hgt(i, 0.0, 0.0)).sum::<f64>() / n.max(1) as f64;
+                m.positions.push([self.centre.x as f32, (centre_h + lift) as f32, self.centre.z as f32]);
+                m.uvs.push([self.centre.x as f32, self.centre.z as f32]);
+                m.normals.push([0.0, 1.0, 0.0]);
+            }
+            let first = m.positions.len() as u32;
             for p in &boundary {
                 m.positions.push([p[0] as f32, (p[1] + lift) as f32, p[2] as f32]);
                 m.uvs.push([p[0] as f32, p[2] as f32]);
                 m.normals.push([0.0, 1.0, 0.0]);
             }
             let k = boundary.len() as u32;
-            for i in 0..k {
-                m.indices.extend([base, base + 1 + (i + 1) % k, base + 1 + i]);
+            if fan {
+                for i in 0..k {
+                    m.indices.extend([base, first + (i + 1) % k, first + i]);
+                }
+            } else {
+                for [a, b, c] in ear_clip(&flat) {
+                    m.indices.extend([first + a as u32, first + b as u32, first + c as u32]);
+                }
             }
         }
         // A point `d` along approach `i` and `o` across it, on its surface raised `dz`.
         let on = |i: usize, d: f64, o: f64, dz: f64| -> ([f64; 3], [f64; 2]) {
-            let p = add(self.centre, add(mul(u[i], d), mul(nrm[i], o)));
+            let p = self.at(i, d, o);
             ([p.x, hgt(i, d, o) + lift + dz, p.z], [p.x, p.z])
         };
         // A patch of approach `i`'s surface from `d0` to `d1` along it and
@@ -750,7 +855,7 @@ impl Junction {
                 Some((r, q)) => {
                     let m = c.kerb.len();
                     let (ta, tb) = (c.kerb[0], c.kerb[m - 1]);
-                    let (da, db) = (dot(sub(ta, self.centre), u[c.a]), dot(sub(tb, self.centre), u[c.b]));
+                    let (da, db) = (dot(sub(ta, self.foot(c.a)), u[c.a]), dot(sub(tb, self.foot(c.b)), u[c.b]));
                     // Heights across the kerb and sidewalk at each end of the return.
                     let ends = |w: f64| (hgt(c.a, da, ha + w), hgt(c.b, db, -(hb + w)));
                     let ring = |w: f64| -> Vec<[f64; 3]> {
@@ -847,6 +952,10 @@ pub const JUNCTION_SNAP: f64 = 12.0;
 const JUNCTION_MAX_STEP: f64 = 3.0;
 /// Junctions closer than this merge into one, metres.
 const JUNCTION_MERGE: f64 = 15.0;
+/// Junctions whose centres stand closer than this leave less than a usable
+/// block between them, metres: two a road joins merge into one, and
+/// `Road:Audit` reports any others.
+pub const MIN_JUNCTION_SPACING: f64 = 40.0;
 /// A road's own end is this close before a meeting near it counts as at its
 /// end rather than along it, metres.
 const END_CLEAR: f64 = 15.0;
@@ -907,6 +1016,9 @@ pub struct Leg {
     pub s: f64,
     pub heading: f64,
     pub outward: bool,
+    /// The road ends in this junction (this is its only leg there): nothing
+    /// of it behind the leg's foot is drawn.
+    pub ends_here: bool,
 }
 
 /// A junction of a road network: where it is, its height, the legs that
@@ -970,8 +1082,8 @@ impl NetworkJunction {
     pub fn on_a_leg(&self, p: P2) -> bool {
         let j = &self.junction;
         j.approaches.iter().enumerate().any(|(i, a)| {
-            let along = dot(sub(p, j.centre), dir(a.heading));
-            let across = dot(sub(p, j.centre), P2::normal(a.heading));
+            let along = dot(sub(p, j.foot(i)), dir(a.heading));
+            let across = dot(sub(p, j.foot(i)), P2::normal(a.heading));
             along >= j.setbacks[i] - 1e-3 && across.abs() <= a.standard.formation_half_width() + 0.5
         })
     }
@@ -1067,7 +1179,8 @@ fn segments_cross(a0: P2, a1: P2, b0: P2, b1: P2) -> Option<(f64, f64)> {
 /// Roads more than [`JUNCTION_MAX_STEP`] apart in height there cross at
 /// different levels instead and meet nowhere. Two road ends meeting head to
 /// head with nothing else are one road continuing and need no junction.
-/// Meetings within [`JUNCTION_MERGE`] of each other are one junction.
+/// Meetings within [`JUNCTION_MERGE`] of each other are one junction, and so
+/// are junctions a road joins within [`MIN_JUNCTION_SPACING`] of each other.
 pub fn find_junctions(roads: &[(u64, &DesignedRoad)]) -> Vec<NetworkJunction> {
     // Segment grid over every road's stations.
     let mut grid: std::collections::BTreeMap<(i64, i64), Vec<(usize, usize)>> = std::collections::BTreeMap::new();
@@ -1191,91 +1304,168 @@ pub fn find_junctions(roads: &[(u64, &DesignedRoad)]) -> Vec<NetworkJunction> {
             None => merged.push((p, met, 1)),
         }
     }
-    // Legs: an end gives one, a meeting along a road gives two.
-    let mut out = Vec::new();
-    for (centre, met, _) in merged {
-        // The box builds every leg straight out from its centre, so the
-        // centre stands where the roads' centrelines meet (the point nearest
-        // all their lines, as an end's own position or an average of nearby
-        // meetings need not be), and each leg's distance is measured from it
-        // along its road: past an end that stops short of the centre, so the
-        // road's surface begins exactly at the box's mouth.
-        let centre = centre_of_lines(roads, &met).filter(|c| len(sub(*c, centre)) <= 2.0 * JUNCTION_MERGE).unwrap_or(centre);
-        let mut legs: Vec<(Leg, RoadStandard)> = Vec::new();
-        for (r, s) in met {
-            let d = roads[r].1;
-            let st = &d.stations[station_at(d, s)];
-            let (id, standard) = (roads[r].0, d.standard);
-            let end = total(r);
-            let at = s + dot(sub(centre, st.pos), dir(st.heading));
-            if s <= 1e-9 {
-                legs.push((Leg { road: id, s: at.min(END_CLEAR), heading: st.heading, outward: true }, standard));
-            } else if (end - s).abs() <= 1e-9 {
-                legs.push((Leg { road: id, s: at.max(end - END_CLEAR), heading: st.heading + PI, outward: false }, standard));
-            } else {
-                legs.push((Leg { road: id, s: at, heading: st.heading, outward: true }, standard));
-                legs.push((Leg { road: id, s: at, heading: st.heading + PI, outward: false }, standard));
-            }
-        }
-        // Two roads' legs side by side (a merge left two near-parallel roads
-        // in one junction): the higher class keeps its leg, then the road
-        // listed first; the other runs on over it without meeting here.
-        let rank_of = |leg: &Leg, st: &RoadStandard| (rank(st.class), std::cmp::Reverse(roads.iter().position(|(id, _)| *id == leg.road).unwrap_or(usize::MAX)));
-        let mut keep = vec![true; legs.len()];
-        for x in 0..legs.len() {
-            for y in 0..legs.len() {
-                if x == y || !keep[x] || !keep[y] || legs[x].0.road == legs[y].0.road {
-                    continue;
-                }
-                if angle_diff(legs[x].0.heading, legs[y].0.heading).abs() < MIN_MEETING_ANGLE
-                    && rank_of(&legs[x].0, &legs[x].1) >= rank_of(&legs[y].0, &legs[y].1)
-                {
-                    keep[y] = false;
-                }
-            }
-        }
-        let mut k = 0;
-        legs.retain(|_| {
-            k += 1;
-            keep[k - 1]
+    // Junctions a road joins closer than MIN_JUNCTION_SPACING leave no usable
+    // block between them (the stub carries back-to-back crosswalks and stop
+    // bars): they are one junction. Every member of a group stands within
+    // that of every other, so a row of close junctions never chains into one.
+    let shares_road = |a: &[(usize, f64)], b: &[(usize, f64)]| a.iter().any(|(r, _)| b.iter().any(|(o, _)| o == r));
+    let mut groups: Vec<Vec<usize>> = Vec::new();
+    for k in 0..merged.len() {
+        let joins = groups.iter().position(|g| {
+            g.iter().all(|&m| len(sub(merged[m].0, merged[k].0)) < MIN_JUNCTION_SPACING)
+                && g.iter().any(|&m| shares_road(&merged[m].1, &merged[k].1))
         });
-        if legs.len() < 2 {
-            continue;
+        #[cfg(test)]
+        let joins = if super::mutant("g02") { None } else { joins };
+        match joins {
+            Some(g) => groups[g].push(k),
+            None => groups.push(vec![k]),
         }
-        // Two ends head to head: one road continuing.
-        if legs.len() == 2 && angle_diff(legs[0].0.heading, legs[1].0.heading).abs() > PI - 0.35 {
-            continue;
+    }
+    let mut out = Vec::new();
+    for group in groups {
+        if group.len() > 1 {
+            let weight: f64 = group.iter().map(|&m| merged[m].2 as f64).sum();
+            let near = group.iter().fold(P2::new(0.0, 0.0), |acc, &m| add(acc, mul(merged[m].0, merged[m].2 as f64 / weight)));
+            let met: Vec<(usize, f64)> = group.iter().flat_map(|&m| merged[m].1.iter().copied()).collect();
+            let met = one_meeting_per_road(roads, &met, near);
+            if let Some(j) = network_junction(roads, near, met, MIN_JUNCTION_SPACING) {
+                out.push(j);
+                continue;
+            }
         }
-        legs.sort_by(|a, b| wrap(a.0.heading).total_cmp(&wrap(b.0.heading)));
-        // A one-way road's leg runs out of the junction when it leaves toward
-        // increasing distance (the road's own way), in otherwise.
-        let approaches: Vec<Approach> = legs
-            .iter()
-            .map(|(l, st)| Approach {
-                heading: l.heading,
-                standard: *st,
-                flow: match (st.one_way, l.outward) {
-                    (false, _) => Flow::Both,
-                    (true, true) => Flow::Outbound,
-                    (true, false) => Flow::Inbound,
-                },
-            })
-            .collect();
-        let Some(junction) = design_junction(centre, &approaches) else { continue };
-        // Each leg's surface out past its crosswalk and stop bar.
-        let surfaces: Vec<LegSurface> = legs
-            .iter()
-            .enumerate()
-            .map(|(i, (l, _))| {
-                let r = roads.iter().position(|(id, _)| *id == l.road).expect("a leg's road");
-                let reach = junction.setbacks[i] + CROSSWALK_LENGTH + STOP_BAR_GAP + STOP_BAR_WIDTH + 2.0;
-                leg_surface(roads[r].1, l, reach)
-            })
-            .collect();
-        let elevation = surfaces.iter().map(|s| s.height(0.0, 0.0)).sum::<f64>() / surfaces.len() as f64;
-        out.push(NetworkJunction { centre, elevation, legs: legs.into_iter().map(|(l, _)| l).collect(), junction, surfaces });
+        // One junction, or a group whose merged box cannot be designed: each
+        // member on its own.
+        for &m in &group {
+            let (near, met, _) = &merged[m];
+            out.extend(network_junction(roads, *near, met.clone(), 2.0 * JUNCTION_MERGE));
+        }
     }
     out
+}
+
+/// One meeting per road in a junction merged from several close ones,
+/// nearest `near`: a road that ends there keeps its end (both, when both
+/// end there); a road that passes through meets it once, where its meeting
+/// stands nearest `near`.
+fn one_meeting_per_road(roads: &[(u64, &DesignedRoad)], met: &[(usize, f64)], near: P2) -> Vec<(usize, f64)> {
+    let total = |r: usize| roads[r].1.stations.last().map_or(0.0, |st| st.s);
+    let mut out: Vec<(usize, f64)> = Vec::new();
+    let mut seen: Vec<usize> = Vec::new();
+    for &(r, _) in met {
+        if seen.contains(&r) {
+            continue;
+        }
+        seen.push(r);
+        let mine: Vec<f64> = met.iter().filter(|(m, _)| *m == r).map(|(_, s)| *s).collect();
+        let ends: Vec<f64> = mine.iter().copied().filter(|&s| s <= 1e-9 || (total(r) - s).abs() <= 1e-9).collect();
+        if ends.is_empty() {
+            let d = roads[r].1;
+            let gap = |s: f64| len(sub(d.stations[station_at(d, s)].pos, near));
+            let s = mine.iter().copied().min_by(|a, b| gap(*a).total_cmp(&gap(*b))).expect("a meeting");
+            out.push((r, s));
+        } else {
+            for s in ends {
+                if !out.iter().any(|&(m, ms)| m == r && (ms - s).abs() <= 1e-9) {
+                    out.push((r, s));
+                }
+            }
+        }
+    }
+    out
+}
+
+/// The junction where the roads of `met` meet near `near`, centred where
+/// their centrelines meet when that lies within `reach` of `near`. Each
+/// leg's distance is measured along its road from the centre's foot on it,
+/// so the road's surface begins exactly at the box's mouth; a leg whose road
+/// passes to one side of the centre keeps that offset. `None` when fewer
+/// than two legs remain, two ends meet head to head (one road continuing),
+/// or no box fits.
+fn network_junction(roads: &[(u64, &DesignedRoad)], near: P2, met: Vec<(usize, f64)>, reach: f64) -> Option<NetworkJunction> {
+    let total = |r: usize| roads[r].1.stations.last().map_or(0.0, |st| st.s);
+    let centre = centre_of_lines(roads, &met).filter(|c| len(sub(*c, near)) <= reach).unwrap_or(near);
+    // Each leg with its road's standard and its foot.
+    let mut legs: Vec<(Leg, RoadStandard, P2)> = Vec::new();
+    for (r, s) in met {
+        let d = roads[r].1;
+        let st = &d.stations[station_at(d, s)];
+        let (id, standard) = (roads[r].0, d.standard);
+        let end = total(r);
+        let u = dir(st.heading);
+        // The centre's foot on the road's line there, as a distance along it.
+        let at = st.s + dot(sub(centre, st.pos), u);
+        let foot = |leg_s: f64| add(st.pos, mul(u, leg_s - st.s));
+        if s <= 1e-9 {
+            let ls = at.min(END_CLEAR);
+            legs.push((Leg { road: id, s: ls, heading: st.heading, outward: true, ends_here: true }, standard, foot(ls)));
+        } else if (end - s).abs() <= 1e-9 {
+            let ls = at.max(end - END_CLEAR);
+            legs.push((Leg { road: id, s: ls, heading: st.heading + PI, outward: false, ends_here: true }, standard, foot(ls)));
+        } else {
+            legs.push((Leg { road: id, s: at, heading: st.heading, outward: true, ends_here: false }, standard, foot(at)));
+            legs.push((Leg { road: id, s: at, heading: st.heading + PI, outward: false, ends_here: false }, standard, foot(at)));
+        }
+    }
+    // Two roads' legs side by side (a merge left two near-parallel roads
+    // in one junction): the higher class keeps its leg, then the road
+    // listed first; the other runs on over it without meeting here.
+    let rank_of = |leg: &Leg, st: &RoadStandard| (rank(st.class), std::cmp::Reverse(roads.iter().position(|(id, _)| *id == leg.road).unwrap_or(usize::MAX)));
+    let mut keep = vec![true; legs.len()];
+    for x in 0..legs.len() {
+        for y in 0..legs.len() {
+            if x == y || !keep[x] || !keep[y] || legs[x].0.road == legs[y].0.road {
+                continue;
+            }
+            if angle_diff(legs[x].0.heading, legs[y].0.heading).abs() < MIN_MEETING_ANGLE
+                && rank_of(&legs[x].0, &legs[x].1) >= rank_of(&legs[y].0, &legs[y].1)
+            {
+                keep[y] = false;
+            }
+        }
+    }
+    let mut k = 0;
+    legs.retain(|_| {
+        k += 1;
+        keep[k - 1]
+    });
+    if legs.len() < 2 {
+        return None;
+    }
+    // Two ends head to head: one road continuing.
+    if legs.len() == 2 && angle_diff(legs[0].0.heading, legs[1].0.heading).abs() > PI - 0.35 {
+        return None;
+    }
+    legs.sort_by(|a, b| wrap(a.0.heading).total_cmp(&wrap(b.0.heading)));
+    // A one-way road's leg runs out of the junction when it leaves toward
+    // increasing distance (the road's own way), in otherwise.
+    let approaches: Vec<Approach> = legs
+        .iter()
+        .map(|(l, st, foot)| Approach {
+            heading: l.heading,
+            standard: *st,
+            flow: match (st.one_way, l.outward) {
+                (false, _) => Flow::Both,
+                (true, true) => Flow::Outbound,
+                (true, false) => Flow::Inbound,
+            },
+            along: dot(sub(*foot, centre), dir(l.heading)),
+            offset: dot(sub(*foot, centre), P2::normal(l.heading)),
+        })
+        .collect();
+    let junction = design_junction(centre, &approaches)?;
+    // Each leg's surface out past its crosswalk and stop bar.
+    let surfaces: Vec<LegSurface> = legs
+        .iter()
+        .enumerate()
+        .map(|(i, (l, _, _))| {
+            let r = roads.iter().position(|(id, _)| *id == l.road).expect("a leg's road");
+            let reach = junction.setbacks[i] + CROSSWALK_LENGTH + STOP_BAR_GAP + STOP_BAR_WIDTH + 2.0;
+            leg_surface(roads[r].1, l, reach)
+        })
+        .collect();
+    let elevation = surfaces.iter().map(|s| s.height(0.0, 0.0)).sum::<f64>() / surfaces.len() as f64;
+    Some(NetworkJunction { centre, elevation, legs: legs.into_iter().map(|(l, _, _)| l).collect(), junction, surfaces })
 }
 
 #[cfg(test)]
@@ -1312,13 +1502,88 @@ mod tests {
             let s_m = if l.outward { l.s + sb } else { l.s - sb };
             let st = &d.stations[station_at(d, s_m.clamp(0.0, d.stations.last().unwrap().s))];
             let a = &j.junction.approaches[i];
-            let mouth = add(j.centre, mul(dir(a.heading), sb));
+            let mouth = j.junction.at(i, sb, 0.0);
             let off = dot(sub(st.pos, mouth), P2::normal(a.heading));
             assert!(off.abs() < 0.1, "leg {i}'s mouth stands {off:+.2} m off road {}", l.road);
         }
         // The stem's leg starts at the centre, 6 m past its end.
         let stem_leg = j.legs.iter().find(|l| l.road == 2).unwrap();
         assert!((stem_leg.s - 60.0).abs() < 0.1, "the stem's leg starts at s {:.2}, not at the centre", stem_leg.s);
+    }
+
+    /// A road through `pts` (x, z), Local or Collector, level at 5 m.
+    fn through(class: RoadClass, pts: &[(f64, f64)]) -> DesignedRoad {
+        let spec = RoadSpec::new(class, ProfileMode::Explicit);
+        let p: Vec<(P2, f64)> = pts.iter().map(|&(x, z)| (P2::new(x, z), 5.0)).collect();
+        design_spline(&p, spec, 0.0, 2.0, 0.0, |_| 5.0).unwrap()
+    }
+
+    #[test]
+    fn junctions_a_short_stub_apart_are_one_box() {
+        // The Campus junction of TerrainBenchmark: three roads end together
+        // at A, and a fourth starts on one of them 31 m east of A. Two boxes
+        // would leave a stub carrying back-to-back crosswalks; it is one
+        // junction of four legs, each mouth on its own road.
+        let west = through(RoadClass::Local, &[(-1000.0, 120.0), (-730.0, 100.0)]);
+        let east = through(RoadClass::Collector, &[(-730.0, 100.0), (-400.0, 130.0), (-50.0, 160.0)]);
+        let south = through(RoadClass::Collector, &[(-850.0, -70.0), (-730.0, 100.0)]);
+        let north = through(RoadClass::Collector, &[(-699.3, 102.8), (-700.0, 700.0)]);
+        let roads = [(1u64, &west), (2, &east), (3, &south), (4, &north)];
+        let js = find_junctions(&roads);
+        assert_eq!(js.len(), 1, "junctions at {:?}", js.iter().map(|j| j.centre).collect::<Vec<_>>());
+        let j = &js[0];
+        let mut legs: Vec<u64> = j.legs.iter().map(|l| l.road).collect();
+        legs.sort_unstable();
+        assert_eq!(legs, vec![1, 2, 3, 4], "one leg per road");
+        let rd = |id: u64| roads.iter().find(|(r, _)| *r == id).unwrap().1;
+        for (i, l) in j.legs.iter().enumerate() {
+            let d = rd(l.road);
+            let sb = j.junction.setbacks[i];
+            let s_m = if l.outward { l.s + sb } else { l.s - sb };
+            let st = &d.stations[station_at(d, s_m.clamp(0.0, d.stations.last().unwrap().s))];
+            let a = &j.junction.approaches[i];
+            let mouth = j.junction.at(i, sb, 0.0);
+            let off = dot(sub(st.pos, mouth), P2::normal(a.heading));
+            let along = dot(sub(st.pos, mouth), dir(a.heading));
+            assert!(off.abs() < 0.2 && along.abs() < 1.5, "road {}'s mouth stands {off:+.2} m across and {along:+.2} m along off it", l.road);
+            assert!(sb < MAX_JUNCTION_SETBACK, "road {}'s setback ran to the backstop", l.road);
+            assert!(l.ends_here, "every road ends in this junction");
+        }
+        // The east road starts inside the box: none of it is drawn before its mouth.
+        let east_leg = j.legs.iter().position(|l| l.road == 2).unwrap();
+        let zones = super::super::road_surface::junction_zones(2, js.iter());
+        let mouth_s = j.legs[east_leg].s + j.junction.setbacks[east_leg];
+        assert!(zones.gaps.iter().any(|&(a, b)| a <= 0.0 && (b - mouth_s).abs() < 1e-6), "{:?} vs mouth at {mouth_s:.2}", zones.gaps);
+        // The box covers its outline exactly once.
+        let built = j.meshes(0.0);
+        let cw = &built.parts.iter().find(|(k, _)| *k == Surface::Carriageway).unwrap().1;
+        let tri_area: f64 = cw
+            .indices
+            .chunks_exact(3)
+            .map(|t| {
+                let p = |i: u32| P2::new(cw.positions[i as usize][0] as f64, cw.positions[i as usize][2] as f64);
+                cross3(p(t[0]), p(t[1]), p(t[2])).abs() / 2.0
+            })
+            .sum();
+        let outline: Vec<P2> = j.junction.draped_boundary(&j.surfaces).iter().map(|p| P2::new(p[0], p[2])).collect();
+        let poly_area: f64 = (0..outline.len()).map(|k| cross3(P2::new(0.0, 0.0), outline[k], outline[(k + 1) % outline.len()])).sum::<f64>() / 2.0;
+        assert!(poly_area > 0.0, "the outline runs counter-clockwise");
+        assert!((tri_area - poly_area).abs() < 1e-3 * poly_area, "triangles cover {tri_area:.1} m2 of a {poly_area:.1} m2 box");
+    }
+
+    #[test]
+    fn ear_clipping_covers_a_box_no_fan_can() {
+        // An L-shaped outline with a straight run of three points along its
+        // foot: not star-shaped about (9, 9), and every point kept.
+        let poly = [(0.0, 0.0), (5.0, 0.0), (10.0, 0.0), (10.0, 4.0), (4.0, 4.0), (4.0, 10.0), (0.0, 10.0)].map(|(x, z)| P2::new(x, z));
+        assert!(!star_shaped(P2::new(9.0, 9.0), &poly));
+        assert!(star_shaped(P2::new(2.0, 2.0), &poly));
+        let tris = ear_clip(&poly);
+        assert_eq!(tris.len(), poly.len() - 2);
+        let area: f64 = tris.iter().map(|t| cross3(poly[t[0]], poly[t[1]], poly[t[2]])).sum::<f64>() / 2.0;
+        assert!((area - 64.0).abs() < 1e-9, "{area}");
+        assert!(tris.iter().all(|t| cross3(poly[t[0]], poly[t[1]], poly[t[2]]) > 0.0), "every ear faces up");
+        assert!(tris.iter().any(|t| t.contains(&1)), "the point on the straight run is a corner of a triangle");
     }
 
     #[test]
@@ -1379,8 +1644,8 @@ mod tests {
     fn approach_of(j: &Junction, p: P2) -> Option<(usize, f64, f64)> {
         (0..j.approaches.len()).find_map(|i| {
             let a = &j.approaches[i];
-            let along = dot(sub(p, j.centre), dir(a.heading));
-            let across = dot(sub(p, j.centre), P2::normal(a.heading));
+            let along = dot(sub(p, j.foot(i)), dir(a.heading));
+            let across = dot(sub(p, j.foot(i)), P2::normal(a.heading));
             (along >= j.setbacks[i] - 0.01 && across.abs() <= kerb_offset(&a.standard) + 0.01).then_some((i, along, across))
         })
     }
@@ -1436,6 +1701,30 @@ mod tests {
             }
         }
         assert!(worst < 0.005, "the box steps {worst:.3} m from a road at its mouth");
+    }
+
+    #[test]
+    fn the_box_and_its_roads_share_one_texture_frame() {
+        // Every paved surface that faces up, the box's and each road's,
+        // samples its textures in world X and Z, so the asphalt runs on
+        // across each mouth with no seam, whatever angle the road meets the
+        // box at. Faces that stand up (kerb faces, the sidewalk's skirt)
+        // texture along and up their face instead.
+        let (a, b, j) = graded_crossing();
+        let paved = |k: &Surface| matches!(k, Surface::Carriageway | Surface::Shoulder | Surface::Kerb | Surface::Sidewalk);
+        let mut checked = 0;
+        let mut worst: f32 = 0.0;
+        let roads = [super::super::road_mesh::build_designed(&a, 0.03), super::super::road_mesh::build_designed(&b, 0.03), j.meshes(0.03)];
+        for built in &roads {
+            for (_, m) in built.parts.iter().filter(|(k, _)| paved(k)) {
+                for ((p, uv), _) in m.positions.iter().zip(&m.uvs).zip(&m.normals).filter(|(_, n)| n[1] > 0.7) {
+                    worst = worst.max((uv[0] - p[0]).abs()).max((uv[1] - p[2]).abs());
+                    checked += 1;
+                }
+            }
+        }
+        assert!(checked > 1000, "only {checked} vertices");
+        assert!(worst < 1e-3, "a surface's texture frame is {worst:.2} m off world X and Z");
     }
 
     #[test]

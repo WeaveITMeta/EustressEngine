@@ -33,6 +33,8 @@ if [[ "$PAGES_BRANCH" == "main" || "$PAGES_PROJECT" != "eustress" ]]; then
 fi
 
 export PATH="${HOME}/.local/bin:${PATH}"
+# trunk reads NO_COLOR as true/false and refuses the common NO_COLOR=1.
+unset NO_COLOR
 if ! command -v wasm-bindgen >/dev/null; then
   echo "wasm-bindgen 0.2.128 is not on PATH (see docs/launch/BROWSER_PLAYER_STAGING.md)" >&2
   exit 1
@@ -48,6 +50,8 @@ if [[ "$BINDGEN" != "$LOCK_BINDGEN" ]]; then
 fi
 
 cd "$EUSTRESS"
+# The Luau VM's C++ builds against wasi-sysroot (see the file's header).
+source "$EUSTRESS/scripts/wasm-luau-env.sh"
 echo "building WebGPU browser Player"
 cargo build --release --target wasm32-unknown-unknown -p eustress-player-web --no-default-features --features webgpu
 WEBGPU_WASM="target/wasm32-unknown-unknown/release/eustress_player.wasm"
@@ -64,6 +68,12 @@ fi
 STAGE="$(mktemp -d)"
 trap 'rm -rf "$STAGE"' EXIT
 PKG=(node crates/player-web/package_player.mjs --workspace "$EUSTRESS" --out "$STAGE/player" --webgpu "$WEBGPU_WASM")
+# The Player the last build staged, carried forward (package_player.mjs --keep):
+# a page that cached the older host.js still loads the build it names. Run
+# this right after the previous deploy, so dist/player is what the site serves.
+if [[ -f "$WEB/dist/player/host.js" ]]; then
+  PKG+=(--keep "$WEB/dist/player")
+fi
 if [[ "$WEBGL2" == 1 ]]; then
   PKG+=(--webgl2 target/wasm32-unknown-unknown/release/eustress_player_webgl2.wasm)
 fi

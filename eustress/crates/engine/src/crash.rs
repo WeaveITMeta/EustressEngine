@@ -1,11 +1,14 @@
 //! What a renderer failure means, and what the process should do about it.
 //!
 //! A lost GPU device (`wgpu` `DeviceLost`, "driver implementation is at
-//! fault") is not an out-of-memory condition. Bevy's default handler quits
-//! the whole app, and the next `Buffer::get_mapped_range` inside
-//! `bevy_pbr`'s GPU light clustering then panics. A hosted session does not
-//! need that renderer: drawing stops, and the simulation keeps running.
-//! `--server` never starts the renderer, so this path does not apply there.
+//! fault") is not an out-of-memory condition. Studio answers it with the
+//! Player's shared recovery (`eustress_play_runtime::gpu_recovery`, added in
+//! `main.rs`): the frame that notices the loss draws nothing more, the
+//! renderer is rebuilt once the driver is back, and the simulation, scripts
+//! and a hosted session keep running throughout. [`show_renderer_health`]
+//! tells the user. A panic that still escapes is classified here for the exit
+//! path in `main.rs`. `--server` never starts the renderer, so none of this
+//! applies there.
 
 use bevy::prelude::*;
 
@@ -58,46 +61,60 @@ pub fn is_gpu_device_lost(msg: &str) -> bool {
         || (msg.contains("get_mapped_range") && msg.contains("Validation"))
 }
 
-/// Bevy calls this for every `RenderError`. A lost device stops drawing and
-/// does not close the app, so a play session that is hosting keeps its
-/// players. Out of memory, and any other renderer fault, still ends the process.
-pub fn on_render_error(
-    error: &bevy::render::error_handler::RenderError,
-    main: &mut World,
-    _render: &mut World,
-) -> bevy::render::error_handler::RenderErrorPolicy {
-    use bevy::render::error_handler::{ErrorType, RenderErrorPolicy};
-    if error.ty == ErrorType::DeviceLost || is_gpu_device_lost(&error.description) {
-        error!(
-            target: "eustress_engine::crash",
-            reason = %error.description,
-            "GPU device lost — drawing stops; the simulation keeps running. Host with --server to avoid the GPU entirely."
-        );
-        return RenderErrorPolicy::StopRendering;
+/// Studio's plain notice while the renderer recovers from a graphics driver
+/// reset, or after it has stopped (`eustress_play_runtime::gpu_recovery`).
+///
+/// The window title carries it, because Windows draws the title bar while
+/// Studio's own drawing (the viewport and every panel) is paused. A
+/// notification follows, which shows once the panels draw again. The title
+/// goes back to the Space's own once drawing returns, unless the Space
+/// changed meanwhile and `update_window_title` already set a new one.
+pub fn show_renderer_health(
+    health: Option<Res<eustress_play_runtime::gpu_recovery::RendererHealth>>,
+    mut windows: Query<&mut Window, With<bevy::window::PrimaryWindow>>,
+    mut notifications: Option<ResMut<crate::notifications::NotificationManager>>,
+    mut plain_title: Local<Option<String>>,
+) {
+    use eustress_play_runtime::gpu_recovery::{health_notice, RendererHealth};
+    let Some(health) = health else { return };
+    if !health.is_changed() {
+        return;
     }
-    if error.ty == ErrorType::OutOfMemory {
-        error!(
-            target: "eustress_engine::crash",
-            "GPU out of memory — quitting"
-        );
-        main.write_message(AppExit::error());
-        return RenderErrorPolicy::StopRendering;
+    match health_notice(*health) {
+        Some(notice) => {
+            for mut window in &mut windows {
+                let plain = plain_title.get_or_insert_with(|| window.title.clone()).clone();
+                window.title = format!("{notice} | {plain}");
+            }
+            if let Some(notifications) = notifications.as_deref_mut() {
+                if *health == RendererHealth::Stopped {
+                    notifications.error(notice);
+                } else {
+                    notifications.warning(notice);
+                }
+            }
+        }
+        None => {
+            let Some(plain) = plain_title.take() else { return };
+            for mut window in &mut windows {
+                if window.title.ends_with(&format!(" | {plain}")) {
+                    window.title = plain.clone();
+                }
+            }
+            if let Some(notifications) = notifications.as_deref_mut() {
+                notifications.success("The graphics driver reset and drawing is back. The simulation kept running.");
+            }
+        }
     }
-    error!(
-        target: "eustress_engine::crash",
-        kind = ?error.ty,
-        reason = %error.description,
-        "render error — quitting"
-    );
-    main.write_message(AppExit::error());
-    RenderErrorPolicy::StopRendering
 }
 
 /// Turn GPU light clustering off once Play starts.
 ///
-/// The mapped-range panic is inside that pass. CPU clustering is the
-/// fallback Bevy already uses when the device cannot compute, and it does
-/// not map that buffer. Edit mode is left on the GPU path.
+/// This was the guard against the mapped-range panic of a lost device. The
+/// 11-18 loss panicked in `prepare_clusters_for_cpu_clustering` too, so it
+/// does not protect against that; the render-set gate in
+/// `eustress_play_runtime::gpu_recovery` does. Edit mode is left on the GPU
+/// path.
 pub fn prefer_cpu_clustering_in_play(
     state: Option<Res<State<crate::play_mode::PlayModeState>>>,
     mut settings: Option<ResMut<bevy::light::cluster::GlobalClusterSettings>>,

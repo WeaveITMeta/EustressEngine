@@ -14,7 +14,7 @@ pub fn PrivacyPage() -> impl IntoView {
             <div class="legal-container">
                 <div class="legal-header">
                     <h1>"Privacy Policy"</h1>
-                    <p class="legal-updated">"Last updated: October 16, 2026"</p>
+                    <p class="legal-updated">"Last updated: November 15, 2026"</p>
                 </div>
                 
                 <div class="legal-content">
@@ -68,7 +68,17 @@ pub fn PrivacyPage() -> impl IntoView {
                             <li>"Discord for authentication"</li>
                             <li>"Law enforcement when legally required"</li>
                             <li>"Other users (public profile information only)"</li>
+                            <li>"Our email service provider, GetCSV.io, and the AI providers it uses to write emails, only for marketing emails you chose to receive (see Marketing Emails below)"</li>
                         </ul>
+
+                        <h3>"Marketing Emails"</h3>
+                        <p>"Marketing emails are optional. You choose at sign-up with the Marketing Emails box, and you can change your mind at any time in Settings or with the unsubscribe link at the bottom of every marketing email."</p>
+                        <p>"Where the law lets the box start ticked (today, the United States), it starts ticked and you can untick it. Everywhere else it starts empty, and only your own tick turns it on. We decide which applies from the country Cloudflare reports for your connection when you sign up."</p>
+                        <p>"If you choose to receive them, we send Eustress news, release notes, a summary of your own activity (such as Spaces you published, plays and BLS earned) and holiday promotions: at most one email a week, plus holiday offers."</p>
+                        <p>"To write and send these emails, we share your email address, username, plan, country and those activity figures with GetCSV.io, our email service provider. GetCSV.io stores them on Amazon Web Services and uses AI models from xAI and Anthropic to write a version of each email for you. They use this information only to send Eustress emails on our behalf. We share nothing from your identity verification, your chats or your support requests."</p>
+                        <p>"We keep a record of each choice you make (what you chose, the words you were shown, the country and the time) as proof of your consent, for as long as your account exists and for 3 years after you turn marketing emails off. When you turn them off, we take you off the next list at once and tell GetCSV.io to stop emailing you straight away. The lists GetCSV.io holds are deleted after 30 days."</p>
+                        <p>"Where the law requires your consent for marketing emails, that consent is our legal basis, and you can withdraw it at any time. Elsewhere, our basis is our legitimate interest in telling account holders about Eustress, and you can object at any time in the same ways."</p>
+                        <p>"Emails about your account, such as sign-in, security notices and review results, are not marketing and do not depend on this choice."</p>
                     </section>
                     
                     <section class="legal-section">

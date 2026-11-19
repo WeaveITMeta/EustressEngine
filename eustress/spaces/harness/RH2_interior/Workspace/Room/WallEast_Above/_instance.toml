@@ -1,0 +1,45 @@
+[asset]
+mesh = "parts/block.glb"
+scene = "Scene0"
+
+[metadata]
+archivable = true
+class_name = "Part"
+created = "2026-11-16T00:00:00Z"
+last_modified = "2026-11-16T00:00:00Z"
+name = "WallEast_Above"
+unit = "m"
+uuid = "4b71b88e88c2cd8a64c9baed79e41dc9"
+
+[properties]
+anchored = true
+can_collide = true
+cast_shadow = true
+color = [
+    200,
+    196,
+    188,
+]
+destructible = false
+locked = false
+material = "H_Matte"
+reflectance = 0.0
+transparency = 0.0
+
+[transform]
+position = [
+    3.1,
+    2.6,
+    0.0,
+]
+rotation = [
+    0.0,
+    0.0,
+    0.0,
+    1.0,
+]
+scale = [
+    0.2,
+    0.8,
+    1.6,
+]

@@ -5,6 +5,28 @@ incremental = true
 # Use all cores
 jobs = 8
 
+# The one shared build target for every session lives on the NVMe (C:); the
+# source stays on E:. Cargo, rustc and the linker write here, never into
+# eustress/target: E: is a USB hard disk and cannot keep up with an engine
+# build's writes.
+target-dir = "C:/EustressBuild/target"
+
+# Dependency cooldown (Cargo 1.100, RFC 3923): resolving a new or updated
+# dependency skips crate versions published less than 7 days ago, so a
+# compromised or broken release has a week to be yanked before it can enter
+# Cargo.lock. Builds that use the existing lock (CI's `--locked`) are
+# unaffected. For an urgent fix, `cargo update -p <crate> --precise <version>`.
+[registry]
+global-min-publish-age = "7 days"
+
+[env]
+# luau0-src 0.18 and later stopped defining NDEBUG, and Luau's Common.h turns
+# every LUAU_ASSERT on when NDEBUG is missing. Measured on mlua 0.12.2 release:
+# pure Luau math 2.1x slower and userdata method calls 1.6x slower without it.
+# Debug build scripts still define LUAU_ENABLE_ASSERT, so dev builds keep the
+# asserts either way.
+LUAU_CXXFLAGS = "-DNDEBUG"
+
 # ── Build tier aliases ────────────────────────────────────────────────────────
 # These match the [features] tiers in crates/engine/Cargo.toml.
 # `cargo core` / `cargo studio-dev` / etc. run from the eustress/ workspace root.

@@ -95,6 +95,9 @@ a.g-chip:hover, button.g-chip:hover { border-color: var(--g-line-strong); color:
 .g-chip.live { color: var(--g-accent-bright); border-color: rgba(60, 186, 84, 0.45); background: var(--g-accent-soft); }
 .g-chip.warn { color: var(--g-warn); border-color: rgba(227, 179, 65, 0.4); background: rgba(227, 179, 65, 0.1); }
 .g-chip.on { color: #04120a; background: var(--g-accent); border-color: var(--g-accent); }
+.g-chip.g-studio { color: var(--g-accent-bright); border-color: rgba(60, 186, 84, 0.45); }
+.g-chip.g-studio:hover { background: var(--g-accent-soft); color: var(--g-accent-bright); }
+.g-studio-hint { margin: 10px 0 0; max-width: 46ch; }
 .g-chip.on.g-tag::before { color: #04120a; }
 .g-chip-btn { cursor: pointer; font-family: var(--g-sans); }
 .g-chip-x { margin-left: 2px; font-size: 15px; line-height: 1; }

@@ -1,0 +1,16 @@
+# ReplicatedStorage — Shared storage replicated to all clients
+# _service.toml marks this folder as a Service and defines all editable properties.
+
+[service]
+class_name = "ReplicatedStorage"
+icon = "serverstorage"
+description = "Objects here replicate to all clients and are accessible from server and client scripts"
+can_have_children = true
+
+[properties]
+# No configurable properties — ReplicatedStorage is purely a container
+
+[metadata]
+id = "replicatedstorage-service"
+created = ""
+last_modified = ""

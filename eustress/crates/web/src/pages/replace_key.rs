@@ -52,11 +52,12 @@ fn default_revoke_passkeys(credentials: &api::Credentials) -> Vec<String> {
 /// What was revoked, in words, for the page that follows a replacement.
 fn revoked_summary(revoke: &api::RevokeList) -> String {
     format!(
-        "{} API key(s), {} webhook endpoint(s), {} passkey(s){}",
+        "{} API key(s), {} webhook endpoint(s), {} passkey(s){}{}",
         revoke.api_keys.len(),
         revoke.webhooks.len(),
         revoke.passkeys.len(),
-        if revoke.discord { ", the Discord link" } else { "" }
+        if revoke.discord { ", the Discord link" } else { "" },
+        if revoke.slack { ", the Slack link" } else { "" }
     )
 }
 
@@ -85,6 +86,7 @@ pub fn ReplaceKeySection() -> impl IntoView {
     let revoke_keys = RwSignal::new(Vec::<String>::new());
     let revoke_hooks = RwSignal::new(Vec::<String>::new());
     let revoke_discord = RwSignal::new(false);
+    let revoke_slack = RwSignal::new(false);
     let revoke_passkeys = RwSignal::new(Vec::<String>::new());
     let email_it = RwSignal::new(true);
     let busy = RwSignal::new(false);
@@ -116,6 +118,7 @@ pub fn ReplaceKeySection() -> impl IntoView {
                         revoke_keys.set(Vec::new());
                         revoke_hooks.set(Vec::new());
                         revoke_discord.set(false);
+                        revoke_slack.set(false);
                         revoke_passkeys.set(default_revoke_passkeys(&b.credentials));
                         begun.set(Some(b));
                     }
@@ -140,6 +143,7 @@ pub fn ReplaceKeySection() -> impl IntoView {
             api_keys: revoke_keys.get_untracked(),
             webhooks: revoke_hooks.get_untracked(),
             discord: revoke_discord.get_untracked(),
+            slack: revoke_slack.get_untracked(),
             passkeys: revoke_passkeys.get_untracked(),
         };
         let email_new_file = email_it.get_untracked();
@@ -250,7 +254,7 @@ pub fn ReplaceKeySection() -> impl IntoView {
 
                 {move || begun.get().map(|b| {
                     let creds = b.credentials.clone();
-                    let any = !creds.api_keys.is_empty() || !creds.webhooks.is_empty() || creds.discord_linked || !creds.passkeys.is_empty();
+                    let any = !creds.api_keys.is_empty() || !creds.webhooks.is_empty() || creds.discord_linked || creds.slack_linked || !creds.passkeys.is_empty();
                     view! {
                         <div class="replace-key-step">
                             <p class="file-ok" role="status">"This file is the key your account signs in with. Choose what to revoke below, then press Replace my key."</p>
@@ -304,6 +308,12 @@ pub fn ReplaceKeySection() -> impl IntoView {
                                 <label class="checkbox-row">
                                     <input type="checkbox" on:change=move |ev| revoke_discord.set(event_target_checked(&ev)) />
                                     <span>"The linked Discord account"</span>
+                                </label>
+                            })}
+                            {creds.slack_linked.then(|| view! {
+                                <label class="checkbox-row">
+                                    <input type="checkbox" on:change=move |ev| revoke_slack.set(event_target_checked(&ev)) />
+                                    <span>"The linked Slack account"</span>
                                 </label>
                             })}
                             {(!creds.complete).then(|| view! { <p class="info-text">"Some items could not be listed. You can revoke them from your project settings afterwards."</p> })}
@@ -385,12 +395,15 @@ mod tests {
         .unwrap();
         assert_eq!(body["revoke"]["passkeys"], serde_json::json!(["AQID"]));
         assert_eq!(body["revoke"]["api_keys"], serde_json::json!([]));
+        assert_eq!(body["revoke"]["slack"], serde_json::json!(false), "the Worker takes slack as a boolean");
     }
 
     #[test]
     fn the_page_after_a_replacement_counts_the_passkeys_removed() {
-        let revoke = api::RevokeList { api_keys: vec!["a".into()], webhooks: vec![], discord: true, passkeys: vec!["x".into(), "y".into()] };
+        let revoke = api::RevokeList { api_keys: vec!["a".into()], webhooks: vec![], discord: true, slack: false, passkeys: vec!["x".into(), "y".into()] };
         assert_eq!(revoked_summary(&revoke), "1 API key(s), 0 webhook endpoint(s), 2 passkey(s), the Discord link");
+        let both = api::RevokeList { discord: true, slack: true, ..Default::default() };
+        assert_eq!(revoked_summary(&both), "0 API key(s), 0 webhook endpoint(s), 0 passkey(s), the Discord link, the Slack link");
         assert_eq!(revoked_summary(&api::RevokeList::default()), "0 API key(s), 0 webhook endpoint(s), 0 passkey(s)");
     }
 

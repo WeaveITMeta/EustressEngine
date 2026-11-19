@@ -1,0 +1,16 @@
+# Teams Service — Manages player teams
+# _service.toml marks this folder as a Service and defines all editable properties.
+
+[service]
+class_name = "Teams"
+icon = "teams"
+description = "Manages player team assignments and team-based gameplay"
+can_have_children = true
+
+[properties]
+# No top-level configurable properties — individual Team objects are children
+
+[metadata]
+id = "teams-service"
+created = ""
+last_modified = ""

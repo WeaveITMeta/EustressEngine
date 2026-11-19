@@ -36,12 +36,14 @@ import Anthropic from '@anthropic-ai/sdk';
 import { renderModerationEmail, buildModerationMime } from './moderation_email.mjs';
 import { textPart, userMessage } from './xai.mjs';
 import { readAccountEmail } from './email_ops.mjs';
+import { requestCountry, recordMarketingChoice } from './marketing_consent.mjs';
 import { prepareUserImage, storedImageVerdict, pngColourType, measurePngAlpha, sha256Hex as sha256OfImage, identOfObject, imageVerdictKey } from './user_images.mjs';
 export { identOfObject, imageVerdictKey } from './user_images.mjs';
 import { tagsForReview, listingTags, reviewChoosesTags, judgeTags, withTagsWrittenBack, sameTagSet, JUDGE_TAGS_MAX, MAX_TAGS, personalInfoIn } from './tags.mjs';
 import { createReviewMeter, meterKind, meterBytes, meterCall, persistReviewMeter, rollupRecentReviewCosts, reviewCostReport, handleReviewQuote } from './review_costs.mjs';
 // The link review (Code Part IX). It imports this module too; neither reads the other's bindings at module top level.
 import { guardReplacedText } from './listing_guard.mjs';
+import { openAgentCase } from './agents.mjs';
 import { approvedPageLinks, noteListingForLinkReview, linkReviewTick, textUrls, stripUrls, hasUrl, linkFixView } from './link_review.mjs';
 import { BANDS, DESCRIPTORS, PSYCHEDELIC_USE_RATING, questionnaireOf, questionnaireRecord, questionnaireForm, checkAnswers } from './rating_questionnaire.mjs';
 import { accountFacts, propertiesNamedIn, handleAttestationAdminRoute } from './account_attestations.mjs';
@@ -51,6 +53,7 @@ import { renderEmail, html, paragraph, facts as factRows, note } from './email_s
 import { sealEvidence, listingEvidenceItems, readViewReceipt, writeAuditRecord, VAULT_ITEM_ID } from './evidence_vault.mjs';
 import { isAdmin } from './admin_check.mjs';
 import { deletionMarkOf, withDeletionMark, listDeletionMarks, attachDeletionMarks, withDeletionFrom } from './space_delete_mark.mjs';
+import { retirePlayTokens } from './world_play_token.mjs';
 
 export const MODERATION_VERSION = '1.0';
 export const POLICY_VERSION = '2.8';
@@ -3011,8 +3014,11 @@ function dossierExcerpts(list) {
   return (Array.isArray(list) ? list : []).filter(s => s && typeof s.source === 'string').map(s => ({ path: String(s.path ?? ''), space: null, audience: null, language: s.language == null ? null : String(s.language), source: s.source, truncated: s.truncated === true }));
 }
 // The package facts the judge is told in the per-case block (never the cached one): the Spaces the package holds, the one
-/// the images show, and whether its server code was uploaded (Share Source on). From the extracted scripts' `space`, the
+/// the images show, and whether its server code was uploaded (a source world, shared or private). From the extracted scripts' `space`, the
 /// listing's `space_names`, and the dossier's optional `package` rows and `digest.space_count`; none is required.
+/// Whether the listing's package holds its server code: a source world was committed (Studio commits one on every publish,
+/// private unless Share Source is on; src/world.mjs), or Share Source is on.
+export const serverCodeInPackage = (sim) => sim?.open_source === true || (typeof sim?.world?.source_manifest_key === 'string' && sim.world.source_manifest_key !== '');
 export function packageFacts(sim, dossier, scripts) {
   const names = new Set();
   for (const s of Array.isArray(scripts) ? scripts : []) if (s?.space) names.add(String(s.space));
@@ -3025,7 +3031,7 @@ export function packageFacts(sim, dossier, scripts) {
     space_count: Math.max(names.size, declared || 0) || null,
     space_names: [...names].slice(0, 32).map(n => clip(n, 80)),
     images_show: openSpace ? `the Space open in Studio at publish: ${JSON.stringify(openSpace)}` : 'the one Space that was open in Studio at publish',
-    server_code_in_package: sim?.open_source === true,
+    server_code_in_package: serverCodeInPackage(sim),
   };
 }
 
@@ -3035,7 +3041,7 @@ export function packageNote(pkg) {
   const many = Number.isInteger(pkg.space_count) && pkg.space_count > 1;
   return [
     `Every capture image shows ${pkg.images_show}${many ? `; this listing's package holds ${pkg.space_count} Spaces (package.space_names), and no image shows the others` : ''}. Do not score anything only images of another Space would show; judge those Spaces from their scripts and the digest.`,
-    pkg.server_code_in_package ? 'The package holds the server code (Share Source is on).' : 'Share Source is off, so the package holds only what players receive: server code is not in it. The dossier excerpts may carry some of it. If a claim depends entirely on code you could not read, do not list it on that claim: say what the author must show.',
+    pkg.server_code_in_package ? 'The package holds the server code (its source world).' : 'Share Source is off, so the package holds only what players receive: server code is not in it. The dossier excerpts may carry some of it. If a claim depends entirely on code you could not read, do not list it on that claim: say what the author must show.',
   ].join(' ');
 }
 
@@ -6336,10 +6342,12 @@ export function authorView(rec, sim) {
   // them), so the author is told whatever the status, in one line.
   const chosenTags = (Array.isArray(d.assigned_tags) ? d.assigned_tags : []).filter(tag => typeof tag === 'string' && /^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(tag)).slice(0, JUDGE_TAGS_MAX);
   const appeal = rec.appeal ? {
-    status: rec.appeal.status === 'pending' ? 'in_review' : rec.appeal.status === 'overturned' ? 'accepted' : 'upheld',
+    status: rec.appeal.status === 'pending' ? 'in_review' : rec.appeal.status === 'overturned' ? 'accepted' : rec.appeal.status === 'withdrawn' ? 'withdrawn' : 'upheld',
     submitted_at: rec.appeal.at || null,
     decided_at: rec.appeal.resolved_at || null,
-    note: rec.appeal.status === 'pending' ? null : safeAuthorText(rec.appeal.rationale, 600),
+    note: rec.appeal.status === 'pending' ? null
+      : rec.appeal.status === 'withdrawn' ? 'You changed this listing, so your appeal was withdrawn and the new version was reviewed instead.'
+        : safeAuthorText(rec.appeal.rationale, 600),
   } : null;
 
   return {
@@ -6450,6 +6458,13 @@ async function applyToSim(env, simId, patch, chosen = null) {
     sim.genre_migrated = true;
   }
   await env.SOCIAL.put(`sim:${simId}`, JSON.stringify(withTagsWrittenBack(sim)));
+  // A rating write (a decision, or moderation_set_rating) retires every world play token minted before it
+  // (src/world_play_token.mjs): a token minted at mature_17 never serves a chunk after a re-rate to adult_18. Written after
+  // the listing, so no token minted from here on reads the old rating. A failure is logged and does not undo the rating.
+  if (Object.prototype.hasOwnProperty.call(patch || {}, 'rating')) {
+    try { await retirePlayTokens(env, simId); }
+    catch (e) { console.error('moderation: play tokens not retired', simId, e?.message); }
+  }
   return sim;
 }
 
@@ -6523,6 +6538,11 @@ async function setStatus(env, rec, status, decisionPatch, event, detail) {
   // Telling the author never blocks or undoes the decision itself.
   try { await notifyAuthor(env, rec, sim); }
   catch (e) { console.error('moderation notify failed:', e?.message); }
+  // An agent's listing rejected in the harm or legal lane, or quarantined, opens an agent case for a person to review
+  // (src/agents.mjs). A quality decision is not misconduct. openAgentCase reads the author and does nothing for a person.
+  if ((status === 'quarantined' || (status === 'rejected' && ['harm', 'legal'].includes(d.lane))) && prev !== status && sim?.author_id) {
+    await openAgentCase(env, sim.author_id, { source: 'listing', ref: rec.reference || null, sim_id: rec.sim_id, status, lane: status === 'quarantined' ? 'legal' : d.lane, reasons: (d.reasons || []).map(r => r?.code).filter(Boolean) });
+  }
   return rec;
 }
 
@@ -7272,15 +7292,27 @@ export async function handleNotificationRoute(request, url, env, deps) {
 
   if (path === '/api/notifications/prefs' && m === 'GET') {
     const prefs = JSON.parse((await env.USERS.get(`notify-prefs:${auth}`)) || '{}');
-    return json({ moderation_email: prefs.moderation_email !== false }, 200, cors);
+    // Review emails are on unless turned off; marketing is off unless chosen.
+    return json({ moderation_email: prefs.moderation_email !== false, marketing_email: prefs.marketing_email === true }, 200, cors);
   }
   if (path === '/api/notifications/prefs' && (m === 'PUT' || m === 'POST')) {
     let body = {};
     try { body = await request.json(); } catch { return json({ error: 'JSON body required' }, 400, cors); }
-    if (typeof body.moderation_email !== 'boolean') return json({ error: 'moderation_email must be true or false' }, 400, cors);
-    const prev = JSON.parse((await env.USERS.get(`notify-prefs:${auth}`)) || '{}');
-    await env.USERS.put(`notify-prefs:${auth}`, JSON.stringify({ ...prev, moderation_email: body.moderation_email, updated_at: new Date().toISOString() }));
-    return json({ moderation_email: body.moderation_email }, 200, cors);
+    const review = body.moderation_email, marketing = body.marketing_email;
+    if (review === undefined && marketing === undefined) return json({ error: 'moderation_email or marketing_email is required' }, 400, cors);
+    if (review !== undefined && typeof review !== 'boolean') return json({ error: 'moderation_email must be true or false' }, 400, cors);
+    if (marketing !== undefined && typeof marketing !== 'boolean') return json({ error: 'marketing_email must be true or false' }, 400, cors);
+    if (review !== undefined) {
+      const prev = JSON.parse((await env.USERS.get(`notify-prefs:${auth}`)) || '{}');
+      await env.USERS.put(`notify-prefs:${auth}`, JSON.stringify({ ...prev, moderation_email: review, updated_at: new Date().toISOString() }));
+    }
+    // Turning the Settings switch on is the person's own act wherever they are,
+    // so it is recorded as express consent; off is always allowed.
+    if (marketing !== undefined) {
+      await recordMarketingChoice(env, auth, { on: marketing, country: requestCountry(request), prechecked: false, source: 'settings' });
+    }
+    const prefs = JSON.parse((await env.USERS.get(`notify-prefs:${auth}`)) || '{}');
+    return json({ moderation_email: prefs.moderation_email !== false, marketing_email: prefs.marketing_email === true }, 200, cors);
   }
 
   return json({ error: 'Method not allowed' }, 405, cors);
@@ -7600,6 +7632,11 @@ export function makeToolExecutor(env, deps, ctx = {}) {
           const r = await resolveForumCase({ env, postId: args.post_id, decision: args.decision, category: args.category ?? null, reviewerId: actorId, note: rationale });
           if (!r.ok) return { ok: false, code: r.code, error: r.message, status: r.status };
           await audit('moderation_forum_resolve', args.post_id, { decision: args.decision, category: args.category ?? null, rationale, pending: r.pending });
+          // A removed post of an agent's opens an agent case (src/agents.mjs); a sealed category is the legal lane.
+          if (r.action === 'remove') {
+            const forumCase = await loadForumCase(env, args.post_id).catch(() => null);
+            if (forumCase?.author_id) await openAgentCase(env, forumCase.author_id, { source: 'forum', ref: r.reference || null, post_id: args.post_id, status: 'removed', lane: FORUM_SEALED_CATEGORIES.includes(args.category) ? 'legal' : 'harm', reasons: [args.category].filter(Boolean) });
+          }
           // Recorded; what is still owed (pending) is retried by the sweeps, and the route answers 202 for it.
           return { ok: true, action: r.action, reference: r.reference, case_version: r.case_version, pending: r.pending, ...(r.follow_up ? { follow_up: r.follow_up } : {}), summary: `forum post ${args.post_id}: ${r.action}${r.pending.length ? ` (still owed: ${r.pending.join(', ')})` : ''}` };
         }
@@ -7800,7 +7837,17 @@ async function runLeased(simId, env, deps, opts, lease, meter = null) {
   else {
     if (trigger === 'publish') rec.notified = null; rec.trigger = trigger;
     // A new publish is the author's: it may get its own automatic pass (applyAutoFix). The last pass stays in the history.
-    if (trigger === 'publish' && rec.auto_fix) { pushHistory(rec, 'auto_fix_cleared', { state: rec.auto_fix.state ?? null }); delete rec.auto_fix; } rec.pak_etag = sim.pak_etag || rec.pak_etag; rec.pak_size = sim.scene_size_bytes || rec.pak_size; rec.content_root = sim.content_root || rec.content_root; pushHistory(rec, 'rerun', { trigger });
+    if (trigger === 'publish' && rec.auto_fix) { pushHistory(rec, 'auto_fix_cleared', { state: rec.auto_fix.state ?? null }); delete rec.auto_fix; }
+    // McKale 2026-11-14 ("Withdraw it"): an appeal is about the version that was decided. A changed listing (an upload, a
+    // commit, a web edit of its text or tags) gets its own review, so the pending appeal is withdrawn: it leaves the Review
+    // Workspace, and a person's later ruling can never land on top of the newer decision (moderation_resolve_appeal asks
+    // for a pending appeal). A staff rerun does not withdraw it, and a hold or quarantine is never reviewed here.
+    if ((trigger === 'publish' || trigger === 'sweep') && rec.appeal?.status === 'pending' && !caseLocksContent(rec)) {
+      rec.appeal = { ...rec.appeal, status: 'withdrawn', resolved_at: new Date().toISOString(), resolved_by: 'listing_changed' };
+      pushHistory(rec, 'appeal_withdrawn', { reason: 'listing_changed', trigger });
+      await clearWorkspace(env, 'appeal', simId);
+    }
+    rec.pak_etag = sim.pak_etag || rec.pak_etag; rec.pak_size = sim.scene_size_bytes || rec.pak_size; rec.content_root = sim.content_root || rec.content_root; pushHistory(rec, 'rerun', { trigger });
     // The tags an earlier run chose belong to its decision; this run's decision says its own.
     if (rec.decision) rec.decision = { ...rec.decision, assigned_tags: [] };
     if (!rec.reference) { try { rec.reference = await assignCaseReference(env, 'moderation', simId); } catch (e) { console.error('moderation: no case reference yet:', e?.message); } }
@@ -8412,7 +8459,7 @@ async function scriptReaderStage({ env, deps, sim, rec, t, meter, dossier, epoch
   // of all of them in one or the other. A listing whose package the extractor does not read records the dossier as its source.
   rec.scripts_review = {
     ...payload.coverage, batches_total: plan.batches.length, script_tokens: plan.script_tokens, forced_reader: forceReader, sized: strict ? 'strict' : 'estimate', reports_only: reportsOnly,
-    server_code_in_package: sim?.open_source === true, space_count: pkg.space_count, updated_at: new Date().toISOString(),
+    server_code_in_package: serverCodeInPackage(sim), space_count: pkg.space_count, updated_at: new Date().toISOString(),
   };
   meterBytes(meter, { script_chars: plan.script_chars, scripts_total: plan.scripts_total, reader_batches: plan.batches.length });
   rec.stage = 'judge';

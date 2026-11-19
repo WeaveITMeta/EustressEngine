@@ -149,12 +149,13 @@ pub fn is_join_link(link: &str) -> bool {
         && link.bytes().all(|b| b.is_ascii_alphanumeric() || b"-.:/?&=[]".contains(&b))
 }
 
-/// True for the final link the page gives to `window.location`: the host's join link or a solo link, with the `ticket`
-/// and `api` parameters the Play chooser appended. Only the Player's two schemes, only the characters the grammar
-/// uses (letters, digits and `-.:/?&=[]_`), and no longer than a Worker link (512), a ticket (2,048) and the
-/// parameter names (32). `is_join_link` still checks the Worker's own link before anything is appended.
+/// True for the final link the page gives to `window.location`: the host's join link or a solo link, with the `ticket`,
+/// `api` and `min` parameters the Play chooser appended. Only the Player's two schemes, only the characters the grammar
+/// uses (letters, digits and `-.:/?&=[]_`), and no longer than a Worker link (512), a ticket (2,048), the parameter
+/// names (32) and `&min=` with the longest version the chooser appends (22). `is_join_link` still checks the Worker's
+/// own link before anything is appended.
 pub fn is_launch_link(link: &str) -> bool {
-    const MAX: usize = 512 + 2_048 + 32;
+    const MAX: usize = 512 + 2_048 + 32 + MIN_PARAM_MAX;
     let rest = link
         .strip_prefix("eustress-player://join/")
         .or_else(|| link.strip_prefix("eustress-player://play/"));
@@ -162,6 +163,10 @@ pub fn is_launch_link(link: &str) -> bool {
         && link.len() <= MAX
         && link.bytes().all(|b| b.is_ascii_alphanumeric() || b"-.:/?&=[]_".contains(&b))
 }
+
+/// The longest `&min=X.Y.Z` the Play chooser appends: five characters of name and a version of three parts of at most
+/// five digits each (17).
+pub const MIN_PARAM_MAX: usize = 5 + 17;
 
 // -----------------------------------------------------------------------------
 // 2. Live Hosts API Functions
@@ -192,8 +197,8 @@ mod tests {
         assert!(is_launch_link("eustress-player://join/[::1]:7777?key=a&pin=b"));
         // The largest link the contract allows is still accepted ...
         let base = "eustress-player://join/h?pin=".to_string();
-        let max = format!("{base}{}", "a".repeat(512 + 2_048 + 32 - base.len()));
-        assert_eq!(max.len(), 512 + 2_048 + 32);
+        let max = format!("{base}{}", "a".repeat(512 + 2_048 + 32 + MIN_PARAM_MAX - base.len()));
+        assert_eq!(max.len(), 512 + 2_048 + 32 + 22);
         assert!(is_launch_link(&max));
         assert!(!is_launch_link(&format!("{max}a")));
         // ... but the Worker's own link is not allowed to grow past 512 because of it.

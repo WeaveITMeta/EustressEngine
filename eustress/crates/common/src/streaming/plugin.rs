@@ -200,16 +200,28 @@ impl Plugin for StreamingPlugin {
         // Startup: scan existing .toml files from disk into the grid.
         app.add_systems(Startup, sys_initial_disk_scan);
 
+        // Predictive prefetch (docs/architecture/RAGE_STREAMING_SIM_LOD_JOB_GRAPH.md
+        // phase 1): plan the chunks the foci will need within the lead time,
+        // in `WorldSimSet::Predict`, before the gate below promotes them
+        // ahead of need and holds every pinned chunk.
+        crate::world_sim::ensure_core(app);
+        app.insert_resource(super::predictive::ChunkPrefetch::new(self.config.active_radius));
+        app.add_systems(
+            Update,
+            super::predictive::sys_predictive_prefetch.in_set(crate::world_sim::WorldSimSet::Predict),
+        );
+
         // Update systems in order. `sys_apply_file_changed` replaces
         // the old `sys_drain_watcher_events` and reads from the
         // engine's shared `FileChanged` broadcast instead of an
-        // internal channel.
+        // internal channel. They run in `WorldSimSet::Stream`, after
+        // prefetch has planned.
         app.add_systems(Update, (
             sys_apply_file_changed,
             sys_radius_gate,
             sys_sync_active_transforms,
             sys_rebuild_index,
-        ).chain());
+        ).chain().in_set(crate::world_sim::WorldSimSet::Stream));
 
         // Render cascade (RENDER_CASCADE.md §3/§4 — Wave 3 CORE).
         //   sys_render_cascade   — distance-band tier switcher (16-frame
@@ -535,6 +547,9 @@ fn sys_radius_gate(
     camera_query: Query<&Transform, With<Camera3d>>,
     mut promoted_messages: MessageWriter<InstancePromoted>,
     mut demoted_messages: MessageWriter<InstanceDemoted>,
+    // Predictive prefetch: chunks to promote ahead of need, and chunks no
+    // pass may demote. Absent (an app without it) means neither.
+    prefetch: Option<Res<super::predictive::ChunkPrefetch>>,
 ) {
     // Get camera position (use first Camera3d found).
     let camera_transform = match camera_query.iter().next() {
@@ -562,9 +577,14 @@ fn sys_radius_gate(
         chunk_data.push((*coord, tier, chunk.len()));
     });
 
-    // Run the gate evaluation.
-    let (decisions, stats) = state.gate.evaluate_all(
-        &chunk_data, chunk_size, camera_x, camera_z, current_active,
+    // Run the gate evaluation, with prefetch's admitted and pinned chunks.
+    let empty = std::collections::HashSet::new();
+    let (admitted, pinned) = match prefetch.as_deref() {
+        Some(p) => (&p.admitted, &p.pinned),
+        None => (&empty, &empty),
+    };
+    let (decisions, stats) = state.gate.evaluate_all_with_prefetch(
+        &chunk_data, chunk_size, camera_x, camera_z, current_active, admitted, pinned,
     );
 
     // Apply decisions.

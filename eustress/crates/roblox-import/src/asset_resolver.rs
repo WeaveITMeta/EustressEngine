@@ -76,19 +76,30 @@ pub enum AssetReference {
 impl AssetReference {
     /// Classify a raw asset URI.
     pub fn parse(raw: &str) -> Self {
-        if let Some(rest) = raw.strip_prefix("rbxassetid://") {
-            if let Ok(n) = rest.parse::<u64>() {
-                return AssetReference::AssetId(n);
+        // Authored URIs carry stray whitespace, mixed-case schemes and a
+        // `?version=` tail. None of them changes which asset is meant, and
+        // each used to make the reference an unknown scheme that was never
+        // fetched. ASCII lowercasing keeps every byte offset.
+        let raw = raw.trim();
+        let lower = raw.to_ascii_lowercase();
+        let after = |scheme: &str| lower.starts_with(scheme).then(|| &raw[scheme.len()..]);
+        if let Some(rest) = after("rbxassetid://") {
+            let digits = rest.bytes().take_while(u8::is_ascii_digit).count();
+            let tail = &rest[digits..];
+            if tail.is_empty() || tail.starts_with('?') || tail.starts_with('&') {
+                if let Ok(n) = rest[..digits].parse::<u64>() {
+                    return AssetReference::AssetId(n);
+                }
             }
             return AssetReference::Other(raw.to_string());
         }
-        if let Some(rest) = raw.strip_prefix("rbxasset://") {
+        if let Some(rest) = after("rbxasset://") {
             return AssetReference::BundledPath(rest.to_string());
         }
-        if let Some(rest) = raw.strip_prefix("rbxhttp://") {
+        if let Some(rest) = after("rbxhttp://") {
             return AssetReference::RbxHttp(rest.to_string());
         }
-        if raw.starts_with("https://") || raw.starts_with("http://") {
+        if lower.starts_with("https://") || lower.starts_with("http://") {
             return AssetReference::HttpUrl(raw.to_string());
         }
         // Other URI schemes (rbxgameasset://, rbxthumb://) — preserve.
@@ -126,16 +137,26 @@ impl AssetReference {
 /// `https://assetdelivery.roblox.com/v1/asset/?id=1234` or a trailing
 /// `/asset/1234`. Returns `None` when no id is present.
 fn extract_id_from_url(url: &str) -> Option<u64> {
-    // `?id=` / `&id=` query form.
-    if let Some(idx) = url.find("id=") {
-        let tail = &url[idx + 3..];
-        let digits: String = tail.chars().take_while(|c| c.is_ascii_digit()).collect();
-        if let Ok(n) = digits.parse::<u64>() {
-            return Some(n);
+    // The query's `id` key, in any case (`?id=`, `&ID=`). Matching the bare
+    // text `id=` also took `assetversionid=`, a version id: a different
+    // number space, so a different asset was fetched under this one's name.
+    let (path, query) = match url.split_once('?') {
+        Some((path, query)) => (path, query),
+        None => (url, ""),
+    };
+    for pair in query.split('&') {
+        let Some((key, value)) = pair.split_once('=') else {
+            continue;
+        };
+        if key.eq_ignore_ascii_case("id") {
+            let digits: String = value.chars().take_while(|c| c.is_ascii_digit()).collect();
+            if let Ok(n) = digits.parse::<u64>() {
+                return Some(n);
+            }
         }
     }
     // Trailing numeric path segment.
-    let last = url.rsplit('/').find(|s| !s.is_empty())?;
+    let last = path.rsplit('/').find(|s| !s.is_empty())?;
     let digits: String = last.chars().take_while(|c| c.is_ascii_digit()).collect();
     digits.parse::<u64>().ok()
 }
@@ -533,11 +554,17 @@ fn sanitise_uri_component(raw: &str) -> String {
     for c in raw.chars() {
         match c {
             ':' | '/' | '\\' | '?' | '#' | '*' | '|' | '<' | '>' | '"' => out.push('_'),
+            c if c.is_control() => out.push('_'),
             _ => out.push(c),
         }
     }
+    // One path component: never empty, never `.` or `..`, and short enough
+    // to be a file name.
+    let out: String = out.chars().take(120).collect();
     if out.is_empty() {
         "empty".to_string()
+    } else if out.chars().all(|c| c == '.') {
+        "dot".to_string()
     } else {
         out
     }
@@ -546,6 +573,30 @@ fn sanitise_uri_component(raw: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn authored_spellings_of_an_asset_id_all_parse() {
+        for uri in ["rbxassetid://123 ", " RbxAssetId://123", "rbxassetid://123?version=2"] {
+            assert_eq!(AssetReference::parse(uri), AssetReference::AssetId(123), "{uri:?}");
+        }
+        assert_eq!(
+            AssetReference::parse("https://www.roblox.com/asset/?ID=77").asset_id(),
+            Some(77)
+        );
+        assert_eq!(
+            AssetReference::parse("http://www.roblox.com/asset/?assetversionid=26838017").asset_id(),
+            None,
+            "a version id is not an asset id"
+        );
+    }
+
+    #[test]
+    fn a_placeholder_leaf_is_one_safe_path_component() {
+        assert_eq!(sanitise_uri_component(".."), "dot");
+        assert_eq!(sanitise_uri_component(""), "empty");
+        assert!(sanitise_uri_component(&"a".repeat(400)).len() <= 120);
+        assert!(!sanitise_uri_component("a\nb").contains('\n'));
+    }
 
     fn no_fetch(uri: &str) -> ResolvedAsset {
         resolve(uri, None, Path::new("/space"), false, Path::new("/space/Workspace/E"))

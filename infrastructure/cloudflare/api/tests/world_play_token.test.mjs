@@ -150,10 +150,22 @@ test('a manifest anyone signed out may read comes with a token, and its chunks a
   assert.equal(env.SOCIAL.reads, 1);
 });
 
+test('a teen_13 or mature_17 world is solo play open signed out (McKale, 2026-11-19), so its manifest comes with a token too', async () => {
+  for (const rating of ['ages_10', 'teen_13', 'mature_17']) {
+    const { env } = await world({ rating });
+    const token = await tokenFromManifest(env);
+    assert.match(String(token), /^wpt1\./, rating);
+    const chunk = await call(env, `chunks/${H1}`, { token });
+    assert.deepEqual([chunk.status, viaToken(chunk)], [200, true], rating);
+  }
+});
+
 test('no token where the manifest was not open to anyone signed out', async () => {
   const cases = [
     ['adult content', { rating: 'adult_18' }, {}],
-    ['rated above the signed-out cap', { rating: 'mature_17' }, { who: 'author' }],
+    ['adult content, read by its author', { rating: 'adult_18' }, { who: 'author' }],
+    ['21+ content, read by its author', { rating: 'adult_21' }, { who: 'author' }],
+    ['no rating, read by its author', { rating: null }, { who: 'author' }],
     ['pending, read by its author', { status: 'pending' }, { who: 'author' }],
     ['private, read by its author', { isPublic: false }, { who: 'author' }],
     ['no approval binding', { bind: false }, {}],
@@ -163,7 +175,7 @@ test('no token where the manifest was not open to anyone signed out', async () =
     const { env } = await world(setup);
     const res = await call(env, 'manifest', opts);
     // An adult listing refuses a signed-out reader outright; every other case serves the manifest, without a token.
-    if (setup.rating === 'adult_18') assert.notEqual(res.status, 200, name);
+    if (setup.rating === 'adult_18' && !opts.who) assert.notEqual(res.status, 200, name);
     else assert.equal(res.status, 200, `${name}: the manifest still serves`);
     assert.equal(res.headers.get(PLAY_TOKEN_HEADER), null, `${name}: no token`);
   }

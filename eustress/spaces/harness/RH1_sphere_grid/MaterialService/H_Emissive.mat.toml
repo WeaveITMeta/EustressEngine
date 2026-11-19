@@ -1,0 +1,10 @@
+[material]
+name = "H_Emissive"
+description = "Harness: emissive surface"
+
+[pbr]
+base_color = [1.0, 1.0, 1.0, 1.0]
+metallic = 0.0
+roughness = 0.5
+reflectance = 0.5
+emissive = [4.0, 4.0, 4.0]

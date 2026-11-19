@@ -204,14 +204,18 @@ test('a day bar that could not be written is retried from the next heartbeat, an
   });
 });
 
-test('the featured shelf stays G to PG signed out', async () => {
+// McKale, 2026-11-19: the featured shelf is the Gallery, a solo surface, so signed out it reaches mature_17; it never
+// carries adult content.
+test('the featured shelf signed out reaches the solo cap (mature_17) and never carries adult content', async () => {
   const env = environment();
   const TEEN = 'cccccccc-3333-4333-8333-cccccccccccc';
+  const ADULT = 'eeeeeeee-5555-4555-8555-eeeeeeeeeeee';
   await env.USERS.put(`user:${AUTHOR}`, JSON.stringify({ kyc_verified: true, id: AUTHOR, username: 'host' }));
   await env.SOCIAL.put(`sim:${TEEN}`, JSON.stringify(listing(TEEN, { rating: 'teen_13', featured: true })));
   await env.SOCIAL.put(`sim:${SIM}`, JSON.stringify(listing(SIM, { rating: 'all_ages', featured: true })));
+  await env.SOCIAL.put(`sim:${ADULT}`, JSON.stringify(listing(ADULT, { rating: 'adult_18', featured: true })));
   const out = await call(env, 'GET', '/api/gallery/featured');
-  assert.deepEqual(out.body.featured.map((s) => s.id), [SIM]);
+  assert.deepEqual(out.body.featured.map((s) => s.id).sort(), [SIM, TEEN].sort());
   const signedIn = await call(env, 'GET', '/api/gallery/featured', { token: player });
   assert.ok(signedIn.body.featured.map((s) => s.id).includes(TEEN));
   assert.match(signedIn.headers.get('Cache-Control') || '', /private/);

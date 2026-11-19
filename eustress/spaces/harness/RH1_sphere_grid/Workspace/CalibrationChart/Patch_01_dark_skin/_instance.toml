@@ -1,0 +1,52 @@
+[asset]
+mesh = "parts/block.glb"
+scene = "Scene0"
+
+[attributes]
+albedo_srgb = [
+    115,
+    82,
+    68,
+]
+
+[metadata]
+archivable = true
+class_name = "Part"
+created = "2026-11-16T00:00:00Z"
+last_modified = "2026-11-16T00:00:00Z"
+name = "Patch_01_dark_skin"
+unit = "m"
+uuid = "939fda2df871591a775a9d94ba272907"
+
+[properties]
+anchored = true
+can_collide = true
+cast_shadow = true
+color = [
+    115,
+    82,
+    68,
+]
+destructible = false
+locked = false
+material = "H_Matte"
+reflectance = 0.0
+transparency = 0.0
+
+[transform]
+position = [
+    -0.75,
+    1.45,
+    -3.97,
+]
+rotation = [
+    0.0,
+    0.0,
+    0.0,
+    1.0,
+]
+scale = [
+    0.26,
+    0.26,
+    0.01,
+]

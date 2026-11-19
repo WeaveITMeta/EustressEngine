@@ -704,6 +704,571 @@ fn render_and_cpu_detail(
     out
 }
 
+// ─────────────────── raw per-frame frame-time series (G1.08) ────────────────
+//
+// The phase profiler above reports window averages. This module records the
+// raw series: one row per frame, tick-indexed, written to a declared path, with
+// the summary statistics computed from that same in-memory series (and
+// reproducible by any reader from the CSV).
+//
+// Switches (all optional; nothing is installed unless a CSV path is given, so
+// an unarmed run pays nothing and the existing profiler output is unchanged):
+//   * `EUSTRESS_FRAMETIME_CSV`     or arg `--frametime-csv=PATH`
+//   * `EUSTRESS_FRAMETIME_SUMMARY` or arg `--frametime-summary=PATH`
+//       (default: `<csv stem>_summary.json` beside the CSV)
+//   * `EUSTRESS_FRAMETIME_FRAMES`  or arg `--frametime-frames=N`
+//       (default: `EUSTRESS_PROFILE_FRAMES` when set, else 600)
+//   * `EUSTRESS_FRAMETIME_EXIT=1`  send `AppExit::Success` once the files are
+//       written (a `--server` measurement run wants this)
+//   * `EUSTRESS_FRAMETIME_CONTEXT` a JSON object merged into the summary under
+//       `context` (scene, camera path, machine id, commit; the harness owns it)
+//
+// Only `Option<Res<..>>` and empty-tolerant queries are used, so the module
+// runs under `MinimalPlugins` with no window or renderer (dedicated server).
+pub mod frametime_series {
+    use bevy::app::AppExit;
+    use bevy::prelude::*;
+    use bevy::window::PrimaryWindow;
+    use eustress_common::simulation::SimulationClock;
+    use std::collections::BTreeMap;
+    use std::path::{Path, PathBuf};
+    use std::sync::OnceLock;
+    use std::time::Instant;
+
+    /// Percentile method named in the summary so two implementations agree.
+    pub const PERCENTILE_METHOD: &str =
+        "nearest-rank: sorted[ceil(p * n) - 1], zero-based, on the full raw series";
+
+    const DEFAULT_FRAMES: u64 = 600;
+
+    /// One frame of the series.
+    #[derive(Clone, Copy, Debug, PartialEq)]
+    pub struct FrameSample {
+        pub frame_index: u64,
+        /// The tick written to the CSV (see `tick_source` in the summary). It
+        /// is set once for the whole series by [`resolve_ticks`], never per row.
+        pub tick_index: u64,
+        /// Fixed-step schedule runs completed so far.
+        pub fixed_step_index: u64,
+        /// How far `tick_index` moved during this frame (0 on the first row).
+        pub ticks_advanced: u64,
+        /// `SimulationClock.tick_count` read this frame; `None` when that
+        /// resource does not exist. Kept raw so nothing is lost.
+        pub clock_tick_index: Option<u64>,
+        /// Frame period: this frame's end stamp minus the previous one.
+        pub frame_time_ns: u64,
+    }
+
+    impl FrameSample {
+        pub fn frame_time_ms(&self) -> f64 {
+            self.frame_time_ns as f64 / 1.0e6
+        }
+    }
+
+    /// Summary statistics, all from the same raw series.
+    #[derive(Clone, Copy, Debug, PartialEq)]
+    pub struct SeriesStats {
+        pub count: usize,
+        pub ft_min_ms: f64,
+        pub ft_p50_ms: f64,
+        pub ft_p95_ms: f64,
+        pub ft_p99_ms: f64,
+        pub ft_max_ms: f64,
+        pub ft_mean_ms: f64,
+        /// Sample standard deviation (n - 1).
+        pub stddev_ms: f64,
+        /// `stddev_ms / ft_mean_ms`.
+        pub cv: f64,
+    }
+
+    /// Nearest-rank percentile on an ascending slice: index `ceil(p*n) - 1`.
+    pub fn nearest_rank(sorted: &[f64], p: f64) -> f64 {
+        let n = sorted.len();
+        if n == 0 {
+            return 0.0;
+        }
+        let rank = (p * n as f64).ceil() as usize;
+        sorted[rank.clamp(1, n) - 1]
+    }
+
+    /// Statistics of a raw series in milliseconds. No frame is excluded.
+    pub fn summarize(ms: &[f64]) -> Option<SeriesStats> {
+        if ms.is_empty() {
+            return None;
+        }
+        let mut sorted = ms.to_vec();
+        sorted.sort_by(|a, b| a.total_cmp(b));
+        let n = sorted.len();
+        let mean = ms.iter().sum::<f64>() / n as f64;
+        let stddev = if n > 1 {
+            (ms.iter().map(|x| (x - mean) * (x - mean)).sum::<f64>() / (n as f64 - 1.0)).sqrt()
+        } else {
+            0.0
+        };
+        Some(SeriesStats {
+            count: n,
+            ft_min_ms: sorted[0],
+            ft_p50_ms: nearest_rank(&sorted, 0.50),
+            ft_p95_ms: nearest_rank(&sorted, 0.95),
+            ft_p99_ms: nearest_rank(&sorted, 0.99),
+            ft_max_ms: sorted[n - 1],
+            ft_mean_ms: mean,
+            stddev_ms: stddev,
+            cv: if mean > 0.0 { stddev / mean } else { 0.0 },
+        })
+    }
+
+    /// The frame-to-tick relationship, recorded as data:
+    /// (frames by ticks advanced in the frame, runs of consecutive frames
+    /// sharing one tick index by run length).
+    pub fn tick_relationships(ticks: &[u64]) -> (BTreeMap<u64, u64>, BTreeMap<u64, u64>) {
+        let mut advanced: BTreeMap<u64, u64> = BTreeMap::new();
+        let mut runs: BTreeMap<u64, u64> = BTreeMap::new();
+        let mut run = 0u64;
+        for (i, t) in ticks.iter().enumerate() {
+            if i == 0 {
+                run = 1;
+                continue;
+            }
+            *advanced.entry(t.saturating_sub(ticks[i - 1])).or_insert(0) += 1;
+            if *t == ticks[i - 1] {
+                run += 1;
+            } else {
+                *runs.entry(run).or_insert(0) += 1;
+                run = 1;
+            }
+        }
+        if !ticks.is_empty() {
+            *runs.entry(run).or_insert(0) += 1;
+        }
+        (advanced, runs)
+    }
+
+    /// Source named in the summary when the clock advanced (Play).
+    pub const TICK_SOURCE_CLOCK: &str =
+        "SimulationClock.tick_count (Play: the clock advanced over the recorded frames)";
+    /// Source named when the clock exists but did not move (editor, not Play).
+    pub const TICK_SOURCE_FIXED_CLOCK_STILL: &str =
+        "fixed_step_count (FixedUpdate runs, the tick camera_path.rs counts; SimulationClock present but did not advance, the run was not in Play)";
+    /// Source named when there is no clock resource at all.
+    pub const TICK_SOURCE_FIXED_NO_CLOCK: &str =
+        "fixed_step_count (FixedUpdate runs; SimulationClock absent)";
+
+    /// Choose the tick source once for the whole series and apply it to every
+    /// row: `SimulationClock.tick_count` when it exists on every row and takes
+    /// more than one value, else the `FixedUpdate` run count. Rewrites
+    /// `tick_index` and `ticks_advanced` on all rows from that one source; a
+    /// wall-clock or frame-count value is never used. Returns the source name.
+    pub fn resolve_ticks(samples: &mut [FrameSample]) -> &'static str {
+        let clock_on_every_row = !samples.is_empty() && samples.iter().all(|s| s.clock_tick_index.is_some());
+        let clock_moves = clock_on_every_row && {
+            let first = samples[0].clock_tick_index;
+            samples.iter().any(|s| s.clock_tick_index != first)
+        };
+        let source = if clock_moves {
+            TICK_SOURCE_CLOCK
+        } else if clock_on_every_row {
+            TICK_SOURCE_FIXED_CLOCK_STILL
+        } else {
+            TICK_SOURCE_FIXED_NO_CLOCK
+        };
+        let mut prev: Option<u64> = None;
+        for s in samples.iter_mut() {
+            let tick = if clock_moves {
+                s.clock_tick_index.unwrap_or(s.fixed_step_index)
+            } else {
+                s.fixed_step_index
+            };
+            s.tick_index = tick;
+            s.ticks_advanced = prev.map(|p| tick.saturating_sub(p)).unwrap_or(0);
+            prev = Some(tick);
+        }
+        source
+    }
+
+    /// CSV text for the raw series. `frame_time_ms` is Rust's shortest
+    /// round-trip decimal, so a reader recovers the exact f64. The raw clock
+    /// tick is the last column (empty when no clock resource exists).
+    pub fn render_csv(samples: &[FrameSample]) -> String {
+        let mut out = String::with_capacity(112 + samples.len() * 64);
+        out.push_str("frame_index,tick_index,fixed_step_index,ticks_advanced,frame_time_ms,frame_time_ns,clock_tick_index\n");
+        for s in samples {
+            let clock = s.clock_tick_index.map(|c| c.to_string()).unwrap_or_default();
+            out.push_str(&format!(
+                "{},{},{},{},{},{},{}\n",
+                s.frame_index,
+                s.tick_index,
+                s.fixed_step_index,
+                s.ticks_advanced,
+                s.frame_time_ms(),
+                s.frame_time_ns,
+                clock
+            ));
+        }
+        out
+    }
+
+    #[derive(Clone, Debug)]
+    struct Config {
+        csv: PathBuf,
+        summary: PathBuf,
+        frames: u64,
+        exit_when_done: bool,
+        context: Option<serde_json::Value>,
+    }
+
+    fn arg_value(prefix: &str) -> Option<String> {
+        std::env::args().find_map(|a| a.strip_prefix(prefix).map(str::to_owned))
+    }
+
+    fn setting(env_key: &str, arg_prefix: &str) -> Option<String> {
+        std::env::var(env_key)
+            .ok()
+            .filter(|v| !v.is_empty())
+            .or_else(|| arg_value(arg_prefix))
+            .filter(|v| !v.is_empty())
+    }
+
+    fn config() -> Option<&'static Config> {
+        static CFG: OnceLock<Option<Config>> = OnceLock::new();
+        CFG.get_or_init(|| {
+            let csv = PathBuf::from(setting("EUSTRESS_FRAMETIME_CSV", "--frametime-csv=")?);
+            let summary = setting("EUSTRESS_FRAMETIME_SUMMARY", "--frametime-summary=")
+                .map(PathBuf::from)
+                .unwrap_or_else(|| {
+                    let stem = csv.file_stem().and_then(|s| s.to_str()).unwrap_or("frametimes");
+                    csv.with_file_name(format!("{stem}_summary.json"))
+                });
+            let frames = setting("EUSTRESS_FRAMETIME_FRAMES", "--frametime-frames=")
+                .or_else(|| std::env::var("EUSTRESS_PROFILE_FRAMES").ok())
+                .and_then(|s| s.parse::<u64>().ok())
+                .filter(|n| *n > 0)
+                .unwrap_or(DEFAULT_FRAMES);
+            let exit_when_done = std::env::var("EUSTRESS_FRAMETIME_EXIT")
+                .map(|v| !v.is_empty() && v != "0")
+                .unwrap_or(false);
+            let context = std::env::var("EUSTRESS_FRAMETIME_CONTEXT")
+                .ok()
+                .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok());
+            Some(Config { csv, summary, frames, exit_when_done, context })
+        })
+        .as_ref()
+    }
+
+    /// The series being recorded.
+    #[derive(Resource, Default)]
+    struct FrameTimeSeries {
+        samples: Vec<FrameSample>,
+        last_stamp: Option<Instant>,
+        fixed_steps: u64,
+        done: bool,
+    }
+
+    /// Install the recorder. A no-op unless a CSV path was given.
+    pub fn install(app: &mut App) {
+        if config().is_none() {
+            return;
+        }
+        app.init_resource::<FrameTimeSeries>()
+            .add_systems(First, begin)
+            .add_systems(FixedUpdate, count_fixed_step)
+            .add_systems(Last, record.after(super::phase_frame_end));
+    }
+
+    /// Baseline stamp: the start of the first frame, so frame 0's period is
+    /// First to end of Last (a partial frame; the summary says so).
+    fn begin(mut series: ResMut<FrameTimeSeries>) {
+        if series.last_stamp.is_none() {
+            series.last_stamp = Some(Instant::now());
+        }
+    }
+
+    fn count_fixed_step(mut series: ResMut<FrameTimeSeries>) {
+        series.fixed_steps += 1;
+    }
+
+    fn record(
+        mut series: ResMut<FrameTimeSeries>,
+        clock: Option<Res<SimulationClock>>,
+        windows: Query<&Window, With<PrimaryWindow>>,
+        mut exit: MessageWriter<AppExit>,
+    ) {
+        let Some(cfg) = config() else { return };
+        if series.done {
+            return;
+        }
+        let now = Instant::now();
+        let Some(prev) = series.last_stamp.replace(now) else { return };
+        let period_ns = now.saturating_duration_since(prev).as_nanos() as u64;
+        // Raw values only; `resolve_ticks` picks the one tick source for the
+        // whole series when the run ends.
+        let sample = FrameSample {
+            frame_index: series.samples.len() as u64,
+            tick_index: series.fixed_steps,
+            fixed_step_index: series.fixed_steps,
+            ticks_advanced: 0,
+            clock_tick_index: clock.as_ref().map(|c| c.tick_count),
+            frame_time_ns: period_ns,
+        };
+        series.samples.push(sample);
+        if (series.samples.len() as u64) < cfg.frames {
+            return;
+        }
+        series.done = true;
+        let resolution = windows
+            .iter()
+            .next()
+            .map(|w| (w.physical_width(), w.physical_height()));
+        let tick_source = resolve_ticks(&mut series.samples);
+        match write_outputs(cfg, &series.samples, tick_source, resolution) {
+            Ok(()) => info!(
+                "frametime: wrote {} frames to {} and {}",
+                series.samples.len(),
+                cfg.csv.display(),
+                cfg.summary.display()
+            ),
+            Err(e) => error!("frametime: export failed: {e}"),
+        }
+        if cfg.exit_when_done {
+            exit.write(AppExit::Success);
+        }
+    }
+
+    /// Temp file plus rename, so a reader never sees a half-written file.
+    fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), String> {
+        if let Some(dir) = path.parent().filter(|d| !d.as_os_str().is_empty()) {
+            std::fs::create_dir_all(dir).map_err(|e| format!("create {}: {e}", dir.display()))?;
+        }
+        let tmp = path.with_extension("tmp-write");
+        std::fs::write(&tmp, bytes).map_err(|e| format!("write {}: {e}", tmp.display()))?;
+        std::fs::rename(&tmp, path).map_err(|e| format!("rename to {}: {e}", path.display()))
+    }
+
+    fn write_outputs(
+        cfg: &Config,
+        samples: &[FrameSample],
+        tick_source: &str,
+        resolution: Option<(u32, u32)>,
+    ) -> Result<(), String> {
+        use sha2::{Digest, Sha256};
+        let csv = render_csv(samples);
+        write_atomic(&cfg.csv, csv.as_bytes())?;
+        let sha = hex::encode(Sha256::digest(csv.as_bytes()));
+
+        let ms: Vec<f64> = samples.iter().map(FrameSample::frame_time_ms).collect();
+        let stats = summarize(&ms).ok_or_else(|| "empty series".to_string())?;
+        let ticks: Vec<u64> = samples.iter().map(|s| s.tick_index).collect();
+        let (advanced, runs) = tick_relationships(&ticks);
+        let keyed = |m: &BTreeMap<u64, u64>| {
+            serde_json::Value::Object(m.iter().map(|(k, v)| (k.to_string(), (*v).into())).collect())
+        };
+        let distinct_ticks = {
+            let mut t = ticks.clone();
+            t.dedup();
+            t.len()
+        };
+        let clock_distinct = {
+            let mut c: Vec<u64> = samples.iter().filter_map(|s| s.clock_tick_index).collect();
+            c.sort_unstable();
+            c.dedup();
+            c.len()
+        };
+        let summary = serde_json::json!({
+            "schema": "eustress.frametime_series.v1",
+            "status": "MEASURED",
+            "frame_count": stats.count,
+            "ft_min_ms": stats.ft_min_ms,
+            "ft_p50_ms": stats.ft_p50_ms,
+            "ft_p95_ms": stats.ft_p95_ms,
+            "ft_p99_ms": stats.ft_p99_ms,
+            "ft_max_ms": stats.ft_max_ms,
+            "ft_mean_ms": stats.ft_mean_ms,
+            "stddev_ms": stats.stddev_ms,
+            "cv": stats.cv,
+            "cv_definition": "sample standard deviation (n - 1) divided by the mean",
+            "percentile_method": PERCENTILE_METHOD,
+            "frames_trimmed": 0,
+            "trim_statement": "no frames trimmed: no warm-up exclusion, no outlier rejection, no smoothing",
+            "frame_time_definition": "wall-clock period between consecutive frame-end stamps (after the Last schedule); frame 0 runs from the start of its First schedule",
+            "first_frame_partial": true,
+            "tick_source": tick_source,
+            "tick_index_distinct_values": distinct_ticks,
+            "tick_index_constant": distinct_ticks <= 1,
+            "tick_index_column_definition": "tick_index is the single source named in tick_source, applied to every row",
+            "clock_tick_index_distinct_values": clock_distinct,
+            "frames_by_ticks_advanced": keyed(&advanced),
+            "tick_sharing_runs_by_frame_count": keyed(&runs),
+            "fixed_steps_total": samples.last().map(|s| s.fixed_step_index).unwrap_or(0),
+            "csv_path": cfg.csv.display().to_string(),
+            "csv_sha256": sha,
+            "resolution": resolution.map(|(w, h)| serde_json::json!({"width": w, "height": h})),
+            "build_profile": if cfg!(debug_assertions) { "debug" } else { "release" },
+            "context": cfg.context.clone().unwrap_or(serde_json::Value::Null),
+        });
+        let text = serde_json::to_string_pretty(&summary).map_err(|e| e.to_string())?;
+        write_atomic(&cfg.summary, text.as_bytes())
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn nearest_rank_on_one_to_hundred() {
+            let ms: Vec<f64> = (1..=100).map(|v| v as f64).collect();
+            let s = summarize(&ms).unwrap();
+            assert_eq!(s.count, 100);
+            assert_eq!(s.ft_p50_ms, 50.0);
+            assert_eq!(s.ft_p95_ms, 95.0);
+            assert_eq!(s.ft_p99_ms, 99.0);
+            assert_eq!(s.ft_max_ms, 100.0);
+            assert_eq!(s.ft_min_ms, 1.0);
+        }
+
+        #[test]
+        fn p99_of_600_is_the_594th_value_regardless_of_input_order() {
+            let mut ms: Vec<f64> = (1..=600).map(|v| v as f64).collect();
+            ms.reverse();
+            let s = summarize(&ms).unwrap();
+            assert_eq!(s.ft_p99_ms, 594.0);
+        }
+
+        #[test]
+        fn one_outlier_is_kept_not_rejected() {
+            let mut ms = vec![10.0; 99];
+            ms.push(500.0);
+            let s = summarize(&ms).unwrap();
+            assert_eq!(s.ft_max_ms, 500.0);
+            assert_eq!(s.ft_p99_ms, 10.0);
+            assert_eq!(s.count, 100);
+        }
+
+        #[test]
+        fn cv_uses_the_sample_standard_deviation() {
+            let s = summarize(&[2.0, 4.0, 4.0, 4.0, 5.0, 5.0, 7.0, 9.0]).unwrap();
+            assert!((s.ft_mean_ms - 5.0).abs() < 1e-12);
+            let expect = (32.0f64 / 7.0).sqrt();
+            assert!((s.stddev_ms - expect).abs() < 1e-12);
+            assert!((s.cv - expect / 5.0).abs() < 1e-12);
+        }
+
+        #[test]
+        fn empty_and_single_series() {
+            assert!(summarize(&[]).is_none());
+            let s = summarize(&[7.5]).unwrap();
+            assert_eq!((s.ft_p50_ms, s.ft_p99_ms, s.ft_max_ms, s.cv), (7.5, 7.5, 7.5, 0.0));
+        }
+
+        #[test]
+        fn tick_relationships_record_both_directions() {
+            // frames 0..=5 land on ticks 0, 0, 1, 3, 3, 3
+            let (advanced, runs) = tick_relationships(&[0, 0, 1, 3, 3, 3]);
+            assert_eq!(advanced.get(&0), Some(&3)); // frames 1, 4, 5 add no tick
+            assert_eq!(advanced.get(&1), Some(&1));
+            assert_eq!(advanced.get(&2), Some(&1));
+            assert_eq!(runs.get(&2), Some(&1)); // the two frames on tick 0
+            assert_eq!(runs.get(&1), Some(&1)); // the one frame on tick 1
+            assert_eq!(runs.get(&3), Some(&1)); // the three frames on tick 3
+        }
+
+        /// Raw rows: fixed-step count `fixed(i)`, clock tick `clock(i)`.
+        fn raw_rows(
+            n: u64,
+            fixed: impl Fn(u64) -> u64,
+            clock: impl Fn(u64) -> Option<u64>,
+        ) -> Vec<FrameSample> {
+            (0..n)
+                .map(|i| FrameSample {
+                    frame_index: i,
+                    tick_index: 999_999, // garbage: resolve_ticks must overwrite it
+                    fixed_step_index: fixed(i),
+                    ticks_advanced: 777, // garbage as well
+                    clock_tick_index: clock(i),
+                    frame_time_ns: 1_000_000,
+                })
+                .collect()
+        }
+
+        #[test]
+        fn a_constant_clock_is_not_chosen_while_the_fixed_step_count_moves() {
+            // Editor run: SimulationClock exists but stays at 0; FixedUpdate runs.
+            let mut rows = raw_rows(600, |i| i * 2, |_| Some(0));
+            let source = resolve_ticks(&mut rows);
+            assert_eq!(source, TICK_SOURCE_FIXED_CLOCK_STILL);
+            assert!(rows.iter().all(|r| r.tick_index == r.fixed_step_index));
+            let ticks: Vec<u64> = rows.iter().map(|r| r.tick_index).collect();
+            let mut distinct = ticks.clone();
+            distinct.dedup();
+            assert!(distinct.len() > 1, "tick_index must move");
+            let (advanced, _) = tick_relationships(&ticks);
+            assert!(advanced.get(&0).is_none() && advanced.get(&2) == Some(&599));
+            assert_eq!(rows[0].ticks_advanced, 0);
+            assert!(rows[1..].iter().all(|r| r.ticks_advanced == 2));
+            // The raw clock column is kept as read.
+            assert!(rows.iter().all(|r| r.clock_tick_index == Some(0)));
+        }
+
+        #[test]
+        fn play_keeps_the_clock_tick_for_every_row() {
+            let mut rows = raw_rows(600, |i| i * 3 + 5, |i| Some(100 + i));
+            let source = resolve_ticks(&mut rows);
+            assert_eq!(source, TICK_SOURCE_CLOCK);
+            assert!(rows.iter().enumerate().all(|(i, r)| r.tick_index == 100 + i as u64));
+            assert_eq!(rows[0].ticks_advanced, 0);
+            assert!(rows[1..].iter().all(|r| r.ticks_advanced == 1));
+        }
+
+        #[test]
+        fn no_clock_resource_uses_the_fixed_step_count_and_leaves_the_cell_empty() {
+            let mut rows = raw_rows(4, |i| i, |_| None);
+            assert_eq!(resolve_ticks(&mut rows), TICK_SOURCE_FIXED_NO_CLOCK);
+            assert_eq!(rows[3].tick_index, 3);
+            let csv = render_csv(&rows);
+            assert!(csv.lines().nth(1).unwrap().ends_with(",1000000,"));
+        }
+
+        #[test]
+        fn a_constant_fixed_step_count_stays_constant_and_is_reported_so() {
+            // No FixedUpdate ran: the index is flat and the summary inputs say so.
+            let mut rows = raw_rows(10, |_| 0, |_| Some(0));
+            resolve_ticks(&mut rows);
+            let ticks: Vec<u64> = rows.iter().map(|r| r.tick_index).collect();
+            let mut distinct = ticks.clone();
+            distinct.dedup();
+            assert_eq!(distinct.len(), 1);
+        }
+
+        #[test]
+        fn csv_round_trips_the_exact_values_and_the_p99_matches() {
+            let samples: Vec<FrameSample> = (0..600u64)
+                .map(|i| FrameSample {
+                    frame_index: i,
+                    tick_index: i / 2,
+                    fixed_step_index: i / 2,
+                    ticks_advanced: if i % 2 == 0 && i > 0 { 1 } else { 0 },
+                    clock_tick_index: None,
+                    frame_time_ns: 1_000_000 + (i * 7919 % 4_000_003),
+                })
+                .collect();
+            let csv = render_csv(&samples);
+            let mut lines = csv.lines();
+            assert_eq!(
+                lines.next().unwrap(),
+                "frame_index,tick_index,fixed_step_index,ticks_advanced,frame_time_ms,frame_time_ns,clock_tick_index"
+            );
+            let parsed: Vec<f64> = lines
+                .map(|l| l.split(',').nth(4).unwrap().parse::<f64>().unwrap())
+                .collect();
+            assert_eq!(parsed.len(), 600);
+            let direct: Vec<f64> = samples.iter().map(FrameSample::frame_time_ms).collect();
+            assert_eq!(parsed, direct);
+            let a = summarize(&direct).unwrap().ft_p99_ms;
+            let b = summarize(&parsed).unwrap().ft_p99_ms;
+            assert!((a - b).abs() <= 0.001);
+        }
+    }
+}
+
 // ───────────────────────────── Bevy plugin ──────────────────────────────
 impl Plugin for ProfilerPlugin {
     fn build(&self, app: &mut App) {
@@ -727,6 +1292,10 @@ impl Plugin for ProfilerPlugin {
         // `script_recorder`). Registers nothing unless
         // `EUSTRESS_SCRIPT_PROFILE` is set.
         script_recorder::install(app);
+
+        // Raw per-frame frame-time series (G1.08). Installs nothing unless a
+        // CSV path is given by env or argument; works under MinimalPlugins.
+        frametime_series::install(app);
 
         // Frame staggering (`eustress_common::utils::stagger`): a bulk load
         // opens every slot, so while it lasts the load throttle alone decides

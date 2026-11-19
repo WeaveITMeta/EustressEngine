@@ -1,0 +1,13 @@
+# Simulation configuration (harness scene). Tick rate equals the engine's fixed step.
+
+[simulation]
+tick_rate_hz = 60.0
+time_scale = 1.0
+max_ticks_per_frame = 10
+auto_start = false
+
+[simulation.recording]
+enabled = false
+output_dir = ".eustress/knowledge/recordings"
+format = "both"
+auto_export = false

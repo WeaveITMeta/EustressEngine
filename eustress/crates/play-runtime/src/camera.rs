@@ -147,7 +147,7 @@ pub fn apply_scripted_camera(
     let Some(cf) = cf else { return };
     let t = cf.to_transform();
     tf.translation = t.translation;
-    tf.rotation = t.rotation;
+    tf.rotation = if ortho { off_vertical(t.rotation) } else { t.rotation };
 
     // Keep WASD relative to the screen: forward is the view direction on
     // the ground, or the screen's up for a straight-down camera.
@@ -184,6 +184,70 @@ pub fn apply_scripted_camera(
         if needs {
             let next = eustress_common::plugins::camera_look::view_perspective(want, &projection);
             *projection = next;
+        }
+    }
+}
+
+/// How far an orthographic Play camera is kept from straight up or down, in
+/// radians: 6 cm across 60 m.
+const ORTHO_VERTICAL_TILT: f32 = 1.0e-3;
+
+/// An orthographic view looking straight up or down sees every level surface
+/// face-on: the view direction and the surface normal are equal to the last
+/// bit on every pixel, and on WebGPU a standard-material shading term turns
+/// that into NaN, so the whole view drew black in the browser (Pong's table,
+/// 2026-11-14). A tilt under about 3.5e-4 rad still rounds to exactly
+/// vertical in f32; 1e-3 rad draws normally. Such a view is tilted to exactly
+/// [`ORTHO_VERTICAL_TILT`] toward the top of the screen, keeping its roll.
+/// Picking reads the same transform, so a click lands on what is drawn.
+fn off_vertical(rotation: Quat) -> Quat {
+    let forward = rotation * Vec3::NEG_Z;
+    if forward.y.abs() < ORTHO_VERTICAL_TILT.cos() {
+        return rotation;
+    }
+    let up = rotation * Vec3::Y;
+    let toward_top = Vec3::new(up.x, 0.0, up.z).normalize_or(Vec3::NEG_Z);
+    let tilted = Vec3::Y * forward.y.signum() * ORTHO_VERTICAL_TILT.cos()
+        + toward_top * ORTHO_VERTICAL_TILT.sin();
+    Transform::IDENTITY.looking_to(tilted, up).rotation
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn tilt_from_vertical(rotation: Quat) -> f32 {
+        let f = rotation * Vec3::NEG_Z;
+        Vec2::new(f.x, f.z).length().atan2(f.y.abs())
+    }
+
+    #[test]
+    fn a_straight_down_view_is_tilted_toward_the_top_of_the_screen() {
+        // Pong's camera: CFrame.lookAt((0, 60, 0), 0, up = -Z).
+        let down = Transform::IDENTITY.looking_to(Vec3::NEG_Y, Vec3::NEG_Z).rotation;
+        let kept = off_vertical(down);
+        assert!((tilt_from_vertical(kept) - ORTHO_VERTICAL_TILT).abs() < 1e-5, "tilt {}", tilt_from_vertical(kept));
+        // Toward the screen's top (-Z here), still looking down, same roll.
+        let f = kept * Vec3::NEG_Z;
+        assert!(f.y < 0.0 && f.z < 0.0, "forward {f}");
+        assert!((kept * Vec3::Y).dot(Vec3::NEG_Z) > 0.999, "up {}", kept * Vec3::Y);
+        // In f32 the view direction is no longer exactly vertical.
+        assert!(f.y.abs() < 1.0);
+    }
+
+    #[test]
+    fn a_straight_up_view_is_tilted_too() {
+        let up_view = Transform::IDENTITY.looking_to(Vec3::Y, Vec3::Z).rotation;
+        let kept = off_vertical(up_view);
+        assert!((tilt_from_vertical(kept) - ORTHO_VERTICAL_TILT).abs() < 1e-5);
+        assert!((kept * Vec3::NEG_Z).y > 0.0);
+    }
+
+    #[test]
+    fn any_other_view_is_left_exactly_as_authored() {
+        for dir in [Vec3::new(0.0, -1.0, -1.0), Vec3::new(1.0, -0.2, 0.0), Vec3::new(0.0, -1.0, 0.01)] {
+            let r = Transform::IDENTITY.looking_to(dir, Vec3::Y).rotation;
+            assert_eq!(off_vertical(r), r, "{dir}");
         }
     }
 }

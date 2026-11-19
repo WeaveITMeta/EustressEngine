@@ -1,0 +1,203 @@
+# Website - the values a website reads. An author marks numbers in the Explorer
+# as References; publish bakes every one of them into a single manifest at
+# universes/{id}/website-manifest.json, and a site fetches that one document to
+# update every value it shows. One fetch, never one per value.
+#
+# This file is the STORE: publish reads it and git tracks it. The panel schema
+# an author actually sees is common/assets/service_properties/Website.toml, and
+# the two change together, because a field authored in only one of them is
+# either a value nothing displays or a control that persists nothing.
+#
+# WHY class_name is "Website" and not the "WebsiteService" that
+# WEBSITE_SERVICE.md 2.1 sketches: three separate lookups key off the class name
+# while the Explorer row is built from the disk FOLDER name, so the two must
+# agree or the service is unusable. Clicking it resolves the node id by hashing
+# sc.class_name and would match nothing, leaving the Properties panel blank;
+# build_service_properties loads service_properties/<class_name>.toml and would
+# look for a WebsiteService.toml that does not exist; and the property write
+# path finds the entity by Instance.name, which is set from class_name. Every
+# service that works today has folder == class. This one does too.
+#
+# WHY every field below is a flat scalar under [service] rather than the
+# [website] / [website.key] tables the spec sketches: the loader runs each
+# [service] value through toml_to_property_value, which accepts scalars and
+# 3-or-4-float arrays and drops tables, so a nested table never reaches
+# ServiceComponent.properties. The signed saver then rewrites the file from that
+# map with the top-level table emptied, so the first save of ANY service deletes
+# the section outright. Lighting, Workspace and SoulService have already lost
+# their [properties] blocks exactly that way. Scalars under [service] round-trip.
+
+[service]
+class_name = "Website"
+icon = "website"
+description = "Values a website reads - References baked into a published manifest"
+can_have_children = true
+
+# Publishing
+#
+# The identifier the manifest is published under, and the name a consumer writes
+# in data-eus="{namespace}:{key}". Empty on a fresh Space because
+# scaffold_new_space copies this template byte for byte with no substitution, so
+# any value here would be the same value in every Space on every machine.
+# Publish must refuse an empty namespace rather than publishing under "".
+namespace = ""
+
+# Bumped by the author when the MEANING of a key changes rather than its value,
+# so a rename is a breaking change a consumer opts into by editing its own
+# check. Issuing or rotating a key never bumps this: transport is not meaning,
+# and a bump on rotation hard-stops every consumer on a day no number changed.
+schema_version = 1
+
+# Access
+#
+# What the manifest key is, stated plainly: a website sends it from browser
+# JavaScript, so anyone who opens devtools can read it. It is not secrecy, and
+# nothing about it makes the manifest private. What it genuinely buys is
+# revocable attribution and abuse control - you can see which consumer is
+# calling, rate-limit per key, and cut a consumer off by rotating. Real
+# confidentiality would need a server-side proxy or short-lived signed tokens,
+# and this is neither.
+#
+# WHY only the key's identity lives here and never the key itself:
+#
+#   1. This file ships inside the published Universe. package_universe_to_pak
+#      tars the entire Universe directory with no exclusion for _service.toml,
+#      and the .pak is served publicly from /api/simulations/{id}/download. A
+#      raw key written here is downloadable by anyone who never visits the site
+#      it was issued for, which collapses the per-consumer attribution that is
+#      the only thing the key buys.
+#
+#   2. Rotation is this key's single lever, and it works only while the current
+#      key lives in one place the author controls. A key copied into every
+#      published .pak snapshot has already reached an audience nobody can
+#      enumerate, so rotating it tells you nothing about who you cut off.
+#
+#   3. The engine already holds this line. api_key_dialog.slint says of the
+#      Claude key that it is "Saved to your local app data, never inside a
+#      Space, so it stays out of audit folders and commits", and
+#      class_schema/ExportTarget stores the NAME of a credential rather than the
+#      credential. A Website service that wrote live key material into a
+#      committed TOML would be the first asset in this tree to break that rule.
+#
+# So the raw key is shown once at mint time in a reveal dialog modelled on
+# api_key_dialog.slint, registered with the api.eustress.dev worker, and never
+# written back here. An author who loses it rotates. That is what every key
+# console does and it is the honest arrangement.
+
+# Short stable handle for the current key, e.g. "wk_3f8a12". This is what
+# appears in request and rate-limit logs, so it is the name an author uses when
+# talking about a consumer. Empty until the first mint.
+key_id = ""
+
+# First and last few characters of the current key, e.g. "eus_pk_7c1d...4f2a",
+# so an author can eyeball-match the value their own site is sending. A hash
+# fingerprint is the right tool for comparing a value you cannot see; this value
+# is visible in the site's own JavaScript, so a preview does the same job for
+# less machinery.
+key_preview = ""
+
+# RFC 3339 UTC. created_at is stamped once at the first mint and never again;
+# rotated_at moves on every rotation. Keeping both distinguishes "issued a year
+# ago, rotated yesterday" from "minted yesterday".
+key_created_at = ""
+key_rotated_at = ""
+
+# The handle of the key that rotation just replaced. It keeps working for
+# key_overlap_days so a site that has not redeployed yet stays up, which is what
+# makes a rotation a migration instead of an outage. Empty when no rotation is
+# in flight.
+previous_key_id = ""
+key_overlap_days = 30
+
+# Whether the worker serves the manifest only to a request carrying a valid key.
+# false on a fresh Space because key_id is still empty, and enforcing against a
+# key that was never issued locks out the author along with everyone else. The
+# mint flow is what earns the right to turn this on.
+access_enforced = false
+
+# An ACTION, not a setting. The Properties grammar has no button type, so this
+# is a bool the write path must intercept; see the RotateKey comment in
+# service_properties/Website.toml for exactly what the UI layer has to add.
+# Without that interception it latches true and rotates nothing.
+rotate_key = false
+
+# Build key
+#
+# The spec's second credential (WEBSITE_SERVICE.md 2.1 [website.build_key]):
+# same manifest, different exposure. CI holds it and it never reaches a browser,
+# so it is the one of the two that behaves like a real secret. Identity only
+# here, for the same reasons as above.
+#
+# Deliberately store-only and absent from the Properties panel: nothing in that
+# panel can act on a credential that lives in CI, and a row is one more surface
+# to leak it into a screenshot for no gain. Surfacing it later means adding two
+# readonly rows to [Access] and nothing else.
+build_key_id = ""
+build_key_created_at = ""
+
+# Page
+#
+# How this Space's public sim page looks, and the images it shows. Publish
+# bakes these (and the PageLink children of this service) into one PageSpec v1
+# document and uploads it; the Worker reviews it and the website renders only
+# what review approved. Design: docs/design/SIM_PAGE_THEME_AND_LINKS.md.
+#
+# "default" in an enum field, an empty colour and an empty image path all mean
+# "the author chose nothing". A Space with nothing chosen here and no PageLink
+# children bakes no page at all, so every existing Space publishes as before.
+#
+# Flat scalars under [service] for the reason given above: a nested [page]
+# table would be dropped by the loader and lost on the first save.
+#
+# theme_preset: default | studio | daylight | blueprint | laboratory | arcade |
+# paper. A preset is a full colour set (common/src/page_spec.rs, PRESETS); the
+# five colour fields below override single colours of it, as "#RRGGBB".
+theme_preset = "default"
+theme_color_primary = ""
+theme_color_accent = ""
+theme_color_background = ""
+theme_color_surface = ""
+theme_color_text = ""
+
+# theme_font: default | inter | space-grotesk | ibm-plex-sans | jetbrains-mono |
+# merriweather.   theme_layout: default | classic | wide | compact.
+# theme_motion: default | none | subtle | full (the page always honours the
+# visitor's reduced-motion setting).
+theme_font = "default"
+theme_layout = "default"
+theme_motion = "default"
+
+# Gallery slideshow interval in seconds (3 to 30) and banner fade in
+# milliseconds (0 to 2000).
+slideshow_interval_s = 6
+banner_fade_ms = 600
+
+# Images, as paths relative to the Space root (for example
+# "Assets/page/logo.png"). PNG, JPEG or WebP, at most 2 MB each. Up to six
+# gallery images; empty slots are skipped.
+image_logo = ""
+image_banner = ""
+image_gallery_0 = ""
+image_gallery_1 = ""
+image_gallery_2 = ""
+image_gallery_3 = ""
+image_gallery_4 = ""
+image_gallery_5 = ""
+
+# README (the About tab)
+#
+# Not a field here: add a README.md file to this Website folder and the sim
+# page shows it, rendered, under an About tab. It publishes on its own, so a
+# README with nothing above chosen still uploads; with no README, publish
+# removes one published before. At most 32 KiB of UTF-8. Images are files
+# inside this Space, written relative to this folder the way GitHub resolves a
+# README ("Assets/diagram.png" is Website/Assets/diagram.png,
+# "../Assets/diagram.png" is the Space's own Assets folder): at most 8, PNG,
+# JPEG or WebP, 2 MB each. A remote image is never loaded and shows its alt
+# text. Raw HTML is dropped. Its text, links and images are reviewed before
+# any of it shows. Design: docs/design/SIM_PAGE_README_AND_TABS.md.
+
+[metadata]
+id = "website-service"
+created = ""
+last_modified = ""

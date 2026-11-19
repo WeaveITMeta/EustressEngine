@@ -1,0 +1,11 @@
+# EEP Space metadata (emitted by harness-scenes; never edit by hand)
+[space]
+name = "S6_domain_sim"
+author = "harness-scenes"
+version = "0.1.0"
+created_with = "harness-scenes"
+format = 3
+
+[metadata]
+created = "2026-11-16T00:00:00Z"
+last_modified = "2026-11-16T00:00:00Z"

@@ -1,0 +1,74 @@
+{
+  "item": "G1.07",
+  "status": "MEASURED",
+  "note": "MEASURED 2026-11-17 by L1 with the block's two eustress-headless commands and its comparison line: BASE_EXIT=0 SAT_EXIT=0 CMP_EXIT=0. second release build of 2026-11-17 on C:\\EustressBuild\\target: Finished release in 42m 45s at 15:53 Arizona, exit 0 (the first, cold build with Slint 1.19.0: 70m 23s at 13:09, exit 0); source = commit bb910190620076e4073a727a5ea20d49afa83e26 plus the uncommitted working tree.",
+  "counter": {
+    "resource": "eustress_common::simulation::PhysicsStepCounter",
+    "increment_site": "eustress/crates/engine/src/simulation/plugin.rs:148",
+    "increment_registration": "eustress/crates/engine/src/simulation/plugin.rs:143 (PhysicsSchedule, in PhysicsStepSystems::Last)",
+    "increment_body": "eustress/crates/common/src/simulation/clock.rs:162",
+    "run_window_open": "eustress/crates/engine/src/simulation/plugin.rs:93 (the run's start is kept on a resume from Pause; the window opens at the clock's first advance)",
+    "run_window_close": "eustress/crates/engine/src/simulation/plugin.rs:120",
+    "independence_argument": "The clock's tick_count is incremented inside SimulationClock::advance (clock.rs:96), called from advance_simulation_clock in PreUpdate, draining the clock's own f64 accumulator with the max_ticks_per_frame cap and the zeroing branch at clock.rs:100-102. The step counter is a separate resource that advance never touches. It is incremented by count_physics_step, a system inside Avian's PhysicsSchedule, which Avian's run_physics_schedule (.patches/avian3d-0.7.0/src/schedule/mod.rs:235-276) runs once per fixed tick of FixedPostUpdate, only when Time<Physics> has a non-zero delta (not paused) and the Kinematics domain run condition allows PhysicsSystems::StepSimulation (engine/src/plugins/physics_plugin.rs:90-93). FixedPostUpdate's tick count comes from Bevy's Time<Fixed> accumulator over Time<Virtual>, not from SimulationClock; SimulationClock.time_scale does not reach Avian at all (Avian's speed is PhysicsService.time_scale, physics_plugin.rs:802-805). The two counts therefore come from different schedules, different accumulators and different scale factors, and disagree whenever the clock's cap or compression and the fixed loop diverge. A catch-up frame that runs FixedPostUpdate N times runs PhysicsSchedule N times and increments the counter N times.",
+    "never_reset_by": [
+      "SimulationClock::reset",
+      "time-scale change",
+      "pause",
+      "mode transition"
+    ],
+    "monotonicity_by_construction": "private u64 field, only record_step (saturating_add) writes it",
+    "pause_is_exact": "eustress/crates/engine/src/simulation/plugin.rs:160 hold_physics. Avian runs one more step after a bare pause() (measured: the counter read 13 after a pause at 12); every engine pause site holds through this function."
+  },
+  "transitions_tested_for_monotonicity": {
+    "pause": "engine simulation::plugin::tests::counts_every_step_of_a_catch_up_frame_and_none_while_paused and a_bare_pause_lets_one_more_step_through_and_a_hold_does_not: RUN, ok",
+    "pause_and_resume_inside_a_run": "engine simulation::plugin::tests::a_resume_keeps_the_runs_window: RUN, ok",
+    "mode_transition": "engine simulation::plugin::tests::window_opens_at_the_first_clock_advance_and_closes_before_the_last and oversteps_account_for_the_phase_at_the_windows_edges (Edit to Play to Edit, nine runs in one app): RUN, ok",
+    "clock_reset_and_time_scale_change": "common simulation::clock::tests::step_counter_ignores_the_clock: RUN, ok",
+    "result": "engine 109 of 109 in the filtered run (6 of them simulation::plugin), common simulation:: 9 of 9",
+    "mutation": "counter.record_step() replaced by a no-op: 6 of 6 simulation::plugin tests FAILED (exit 101); restored byte for byte, 109 of 109 pass again"
+  },
+  "runs": {
+    "baseline": {
+      "config": {
+        "ticks": 600,
+        "time_scale": 1.0,
+        "max_ticks_per_frame": 10
+      },
+      "physics_steps_executed": 600,
+      "clock_tick_count_implied_by_time": 600,
+      "simulation_time_s": 10.00000020000009,
+      "clock_tick_count": 600,
+      "dropped_steps": 0,
+      "source_file": "docs/PROMPTS/artifacts/G1.07/step_counter_baseline.json",
+      "physics_steps_before_clock_start": 1,
+      "clock_ticks_after_physics_end": 1,
+      "source_sha256": "sha256:4f45fb8a442c60fea3145727c52d85de5f61b748fd68550bcef6aab3cadf6e36"
+    },
+    "saturated": {
+      "config": {
+        "ticks": 600,
+        "time_scale": 8.0,
+        "max_ticks_per_frame": 2
+      },
+      "physics_steps_executed": 300,
+      "clock_tick_count_implied_by_time": 2400,
+      "simulation_time_s": 40.00000079999994,
+      "clock_tick_count": 600,
+      "dropped_steps": 2100,
+      "source_file": "docs/PROMPTS/artifacts/G1.07/step_counter_saturated.json",
+      "is_capture": false,
+      "label": "experiment: compressed run, emits no frames, not admissible as a capture",
+      "physics_steps_before_clock_start": 1,
+      "clock_ticks_after_physics_end": 2,
+      "source_sha256": "sha256:e951dcbd7c17c29b23c231b055fcda70a76fe45a214ec100d4f9faa442b478d8"
+    }
+  },
+  "harness_scene": {
+    "path": "eustress/spaces/harness/S5_physics_stress",
+    "frozen_hash": "sha256:855b5088f934ff606aa6fb97da9a834afa7368f7bb978cf50cc946d67187de45"
+  },
+  "commit": "bb910190620076e4073a727a5ea20d49afa83e26",
+  "reference_machine_id": null,
+  "source_matches_commit": false,
+  "machine_note": "verify_reference_machine.ps1 -Id RM-1 exits 1 on this machine (gpu_match=False), so no reference machine id is claimed. CPU: Intel Core i9-10980XE."
+}

@@ -1317,6 +1317,43 @@ fn do_publish(world: &mut World, request: &PublishRequest) {
         );
     }
 
+    // Bake the sim page (theme, images, links) and its README, if the author
+    // set any. Apart from the numbers manifest: an invalid entry is dropped
+    // with a warning here and the rest publishes. Ok with no page and no
+    // README is every Space that set nothing, and costs three reads.
+    let (pending_page, pending_readme) = match crate::website::bake_page_from_world(world, &space_root) {
+        Ok(bake) => {
+            for warning in &bake.warnings {
+                tracing::warn!("{}", warning);
+                if let Some(mut n) = world.get_resource_mut::<NotificationManager>() {
+                    n.warning(warning.clone());
+                }
+            }
+            (bake.page, bake.readme)
+        }
+        Err(e) => {
+            if let Some(mut n) = world.get_resource_mut::<NotificationManager>() {
+                n.error(format!("Publish stopped: the Website page could not be read: {}", e));
+            }
+            tracing::error!("website page bake failed: {}", e);
+            return;
+        }
+    };
+    if let Some(ref page) = pending_page {
+        tracing::info!(
+            "Website page baked: {} link(s), {} image(s)",
+            page.link_count,
+            page.images.len(),
+        );
+    }
+    if let crate::website::ReadmeBake::Present { ref markdown, ref images } = pending_readme {
+        tracing::info!("Website README baked: {} byte(s), {} image(s)", markdown.len(), images.len());
+    }
+    // Whether this publish sends a page or a README, so the review can be read
+    // back after.
+    let page_published =
+        pending_page.is_some() || matches!(pending_readme, crate::website::ReadmeBake::Present { .. });
+
     // The thumbnail is one of the capture orbit's off-screen renders, made once
     // the orbit is done (submit_for_review): never a capture of the Studio
     // window. A thumbnail an older build took of the window (512x288) is
@@ -1368,7 +1405,16 @@ fn do_publish(world: &mut World, request: &PublishRequest) {
         // However this thread ends, the record ends complete.
         let _guard = PublishGuard(progress_for_thread.clone());
         let mut dossier = dossier;
-        let result = execute_publish_upload(&plan, &universe_root, &request, &token, &progress_for_thread, pending_manifest);
+        let result = execute_publish_upload(
+            &plan,
+            &universe_root,
+            &request,
+            &token,
+            &progress_for_thread,
+            pending_manifest,
+            pending_page,
+            pending_readme,
+        );
         match result {
             Ok(PublishDone { sim_id, state, changelog, changelog_version, changelog_stored, notes }) => {
                 // The listing exists and the content is stored. Review is a
@@ -1380,6 +1426,17 @@ fn do_publish(world: &mut World, request: &PublishRequest) {
                 let outcome = submit_for_review(&sim_id, &token, &universe_root, &mut dossier, &capture_status, true, &progress_for_thread);
                 if outcome.is_ok() {
                     record_reviewed(&universe_root, &state);
+                }
+                // What review did to the page's links and images so far. The
+                // link scans can take longer than this publish waits, so a
+                // link still pending is not listed; the next publish reads it.
+                let page_notes = if page_published {
+                    fetch_page_review_notes(&sim_id, &token)
+                } else {
+                    Vec::new()
+                };
+                for note in &page_notes {
+                    tracing::warn!("Sim page review: {}", note);
                 }
                 let mut p = lock_progress(&progress_for_thread);
                 p.sim_id = Some(sim_id.clone());
@@ -1401,6 +1458,10 @@ fn do_publish(world: &mut World, request: &PublishRequest) {
                 }
                 // SoulService's notice and any key warning, after the result.
                 for note in &notes {
+                    p.stage.push(' ');
+                    p.stage.push_str(note);
+                }
+                for note in &page_notes {
                     p.stage.push(' ');
                     p.stage.push_str(note);
                 }
@@ -1619,6 +1680,8 @@ fn execute_publish_upload(
     token: &str,
     progress: &ProgressHandle,
     pending_manifest: Option<crate::website::PendingManifest>,
+    pending_page: Option<crate::website::PendingPage>,
+    pending_readme: crate::website::ReadmeBake,
 ) -> Result<PublishDone, String> {
     use crate::space::echk_publish::{publish_to, Listing};
 
@@ -1692,6 +1755,70 @@ fn execute_publish_upload(
         }
     }
 
+    // ── Sim page ────────────────────────────────────────────────────────────
+    // After the manifest, the same way and with the same failure rule: a page
+    // that did not upload leaves the public page showing the previous theme and
+    // links while the Space says otherwise. Images first, because the Worker
+    // marks a slot pending when its bytes land and the spec names the slots.
+    if let Some(page) = pending_page {
+        set_progress(progress, "Publishing sim page...", 89.0);
+        let auth = format!("Bearer {}", token);
+        for image in &page.images {
+            ureq::put(&format!("{}/api/simulations/{}/page/image/{}", api_base(), sim_id, image.slot))
+                .set("Authorization", &auth)
+                .set("Content-Type", image.content_type)
+                .send_bytes(&image.bytes)
+                .map_err(|e| format!("Sim page image '{}' upload failed: {}", image.slot, e))?;
+        }
+        ureq::put(&format!("{}/api/simulations/{}/page", api_base(), sim_id))
+            .set("Authorization", &auth)
+            .set("Content-Type", "application/json")
+            .send_string(&page.spec_json)
+            .map_err(|e| format!("Sim page upload failed: {}", e))?;
+        tracing::info!(
+            "Sim page published: {} link(s), {} image(s)",
+            page.link_count,
+            page.images.len()
+        );
+    }
+
+    // ── Sim page README (the About tab) ─────────────────────────────────────
+    // After the page images and the PageSpec, on its own: a README alone, with
+    // no theme or link, still uploads. Its images first, because the Worker
+    // checks every eustress-image:readme-N the README names. With no README,
+    // a DELETE removes one published before; the Worker answers 404 when there
+    // was none, which is not a failure. Any other failure fails the publish,
+    // the same rule as the page.
+    {
+        let auth = format!("Bearer {}", token);
+        let readme_url = format!("{}/api/simulations/{}/page/readme", api_base(), sim_id);
+        match pending_readme {
+            crate::website::ReadmeBake::Present { markdown, images } => {
+                set_progress(progress, "Publishing sim page README...", 89.5);
+                for image in &images {
+                    ureq::put(&format!("{}/api/simulations/{}/page/image/{}", api_base(), sim_id, image.slot))
+                        .set("Authorization", &auth)
+                        .set("Content-Type", image.content_type)
+                        .send_bytes(&image.bytes)
+                        .map_err(|e| format!("README image '{}' upload failed: {}", image.slot, e))?;
+                }
+                ureq::put(&readme_url)
+                    .set("Authorization", &auth)
+                    .set("Content-Type", "text/markdown; charset=utf-8")
+                    .send_string(&markdown)
+                    .map_err(|e| format!("Sim page README upload failed: {}", e))?;
+                tracing::info!("Sim page README published: {} byte(s), {} image(s)", markdown.len(), images.len());
+            }
+            crate::website::ReadmeBake::Absent => {
+                match ureq::delete(&readme_url).set("Authorization", &auth).call() {
+                    Ok(_) => tracing::info!("Sim page README removed: the Space has none now"),
+                    Err(ureq::Error::Status(404, _)) => {}
+                    Err(e) => return Err(format!("Sim page README removal failed: {}", e)),
+                }
+            }
+        }
+    }
+
     set_progress(progress, "Uploading thumbnail...", 90.0);
 
     // Step 4: Upload thumbnail if available (check .eustress/ in Universe root)
@@ -1733,6 +1860,8 @@ fn execute_publish_upload(
     _token: &str,
     _progress: &ProgressHandle,
     _pending_manifest: Option<crate::website::PendingManifest>,
+    _pending_page: Option<crate::website::PendingPage>,
+    _pending_readme: crate::website::ReadmeBake,
 ) -> Result<PublishDone, String> {
     Err("Publishing exports the Space's database, and this build has no world-db feature.".into())
 }
@@ -1741,6 +1870,113 @@ fn execute_publish_upload(
 /// with whatever landed. Generous next to the orbit's own 20 s budget so the
 /// two do not race; a publish that waited this long has something else wrong.
 const CAPTURE_WAIT: std::time::Duration = std::time::Duration::from_secs(25);
+
+/// Each link and image of the sim page that review has removed, with the
+/// reason, from `GET {api}/api/simulations/{id}/page/review`. Best-effort: a
+/// failed read gives no notes, because the page itself is already uploaded.
+///
+/// Reads the response tolerantly (the Worker's `page.mjs` owns its shape): any
+/// item under `links` or `images` whose `status` is `removed` is reported by
+/// its `label`, `url` or `slot`, with its `reason`; so is a removed README
+/// (`readme.status`) and each removed README link (`readme.links`).
+fn fetch_page_review_notes(sim_id: &str, token: &str) -> Vec<String> {
+    let resp = ureq::get(&format!("{}/api/simulations/{}/page/review", api_base(), sim_id))
+        .set("Authorization", &format!("Bearer {}", token))
+        .call();
+    let body: serde_json::Value = match resp {
+        Ok(r) => r.into_json().unwrap_or_default(),
+        Err(e) => {
+            tracing::info!("Sim page review not read for {}: {}", sim_id, e);
+            return Vec::new();
+        }
+    };
+    removed_page_items(&body)
+}
+
+/// The removal notes in a page review body. See [`fetch_page_review_notes`].
+fn removed_page_items(body: &serde_json::Value) -> Vec<String> {
+    let mut notes = Vec::new();
+    for (list, noun) in [("links", "link"), ("images", "image")] {
+        let Some(items) = body.get(list).and_then(|v| v.as_array()) else { continue };
+        for item in items {
+            if item.get("status").and_then(|s| s.as_str()) != Some("removed") {
+                continue;
+            }
+            let what = ["label", "url", "slot"]
+                .iter()
+                .find_map(|k| item.get(*k).and_then(|v| v.as_str()))
+                .unwrap_or("(unnamed)");
+            let reason = item.get("reason").and_then(|v| v.as_str()).unwrap_or("no reason given");
+            notes.push(format!("The {noun} \"{what}\" was removed from your page: {reason}."));
+        }
+    }
+    // The README (`readme: { status, reason, links: [{ url, status, reason }] }`):
+    // its text as a whole, then each of its links.
+    if let Some(readme) = body.get("readme").filter(|v| v.is_object()) {
+        if readme.get("status").and_then(|s| s.as_str()) == Some("removed") {
+            let reason = readme.get("reason").and_then(|v| v.as_str()).unwrap_or("no reason given");
+            notes.push(format!("Your README was removed from your page's About tab: {reason}."));
+        }
+        for item in readme.get("links").and_then(|v| v.as_array()).into_iter().flatten() {
+            if item.get("status").and_then(|s| s.as_str()) != Some("removed") {
+                continue;
+            }
+            let what = item.get("url").and_then(|v| v.as_str()).unwrap_or("(unnamed)");
+            let reason = item.get("reason").and_then(|v| v.as_str()).unwrap_or("no reason given");
+            notes.push(format!("The README link \"{what}\" was removed from your page: {reason}."));
+        }
+    }
+    notes
+}
+
+#[cfg(test)]
+mod page_review_tests {
+    use super::*;
+
+    #[test]
+    fn only_removed_links_and_images_are_reported_with_their_reason() {
+        let body = serde_json::json!({
+            "links": [
+                { "url": "https://a.com/", "label": "Shop", "status": "removed", "reason": "redirects elsewhere" },
+                { "url": "https://b.com/", "label": "Docs", "status": "approved" },
+                { "url": "https://c.com/", "status": "pending" },
+                { "url": "https://d.com/", "status": "removed" }
+            ],
+            "images": [ { "slot": "banner", "status": "removed", "reason": "fails the Code" } ]
+        });
+        let notes = removed_page_items(&body);
+        assert_eq!(notes.len(), 3, "{notes:?}");
+        assert!(notes[0].contains("Shop") && notes[0].contains("redirects elsewhere"));
+        assert!(notes[1].contains("https://d.com/") && notes[1].contains("no reason given"));
+        assert!(notes[2].contains("banner") && notes[2].contains("fails the Code"));
+        assert!(removed_page_items(&serde_json::json!({})).is_empty());
+        assert!(removed_page_items(&serde_json::json!({ "readme": null })).is_empty());
+    }
+
+    #[test]
+    fn a_removed_readme_and_its_removed_links_are_reported() {
+        let body = serde_json::json!({
+            "links": [],
+            "images": [ { "slot": "readme-1", "status": "removed", "reason": "fails the Code" } ],
+            "readme": {
+                "status": "removed",
+                "reason": "B3 applies",
+                "links": [
+                    { "url": "https://a.com/", "status": "removed", "reason": "risk score 80" },
+                    { "url": "https://b.com/", "status": "approved", "reason": "ok" }
+                ]
+            }
+        });
+        let notes = removed_page_items(&body);
+        assert_eq!(notes.len(), 3, "{notes:?}");
+        assert!(notes[0].contains("readme-1"));
+        assert!(notes[1].contains("README") && notes[1].contains("B3 applies"));
+        assert!(notes[2].contains("https://a.com/") && notes[2].contains("risk score 80"));
+        // A README still in review is not news.
+        let pending = serde_json::json!({ "readme": { "status": "pending", "links": [] } });
+        assert!(removed_page_items(&pending).is_empty());
+    }
+}
 
 /// Upload the moderation inputs, submit the listing for review, and poll the
 /// outcome briefly so the notification can say what happened. Runs on the

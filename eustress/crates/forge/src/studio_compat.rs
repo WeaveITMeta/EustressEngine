@@ -6,9 +6,13 @@
 //! This module answers the Studio routes and, for each instance, builds the
 //! `/api/v1/jobs` job the control plane records.
 //!
-//! The listener binds to loopback only. A missing `Authorization` header is
-//! accepted, because the socket is not reachable from another machine. A
-//! wrong bearer is refused. The API key is `FORGE_LOCAL_API_KEY` or
+//! The listener binds to loopback only. A read (a deployment's status, a
+//! listing's servers) is answered without an `Authorization` header; a wrong
+//! bearer is refused. A deployment starts processes, so it needs the bearer
+//! `POST /api/auth` hands out: the socket is not reachable from another
+//! machine, but a page open in a browser on this one can post to it, and a
+//! page cannot add an `Authorization` header without a preflight this
+//! server never answers. The API key is `FORGE_LOCAL_API_KEY` or
 //! `local-dev`.
 //!
 //! `GET /api/deployments/{id}/status` is the deployment status as a JSON
@@ -135,6 +139,11 @@ pub fn handle(state: &mut CompatState, method: &str, path: &str, body: &str, aut
         return reject;
     }
     match (method, path) {
+        ("POST", "/api/deployments") if !has_bearer(authorization) => Reply {
+            status: 401,
+            body: json!({ "error": "a deployment needs the Forge key: authenticate first" }),
+            plans: Vec::new(),
+        },
         ("POST", "/api/deployments") => deploy(state, body),
         ("GET", path) if path.starts_with("/api/deployments/") && path.ends_with("/status") => deployment_status(state, path),
         ("GET", path) if path.starts_with("/api/experiences/") && path.ends_with("/servers") => list_servers(state, path),
@@ -149,6 +158,12 @@ fn auth(state: &CompatState, body: &str) -> Reply {
         return Reply { status: 401, body: json!({ "error": "unknown api key" }), plans: Vec::new() };
     }
     Reply { status: 200, body: json!({ "token": state.token }), plans: Vec::new() }
+}
+
+/// Whether the request carries an `Authorization` header at all.
+/// [`reject_bearer`] has already refused a wrong one.
+fn has_bearer(authorization: Option<&str>) -> bool {
+    authorization.map(str::trim).is_some_and(|header| !header.is_empty())
 }
 
 fn reject_bearer(state: &CompatState, authorization: Option<&str>) -> Option<Reply> {
@@ -171,6 +186,14 @@ fn deploy(state: &mut CompatState, body: &str) -> Reply {
     let experience_id = parsed.get("experience_id").and_then(|v| v.as_str()).unwrap_or("").trim().to_string();
     if experience_id.is_empty() {
         return Reply { status: 400, body: json!({ "error": "experience_id is required" }), plans: Vec::new() };
+    }
+    // It becomes a directory name (the status directory) and an argument.
+    if !is_token(&experience_id) {
+        return Reply {
+            status: 400,
+            body: json!({ "error": "experience_id must be 1 to 64 letters, digits, _ or -" }),
+            plans: Vec::new(),
+        };
     }
     let version = parsed.get("version").and_then(|v| v.as_str()).unwrap_or("latest").to_string();
     let region_variant = parsed
@@ -529,7 +552,7 @@ mod tests {
             "max_players_per_server":100,
             "env":{"EUSTRESS_AUTHOR_TOKEN":"session-secret","EUSTRESS_HOST_PUBLIC":"203.0.113.7"}
         }"#;
-        let reply = handle(&mut state, "POST", "/api/deployments", body, None);
+        let reply = handle(&mut state, "POST", "/api/deployments", body, Some("Bearer local-dev"));
         assert_eq!(reply.status, 200, "{:?}", reply.body);
         assert_eq!(reply.body["status"], "Active");
         assert_eq!(reply.body["server_count"], 1);
@@ -561,11 +584,48 @@ mod tests {
     fn five_is_the_ceiling_and_only_min_servers_are_planned() {
         let mut state = state();
         let body = r#"{"experience_id":"box","version":"latest","regions":["UsEast"],"min_servers":3,"max_servers":5,"max_players_per_server":8}"#;
-        let reply = handle(&mut state, "POST", "/api/deployments", body, None);
+        let reply = handle(&mut state, "POST", "/api/deployments", body, Some("Bearer local-dev"));
         assert_eq!(reply.plans.len(), 3);
         assert_eq!(reply.body["server_count"], 3);
         let ports: Vec<u16> = reply.plans.iter().map(|p| p.port).collect();
         assert_eq!(ports, vec![7777, 7778, 7779]);
+    }
+
+    /// A page open in a browser on this computer can post to the loopback
+    /// port, with any body, but with no `Authorization` header. That request
+    /// must start nothing.
+    #[test]
+    fn a_deployment_without_the_key_starts_nothing() {
+        let body = r#"{"experience_id":"07d084d8-9098-4192-bb48-84d2c428db36","min_servers":3,"env":{"EUSTRESS_API_URL":"https://example.invalid"}}"#;
+        for header in [None, Some(""), Some("   ")] {
+            let mut state = state();
+            let reply = handle(&mut state, "POST", "/api/deployments", body, header);
+            assert_eq!(reply.status, 401, "{header:?}: {:?}", reply.body);
+            assert!(reply.plans.is_empty(), "{header:?}: a process was planned");
+            assert!(state.instances.is_empty() && state.deployments.is_empty() && state.ports.is_empty(), "{header:?}");
+        }
+        let mut state = state();
+        let wrong = handle(&mut state, "POST", "/api/deployments", body, Some("Bearer other"));
+        assert_eq!(wrong.status, 401);
+        assert!(wrong.plans.is_empty());
+        let ok = handle(&mut state, "POST", "/api/deployments", body, Some("Bearer local-dev"));
+        assert_eq!(ok.status, 200, "{:?}", ok.body);
+        assert_eq!(ok.plans.len(), 3);
+        // Reads stay open to this computer.
+        let servers = handle(&mut state, "GET", "/api/experiences/07d084d8-9098-4192-bb48-84d2c428db36/servers", "", None);
+        assert_eq!(servers.status, 200);
+    }
+
+    /// The listing id becomes a directory name and a process argument.
+    #[test]
+    fn a_listing_id_that_is_not_a_token_is_refused() {
+        for bad in ["../../outside", "a/b", "a\\b", "has space", "x".repeat(65).as_str()] {
+            let mut state = state();
+            let body = json!({ "experience_id": bad, "min_servers": 1 }).to_string();
+            let reply = handle(&mut state, "POST", "/api/deployments", &body, Some("Bearer local-dev"));
+            assert_eq!(reply.status, 400, "{bad:?}: {:?}", reply.body);
+            assert!(reply.plans.is_empty() && state.instances.is_empty(), "{bad:?}");
+        }
     }
 
     #[test]

@@ -1,0 +1,45 @@
+[asset]
+mesh = "parts/block.glb"
+scene = "Scene0"
+
+[metadata]
+archivable = true
+class_name = "Part"
+created = "2026-11-16T00:00:00Z"
+last_modified = "2026-11-16T00:00:00Z"
+name = "Anchor"
+unit = "m"
+uuid = "3a791363624682c3a57a356a2059c485"
+
+[properties]
+anchored = true
+can_collide = true
+cast_shadow = true
+color = [
+    40,
+    40,
+    40,
+]
+destructible = false
+locked = false
+material = "SmoothPlastic"
+reflectance = 0.0
+transparency = 0.0
+
+[transform]
+position = [
+    -2.0,
+    6.0,
+    -5.0,
+]
+rotation = [
+    0.0,
+    0.0,
+    0.0,
+    1.0,
+]
+scale = [
+    0.2,
+    0.2,
+    0.2,
+]

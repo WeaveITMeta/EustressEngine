@@ -19,7 +19,8 @@ use eustress_common::datamodel::{DataModel, DmEvent, DmValue, InstanceId};
 use eustress_common::mlua::play::{RayHit, RayQuery};
 use eustress_common::machine_input::{write_camera, write_input, write_mouse, DeviceFrame, Taken, ViewRect};
 use eustress_common::scripting::{CFrame, Vector3};
-use eustress_common::terrain::road_surface::RoadMaterial;
+use eustress_common::terrain::road_hit::{RoadHitMap, RoadJunctionRoads};
+use eustress_common::terrain::road_surface::{RoadMaterial, RoadSurface};
 use eustress_common::terrain::TerrainChunkCollider;
 
 use super::PlayDataModel;
@@ -453,13 +454,28 @@ pub fn pull_mouse_hit(
     write_mouse(&dm.dm, camera, cam_gt, rect, ray_state.cursor, &spatial, &colliders, avatars.iter());
 }
 
+/// What `workspace:Raycast` reads about each collider it meets: a part's
+/// settings, whether it is a sensor or terrain, and, for a road's surface or
+/// a junction, its bed material, its road and the surfaces it draws.
+pub type RayColliders<'w, 's> = Query<
+    'w,
+    's,
+    (
+        Option<&'static BasePart>,
+        Has<Sensor>,
+        Has<TerrainChunkCollider>,
+        Option<&'static RoadMaterial>,
+        Option<&'static RoadSurface>,
+        Option<&'static RoadHitMap>,
+        Option<&'static RoadJunctionRoads>,
+    ),
+>;
+
 /// `workspace:Raycast` against Avian, synchronously. Terrain chunk colliders
 /// have no instance: the filter takes or skips them together, as the Terrain.
-pub fn cast_ray(
-    spatial: &SpatialQuery,
-    colliders: &Query<(Option<&BasePart>, Has<Sensor>, Has<TerrainChunkCollider>, Option<&RoadMaterial>)>,
-    q: &RayQuery,
-) -> Option<RayHit> {
+/// A road's surface and a junction have none either: a hit on one reports
+/// the road's spline, and the surface and material under the hit.
+pub fn cast_ray(spatial: &SpatialQuery, colliders: &RayColliders, q: &RayQuery) -> Option<RayHit> {
     let origin = q.origin.to_vec3();
     let dir = q.direction.to_vec3();
     let len = dir.length();
@@ -473,13 +489,20 @@ pub fn cast_ray(
         filter = filter.with_excluded_entities(listed.iter().map(|b| Entity::from_bits(*b)));
     }
     let hit = spatial.cast_ray_predicate(origin, direction, len, true, &filter, &|e| {
-        let (part, sensor, terrain, _) = colliders.get(e).unwrap_or((None, false, false, None));
+        let Ok((part, sensor, terrain, _, road, _, junction)) = colliders.get(e) else {
+            return !q.include || listed.contains(&e.to_bits());
+        };
         if terrain {
             // Include lists take the Terrain only when they name it; exclude
             // lists skip it only when they do.
             return q.include == q.terrain_listed;
         }
-        if q.include && !listed.contains(&e.to_bits()) {
+        // A road's surface is listed when its road is; a junction when any
+        // road meeting there is.
+        let named = listed.contains(&e.to_bits())
+            || road.is_some_and(|r| listed.contains(&r.spline.to_bits()))
+            || junction.is_some_and(|j| j.0.iter().any(|(r, ..)| listed.contains(&r.to_bits())));
+        if named != q.include && (road.is_some() || junction.is_some() || q.include) {
             return false;
         }
         if q.respect_can_collide && (sensor || part.map_or(false, |b| !b.can_collide)) {
@@ -488,9 +511,16 @@ pub fn cast_ray(
         true
     })?;
     let p = origin + *direction * hit.distance;
-    let (terrain, material) = colliders
-        .get(hit.entity)
-        .map_or((false, None), |(_, _, terrain, road)| (terrain, road.map(|r| r.0)));
+    let (mut terrain, mut material, mut owner, mut surface) = (false, None, None, None);
+    if let Ok((_, _, on_terrain, bed, road, map, junction)) = colliders.get(hit.entity) {
+        terrain = on_terrain;
+        material = bed.map(|r| r.0);
+        owner = road.map(|r| r.spline).or_else(|| junction.and_then(|j| j.road_at(p)));
+        if let Some(under) = map.and_then(|m| m.at(p)) {
+            material = Some(under.material);
+            surface = Some(under.surface.name());
+        }
+    }
     Some(RayHit {
         entity: hit.entity.to_bits(),
         position: Vector3::from_vec3(p),
@@ -498,5 +528,7 @@ pub fn cast_ray(
         distance: hit.distance as f64,
         terrain,
         material,
+        owner: owner.map(Entity::to_bits),
+        surface,
     })
 }

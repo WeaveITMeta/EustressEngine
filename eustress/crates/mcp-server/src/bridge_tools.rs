@@ -599,6 +599,89 @@ impl ToolHandler for DataUnbindTool {
 
 // ---------------------------------------------------------------------------
 
+pub struct InspectWorldSimTool;
+
+impl ToolHandler for InspectWorldSimTool {
+    /// Read-only: a pure bridge query, mutates nothing.
+    fn read_only(&self) -> bool {
+        true
+    }
+
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition {
+            name: "inspect_world_sim",
+            description: "Inspect the LIVE engine's world simulation over the bridge (docs/architecture/RAGE_STREAMING_SIM_LOD_JOB_GRAPH.md): predictive prefetch per source (foci with velocity and lead time, predicted cells with their ETA and residency, I/O budget, hit/miss/waste counters and hit rate), simulation LOD (Full/Reduced/Dormant counts, transitions, cap and island stats, forced sleeps, bodies physics woke, per-body tiers with names and positions) and the frame timeline (physics, world_sim and play stage times, the critical stage and its share of the frame). Use it to see why something far away stopped moving, whether streaming keeps ahead of a fast vehicle, and what dominates a slow frame. Read-only; requires the engine running.",
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "limit": { "type": "integer", "description": "Max tiered bodies listed (default 200, max 5000)." }
+                }
+            }),
+            modes: &[WorkshopMode::General],
+            requires_approval: false,
+            stream_topics: &[],
+        }
+    }
+
+    fn execute(&self, input: Value, ctx: &ToolContext) -> ToolResult {
+        let mut params = serde_json::Map::new();
+        if let Some(v) = input.get("limit") {
+            if !v.is_null() {
+                params.insert("limit".to_string(), v.clone());
+            }
+        }
+        match call_engine(&ctx.universe_root, "sim.inspect", Value::Object(params)) {
+            Ok(result) => {
+                let mut lines: Vec<String> = Vec::new();
+                if let Some(arr) = result.get("prefetch").and_then(|v| v.as_array()) {
+                    for p in arr {
+                        let source = p.get("source").and_then(|v| v.as_str()).unwrap_or("?");
+                        let predicted = p.get("predicted_total").and_then(|v| v.as_u64()).unwrap_or(0);
+                        let pinned = p.get("pinned_total").and_then(|v| v.as_u64()).unwrap_or(0);
+                        let c = p.get("counters");
+                        let n = |k: &str| c.and_then(|c| c.get(k)).and_then(|v| v.as_u64()).unwrap_or(0);
+                        let rate = p
+                            .get("hit_rate")
+                            .and_then(|v| v.as_f64())
+                            .map_or("n/a".to_string(), |r| format!("{:.1}%", r * 100.0));
+                        lines.push(format!(
+                            "prefetch {source}: {predicted} predicted, {pinned} pinned; hits {} (prefetch {}), misses {}, wasted {}; hit rate {rate}",
+                            n("hits"),
+                            n("prefetch_hits"),
+                            n("misses"),
+                            n("wasted")
+                        ));
+                    }
+                }
+                if let Some(l) = result.get("sim_lod").filter(|v| v.is_object()) {
+                    let n = |k: &str| l.get(k).and_then(|v| v.as_u64()).unwrap_or(0);
+                    let role = l.get("role").and_then(|v| v.as_str()).unwrap_or("?");
+                    lines.push(format!(
+                        "sim LOD ({role}): {} bodies, Full {}, Reduced {}, Dormant {}; {} transitions last pass; {} woken by physics",
+                        n("bodies"),
+                        n("full"),
+                        n("reduced"),
+                        n("dormant"),
+                        n("transitions_last_pass"),
+                        n("woken_by_physics")
+                    ));
+                }
+                if let Some(f) = result.get("frame_graph").filter(|v| v.is_object()) {
+                    let avg = f.get("frame").and_then(|v| v.get("avg_ms")).and_then(|v| v.as_f64()).unwrap_or(0.0);
+                    let crit = f.get("critical_stage").and_then(|v| v.as_str()).unwrap_or("?");
+                    let share = f.get("critical_share").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                    lines.push(format!("frame {avg:.2} ms avg; critical stage {crit} ({:.0}% of the last frame)", share * 100.0));
+                }
+                let summary = if lines.is_empty() { "world simulation idle".to_string() } else { lines.join("\n") };
+                ok("inspect_world_sim", summary, result)
+            }
+            Err(e) => fail("inspect_world_sim", e),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+
 pub struct OplogTailTool;
 
 impl ToolHandler for OplogTailTool {
@@ -4195,7 +4278,7 @@ impl ToolHandler for TerrainLayerCreateTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: "terrain_layer_create",
-            description: "Create a non-destructive terrain layer instance under Workspace/Terrain/Layers, as the Insert menu does: `class` TerrainSpline (a road, path, river, canyon or embankment along `points`), TerrainStamp (a crater, mound, plateau or ridge), TerrainFlattenPad (a flat pad), TerrainNoise (fractal noise over a rectangle), TerrainMaterialFill (a material painted by slope and height rules), TerrainScatter (grass, shrubs, rocks or trees placed by rules) or TerrainWaterBody (a lake); `position` [x, y, z] in world metres; an optional `name`; optional `fields` that set its properties by name; and for a TerrainSpline, `points` [[x, y, z], ...] in world metres in path order (2 to 64; default two points 20 m either side of the position along X, on the ground). An unknown class, property or value is refused with the valid list and nothing is created. Over the next frames a spline, stamp, pad, noise or material fill bakes over the ground and the chunks under it remesh and re-collide, a scatter places its objects and a water body floods its lake; deleting or disabling the layer restores the ground. One undo step removes it. Requires the engine running.",
+            description: "Create a non-destructive terrain layer instance under Workspace/Terrain/Layers, as the Insert menu does: `class` TerrainSpline (a road, path, river, canyon or embankment along `points`), TerrainStamp (a crater, mound, plateau or ridge), TerrainFlattenPad (a flat pad), TerrainNoise (fractal noise over a rectangle), TerrainMaterialFill (a material painted by slope and height rules), TerrainScatter (grass, shrubs, rocks or trees placed by rules) or TerrainWaterBody (a lake); `position` [x, y, z] in world metres; an optional `name`; optional `fields` that set its properties by name; and for a TerrainSpline, `points` [[x, y, z], ...] in world metres in path order (2 to 4096; default two points 20 m either side of the position along X, on the ground). An unknown class, property or value is refused with the valid list and nothing is created. Over the next frames a spline, stamp, pad, noise or material fill bakes over the ground and the chunks under it remesh and re-collide, a scatter places its objects and a water body floods its lake; deleting or disabling the layer restores the ground. One undo step removes it. Requires the engine running.",
             input_schema: serde_json::json!({
                 "type": "object",
                 "properties": {

@@ -1,0 +1,48 @@
+[asset]
+mesh = "parts/block.glb"
+scene = "Scene0"
+
+[attributes]
+surface = "thin_shell"
+
+[metadata]
+archivable = true
+class_name = "Part"
+created = "2026-11-16T00:00:00Z"
+last_modified = "2026-11-16T00:00:00Z"
+name = "ThinShellPane"
+unit = "m"
+uuid = "5d9cc695481c489b413473d2ab32b1f8"
+
+[properties]
+anchored = true
+can_collide = true
+cast_shadow = true
+color = [
+    255,
+    255,
+    255,
+]
+destructible = false
+locked = false
+material = "H_ThinShell"
+reflectance = 0.0
+transparency = 0.0
+
+[transform]
+position = [
+    -1.073046,
+    0.75,
+    1.274788,
+]
+rotation = [
+    0.0,
+    0.0,
+    0.0,
+    1.0,
+]
+scale = [
+    1.0,
+    1.5,
+    0.002,
+]

@@ -337,27 +337,43 @@ pub fn LearnPage() -> impl IntoView {
 
             // Hero
             <section class="learn-hero">
-                <div class="hero-header">
-                    <div class="header-line"></div>
-                    <span class="header-tag">"LEARN"</span>
-                    <div class="header-line"></div>
-                </div>
-                <h1 class="learn-title">"Learn Eustress"</h1>
-                <p class="learn-subtitle">
-                    "Eustress is a source-available simulation and data platform built in Rust.
+                <div class="learn-hero-text">
+                    <div class="hero-header">
+                        <div class="header-line"></div>
+                        <span class="header-tag">"LEARN"</span>
+                        <div class="header-line"></div>
+                    </div>
+                    <h1 class="learn-title">"Learn Eustress"</h1>
+                    <p class="learn-subtitle">
+                        "Eustress is a source-available simulation and data platform built in Rust.
                     These guides cover building a Space, giving it behavior, simulating it,
                     publishing it, and handing it to AI agents."
-                </p>
-                <nav class="learn-jump" aria-label="Tracks">
-                    <a href="#start" class="chip">"Start Here"</a>
-                    <a href="#build" class="chip">"Build"</a>
-                    <a href="#script" class="chip">"Script"</a>
-                    <a href="#simulate" class="chip">"Simulate"</a>
-                    <a href="#ship" class="chip">"Ship"</a>
-                    <a href="#agents" class="chip">"Agents & Tools"</a>
-                    <a href="#foundations" class="chip">"Foundations"</a>
-                </nav>
-                <p class="learn-count">{format!("{} guides, each ending with what comes next", guide_count)}</p>
+                    </p>
+                    <nav class="learn-jump" aria-label="Tracks">
+                        <a href="#start" class="chip">"Start Here"</a>
+                        <a href="#build" class="chip">"Build"</a>
+                        <a href="#script" class="chip">"Script"</a>
+                        <a href="#simulate" class="chip">"Simulate"</a>
+                        <a href="#ship" class="chip">"Ship"</a>
+                        <a href="#agents" class="chip">"Agents & Tools"</a>
+                        <a href="#foundations" class="chip">"Foundations"</a>
+                    </nav>
+                    <p class="learn-count">{format!("{} guides, each ending with what comes next", guide_count)}</p>
+                </div>
+                // The hero picture: the page's largest paint on wide screens, so it
+                // loads at once (no lazy loading, no entrance animation).
+                <div class="learn-hero-art">
+                    <img
+                        src="/assets/learn/hub-hero-1600.webp"
+                        srcset="/assets/learn/hub-hero-800.webp 800w, /assets/learn/hub-hero-1600.webp 1600w"
+                        sizes="(max-width: 1023px) 92vw, 560px"
+                        alt="A central glowing grid platform holding a few cubes, linked by five green light paths to five smaller platforms: stacked blocks, connected nodes, a bouncing sphere and cube, a ring of nodes, and a rising stepped tower."
+                        width="1600"
+                        height="900"
+                        fetchpriority="high"
+                        decoding="async"
+                    />
+                </div>
             </section>
 
             // Start here

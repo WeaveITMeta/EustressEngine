@@ -471,3 +471,36 @@
     text-transform: uppercase;
     pointer-events: none;
 }
+
+/* ------------------------------------------------------------------------
+   Below the first screen: drawn when it comes near the window
+   ------------------------------------------------------------------------
+   The browser skips laying out and painting a section with
+   content-visibility: auto until it nears the viewport, which halves the
+   work of the first render on a phone. Nothing looks different: a skipped
+   section holds the place of its height (contain-intrinsic-size, measured on
+   the landing page), and "auto" makes the browser keep the real height once
+   it has drawn the section, so the scrollbar does not jump. */
+.epic-landing > .power-section,
+.epic-landing > .comparison-section,
+.epic-landing > .showcase-industrial,
+.epic-landing > .github-section,
+.epic-landing > .cta-industrial,
+.epic-landing > .footer-industrial {
+    content-visibility: auto;
+}
+.epic-landing > .power-section       { contain-intrinsic-size: auto 1031px; }
+.epic-landing > .comparison-section  { contain-intrinsic-size: auto 1450px; }
+.epic-landing > .showcase-industrial { contain-intrinsic-size: auto 1174px; }
+.epic-landing > .github-section      { contain-intrinsic-size: auto 519px; }
+.epic-landing > .cta-industrial      { contain-intrinsic-size: auto 504px; }
+.epic-landing > .footer-industrial   { contain-intrinsic-size: auto 564px; }
+
+@media (max-width: 768px) {
+    .epic-landing > .power-section       { contain-intrinsic-size: auto 2451px; }
+    .epic-landing > .comparison-section  { contain-intrinsic-size: auto 1404px; }
+    .epic-landing > .showcase-industrial { contain-intrinsic-size: auto 2630px; }
+    .epic-landing > .github-section      { contain-intrinsic-size: auto 864px; }
+    .epic-landing > .cta-industrial      { contain-intrinsic-size: auto 488px; }
+    .epic-landing > .footer-industrial   { contain-intrinsic-size: auto 1003px; }
+}

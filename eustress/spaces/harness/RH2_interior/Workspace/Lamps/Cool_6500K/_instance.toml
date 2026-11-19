@@ -1,0 +1,45 @@
+[asset]
+mesh = "parts/ball.glb"
+scene = "Scene0"
+
+[metadata]
+archivable = true
+class_name = "Part"
+created = "2026-11-16T00:00:00Z"
+last_modified = "2026-11-16T00:00:00Z"
+name = "Cool_6500K"
+unit = "m"
+uuid = "ad015c01dbd209734fe354bc1bdf7c98"
+
+[properties]
+anchored = true
+can_collide = false
+cast_shadow = false
+color = [
+    255,
+    249,
+    253,
+]
+destructible = false
+locked = false
+material = "H_Emissive"
+reflectance = 0.0
+transparency = 0.0
+
+[transform]
+position = [
+    -1.8,
+    2.7,
+    2.5,
+]
+rotation = [
+    0.0,
+    0.0,
+    0.0,
+    1.0,
+]
+scale = [
+    0.1,
+    0.1,
+    0.1,
+]

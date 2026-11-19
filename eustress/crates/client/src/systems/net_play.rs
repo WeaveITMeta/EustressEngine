@@ -47,6 +47,10 @@ pub struct JoinTarget {
     /// ticket works once, so a failed join is joined again from the gallery,
     /// never retried.
     pub gallery_ticket: bool,
+    /// Joining as a guest because Studio on this computer is signed in to
+    /// another Eustress service only: `(signed in to, this one)`, as people
+    /// call them. Set by `start_join`; a refused join says so.
+    pub signed_in_elsewhere: Option<(String, String)>,
 }
 
 impl JoinTarget {
@@ -59,7 +63,7 @@ impl JoinTarget {
             Some(ticket) => Some(ticket.into_secret()),
             None => mint(&link),
         };
-        Self { link, name, signed_in: identity.is_some(), gallery_ticket, identity }
+        Self { link, name, signed_in: identity.is_some(), gallery_ticket, identity, signed_in_elsewhere: None }
     }
 }
 
@@ -70,6 +74,7 @@ impl std::fmt::Debug for JoinTarget {
             .field("name", &self.name)
             .field("signed_in", &self.signed_in)
             .field("gallery_ticket", &self.gallery_ticket)
+            .field("signed_in_elsewhere", &self.signed_in_elsewhere)
             .field("identity", &format_args!("{}", if self.identity.is_some() { "<set>" } else { "<none>" }))
             .finish()
     }
@@ -105,6 +110,11 @@ fn start_join(mut commands: Commands, mut target: ResMut<JoinTarget>, mut screen
         target.name,
         if target.link.pin.is_some() { "" } else { " (unpinned: this machine only)" }
     );
+    // A guest may be one only because Studio here is signed in to another
+    // Eustress service, whose sign-in this Player never sends here.
+    if !target.signed_in {
+        target.signed_in_elsewhere = super::credential::signed_in_elsewhere();
+    }
     // Taken, not copied: the ticket goes into this one `Hello` and nowhere
     // else, and a join that fails is never tried again with it.
     let identity = target.identity.take();
@@ -178,7 +188,10 @@ fn spawn_avatar_in_opened_world(
     // The Space's `Players.CharacterAutoLoads`, by Studio's rule: off, nobody
     // gets a body, and a paddle game is played through its camera and input.
     if pending.root.as_deref().map_or(true, eustress_common::play_session::space_character_auto_loads) {
-        let token = super::commerce::auth_token();
+        // Sent only when the avatar service is on the origin that issued it.
+        let token = super::credential::studio_token_for(&eustress_common::api_base::api_url(
+            eustress_common::avatar::profile::PROFILE_PATH,
+        ));
         // A host placed a joined player in metres, so its position stands. A
         // published world has no host: its place is the Space's own
         // SpawnLocation, read in the Space's units (`OpenSpace.spawn`). The
@@ -212,6 +225,15 @@ fn show(screen: &mut ScreenNotice, n: PlainNotice) {
 fn join_failure_notice(target: Option<&JoinTarget>, reason: &str) -> PlainNotice {
     match target {
         Some(t) if t.gallery_ticket => join_notice::join_failed_with_gallery_ticket(reason),
+        Some(JoinTarget { signed_in: false, signed_in_elsewhere: Some((signed_in_to, this_one)), .. }) => {
+            let mut n = join_notice::join_failed(reason, false);
+            // Where a guest is told to sign in (a signed-in player would get
+            // other help), say which service the sign-in is for.
+            if n.hint != join_notice::join_failed(reason, true).hint {
+                n.hint = Some(super::credential::signed_in_elsewhere_hint(signed_in_to, this_one));
+            }
+            n
+        }
         _ => join_notice::join_failed(reason, target.is_some_and(|t| t.signed_in)),
     }
 }
@@ -228,8 +250,28 @@ fn disconnect_notice(target: Option<&JoinTarget>, reason: &str) -> PlainNotice {
 /// A published simulation that would not download says why on screen.
 fn show_fetch_failures(mut failures: MessageReader<SpaceFetchFailed>, mut screen: ResMut<ScreenNotice>) {
     if let Some(failure) = failures.read().last() {
-        show(&mut screen, join_notice::fetch_failed(&failure.error, super::commerce::auth_token().is_some()));
+        let signed_in = super::commerce::auth_token().is_some();
+        let elsewhere = if signed_in || failure.gallery_ticket { None } else { super::credential::signed_in_elsewhere() };
+        show(&mut screen, fetch_failure_notice(&failure.error, failure.gallery_ticket, signed_in, elsewhere.as_ref()));
     }
+}
+
+/// What a solo download that failed shows. A launch with the gallery's
+/// one-time ticket goes back to the gallery. A guest only because Studio here
+/// is signed in to another Eustress service (`elsewhere`: signed in to, this
+/// one) is told which service to sign in to, where a guest would be told to
+/// sign in.
+fn fetch_failure_notice(error: &str, gallery_ticket: bool, signed_in: bool, elsewhere: Option<&(String, String)>) -> PlainNotice {
+    if gallery_ticket {
+        return join_notice::fetch_failed_with_gallery_ticket(error);
+    }
+    let mut n = join_notice::fetch_failed(error, signed_in);
+    if let (false, Some((signed_in_to, this_one))) = (signed_in, elsewhere) {
+        if n.hint != join_notice::fetch_failed(error, true).hint {
+            n.hint = Some(super::credential::signed_in_elsewhere_hint(signed_in_to, this_one));
+        }
+    }
+    n
 }
 
 fn log_net_notices(
@@ -372,6 +414,50 @@ mod tests {
         assert!(guest.hint.unwrap().contains("Sign in"));
         let member = shown_after(refused(), Some(target(Some("ticket"))));
         assert!(!member.hint.unwrap_or_default().contains("Sign in"), "a signed-in player is not told to sign in");
+    }
+
+    /// A guest because Studio here is signed in to production only, refused
+    /// by a staging host, is told which service to sign in to; a failure
+    /// that has nothing to do with signing in keeps its own help.
+    /// A solo download refused for a guest who is one only because Studio
+    /// here is signed in to the other service says which service to sign in
+    /// to; a launch with the gallery's ticket goes back to the gallery.
+    #[test]
+    fn a_solo_fetch_failure_names_the_other_service_or_the_gallery() {
+        let rated = r#"403 Forbidden from https://api-staging.eustress.dev/api/simulations/07d0/world/manifest: {"code":"sign_in_required"}"#;
+        let elsewhere = ("production".to_string(), "staging".to_string());
+        let n = fetch_failure_notice(rated, false, false, Some(&elsewhere));
+        assert_eq!(n.title, "This simulation is rated for older players");
+        assert_eq!(n.hint, Some(super::super::credential::signed_in_elsewhere_hint("production", "staging")));
+        assert_eq!(fetch_failure_notice(rated, false, false, None), join_notice::fetch_failed(rated, false), "signed in nowhere");
+        let missing = "404 Not Found from https://api-staging.eustress.dev/api/simulations/07d0/world/manifest: ";
+        assert_eq!(fetch_failure_notice(missing, false, false, Some(&elsewhere)), join_notice::fetch_failed(missing, false), "not about signing in");
+        let used = format!("{}: 403 used", join_notice::PLAY_TICKET_REFUSED);
+        let n = fetch_failure_notice(&used, true, false, Some(&elsewhere));
+        assert_eq!((n.title.as_str(), n.hint.as_deref()), ("This Play link cannot be used", Some("Join again from the gallery.")));
+    }
+
+    #[test]
+    fn player_token_origin_join_notice_names_the_other_service() {
+        let elsewhere = || {
+            let mut t = target(None);
+            t.signed_in_elsewhere = Some(("production".into(), "staging".into()));
+            Some(t)
+        };
+        let refused = || NetNotice::JoinFailed { reason: "the host refused the join: The gallery did not admit this join.".into() };
+        let shown = shown_after(refused(), elsewhere());
+        assert_eq!(shown.detail, "The gallery did not admit this join.");
+        assert_eq!(
+            shown.hint.as_deref(),
+            Some(
+                "This Player is signed in to production but this simulation is on staging. \
+                 Sign in to staging with Eustress Studio, then press Play again."
+            )
+        );
+        let unreachable = || NetNotice::JoinFailed { reason: "could not reach the host at 203.0.113.7:7777: timed out".into() };
+        assert_eq!(shown_after(unreachable(), elsewhere()).hint, shown_after(unreachable(), Some(target(None))).hint);
+        let plain_guest = shown_after(refused(), Some(target(None)));
+        assert!(!plain_guest.hint.unwrap_or_default().contains("production"), "a guest signed in nowhere");
     }
 
     /// Losing the session after joining says so too.

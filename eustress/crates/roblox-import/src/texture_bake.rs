@@ -65,6 +65,11 @@ pub fn image_mime(bytes: &[u8]) -> Option<&'static str> {
     }
 }
 
+/// The most pixels a texture may declare: 8192 x 8192, Roblox's own texture
+/// ceiling several times over. The size is the fetched file's claim, and the
+/// decode buffer is sized from it before a single pixel is read.
+const MAX_TEXTURE_PIXELS: u64 = 8192 * 8192;
+
 /// Decode a PNG to tightly packed RGBA8.
 pub fn decode_png_rgba(bytes: &[u8]) -> Result<(u32, u32, Vec<u8>), String> {
     let mut decoder = png::Decoder::new(Cursor::new(bytes));
@@ -72,6 +77,13 @@ pub fn decode_png_rgba(bytes: &[u8]) -> Result<(u32, u32, Vec<u8>), String> {
         png::Transformations::EXPAND | png::Transformations::STRIP_16 | png::Transformations::ALPHA,
     );
     let mut reader = decoder.read_info().map_err(|e| format!("png header: {e}"))?;
+    let (width, height) = {
+        let header = reader.info();
+        (header.width, header.height)
+    };
+    if width == 0 || height == 0 || u64::from(width) * u64::from(height) > MAX_TEXTURE_PIXELS {
+        return Err(format!("png is {width}x{height}: outside the size a texture may be"));
+    }
     let mut buf = vec![0u8; reader.output_buffer_size()];
     let info = reader.next_frame(&mut buf).map_err(|e| format!("png data: {e}"))?;
     let (w, h) = (info.width, info.height);

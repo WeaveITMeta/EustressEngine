@@ -211,7 +211,7 @@ reference index; every item in every pack appears exactly once.
 | W1 | `G7.30` ◐ | Session lifecycle beacon and measured crash-free session baseline | T5 | W3 +W6 | G7 | `G1.01` | M | 6 | — |
 | W2 | `G1.04` ★ | Camera path files CP-A/B/S/U and the tick-driven path player | G1 | W3 +W1 | G1 | `G1.03` | M | 6 | — |
 | W2 | `G1.06` ★ | Captures fire at declared simulation tick indices | G1 | W3 | G1 | `G1.05` | M | 6 | — |
-| W2 | `G1.41` | Vertical selection with an evidence-scored kill list | B2 | W4 +W2 | G1 | `G1.40` | S | 0 | — |
+| W2 | `G1.41` | Vertical selection with an evidence-scored sequence | B2 | W4 +W2 | G1 | `G1.40` | S | 0 | — |
 | W2 | `G1.43` | Unit economics of simulation compute, from a measured throughput baseline | B2 | W2 +W3 | G1 | `G1.40` | M | 6 | — |
 | W2 | `G1.48` § | Licence decision-forcing memo with four costed options | B2 | W5 +W2 | G1 | `G1.40` | S | 0 | — |
 | W2 | `G1.56` | Operator automation baseline with a measured wall-clock reduction | B2 | W6 +W3 | G1 | `G1.40` | M | 6 | — |
@@ -1170,7 +1170,7 @@ Of these, 13 have every dependency `PASSED` today:
 | Item | Tier | Builds | Title |
 |:--|:--|--:|:--|
 | `G1.31` | S | 0 | A proof standard an outside engineer can execute without contacting anyone |
-| `G1.41` | S | 0 | Vertical selection with an evidence-scored kill list |
+| `G1.41` | S | 0 | Vertical selection with an evidence-scored sequence |
 | `G1.48` | S | 0 | Licence decision-forcing memo with four costed options |
 | `G7.33` | S | 0 | CI truth ledger: what ci.yml gates today versus what it must gate |
 | `G1.03` | L | 12 | Harness scene set S1-S6 emitted by a seeded generator |

@@ -1,0 +1,55 @@
+{
+  "build_profile": "release",
+  "clock_tick_index_distinct_values": 1,
+  "context": {
+    "camera_path": "CP-B",
+    "driver": "harness-scenes frametime",
+    "frames": 600,
+    "height": 2160,
+    "ran_from_copy": true,
+    "resolution": "3840x2160",
+    "scene": "RH3_exterior",
+    "scene_id": "S3",
+    "scene_sha256": "6c94bdad3a88ee422535e85820e9f97857bb175aebcd6ab07b17a60a7e16e74b",
+    "seed": 42,
+    "width": 3840
+  },
+  "csv_path": "E:\\Workspace\\EustressEngine\\eustress\\../docs/PROMPTS/artifacts/G1.08/frametimes.csv",
+  "csv_sha256": "0776fe9028f419d0c4948105471e4dc14debb1fa8fc7bde0af4157ab79555e1a",
+  "cv": 6.589435666125596,
+  "cv_definition": "sample standard deviation (n - 1) divided by the mean",
+  "first_frame_partial": true,
+  "fixed_steps_total": 745,
+  "frame_count": 600,
+  "frame_time_definition": "wall-clock period between consecutive frame-end stamps (after the Last schedule); frame 0 runs from the start of its First schedule",
+  "frames_by_ticks_advanced": {
+    "0": 96,
+    "1": 267,
+    "2": 230,
+    "3": 6
+  },
+  "frames_trimmed": 0,
+  "ft_max_ms": 5292.9439,
+  "ft_mean_ms": 37.272489000000014,
+  "ft_min_ms": 7.2915,
+  "ft_p50_ms": 20.6677,
+  "ft_p95_ms": 34.0187,
+  "ft_p99_ms": 102.5954,
+  "percentile_method": "nearest-rank: sorted[ceil(p * n) - 1], zero-based, on the full raw series",
+  "resolution": {
+    "height": 2160,
+    "width": 3840
+  },
+  "schema": "eustress.frametime_series.v1",
+  "status": "MEASURED",
+  "stddev_ms": 245.60466838187406,
+  "tick_index_column_definition": "tick_index is the single source named in tick_source, applied to every row",
+  "tick_index_constant": false,
+  "tick_index_distinct_values": 504,
+  "tick_sharing_runs_by_frame_count": {
+    "1": 408,
+    "2": 96
+  },
+  "tick_source": "fixed_step_count (FixedUpdate runs, the tick camera_path.rs counts; SimulationClock present but did not advance, the run was not in Play)",
+  "trim_statement": "no frames trimmed: no warm-up exclusion, no outlier rejection, no smoothing"
+}

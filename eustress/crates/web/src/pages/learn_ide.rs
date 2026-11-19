@@ -175,6 +175,20 @@ pub fn LearnIdePage() -> impl IntoView {
 
                 <main class="docs-content">
                     <header class="docs-hero">
+                        // The hero picture: the page's largest paint, so it loads at
+                        // once (no lazy loading, no entrance animation).
+                        <div class="docs-hero-art">
+                            <img
+                                src="/assets/learn/ide-hero-1600.webp"
+                                srcset="/assets/learn/ide-hero-800.webp 800w, /assets/learn/ide-hero-1600.webp 1600w"
+                                sizes="(max-width: 1024px) 100vw, 840px"
+                                alt="An editor slab marked with plain bars of light sends a pulse through a file slab in an open folder block into a grid world, where one cube glows."
+                                width="1600"
+                                height="900"
+                                fetchpriority="high"
+                                decoding="async"
+                            />
+                        </div>
                         <div class="docs-breadcrumb">
                             <a href="/learn">"Learn"</a>
                             <span class="separator">"/"</span>
@@ -321,6 +335,19 @@ source = "SoulScript.rune""#}</code></pre>
 
                         <div id="disk-open" class="subsection">
                             <h3>"Open the Universe"</h3>
+                            <figure class="learn-figure">
+                                <img
+                                    src="/assets/learn/ide-fig-1-1200.webp"
+                                    srcset="/assets/learn/ide-fig-1-600.webp 600w, /assets/learn/ide-fig-1-1200.webp 1200w"
+                                    sizes="(max-width: 660px) 92vw, (max-width: 1099px) 600px, 500px"
+                                    alt="An editor slab joined by one line to a large translucent frame that contains two smaller frames of three file slabs each, with thin lines reaching all six slabs."
+                                    width="1200"
+                                    height="900"
+                                    loading="lazy"
+                                    decoding="async"
+                                />
+                                <figcaption>"Open the Universe folder as your editor's workspace. The language server indexes every .rune file below it."</figcaption>
+                            </figure>
                             <p>
                                 "Open the Universe folder, the one that contains "<code>"Spaces/"</code>
                                 ", as your editor's workspace. The language server walks up from the

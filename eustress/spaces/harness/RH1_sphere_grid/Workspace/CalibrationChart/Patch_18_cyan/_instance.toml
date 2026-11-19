@@ -1,0 +1,52 @@
+[asset]
+mesh = "parts/block.glb"
+scene = "Scene0"
+
+[attributes]
+albedo_srgb = [
+    8,
+    133,
+    161,
+]
+
+[metadata]
+archivable = true
+class_name = "Part"
+created = "2026-11-16T00:00:00Z"
+last_modified = "2026-11-16T00:00:00Z"
+name = "Patch_18_cyan"
+unit = "m"
+uuid = "80f9a4dc03ff8fdca12cdb21ec2e8ec1"
+
+[properties]
+anchored = true
+can_collide = true
+cast_shadow = true
+color = [
+    8,
+    133,
+    161,
+]
+destructible = false
+locked = false
+material = "H_Matte"
+reflectance = 0.0
+transparency = 0.0
+
+[transform]
+position = [
+    0.75,
+    0.85,
+    -3.97,
+]
+rotation = [
+    0.0,
+    0.0,
+    0.0,
+    1.0,
+]
+scale = [
+    0.26,
+    0.26,
+    0.01,
+]

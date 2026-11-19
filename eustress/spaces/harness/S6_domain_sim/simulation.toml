@@ -1,0 +1,55 @@
+# Simulation configuration (harness scene). Tick rate equals the engine's fixed step.
+
+[simulation]
+tick_rate_hz = 60.0
+time_scale = 1.0
+max_ticks_per_frame = 10
+auto_start = true
+
+[simulation.recording]
+enabled = true
+output_dir = ".eustress/knowledge/recordings"
+format = "both"
+auto_export = true
+
+[[watchpoints]]
+name = "rod_T00"
+label = "Hot end temperature"
+unit = "K"
+interval = 1
+
+[[watchpoints]]
+name = "rod_T05"
+label = "Node 5 temperature"
+unit = "K"
+interval = 1
+
+[[watchpoints]]
+name = "rod_T10"
+label = "Node 10 temperature"
+unit = "K"
+interval = 1
+
+[[watchpoints]]
+name = "rod_T15"
+label = "Cold end temperature"
+unit = "K"
+interval = 1
+
+[[watchpoints]]
+name = "rod_mean_T"
+label = "Mean rod temperature"
+unit = "K"
+interval = 1
+
+[[watchpoints]]
+name = "rod_step_count"
+label = "Independent step counter"
+unit = "steps"
+interval = 1
+
+[[watchpoints]]
+name = "rod_sim_time_s"
+label = "Simulated time"
+unit = "s"
+interval = 1

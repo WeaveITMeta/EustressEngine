@@ -42,6 +42,8 @@
 //! 1. [`key`] - minting, storage, rotation, revocation, verification
 //! 2. [`resolve`] - the five reference kinds, dependency order, cycle naming
 //! 3. [`bake`] - the manifest shape, formatting, and the publish seam
+//! 4. [`page`] - the themed, linked sim page (PageSpec v1) and its README
+//!    (the About tab), separate from the numbers
 //!
 //! ## Calling it
 //!
@@ -79,6 +81,7 @@
 
 pub mod bake;
 pub mod key;
+pub mod page;
 pub mod resolve;
 
 pub use bake::{
@@ -91,6 +94,7 @@ pub use key::{
     fingerprint, KeyKind, KeyRecord, KeySet, KeyVerdict, MintedKey, BROWSER_PREFIX, BUILD_PREFIX,
     DEFAULT_BURST, DEFAULT_OVERLAP_DAYS, DEFAULT_RATE_LIMIT_PER_MINUTE,
 };
+pub use page::{bake_page, bake_page_from_world, bake_readme, PageBake, PageImage, PendingPage, ReadmeBake};
 pub use resolve::{
     did_you_mean, glob_matches, resolve_all, Datamodel, ErrorKind, Reference, ReferenceKind,
     ResolveError, Scalar, WorldDatamodel,

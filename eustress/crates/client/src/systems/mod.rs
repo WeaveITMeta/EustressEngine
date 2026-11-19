@@ -5,10 +5,14 @@
 pub mod agent_control;
 pub mod asset_sources;
 pub mod commerce;
+pub mod credential;
 pub mod frame_capture;
+pub mod gpu_recovery;
+pub mod keep_awake;
 pub mod join_notice;
 pub mod link_handler;
 pub mod player_update;
+pub mod raytracing;
 pub mod window_icon;
 pub mod scene_loader;
 pub mod live_world;

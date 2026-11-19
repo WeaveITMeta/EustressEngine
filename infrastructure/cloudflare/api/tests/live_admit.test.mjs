@@ -85,6 +85,52 @@ test('the host admits a signed-in player once, and learns who they are', async (
   assert.equal(r.headers.get('Cache-Control'), 'no-store');
 });
 
+test('each server of a listing admits the players sent to it, not only the one the page shows first', async () => {
+  const env = await hosting(environment());
+  assert.equal((await beat(env, PIN2, { server_id: 'east-2' })).status, 200);
+  const first = await admit(env, (await ticketFor(env, player, PIN)).ticket, PIN);
+  const second = await admit(env, (await ticketFor(env, player, PIN2)).ticket, PIN2);
+  assert.deepEqual([first.status, second.status], [200, 200], JSON.stringify(second.body));
+  // A pin no server of this listing answers at is still another host.
+  const PIN3 = 'ef'.repeat(32);
+  const stranger = await admit(env, (await ticketFor(env, player, PIN3)).ticket, PIN3);
+  assert.deepEqual([stranger.status, stranger.body.code], [403, 'wrong_host']);
+  // A server that stopped no longer admits.
+  assert.equal((await call(env, 'DELETE', `${live}?server_id=east-2`, { token: author })).status, 200);
+  const gone = await admit(env, (await ticketFor(env, player, PIN2)).ticket, PIN2);
+  assert.deepEqual([gone.status, gone.body.code], [403, 'wrong_host']);
+});
+
+test('a server that went silent stops admitting, while the other server of the listing goes on', async () => {
+  const realNow = Date.now;
+  const t0 = realNow();
+  Date.now = () => t0;
+  try {
+    const env = await hosting(environment());
+    assert.equal((await beat(env, PIN2, { server_id: 'east-2' })).status, 200);
+    // A minute on, the first server beats again; the second has said nothing since the start.
+    Date.now = () => t0 + 60_000;
+    assert.equal((await beat(env)).status, 200);
+    // 95 s after the second server's last heartbeat, its row is past the 90 s the registry keeps one.
+    Date.now = () => t0 + 95_000;
+    const silent = await admit(env, (await ticketFor(env, player, PIN2)).ticket, PIN2);
+    assert.deepEqual([silent.status, silent.body.code], [403, 'wrong_host']);
+    assert.equal((await admit(env, (await ticketFor(env, player, PIN)).ticket, PIN)).status, 200);
+  } finally {
+    Date.now = realNow;
+  }
+});
+
+test('a guest-only session cannot beat at the pin of any account server of the listing, not only the first', async () => {
+  const env = await hosting(environment());
+  assert.equal((await beat(env, PIN2, { server_id: 'east-2' })).status, 200);
+  for (const pin of [PIN, PIN2]) {
+    const r = await beat(env, pin, { guest_only: true });
+    assert.deepEqual([r.status, r.body.code], [409, 'pin_in_use'], pin);
+  }
+  assert.equal((await beat(env, 'ef'.repeat(32), { guest_only: true })).status, 200);
+});
+
 test('the same ticket is refused the second time, with the code the Player is told', async () => {
   const env = await hosting(environment());
   const { ticket } = await ticketFor(env, player);

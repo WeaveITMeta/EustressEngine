@@ -102,7 +102,6 @@ avian3d = { workspace = true, optional = true }
 symbolica = { version = "1.0", optional = true }
 # Rune scripting for dynamic physics (0.14+ with native modules)
 rune = { version = "0.14", optional = true }
-rune-modules = { version = "0.14", optional = true }
 # Rune WASM support for browser simulations
 rune-wasm = { version = "0.14", optional = true }
 # Spatial data structures for neighbor queries (4.2+ with rkyv zero-copy)
@@ -114,7 +113,6 @@ eustress-stream = { path = "../stream", optional = true }
 # bytes — payload buffer type used by streaming code
 bytes = { version = "1.7", optional = true }
 # Notify for hot-reload file watching
-notify = { version = "6.1", optional = true }
 # Spatial R-tree indexing for streaming radius queries
 rstar = { version = "0.12", optional = true }
 # GPU compute for SPH (uses Bevy's wgpu 28)
@@ -170,7 +168,7 @@ realism = ["physics"]
 # Enable symbolic mathematics (Symbolica 1.0+) for real-time equation solving
 realism-symbolic = ["realism", "symbolica"]
 # Enable Rune scripting for dynamic physics laws
-realism-scripting = ["realism", "rune", "rune-modules", "notify"]
+realism-scripting = ["realism", "rune"]
 # Enable Rune WASM for browser-based physics simulations
 realism-wasm = ["realism-scripting", "rune-wasm"]
 # Enable GPU compute for SPH fluid simulation
@@ -179,7 +177,7 @@ realism-gpu = ["realism", "wgpu", "encase"]
 realism-spatial = ["realism", "kiddo"]
 # Enable EustressStream + instance streaming (scene delta emission, TOML materializer,
 # hot-cache, spatial chunking, TOML watcher, dirty-bit write-back)
-streaming = ["dep:eustress-stream", "tokio", "bytes", "notify", "rstar"]
+streaming = ["dep:eustress-stream", "tokio", "bytes", "rstar"]
 # Enable quantum effects module (DISABLED — future work)
 # realism-quantum = ["realism-symbolic"]
 # Enable full realism system with all features (excludes quantum)

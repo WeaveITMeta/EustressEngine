@@ -175,6 +175,20 @@ pub fn DocsAudioPage() -> impl IntoView {
 
                 <main class="docs-content">
                     <header class="docs-hero">
+                        // The hero picture: the page's largest paint, so it loads at
+                        // once (no lazy loading, no entrance animation).
+                        <div class="docs-hero-art">
+                            <img
+                                src="/assets/learn/audio-hero-1600.webp"
+                                srcset="/assets/learn/audio-hero-800.webp 800w, /assets/learn/audio-hero-1600.webp 1600w"
+                                sizes="(max-width: 1024px) 100vw, 840px"
+                                alt="A small cube on a grid platform sends out rings of light that thin and fade with distance, with two fainter emitters behind it and an open tray holding three more cubes at rest."
+                                width="1600"
+                                height="900"
+                                fetchpriority="high"
+                                decoding="async"
+                            />
+                        </div>
                         <div class="docs-breadcrumb">
                             <a href="/learn">"Learn"</a>
                             <span class="separator">"/"</span>

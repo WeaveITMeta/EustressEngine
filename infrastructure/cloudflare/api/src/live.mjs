@@ -35,6 +35,7 @@ import {
 import { simForServing, simWithLegalLock } from './moderation.mjs';
 import { GUEST_LIVE_INDEX_NAME, cleanRegion, publicRegion, regionOf, tellLiveIndex } from './live_index.mjs';
 import { adultRefusal, isAdultListing, mayView, refuseAdult, viewerFor } from './adult_content.mjs';
+import { FLEET_ID, SESSION_CREDENTIAL, fleetCall, sessionFromCredential, sessionServerOf } from './fleet_credentials.mjs';
 
 /// A host with no heartbeat for this long is Offline. Three missed 30 s beats.
 export const HEARTBEAT_TTL_MS = 90_000;
@@ -425,6 +426,16 @@ function freshServers(host, now) {
   return list.filter((s) => s && now - s.last_seen <= HEARTBEAT_TTL_MS);
 }
 
+/// The certificate pins a ticket may be for in this session. One pin is one server process, and a listing can run
+/// several: each fresh server's own pin, or only `serverId`'s when the caller stands for that one server (a
+/// hosted-session credential). A record written before per-server rows has its one link, and no named server.
+function admissionPins(host, now, serverId) {
+  if (!Array.isArray(host?.servers)) return serverId === undefined ? [pinOf(host?.link)] : [];
+  const rows = freshServers(host, now);
+  const mine = serverId === undefined ? rows : rows.filter((s) => s.id === serverId);
+  return mine.map((s) => pinOf(s.link));
+}
+
 function winnerOf(servers, admitted) {
   const ranked = rankServers(servers.map((s) => ({ ...publicServer(s, admitted, false), _raw: s })));
   const winner = ranked.find((s) => !s.full) || ranked[0];
@@ -711,6 +722,15 @@ const LIVE_OPS = {
     };
   },
 
+  /// Take one named server off this session when it lists it; the fleet's route calls this for a session whose
+  /// credentials it has just revoked. Unlike `stop`, a server this session does not list changes nothing.
+  async delist({ server_id, now }) {
+    const host = await this.storage.get('host');
+    const listed = Array.isArray(host?.servers) && host.servers.some((s) => s && s.id === server_id);
+    if (!listed) return { ok: true, changed: false };
+    return { ...(await LIVE_OPS.stop.call(this, { server_id, now })), changed: true };
+  },
+
   /// Spend one solo play ticket (src/play_pass.mjs): each id once. Runs only in a listing's play object
   /// (playTicketObjectName), never in a hosting session's, whose admitted ids a new session clears. An id is kept until its
   /// ticket has expired, then dropped here or by the alarm (expireKept).
@@ -759,14 +779,15 @@ const LIVE_OPS = {
   /// The host asks whether one joining player may be admitted. A ticket is
   /// admitted once per hosting session: the Durable Object is single-threaded
   /// and its writes are atomic, which is why this lives here and not in KV.
-  async admit({ ticket, audience, now }) {
+  async admit({ ticket, audience, now, server_id }) {
     const refuse = (status, code, error) => ({ ok: false, status, code, error });
     const host = await this.storage.get('host');
     if (!host || now - host.last_seen > HEARTBEAT_TTL_MS) {
       return refuse(409, 'not_live', 'This simulation is not hosted right now');
     }
-    const pin = pinOf(host.link);
-    if (audience !== pin) return refuse(403, 'wrong_host', 'The ticket is not for this hosting session');
+    // The ticket must be for a server this session lists now: the caller's own when it stands for one, else any of them.
+    const pin = admissionPins(host, now, typeof server_id === 'string' ? server_id : undefined).find((p) => p && p === audience);
+    if (!pin) return refuse(403, 'wrong_host', 'The ticket is not for this hosting session');
 
     const nowS = Math.floor(now / 1000);
     // A guest join ticket (guest.mjs) or an account's identity ticket. The route has already checked what only it can reach
@@ -1021,10 +1042,35 @@ export async function livePin(env, simId, now, { guestOnly = false } = {}) {
   return link.ok ? link.pin.toLowerCase() : null;
 }
 
+/// The certificate pin of every server in that session of `simId` now, lower case. "One pin is one process" is tested
+/// against all of them, since each server of a listing admits its own players. Empty when nobody hosts it.
+export async function livePins(env, simId, now, { guestOnly = false } = {}) {
+  const rows = await liveServerRows(env, simId, now, { guestOnly });
+  return rows.map((row) => checkJoinLink(row.link)).filter((link) => link.ok).map((link) => link.pin.toLowerCase());
+}
+
+/// The listing's live servers as Quick Join ranks them (rankServers), each with its join link and pin, for the fleet's
+/// allocation (src/fleet.mjs). Only rows whose link is the exact join grammar. Empty when nobody hosts it or this
+/// deployment has no live registry.
+export async function liveServerRows(env, simId, now, { guestOnly = false } = {}) {
+  if (!env.LIVE_HOSTS) return [];
+  const s = await liveCall(env, sessionName(simId, guestOnly), 'status', { now });
+  if (s.ok === false || !s.live) return [];
+  const servers = (Array.isArray(s.servers) ? s.servers : []).filter((server) => checkJoinLink(server.link).ok);
+  return rankServers(servers.map((server) => publicServer(server, s.admitted, true)));
+}
+
 /// A call into a listing's guest-only session object (guest.mjs reaches it this way for the chat check).
 export async function guestSession(env, simId, op, args) {
   if (!env.LIVE_HOSTS) return { ok: false, status: 503, code: 'live_unavailable' };
   return liveCall(env, guestSessionName(simId), op, args);
+}
+
+/// Take one server off the listing's account session now (LIVE_OPS.delist). The fleet calls this for a session it
+/// started whose credentials it has just revoked: stopped, ended or gone, it can neither renew nor remove its own entry.
+export async function delistServer(env, simId, serverId, now) {
+  if (!env.LIVE_HOSTS) return;
+  await liveCall(env, sessionName(simId, false), 'delist', { now, server_id: serverId });
 }
 
 async function liveCall(env, name, op, args) {
@@ -1050,6 +1096,41 @@ export const END_ALL_GUESTS = Object.freeze({ end_all_guests: true });
 
 /// Whether `request` is a gallery heartbeat (POST /api/simulations/{id}/live), whose refusals carry END_ALL_GUESTS.
 export const isLiveHeartbeat = (request, path) => request.method === 'POST' && /^\/api\/simulations\/[^/]+\/live$/.test(path);
+
+/// Whether a hosted-session credential (`eshs_`, src/fleet_credentials.mjs) may make this request: `{ machine_id }` (and,
+/// on an admission, the `server_id` it stands for, which the listing's object holds the ticket to), or
+/// `{ refused: { status, body } }`. It stands for one listing and one server id, so a heartbeat (POST) must name that
+/// server_id in its body and a stop (DELETE) in its query; an admission (POST /live/admit), whose body names no server, is
+/// accepted only for a ticket whose audience is the pin that server's own /live entry carries. A fleet session takes
+/// signed-in accounts only: never a guest-only session or a guest ticket.
+async function fleetSessionHost(request, env, simId, token, admitting, now) {
+  const refused = (status, code, error) => ({ refused: { status, body: { error, code } } });
+  const bad = () => refused(401, 'bad_session_credential', 'This session credential is not valid for this listing and server');
+  if (!SESSION_CREDENTIAL.test(token)) return bad();
+  const params = new URL(request.url).searchParams;
+  const body = request.method === 'POST' ? await bodyObject(request.clone()) : {};
+  const guestOnly = request.method === 'POST' ? body.guest_only === true : params.get('guest_only') === 'true';
+  if (guestOnly || (admitting && isGuestJoinTicket(body.ticket))) {
+    return refused(403, 'guest_only_not_allowed', 'A hosted session takes signed-in players only');
+  }
+  if (admitting) {
+    const held = await sessionServerOf(env, token, simId, { now });
+    if (!held) return bad();
+    const row = (await liveServerRows(env, simId, now)).find((r) => r.id === held.server_id);
+    const link = row ? checkJoinLink(row.link) : null;
+    const audience = typeof body.audience === 'string' ? body.audience.toLowerCase() : '';
+    if (!link?.ok || link.pin.toLowerCase() !== audience) {
+      return refused(403, 'wrong_host', 'The ticket is not for this hosting session');
+    }
+    return { machine_id: held.machine_id, server_id: held.server_id };
+  }
+  const serverId = request.method === 'POST' ? body.server_id : params.get('server_id');
+  if (typeof serverId !== 'string' || !FLEET_ID.test(serverId)) {
+    return refused(400, 'bad_server_id', 'A hosted session names its own server_id');
+  }
+  const held = await sessionFromCredential(env, token, simId, serverId, { now, beat: request.method === 'POST' });
+  return held ? { machine_id: held.machine_id } : bad();
+}
 
 /// `deps` carries the index.js helpers: verifyAuth, requireAdmin, json, and
 /// isListable from moderation.mjs.
@@ -1129,11 +1210,20 @@ export async function handleLive(request, env, cors, simId, deps) {
   // verifyAuth so a credential is never treated as a user id.
   const presented = bearerOf(request);
   let userId;
+  // The one server a hosted-session credential stands for, on an admission. Any other caller is the author, for any of
+  // the listing's servers.
+  let boundServer;
   if (presented.startsWith('esrv_')) {
     userId = await authorFromServerCredential(env, presented, simId, sim.author_id);
     if (!userId) {
       return json({ error: 'This server credential is not valid for this listing', code: 'bad_server_credential', ...endAll }, 401, cors);
     }
+  } else if (presented.startsWith('eshs_')) {
+    // A session the fleet started (src/fleet.mjs) presents `eshs_…`: this listing and its own server id only.
+    const held = await fleetSessionHost(request, env, simId, presented, admitting, now);
+    if (held.refused) return json({ ...held.refused.body, ...endAll }, held.refused.status, cors);
+    userId = `fleet:${held.machine_id}`;
+    boundServer = held.server_id;
   } else {
     userId = await verifyAuth(request, env);
     if (!userId) return json({ error: 'Unauthorized', ...endAll }, 401, cors);
@@ -1201,16 +1291,22 @@ export async function handleLive(request, env, cors, simId, deps) {
     const toGuestSession = isGuestJoinTicket(body.ticket) || body.guest_only === true;
     // One certificate pin is one host process. When the listing's other session (account or guest-only) is live at the pin
     // this ticket is for, that process would hold accounts and guests at once: nobody is admitted to it.
-    if ((await livePin(env, simId, now, { guestOnly: !toGuestSession })) === body.audience) {
+    if ((await livePins(env, simId, now, { guestOnly: !toGuestSession })).includes(body.audience)) {
       return json({ error: 'This session cannot take players right now.', code: 'pin_in_use' }, 403, { ...cors, 'Cache-Control': 'no-store' });
     }
-    const r = await liveCall(env, sessionName(simId, toGuestSession), 'admit', { ticket: body.ticket, audience: body.audience, now });
+    const r = await liveCall(env, sessionName(simId, toGuestSession), 'admit', { ticket: body.ticket, audience: body.audience, now, server_id: boundServer });
     if (r.ok === false) {
       return json({ error: r.error, code: r.code || 'admit_failed' }, r.status || 500, { ...cors, 'Cache-Control': 'no-store' });
     }
     // The player was admitted: a visit by them, counted once a day (src/visits.mjs); a guest once per lease, however many
     // times it joins. Never fails the admission.
     if (deps.onJoin) await Promise.resolve(deps.onJoin(sim, { id: r.id, accountId: r.account_id, guest: r.guest, visit: r.visit })).catch((e) => console.error('onJoin failed:', e?.message || e));
+    // A fleet session admitted an account: the seat its allocation reserved there is the host's to count from now on
+    // (src/fleet.mjs `arrived`), so the fleet does not count one player twice. fleetCall never throws, and a fleet that
+    // cannot be reached never fails the admission: the reservation then ends by its own 60 s.
+    if (typeof boundServer === 'string' && typeof r.account_id === 'string' && r.guest !== true) {
+      await fleetCall(env, 'arrived', { who: `u:${r.account_id}`, server_id: boundServer, now });
+    }
     return json({ ok: true, id: r.id, account_id: r.account_id, username: r.username, guest: r.guest, expires: r.expires }, 200, { ...cors, 'Cache-Control': 'no-store' });
   }
 
@@ -1285,8 +1381,7 @@ export async function handleLive(request, env, cors, simId, deps) {
     // One certificate pin is one host process: a session may not beat at the pin the listing's other session (account or
     // guest-only) is live at, or that one process would take accounts and guests at once. A guest-only beat refused here
     // also tells the host to let its guests go.
-    const otherPin = await livePin(env, simId, now, { guestOnly: !guestOnly });
-    if (otherPin && otherPin === link.pin.toLowerCase()) {
+    if ((await livePins(env, simId, now, { guestOnly: !guestOnly })).includes(link.pin.toLowerCase())) {
       return json({
         error: 'The listing\'s other session is live at this certificate pin. Guest-only and account sessions run in separate host processes.',
         code: 'pin_in_use', ...(guestOnly ? END_ALL_GUESTS : {}),
@@ -1322,6 +1417,10 @@ export async function handleLive(request, env, cors, simId, deps) {
       const clip = (v) => (typeof v === 'string' ? v.slice(0, 160) : '');
       const tier = ['unknown', 'low', 'mid', 'high'].includes(h.tier) ? h.tier : 'unknown';
       hardware = { gpu: clip(h.gpu), cpu: clip(h.cpu), tier };
+      // A host that reads its GPU (eustress/crates/forge/src/gpu_probe.rs) adds its VRAM and whether it is a hardware GPU.
+      // Both optional: a host that predates them sends `{gpu, cpu, tier}` alone, and a value out of range is left out.
+      if (Number.isSafeInteger(h.gpu_vram_mb) && h.gpu_vram_mb >= 0 && h.gpu_vram_mb <= 1_048_576) hardware.gpu_vram_mb = h.gpu_vram_mb;
+      if (typeof h.gpu_available === 'boolean') hardware.gpu_available = h.gpu_available;
     }
     const r = await liveCall(env, sessionName(simId, guestOnly), 'beat', {
       host_id: userId, link: body.link, players, max_players: maxPlayers, protocol, connected, guest_caps: guestCaps, guest_only: guestOnly,

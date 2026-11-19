@@ -1,0 +1,45 @@
+[asset]
+mesh = "parts/block.glb"
+scene = "Scene0"
+
+[metadata]
+archivable = true
+class_name = "Part"
+created = "2026-11-16T00:00:00Z"
+last_modified = "2026-11-16T00:00:00Z"
+name = "Ground"
+unit = "m"
+uuid = "8b08aaed9d1f967d5f50f5ea60cc18e8"
+
+[properties]
+anchored = true
+can_collide = true
+cast_shadow = true
+color = [
+    96,
+    120,
+    70,
+]
+destructible = false
+locked = false
+material = "H_Matte"
+reflectance = 0.0
+transparency = 0.0
+
+[transform]
+position = [
+    0.0,
+    -0.5,
+    0.0,
+]
+rotation = [
+    0.0,
+    0.0,
+    0.0,
+    1.0,
+]
+scale = [
+    400.0,
+    1.0,
+    400.0,
+]

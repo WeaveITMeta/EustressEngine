@@ -71,6 +71,8 @@ pub mod drag_guard;
 pub mod look_picker;
 pub mod camera_controller;
 pub mod view_grid;
+/// The render layer editor overlays are on, which the AI capture camera never renders.
+pub mod editor_overlay;
 // Government opportunity capture (SAM.gov + Grants.gov). Gated with the
 // `data` feature because it builds on `eustress_data`'s HTTP seam and
 // Connector materialization rather than carrying a second copy of either.
@@ -84,6 +86,7 @@ pub mod data_scripting;
 // `crate::ai_camera::AiCamera` (gap-3 Play→Edit camera-disable filter). Its only
 // crate dependency is `crate::default_scene`, which is already in this lib.
 pub mod ai_camera;
+pub mod camera_path;
 // Publish-time moderation dossier + capture orbit (reads the World, drives the
 // AI camera). Consumed by api.eustress.dev; see docs/architecture/MODERATION_PIPELINE.md.
 pub mod moderation_dossier;
@@ -165,6 +168,9 @@ pub mod terrain_region;
 /// Engine side of the terrain layer classes: spawning their components from
 /// TOML, hot reload, undo replay, spline-point adoption and Insert placement.
 pub mod terrain_layers;
+/// The `Road` class methods (`Road:Audit`), answered by a `TerrainSpline` in
+/// Road mode.
+pub mod road_methods;
 // Disk-terrain auto-loader — legacy/disk Spaces hydrate `Workspace/Terrain/`
 // (worldgen export + heightmap import R16/toml format) on Space open.
 // UNGATED sibling of the world-db voxel loader below.
@@ -251,6 +257,7 @@ pub mod txt_to_toml_watcher;
 #[cfg(feature = "stream-node")]
 pub mod stream_node_plugin;
 pub mod updater;
+pub mod update_trust;
 pub mod simulation;
 pub mod frame_diagnostics;
 /// Opt-in per-system frame micro-profiler (feature `profiling`).
@@ -283,9 +290,12 @@ pub mod light_sync;
 pub mod photoreal;
 // Hardware ray-traced lighting (Bevy Solari), Auto by default: the switch and
 // its production guards, the GPU gate, the Solari wiring, the mesh copies
-// Solari traces, and the traced sky, light and surface proxies. See its
-// module docs.
-pub mod raytracing;
+// Solari traces, and the traced sky, light and surface proxies. The
+// eustress-raytracing crate, shared with the Player; see its crate docs.
+pub use eustress_raytracing as raytracing;
+// What that crate asks of Studio: the frame-time guard's view of the frame,
+// the open Space, the Studio cameras, and its notices as notifications.
+pub mod raytracing_host;
 // Free-camera Space↔Space teleport, driven by `[attributes]` on ordinary
 // instances — no new class, no revival of the dead `scene::PortalData`.
 pub mod portal;

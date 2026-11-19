@@ -548,8 +548,8 @@ pub enum SlintAction {
     /// Settings > Soul > Test Connection, and its background result.
     SoulTestConnection,
     SoulTestConnectionDone(Vec<crate::soul::KeyProbe>),
-    /// A control whose backend is not built yet: "server" | "network-panel"
-    /// | "collaboration" | "stress-test". Answered with a notification.
+    /// A control whose backend is not built yet: "collaboration". Answered
+    /// with a notification.
     UnbuiltFeature(String),
     /// Fold the Ribbon's tool rows away (true) or bring them back (false).
     SetRibbonCollapsed(bool),
@@ -876,7 +876,8 @@ pub struct CenterTabData {
 }
 
 /// Atomic flag: true when the Slint overlay has input focus or a modal open.
-/// Written by the overlay thread (slint_main.rs timer), read by Bevy keyboard handlers.
+/// Read by Bevy keyboard handlers. Its only writer was the overlay-thread timer
+/// in the dead parallel drain module that G6.03 deleted.
 pub static OVERLAY_INPUT_FOCUSED: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 
@@ -1659,6 +1660,11 @@ impl Plugin for SlintUiPlugin {
             crate::particles::ParticlesPlugin,
         ));
 
+        // Every registration `drain_slint_actions` needs from this plugin, in
+        // one function the `ui::drain_contract` tests also call.
+        register_drain_requirements(app);
+        app.add_systems(PostStartup, super::drain_contract::guard_drain_contract);
+
         app
             // Play start, pause, resume and stop, in the Output panel.
             .add_systems(Update, log_play_state_to_output)
@@ -1673,17 +1679,7 @@ impl Plugin for SlintUiPlugin {
             .init_resource::<ExplorerCache>()
             .init_resource::<UIPerformance>()
             .init_resource::<SlintUIFocus>()
-            // ── CRITICAL: must be registered here, not in the legacy
-            // StudioUiPlugin (which isn't used at runtime). drain_slint_actions
-            // takes `ResMut<LabelEditState>` for the EditLabelDialog handler;
-            // missing → Bevy skips the entire drain every frame → ALL Slint
-            // UI callbacks (Explorer, tag X, add-tag, ribbon, …) silently die.
-            .init_resource::<LabelEditState>()
-            // Same CRITICAL rule: `DrainResources.terrain_visibility` is a
-            // required (non-Option) ResMut — it was registered only in the
-            // legacy plugin, which skipped the whole drain (the "theme/mode
-            // clicks do nothing" bug; Bevy logs one 'failed validation' WARN).
-            .init_resource::<TerrainVisibility>()
+            // LabelEditState and TerrainVisibility: see register_drain_requirements.
             .init_resource::<SceneFile>()
             .init_resource::<crate::auth::AuthState>()
             .init_resource::<crate::forge::ForgeState>()
@@ -1718,13 +1714,7 @@ impl Plugin for SlintUiPlugin {
             // Eustress Modes: signature-gated push of the mode list +
             // data-driven ribbon-tab filter.
             .init_resource::<ModeSyncSignature>()
-            // Events
-            .add_message::<FileEvent>()
-            .add_message::<MenuActionEvent>()
-            .add_message::<ExplorerToggleEvent>()
-            .add_message::<crate::commands::UndoCommandEvent>()
-            .add_message::<crate::commands::RedoCommandEvent>()
-            .add_message::<crate::commands::HistoryActionEvent>()
+            // Events: see register_drain_requirements.
             // Plugins
             .add_plugins(SpawnEventsPlugin)
             .add_plugins(super::webview::WebViewPlugin)
@@ -1735,6 +1725,8 @@ impl Plugin for SlintUiPlugin {
             .add_systems(Update, update_slint_ui_focus)
             .init_resource::<super::layout_tables::ActiveLayoutKey>()
             .add_systems(Update, follow_mode_layout)
+            // A harness Space's pinned layout and selection, after the mode's.
+            .add_systems(Update, restore_harness_pins.after(follow_mode_layout))
             .add_systems(Update, super::publish_targets::sync_publish_targets)
             .add_systems(
                 Update,
@@ -1774,17 +1766,8 @@ impl Plugin for SlintUiPlugin {
             // Insert-by-template selection: `create_instance` writes files and
             // lets the file watcher spawn them, so the entity doesn't exist
             // when the action returns. This polls for it and finishes the
-            // insert (select + reveal) as soon as it lands.
-            //
-            // `drain_slint_actions` takes this as a NON-Option `ResMut`, so the
-            // LOOP-5 breaker gets told about it too — a missing registration
-            // would otherwise fail Bevy's param validation every frame and take
-            // every UI button in the engine down with it, silently.
-            .init_resource::<PendingInsertSelection>()
-            .add_drain_resource::<PendingInsertSelection>(
-                "drain_slint_actions",
-                "SlintUiPlugin",
-            )
+            // insert (select + reveal) as soon as it lands. Its resource,
+            // PendingInsertSelection, is registered in register_drain_requirements.
             .add_systems(Update, resolve_pending_insert_selection.after(SlintSystems::Drain))
             // `.after(handle_window_resize)`: this system polls the Slint
             // viewport geometry into `ViewportBounds` (physical px) using the
@@ -1987,6 +1970,52 @@ impl Plugin for SlintUiPlugin {
             app.add_systems(Update, sync_soul_panel_to_slint.after(SlintSystems::Drain).run_if(crate::space::file_loader::ui_sync_tick_slow));
         }
     }
+}
+
+/// Every registration `drain_slint_actions` needs that `SlintUiPlugin` owns:
+/// its required (non-`Option`) resources and the messages it writes that no
+/// other plugin registers. The plugin calls this, and so do the
+/// `ui::drain_contract` tests, so a line removed here fails
+/// `cargo test -p eustress-engine --lib ui::drain_contract`.
+///
+/// A missing entry fails the drain's parameter validation every frame, and
+/// Bevy skips the whole drain: every Slint callback (Explorer, tags, ribbon,
+/// theme, tools, Play) stops at once, with one `failed validation` log line.
+/// That shipped twice, both times because the registration sat in a plugin
+/// that does not run (the legacy `StudioUiPlugin`). Register here, nowhere else.
+pub(crate) fn register_drain_requirements(app: &mut App) {
+    app
+        // The EditLabelDialog handler takes `ResMut<LabelEditState>`.
+        .init_resource::<LabelEditState>()
+        // `DrainResources.terrain_visibility` is a required `ResMut` (the
+        // "theme/mode clicks do nothing" bug when it was missing).
+        .init_resource::<TerrainVisibility>()
+        // Template inserts park their folder here for
+        // `resolve_pending_insert_selection`; the LOOP-5 breaker is told too.
+        .init_resource::<PendingInsertSelection>()
+        .add_drain_resource::<PendingInsertSelection>(
+            "drain_slint_actions",
+            "SlintUiPlugin",
+        )
+        // Messages
+        .add_message::<FileEvent>()
+        .add_message::<MenuActionEvent>()
+        .add_message::<ExplorerToggleEvent>()
+        .add_message::<crate::commands::UndoCommandEvent>()
+        .add_message::<crate::commands::RedoCommandEvent>()
+        .add_message::<crate::commands::HistoryActionEvent>();
+}
+
+/// Validates `drain_slint_actions`'s whole parameter set against `world`
+/// without running it. `Err` names the first parameter Bevy would refuse.
+pub(crate) fn check_drain_params(world: &mut World) -> Result<(), String> {
+    super::drain_contract::validate_system_params(&drain_slint_actions, world)
+}
+
+/// Adds the drain to `app` exactly as `SlintUiPlugin` schedules it.
+#[cfg(test)]
+pub(crate) fn add_drain_system(app: &mut App) {
+    app.add_systems(Update, drain_slint_actions.in_set(SlintSystems::Drain));
 }
 
 /// Initialize Slint software renderer and create overlay (exclusive startup system)
@@ -2999,7 +3028,7 @@ fn setup_slint_overlay(world: &mut World) {
     let q = queue.clone();
     ui.on_force_exit(move || q.push(SlintAction::ForceExit));
     
-    // Workshop Panel callbacks. (Historically these lived in slint_main.rs's
+    // Workshop Panel callbacks. (Historically these lived in a separate
     // overlay loop, but that path isn't active — SlintUiPlugin owns the UI
     // in-process. Without these, the Send button, pipeline controls, and
     // mention popup were all no-ops.)
@@ -5352,34 +5381,26 @@ fn apply_key_results() {}
 fn unbuilt_feature_notice(id: &str) -> Option<super::notifications::NotificationEvent> {
     use super::notifications::{NotificationCategory, NotificationEvent};
     let (title, message) = match id {
-        "network-panel" => (
-            "The Network panel is not built yet",
-            "Start Server (F9) hosts the Space you are playing; who joins and leaves appears in notifications and the Output. Connect to Forge and Allocate Server work from this menu.",
-        ),
         "collaboration" => (
             "Live collaboration is not built yet",
-            "Editing a Space together (Team Create) is not built. Playing together is: Start Server (F9) hosts the Space you are playing.",
-        ),
-        "stress-test" => (
-            "Stress tests are not built for the current server",
-            "The stress test drives the old play-server protocol, which Start Server (F9) no longer uses.",
+            "Editing a Space together (Team Create) is not built. Playing together is: Start Server (F9) hosts the open Space, and players join it.",
         ),
         _ => return None,
     };
     Some(NotificationEvent::info(NotificationCategory::General, title, message))
 }
 
-/// The keyboard route to the same unbuilt controls (F9, Ctrl+Alt+N,
-/// Ctrl+Shift+L) arrives as menu actions nothing else handles.
+/// The keyboard route to the same unbuilt control (Ctrl+Shift+L) arrives as a
+/// menu action nothing else handles.
 fn announce_unbuilt_actions(
     mut menu: MessageReader<MenuActionEvent>,
     mut notes: MessageWriter<super::notifications::NotificationEvent>,
 ) {
     use crate::keybindings::Action;
     for event in menu.read() {
-        // Start/Stop Server are built: `crate::multiplayer` owns them.
+        // Start/Stop Server are built (`crate::multiplayer`), and so is the
+        // Network panel (Ctrl+Alt+N, `preferences::sync_hosting_to_slint`).
         let id = match event.action {
-            Action::ToggleNetworkPanel => "network-panel",
             Action::ToggleCollaboration => "collaboration",
             _ => continue,
         };
@@ -9342,6 +9363,16 @@ fn drain_slint_actions(
                     if let Some(ref mut s) = res.editor_settings {
                         if s.usage_telemetry_enabled != on {
                             s.usage_telemetry_enabled = on;
+                            let _ = s.save();
+                        }
+                    }
+                    // Automatic updates rides the same callback. The updater
+                    // reads the resource at each decision, so the change
+                    // applies at once.
+                    let automatic = ui.get_automatic_updates_enabled();
+                    if let Some(ref mut s) = res.editor_settings {
+                        if s.automatic_updates != automatic {
+                            s.automatic_updates = automatic;
                             let _ = s.save();
                         }
                     }
@@ -19588,6 +19619,9 @@ fn sync_bevy_to_slint(
         if ui.get_usage_telemetry_enabled() != es.usage_telemetry_enabled {
             ui.set_usage_telemetry_enabled(es.usage_telemetry_enabled);
         }
+        if ui.get_automatic_updates_enabled() != es.automatic_updates {
+            ui.set_automatic_updates_enabled(es.automatic_updates);
+        }
         if ui.get_ribbon_collapsed() != es.ribbon_collapsed {
             ui.set_ribbon_collapsed(es.ribbon_collapsed);
         }
@@ -20067,7 +20101,7 @@ impl WorkshopAgentStatus {
 /// pipeline mutation, so the UI would look broken even though the key is valid.
 ///
 /// Pushes straight to `SlintUiState.window` via NonSend. The `SlintBridge`
-/// pipeline in slint_main.rs is unused in the current in-process Slint path,
+/// pipeline is unused in the current in-process Slint path,
 /// so writing there never reached the UI (banner stuck on, message list empty).
 fn sync_workshop_to_slint(
     slint_context: Option<NonSend<SlintUiState>>,
@@ -20904,7 +20938,7 @@ fn generate_workshop_titles(
 /// changes or the filter is marked dirty (search text, category, language).
 ///
 /// This pushes straight to `SlintUiState.window` via NonSend — the separate
-/// SlintBridge pipeline in slint_main.rs is unused in the current Bevy-native
+/// SlintBridge pipeline is unused in the current Bevy-native
 /// overlay path, so data written there never reached the UI.
 fn sync_api_reference_to_slint(
     slint_context: Option<NonSend<SlintUiState>>,
@@ -21898,6 +21932,122 @@ fn follow_mode_layout(
     let right = lt::tab_pinned(&lt::RIGHT_TABS, ui.get_right_tab_index(), &settings.pinned_panels);
     if ui.get_right_active_pinned() != right {
         ui.set_right_active_pinned(right);
+    }
+}
+
+/// What [`restore_harness_pins`] still owes the current Space open.
+#[derive(Default)]
+struct HarnessPinState {
+    handled: Option<super::harness_pins::SpaceOpen>,
+    /// The pinned layout file and the frames waited for the mode's layout.
+    layout: Option<(std::path::PathBuf, u32)>,
+    /// The uuid to select, its path for messages, and the frames waited.
+    select: Option<(String, String, u32)>,
+}
+
+/// A harness Space's pinned panel layout and selection (`harness_pins`),
+/// once per Space open after the load settles. The layout goes through the
+/// Import Layout dialog's own parse and `PanelLayout::apply`; the selection
+/// through the selection manager and Explorer reveal, as `select_and_reveal`
+/// does. A Space without the pin files is untouched.
+fn restore_harness_pins(
+    space_root: Option<Res<crate::space::SpaceRoot>>,
+    generation: Option<Res<crate::space::file_loader::SpaceLoadGeneration>>,
+    load: Option<Res<crate::space::file_loader::LoadInProgress>>,
+    slint_context: Option<NonSend<SlintUiState>>,
+    mut active: ResMut<super::layout_tables::ActiveLayoutKey>,
+    instances: Query<(Entity, &eustress_common::classes::Instance)>,
+    selection_manager: Option<Res<crate::rendering::BevySelectionManager>>,
+    mut explorer_state: Option<ResMut<UnifiedExplorerState>>,
+    mut state: Local<HarnessPinState>,
+) {
+    use super::harness_pins as hp;
+    let (Some(space_root), Some(generation)) = (space_root, generation) else { return };
+    let state = &mut *state;
+    let this_open = (space_root.0.clone(), generation.0);
+    if state.handled.as_ref() != Some(&this_open) {
+        // A new open: whatever the last one still owed is void.
+        state.layout = None;
+        state.select = None;
+    }
+    let load_active = load.as_ref().is_some_and(|l| l.active);
+    if hp::should_read_pins(state.handled.as_ref(), &this_open, load_active) {
+        state.handled = Some(this_open);
+        let dir = hp::harness_dir(&space_root.0);
+        let pins_path = dir.join(hp::PINS_FILE);
+        let pins_text = pins_path
+            .is_file()
+            .then(|| std::fs::read_to_string(&pins_path).map_err(|e| e.to_string()));
+        let plan = hp::plan_pins(&dir, pins_text, |p| p.is_file());
+        for w in &plan.warnings {
+            warn!("Harness pins: {w}");
+        }
+        state.layout = plan.layout.map(|p| (p, 0));
+        state.select = plan.select.map(|(uuid, path)| (uuid, path, 0));
+    }
+
+    // The layout, once the mode's own layout has been applied (else
+    // `follow_mode_layout` would replace it on its first mode report).
+    let layout_due = match (state.layout.as_mut(), slint_context.is_some()) {
+        (Some((_, frames)), true) => hp::step_wait(frames, active.key.is_some()) != hp::Wait::Waiting,
+        _ => false,
+    };
+    if layout_due {
+        if let (Some((path, _)), Some(ctx)) = (state.layout.take(), slint_context.as_ref()) {
+            let ui = &ctx.window;
+            let layout = std::fs::read_to_string(&path)
+                .map_err(|e| e.to_string())
+                .and_then(|text| serde_json::from_str::<PanelLayout>(&text).map_err(|e| e.to_string()));
+            match layout {
+                Ok(layout) => {
+                    layout.apply(ui);
+                    // Recorded as the applied layout, not a change of the
+                    // user's: `follow_mode_layout` stores a layout in
+                    // `EditorSettings.layout_state_by_key` only when it differs
+                    // from `applied`, so the pinned one is never saved as theirs.
+                    active.applied = Some(PanelLayout::read(ui));
+                    info!("Harness pins: applied the pinned panel layout {}", path.display());
+                }
+                Err(e) => warn!("Harness pins: could not apply the pinned layout {}: {e}", path.display()),
+            }
+        }
+    }
+
+    // The selection, once the instance exists.
+    let select_due = state.select.as_mut().map(|(uuid, _, frames)| {
+        let found = instances
+            .iter()
+            .find(|(_, i)| {
+                i.uuid.eq_ignore_ascii_case(uuid)
+                    || (i.uuid.contains('-') && hp::normalize_uuid(&i.uuid).as_deref() == Some(uuid.as_str()))
+            })
+            .map(|(e, _)| e);
+        let wait = hp::step_wait(frames, found.is_some());
+        (found, wait)
+    });
+    match select_due {
+        Some((Some(entity), _)) => {
+            if let Some((uuid, path, _)) = state.select.take() {
+                if let Some(ref sm) = selection_manager {
+                    sm.0.write().select(crate::entity_utils::entity_to_id_string(entity));
+                }
+                if let Some(ref mut es) = explorer_state {
+                    es.pending_scroll_target_entity = Some(entity);
+                    es.dirty = true;
+                    es.needs_immediate_sync = true;
+                }
+                info!("Harness pins: selected the pinned instance {path} ({uuid}) as {entity:?}");
+            }
+        }
+        Some((None, hp::Wait::GaveUp)) => {
+            if let Some((uuid, path, _)) = state.select.take() {
+                warn!(
+                    "Harness pins: the pinned instance {path} ({uuid}) did not appear within {} frames of the load settling; nothing selected",
+                    hp::MAX_WAIT_FRAMES
+                );
+            }
+        }
+        _ => {}
     }
 }
 

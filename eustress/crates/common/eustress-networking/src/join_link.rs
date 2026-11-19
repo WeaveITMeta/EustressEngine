@@ -531,6 +531,30 @@ mod tests {
         assert!(!e.contains(secret), "{e}");
     }
 
+    /// A solo `play/<id>` link from the website's Play button carries a
+    /// ticket too, with `api` and `min` in any order. The ticket comes out;
+    /// the rest of the link keeps its order; nothing prints the ticket.
+    #[test]
+    fn a_solo_links_ticket_is_taken_out_in_any_order() {
+        let secret = "eit1.c2VjcmV0LXRpY2tldA.c2ln-_x";
+        let id = "07d084d8-9098-4192-bb48-84d2c428db36";
+        for (query, kept) in [
+            (format!("api=staging&ticket={secret}"), "api=staging"),
+            (format!("ticket={secret}&api=staging"), "api=staging"),
+            (format!("ticket={secret}&min=1.2.3&api=staging"), "min=1.2.3&api=staging"),
+            (format!("api=staging&min=1.2.3&ticket={secret}"), "api=staging&min=1.2.3"),
+        ] {
+            let (rest, extras) = split_link_extras(&format!("eustress-player://play/{id}?{query}")).unwrap();
+            assert_eq!(rest, format!("eustress-player://play/{id}?{kept}"), "{query}");
+            assert_eq!(extras.api, Some("https://api-staging.eustress.dev"), "{query}");
+            assert!(!format!("{extras:?}").contains(secret), "{query}: {extras:?}");
+            assert_eq!(extras.ticket.map(JoinTicket::into_secret).as_deref(), Some(secret), "{query}");
+        }
+        let (rest, extras) = split_link_extras(&format!("eustress-player://play/{id}?ticket={secret}")).unwrap();
+        assert_eq!(rest, format!("eustress-player://play/{id}"));
+        assert!(extras.ticket.is_some());
+    }
+
     /// A malformed ticket, an API the Player does not know, or either named
     /// twice refuses the link, and no message quotes the ticket.
     #[test]

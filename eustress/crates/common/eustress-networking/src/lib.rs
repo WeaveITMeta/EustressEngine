@@ -12,6 +12,7 @@
 //! | [`join_link`] | `eustress-player://join/…` links | none |
 //! | [`session`] | Bevy systems: hosting, joining, world download, avatar replication | none |
 //! | [`repl`] | Server authority: the world, motion and input lanes, remote calls | none |
+//! | [`handoff`] | Moving an entity between hosts, one owner at a time | none |
 //! | [`native`] | Desktop transport: a WebTransport host and player | sockets and threads; not built for wasm32 |
 //!
 //! All but the last are IO-free, so a browser build keeps them and swaps in
@@ -33,6 +34,7 @@
 //! ping contention) kept for server-authoritative physics, the next
 //! replication tier after avatars.
 
+pub mod handoff;
 pub mod join_link;
 pub mod player_replica;
 pub mod repl;

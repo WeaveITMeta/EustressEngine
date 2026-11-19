@@ -160,6 +160,38 @@ namespace_id = "2001"
 #                           npx wrangler secret put DISCORD_BOT_TOKEN
 #                         (and again with --env staging). Without it the tick logs one line
 #                         and registers and posts nothing; the commands still answer.
+# SLACK_CLIENT_ID,      - the Slack app Settings > Connect Slack links through ("Sign in
+# SLACK_CLIENT_SECRET     with Slack", OpenID Connect; src/slack_link.mjs). Scopes are
+#                         `openid profile` only: no email. The token Slack issues is
+#                         revoked right after reading who the person is; nothing is kept
+#                         but the link. In each environment:
+#                           npx wrangler secret put SLACK_CLIENT_ID
+#                           npx wrangler secret put SLACK_CLIENT_SECRET
+#                         (and again with --env staging). In the Slack app (api.slack.com/apps
+#                         > the app > OAuth & Permissions): under Redirect URLs add
+#                           https://eustress.dev/auth/slack/callback
+#                           https://www.eustress.dev/auth/slack/callback
+#                           https://staging.eustress-cbb.pages.dev/auth/slack/callback
+#                         and under Scopes > User Token Scopes add `openid` and `profile`
+#                         (Sign in with Slack). Slack takes HTTPS redirects only, so
+#                         http://localhost:3000 cannot link Slack: begin answers 400
+#                         slack_needs_https there. Without both secrets the link routes
+#                         answer 503 slack_unavailable.
+#                         The same two secrets serve the Eustress Slack app (src/slack_bot.mjs):
+#                         the "Add to Slack" install exchanges its code with them, and
+#                         SLACK_CLIENT_SECRET derives the key each workspace's bot token is
+#                         sealed under (replacing it ends every installation until reinstall).
+#                         The Slack app must also list each API origin's
+#                           https://api.eustress.dev/api/slack/oauth_redirect
+#                           https://api-staging.eustress.dev/api/slack/oauth_redirect
+#                         as Redirect URLs (infrastructure/slack-app/manifest.worker.json).
+# SLACK_SIGNING_SECRET  - the Slack app's Signing Secret (api.slack.com/apps > the app > Basic
+#                         Information > App Credentials). POST /api/slack/commands, /events and
+#                         /interactivity verify every request's X-Slack-Signature under it
+#                         (src/slack_bot.mjs); without it (or SLACK_APP_ID in [vars]) they
+#                         answer 503. In each environment:
+#                           npx wrangler secret put SLACK_SIGNING_SECRET
+#                         (and again with --env staging).
 # STRIPE_SECRET_KEY     - Stripe secret key for payments + Connect
 # STRIPE_WEBHOOK_SECRET - Stripe webhook signing secret
 # KYC_ID_PEPPER         - the key id_hash is an HMAC-SHA-256 under (src/kyc_identity.mjs):
@@ -313,6 +345,19 @@ class_name = "HolderLedger"
 tag = "v9-holder-ledger"
 new_sqlite_classes = ["HolderLedger"]
 
+# The fleet (src/fleet.mjs): Eustress-hosted sessions on rented machines. One object,
+# named "fleet", holds every machine as its host agent last reported it, the start and
+# stop commands not yet acknowledged, each Play click's answer for 10 minutes, and the
+# hashes of the hosted-session (eshs_) credentials, so every placement sees one state.
+# The host (ehost_) credentials are in SOCIAL. See docs/architecture/HOSTED_FLEET.md.
+[[durable_objects.bindings]]
+name = "FLEET"
+class_name = "Fleet"
+
+[[migrations]]
+tag = "v10-fleet"
+new_sqlite_classes = ["Fleet"]
+
 # Cosign claims per account. The engine sends at most 6 claims per 5-minute
 # flush; this only meets a script. Per Cloudflare location, like the manifest
 # limiter above.
@@ -408,6 +453,9 @@ FORK_ID = "eustress.dev"
 # POST /api/discord/interactions verifies every request's Ed25519 signature under it
 # (src/discord_interactions.mjs). Without it the endpoint answers 503.
 DISCORD_PUBLIC_KEY = "2c01880f7fd6ecb01d475da61a0186a500549b19dd10000c7a5515a6c71bc63f"
+# The Eustress Slack app's App ID (api.slack.com/apps), not a secret: every signed request
+# to /api/slack/* must name it as api_app_id (src/slack_bot.mjs). One app serves both environments.
+SLACK_APP_ID = "A0CHNKPQCKX"
 # Hosted guest play (src/guest.mjs, docs/architecture/GUEST_PLAY.md section 13):
 # guest join tickets, guest admission, guest-only sessions and the guest chat
 # check. On only when this is exactly "on"; anything else, or unset, is off.
@@ -418,9 +466,10 @@ GUEST_PLAY = "off"
 # Deleting and restoring a published Space (src/space_delete.mjs, docs/architecture/
 # DELETE_PUBLISHED_SPACE.md): the confirmation code is emailed to the account's verified
 # address. On only when this is exactly "on"; anything else, or unset, answers 503
-# delete_unavailable. Off until one code mail is shown to arrive (the delivery check in the
-# design document) and McKale turns it on.
-DELETE_CODE_EMAIL = "off"
+# delete_unavailable. McKale switched it on in production on 2026-11-14 ("Switch it on
+# production"), before the delivery check in the design document was run. The removal for
+# good stays off (SPACE_HARD_DELETE), so every deletion keeps its 90-day undo.
+DELETE_CODE_EMAIL = "on"
 # The sender of the delete and restore code mail and of the deleted and restored notices (shown as
 # "Eustress Support"). No other mail uses it.
 DELETE_MAIL_FROM = "support@eustress.dev"
@@ -430,6 +479,11 @@ DELETE_MAIL_FROM = "support@eustress.dev"
 # exactly "on"; anything else, or unset, and the job reads and removes nothing. Off until
 # McKale turns it on (docs/architecture/DELETE_PUBLISHED_SPACE_SECURITY_REVIEW.md).
 SPACE_HARD_DELETE = "off"
+# Agent accounts (src/agents.mjs, docs/architecture/AGENT_ACCOUNTS.md): sponsors' invites and
+# agents' own registration. On only when this is exactly "on" AND counsel's final agreement
+# text is in src/agent_agreement.mjs; otherwise 503 agent_signup_unavailable. McKale turned it
+# on 2026-11-15; sign-up still waits on the final agreement.
+AGENT_SIGNUP = "on"
 # Daily caps on guest chat checks that reach Jev (each a paid model call;
 # src/guest.mjs guestChatCaps, GUEST_PLAY.md section 13): per listing, per host
 # account, and for the whole deployment. Unset, or not a whole number, is the
@@ -645,6 +699,14 @@ class_name = "HolderLedger"
 tag = "v9-holder-ledger"
 new_sqlite_classes = ["HolderLedger"]
 
+[[env.staging.durable_objects.bindings]]
+name = "FLEET"
+class_name = "Fleet"
+
+[[env.staging.migrations]]
+tag = "v10-fleet"
+new_sqlite_classes = ["Fleet"]
+
 [[env.staging.send_email]]
 name = "EMAIL"
 
@@ -655,6 +717,8 @@ enabled = true
 [env.staging.vars]
 # The Discord app's public key: one application serves both environments (see [vars]).
 DISCORD_PUBLIC_KEY = "2c01880f7fd6ecb01d475da61a0186a500549b19dd10000c7a5515a6c71bc63f"
+# The Slack app's App ID: one app serves both environments (see [vars]).
+SLACK_APP_ID = "A0CHNKPQCKX"
 # Hosted guest play: off until switched on here, as in production (see [vars]).
 GUEST_PLAY = "off"
 # Deleting a published Space: on in staging so the code mail can be shown to arrive (production stays off; see [vars]).
@@ -663,6 +727,8 @@ DELETE_CODE_EMAIL = "on"
 DELETE_MAIL_FROM = "support@eustress.dev"
 # Removing a deleted Space for good: off until McKale turns it on (see [vars]).
 SPACE_HARD_DELETE = "off"
+# Agent accounts: off until counsel's agreement text is in place (see [vars]).
+AGENT_SIGNUP = "off"
 # Guest chat check caps: the defaults apply unless set (see [vars]).
 # GUEST_CHAT_CAP_LISTING = "5000"
 # GUEST_CHAT_CAP_HOST = "5000"

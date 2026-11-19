@@ -33,11 +33,11 @@ impl UserData for LInst {
     }
 
     fn add_methods<M: UserDataMethods<Self>>(methods: &mut M) {
-        methods.add_meta_method(MetaMethod::Index, |lua, this, key: mlua::String| {
+        methods.add_meta_method(MetaMethod::Index, |lua, this, key: mlua::LuaString| {
             let key = key.to_str()?;
             index(lua, this.0, &key)
         });
-        methods.add_meta_method(MetaMethod::NewIndex, |lua, this, (key, value): (mlua::String, Value)| {
+        methods.add_meta_method(MetaMethod::NewIndex, |lua, this, (key, value): (mlua::LuaString, Value)| {
             let key = key.to_str()?;
             newindex(lua, this.0, &key, value)
         });
@@ -427,7 +427,7 @@ pub(crate) fn data_service(lua: &Lua, op: &str, arg: Value) -> LuaResult<Value> 
     let reply = f(op, json).map_err(|e| mlua::Error::RuntimeError(format!("DataService: {e}")))?;
     // A missing cell or an unanswered question (JSON null) arrives as nil, so
     // `row.qty == nil` reads the way a script expects.
-    let options = mlua::SerializeOptions::new().serialize_none_to_null(false).serialize_unit_to_null(false);
+    let options = mlua::serde::SerializeOptions::new().serialize_none_to_null(false).serialize_unit_to_null(false);
     lua.to_value_with(&reply, options)
 }
 
@@ -1451,6 +1451,12 @@ pub struct RayHit {
     pub terrain: bool,
     /// The material of a road's ribbon, which has no instance to read one from.
     pub material: Option<crate::terrain::material::TerrainMaterial>,
+    /// The instance a hit on a collider that is none reports: a road's
+    /// spline, for a hit on its surface or a junction it meets.
+    pub owner: Option<u64>,
+    /// The road surface under the hit (`Carriageway`, `Shoulder`, `Kerb`,
+    /// `Sidewalk` or `Paint`), for a hit on a road.
+    pub surface: Option<&'static str>,
 }
 
 /// The engine's ray caster for the current frame. It borrows the frame's
@@ -1493,10 +1499,21 @@ fn cast(query: &RayQuery) -> Option<RayHit> {
 /// the caller's units, metres divided by `k` (see `studs::script_scale`).
 fn raycast(lua: &Lua, origin: Vector3, direction: Vector3, params: MluaRaycastParams, k: f64) -> LuaResult<Value> {
     let query = with_dm(lua, |dm| {
+        let terrain = terrain::terrain_instance(dm);
         let mut filter = Vec::new();
         for f in &params.filter {
             if let Some(e) = dm.entity_of(*f) {
                 filter.push(e);
+            }
+            // The Terrain itself stands for its voxel ground
+            // (`terrain_listed`); a road among its layers is listed by
+            // naming the road, its folder, or an ancestor of the Terrain.
+            #[cfg(test)]
+            let skip = !crate::terrain::mutant("g07_terrain");
+            #[cfg(not(test))]
+            let skip = true;
+            if skip && Some(*f) == terrain {
+                continue;
             }
             for d in dm.descendants(*f) {
                 if let Some(e) = dm.entity_of(d) {
@@ -1504,7 +1521,7 @@ fn raycast(lua: &Lua, origin: Vector3, direction: Vector3, params: MluaRaycastPa
                 }
             }
         }
-        let terrain_listed = terrain::terrain_instance(dm)
+        let terrain_listed = terrain
             .map_or(false, |t| params.filter.iter().any(|f| *f == t || dm.is_descendant_of(t, *f)));
         RayQuery {
             origin,
@@ -1521,11 +1538,13 @@ fn raycast(lua: &Lua, origin: Vector3, direction: Vector3, params: MluaRaycastPa
         (with_dm(lua, |dm| terrain::terrain_instance(dm))?, terrain::ground_material(hit.position))
     } else {
         with_dm(lua, |dm| {
-            let inst = dm.by_entity(hit.entity);
-            // A road ribbon has no instance; it reports the bed material it wears.
-            let material = match (inst, hit.material) {
+            // A road's surface has no instance: it reports its road's, and
+            // the material of the surface under the hit.
+            let own = dm.by_entity(hit.entity);
+            let inst = own.or_else(|| hit.owner.and_then(|o| dm.by_entity(o)));
+            let material = match (own, hit.material) {
                 (None, Some(road)) => DmValue::Enum(EnumItem::new("Material", road.name())),
-                _ => inst
+                _ => own
                     .and_then(|i| dm.get_prop(i, "Material"))
                     .unwrap_or(DmValue::Enum(EnumItem::new("Material", "Plastic"))),
             };
@@ -1538,6 +1557,9 @@ fn raycast(lua: &Lua, origin: Vector3, direction: Vector3, params: MluaRaycastPa
     result.raw_set("Normal", MluaVector3(hit.normal))?;
     result.raw_set("Distance", hit.distance / k)?;
     result.raw_set("Material", to_lua(lua, &material)?)?;
+    if let Some(surface) = hit.surface {
+        result.raw_set("Surface", surface)?;
+    }
     let meta = lua.create_table()?;
     meta.raw_set("__type", "RaycastResult")?;
     result.set_metatable(Some(meta));

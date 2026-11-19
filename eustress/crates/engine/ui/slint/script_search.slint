@@ -272,16 +272,16 @@ export component ScriptSearchModal inherits Rectangle {
         if (index < 0) {
             return;
         }
-        if (index * root.row-height + list.viewport-y < 0px) {
-            list.viewport-y = -(index * root.row-height);
-        } else if ((index + 1) * root.row-height + list.viewport-y > list.visible-height) {
-            list.viewport-y = list.visible-height - (index + 1) * root.row-height;
+        if (index * root.row-height + list.content-y < 0px) {
+            list.content-y = -(index * root.row-height);
+        } else if ((index + 1) * root.row-height + list.content-y > list.visible-height) {
+            list.content-y = list.visible-height - (index + 1) * root.row-height;
         }
     }
 
     changed selected => { root.reveal(root.selected); }
     // A new search starts the list from its top row.
-    changed results => { list.viewport-y = 0px; }
+    changed results => { list.content-y = 0px; }
     changed show => {
         if (root.show) {
             query-field.focus();

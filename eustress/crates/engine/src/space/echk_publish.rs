@@ -507,18 +507,25 @@ pub fn publish_to(
     let only = space_only.then_some(plan.start_space.as_str());
     progress("Baking the world...", 5.0);
     let play = export(plan, only, Audience::Players)?;
-    // The server-only services leave this machine only for a listing whose
-    // author shares its source, and then only to Edit.
-    let server = if listing.open_source {
-        progress("Baking the source...", 9.0);
-        Some(export(plan, only, Audience::Server)?)
-    } else {
-        None
-    };
-    refuse_webhooks(&play, server.as_ref())?;
+    // The server-only services always go up as the listing's source world, so
+    // a hosted session runs the server scripts. Share Source decides who reads
+    // it: on, anyone (and Edit); off, only the author and the sessions the
+    // fleet starts for this listing
+    // (docs/architecture/PRIVATE_SOURCE_SECURITY_REVIEW.md).
+    progress("Baking the source...", 9.0);
+    let server = Some(export(plan, only, Audience::Server)?);
+    refuse_webhooks(&play, public_server(listing.open_source, server.as_ref()))?;
     // What the screen asks the person to read: SoulService's notice and any
     // key warning, returned with the result and logged.
-    let notes = publish_notes(&play, server.as_ref());
+    let mut notes = publish_notes(&play, server.as_ref());
+    if !listing.open_source {
+        let private_hooks: Vec<String> = server
+            .iter()
+            .flat_map(|exported| exported.stats.iter())
+            .flat_map(|(space, stats)| stats.webhook_paths.iter().map(move |p| format!("{space}/{p}")))
+            .collect();
+        notes.extend(private_webhook_note(&private_hooks));
+    }
     for note in &notes {
         warn!("publish: {note}");
     }
@@ -534,7 +541,7 @@ pub fn publish_to(
         let source = match &server {
             Some(server) => {
                 let base = fetch_manifest(&api, id, "source")?.ok_or_else(|| {
-                    "Share Source is new for this listing. Publish the whole Universe once so every Space's source goes up."
+                    "This listing has no source world yet. Publish the whole Universe once so every Space's source goes up."
                         .to_string()
                 })?;
                 Some(swap_space(base, &source_of(&play.manifest, &server.manifest)?, &plan.start_space)?)
@@ -843,6 +850,29 @@ fn source_of(play: &WorldManifest, server: &WorldManifest) -> Result<WorldManife
     source.canonicalize();
     source.validate().map_err(|e| format!("The source world failed its own check: {e}"))?;
     Ok(source)
+}
+
+/// The server-only services when the public can download them (Share Source
+/// on), else `None`: a private source is read only by the author and the
+/// sessions the fleet starts for this listing.
+fn public_server(open_source: bool, server: Option<&ExportedWorld>) -> Option<&ExportedWorld> {
+    server.filter(|_| open_source)
+}
+
+/// The note for webhook URLs in a private source. It is not refused, since
+/// the public cannot download it, but every machine that hosts a session of
+/// the listing reads the source, so the author is told. Names the files,
+/// never the URLs.
+fn private_webhook_note(paths: &[String]) -> Option<String> {
+    if paths.is_empty() {
+        return None;
+    }
+    let shown = paths.iter().take(8).cloned().collect::<Vec<_>>().join(", ");
+    let more = if paths.len() > 8 { format!(" and {} more", paths.len() - 8) } else { String::new() };
+    Some(format!(
+        "{} server file(s) hold a webhook URL: {shown}{more}. Share Source is off, so players cannot download them, but every machine that hosts a session of this listing reads its source.",
+        paths.len()
+    ))
 }
 
 /// Refuse to publish a webhook URL in anything the public can download: the
@@ -1538,6 +1568,25 @@ mod tests {
         assert!(refused(Some("bad_max_players")).is_some());
         assert_eq!(refused(Some("other")), None);
         assert_eq!(refused(None), None);
+    }
+
+    /// A private source (Share Source off) is never treated as a public
+    /// download, so a webhook in a server script is a note, never a refusal;
+    /// the note names the files and never the URL.
+    #[test]
+    fn a_webhook_in_a_private_source_is_a_note_naming_files_only() {
+        assert!(public_server(false, None).is_none());
+        assert!(public_server(true, None).is_none());
+        assert_eq!(private_webhook_note(&[]), None, "no webhook, no note");
+        let one = private_webhook_note(&["Arena/ServerScriptService/Alerts.server.luau".to_string()]).unwrap();
+        assert!(one.starts_with("1 server file(s)"));
+        assert!(one.contains("Arena/ServerScriptService/Alerts.server.luau"));
+        assert!(one.contains("every machine that hosts a session"));
+        assert!(!one.contains("https://"), "the URL is never repeated");
+        let many: Vec<String> = (0..10).map(|i| format!("S/f{i}.luau")).collect();
+        let note = private_webhook_note(&many).unwrap();
+        assert!(note.contains("and 2 more"));
+        assert!(!note.contains("S/f8.luau"), "at most 8 are named");
     }
 
     /// A cover the API refuses reads in its own words: a bad image states

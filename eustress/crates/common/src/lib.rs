@@ -41,6 +41,9 @@ pub mod assets;
 pub mod attributes;
 /// Where the Eustress API is: `EUSTRESS_API_URL`, checked, else production.
 pub mod api_base;
+/// PageSpec v1: the themed, linked sim page. Presets, rules, and the pure
+/// builder Studio's publish bake and the MCP tools share.
+pub mod page_spec;
 // Roblox-parity 2D UI types: UDim, UDim2 with serde round-trip.
 pub mod ui_types;
 // Native Eustress BrickColor palette: sRGB-keyed swatches in 7 wheels, the
@@ -75,6 +78,8 @@ pub mod avatar;
 // Animation built from instances (Animator, AnimationTrack, KeyframeSequence):
 // the pose evaluator both shells add, and the local character both share.
 pub mod animation;
+// Bump arena for the scratch collections a system rebuilds every frame.
+pub mod frame_arena;
 // Authoritative per-class TOML schema — embedded templates + self-heal +
 // extra-section claimants. Single source of truth shared between engine,
 // client, and external tooling.
@@ -175,6 +180,10 @@ pub mod realism;
 pub mod simulation;
 #[cfg(feature = "streaming")]
 pub mod streaming;
+// Predictive prefetch, simulation LOD and the coupled frame (RAGE lessons):
+// docs/architecture/RAGE_STREAMING_SIM_LOD_JOB_GRAPH.md. Pure policy and
+// inspectors; not gated, so the play runtime and the Player use it too.
+pub mod world_sim;
 
 // ============================================================================
 // Asset resolution — canonical paths to bundled templates

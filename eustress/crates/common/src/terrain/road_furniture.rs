@@ -204,11 +204,11 @@ pub fn junction_furniture(j: &Junction, surfaces: &[LegSurface]) -> FurnitureMes
                     Some(k) => {
                         // Far side, on the right of travel into it (its positive side).
                         let b = &j.approaches[k];
-                        let (uk, nk) = (dir(b.heading), P2::normal(b.heading));
+                        let nk = P2::normal(b.heading);
                         let kerbed_k = b.standard.edge == EdgeTreatment::KerbAndSidewalk;
                         let off = kerb_offset(&b.standard) + if kerbed_k { 0.15 + SET_BACK } else { 1.0 };
                         let d = j.setbacks[k] + 1.0;
-                        let p = P2::new(j.centre.x + uk.x * d + nk.x * off, j.centre.z + uk.z * d + nk.z * off);
+                        let p = j.at(k, d, off);
                         let count = a.lanes_in().min(b.lanes_out()).max(1);
                         let heads = (0..b.lanes_out()).rev().take(count as usize).map(|q| off - b.lane_out_offset(q)).collect();
                         (p, P2::new(-nk.x, -nk.z), heads)
@@ -216,15 +216,16 @@ pub fn junction_furniture(j: &Junction, surfaces: &[LegSurface]) -> FurnitureMes
                     None => {
                         // The stem of a T: the near-right corner, its arm over the lanes coming in.
                         let d = j.setbacks[i] + CROSSWALK_LENGTH + STOP_BAR_GAP;
-                        let p = P2::new(j.centre.x + u.x * d - nrm.x * side, j.centre.z + u.z * d - nrm.z * side);
+                        let p = j.at(i, d, -side);
                         let heads = (0..a.lanes_in()).map(|q| side + a.lane_in_offset(q)).collect();
                         (p, P2::new(nrm.x, nrm.z), heads)
                     }
                 };
                 let leg = opposite.unwrap_or(i);
                 let lp = j.approaches[leg].heading;
-                let along = (pole.x - j.centre.x) * lp.cos() + (pole.z - j.centre.z) * lp.sin();
-                let across = -(pole.x - j.centre.x) * lp.sin() + (pole.z - j.centre.z) * lp.cos();
+                let foot = j.foot(leg);
+                let along = (pole.x - foot.x) * lp.cos() + (pole.z - foot.z) * lp.sin();
+                let across = -(pole.x - foot.x) * lp.sin() + (pole.z - foot.z) * lp.cos();
                 let ground = hgt(leg, along, across.signum() * (kerb_offset(&j.approaches[leg].standard) + 0.15));
                 let base = at(pole, ground);
                 add_pole(f.part(Finish::Steel), base, 0.16, SIGNAL_ARM_HEIGHT + 0.4);
@@ -238,7 +239,7 @@ pub fn junction_furniture(j: &Junction, surfaces: &[LegSurface]) -> FurnitureMes
             }
             Control::AllWayStop | Control::MinorStop => {
                 let d = j.setbacks[i] + CROSSWALK_LENGTH + STOP_BAR_GAP;
-                let p = P2::new(j.centre.x + u.x * d - nrm.x * side, j.centre.z + u.z * d - nrm.z * side);
+                let p = j.at(i, d, -side);
                 let base = hgt(i, d, -(kerb_offset(&a.standard) + if kerbed { 0.15 } else { 0.0 }));
                 add_pole(f.part(Finish::Steel), at(p, base), 0.04, STOP_SIGN_HEIGHT + STOP_SIGN_SIZE);
                 let centre = [p.x, base + STOP_SIGN_HEIGHT + STOP_SIGN_SIZE / 2.0, p.z];

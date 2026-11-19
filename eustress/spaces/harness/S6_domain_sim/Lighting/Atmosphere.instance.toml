@@ -1,0 +1,34 @@
+[atmosphere]
+atmosphere_environment_light = true
+atmosphere_height = 100000.0
+color = [
+    198,
+    220,
+    255,
+]
+decay_color = [
+    112,
+    129,
+    162,
+]
+density = 0.5
+enabled = true
+environment_intensity = 1.0
+environment_map_enabled = true
+glare = 0.0
+haze = 0.0
+mie_coefficient = 4.44
+mie_direction = 0.758
+offset = 0.0
+planet_radius = 6371000.0
+rayleigh_coefficient = [
+    5.802,
+    13.558,
+    33.1,
+]
+rendering_mode = "LookupTexture"
+sky_max_samples = 32
+
+[metadata]
+archivable = true
+class_name = "Atmosphere"

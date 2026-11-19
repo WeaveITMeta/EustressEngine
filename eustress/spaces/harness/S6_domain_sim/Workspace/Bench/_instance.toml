@@ -1,0 +1,45 @@
+[asset]
+mesh = "parts/block.glb"
+scene = "Scene0"
+
+[metadata]
+archivable = true
+class_name = "Part"
+created = "2026-11-16T00:00:00Z"
+last_modified = "2026-11-16T00:00:00Z"
+name = "Bench"
+unit = "m"
+uuid = "a4ee88ac3d0ac6a98c38feac4c01e049"
+
+[properties]
+anchored = true
+can_collide = true
+cast_shadow = true
+color = [
+    120,
+    110,
+    100,
+]
+destructible = false
+locked = false
+material = "H_Matte"
+reflectance = 0.0
+transparency = 0.0
+
+[transform]
+position = [
+    0.0,
+    -0.5,
+    0.0,
+]
+rotation = [
+    0.0,
+    0.0,
+    0.0,
+    1.0,
+]
+scale = [
+    4.0,
+    1.0,
+    4.0,
+]

@@ -57,6 +57,11 @@ pub struct StartupArgs {
     /// open a copy of it (see `crate::space::gallery_edit`).
     pub gallery_edit: Option<String>,
 
+    /// The Space on this computer already published as the `gallery_edit`
+    /// listing, which Studio opens instead of downloading a copy
+    /// ([`StartupArgs::open_local_gallery_edit`]).
+    pub gallery_edit_local: Option<PathBuf>,
+
     /// `--help` / `-h`. `main` prints usage and exits 0. Parsing does not
     /// exit, so a test can see the flag.
     pub show_help: bool,
@@ -214,13 +219,34 @@ impl StartupArgs {
             }
             i += 1;
         }
-        
+
+        // Resolve a relative `--space` / `--open` / `--universe` against the
+        // working directory once, here, so the SpaceRoot every system and
+        // every bridge reply reads is absolute.
+        result.space_dir = result.space_dir.map(absolute_launch_path);
+        result.universe_dir = result.universe_dir.map(absolute_launch_path);
+
         result
     }
 
     /// The Space these arguments open: `--space`, `--open` or a `.eustress`
     /// launch file (all resolved into `space_dir`), else the first Space of
     /// `--universe`. `None` when they name no Space.
+    /// Edit on one of the user's own Spaces: when a Space under `workspace`
+    /// is already published as the `gallery_edit` listing, it becomes the
+    /// launch Space and nothing is downloaded. A Space the arguments already
+    /// name is left alone.
+    pub fn open_local_gallery_edit(&mut self, workspace: &std::path::Path) {
+        if self.space_dir.is_some() {
+            return;
+        }
+        let Some(id) = self.gallery_edit.as_deref() else { return };
+        if let Some(space) = crate::space::gallery_edit::local_space_for(workspace, id) {
+            self.space_dir = Some(space.clone());
+            self.gallery_edit_local = Some(space);
+        }
+    }
+
     pub fn launch_space_root(&self) -> Option<PathBuf> {
         if let Some(ref space_dir) = self.space_dir {
             return Some(space_dir.clone());
@@ -229,6 +255,14 @@ impl StartupArgs {
             .as_deref()
             .and_then(crate::space::first_space_root_in_universe)
     }
+}
+
+/// `path` made absolute against the working directory, without touching the
+/// file system (`std::path::absolute`: no symlink resolution, no `\\?\`
+/// prefix on Windows). An absolute path comes back as it is; a path that
+/// cannot be resolved (no working directory) comes back unchanged.
+pub fn absolute_launch_path(path: PathBuf) -> PathBuf {
+    std::path::absolute(&path).unwrap_or(path)
 }
 
 /// Check if a path is a supported scene file
@@ -1135,5 +1169,31 @@ mod tests {
         assert_eq!(args.public_host.as_deref(), Some("203.0.113.7"));
         assert_eq!(args.port, Some(7777));
         assert_eq!(args.status_file.as_deref(), Some(std::path::Path::new("/tmp/dedicated-server.json")));
+    }
+
+    #[test]
+    fn a_relative_space_or_universe_is_resolved_against_the_working_directory() {
+        let cwd = std::env::current_dir().unwrap();
+        let args = StartupArgs::parse_from(&argv(&[
+            "eustress-engine",
+            "--space",
+            "spaces/harness/RH1_sphere_grid",
+            "--universe",
+            "spaces/harness",
+        ]));
+        let space = args.space_dir.expect("--space parsed");
+        assert!(space.is_absolute(), "{space:?}");
+        assert!(space.starts_with(&cwd), "{space:?} not under {cwd:?}");
+        assert!(space.ends_with(std::path::Path::new("spaces").join("harness").join("RH1_sphere_grid")));
+        let universe = args.universe_dir.expect("--universe parsed");
+        assert!(universe.is_absolute(), "{universe:?}");
+        assert!(universe.starts_with(&cwd), "{universe:?} not under {cwd:?}");
+        assert!(universe.ends_with(std::path::Path::new("spaces").join("harness")));
+    }
+
+    #[test]
+    fn an_absolute_space_is_kept_as_given() {
+        let given = std::env::current_dir().unwrap().join("Universe1").join("Spaces").join("Space1");
+        assert_eq!(absolute_launch_path(given.clone()), given);
     }
 }

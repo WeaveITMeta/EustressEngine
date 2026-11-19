@@ -165,6 +165,20 @@ pub fn DocsWebsitePage() -> impl IntoView {
 
                 <main class="docs-content">
                     <header class="docs-hero">
+                        // The hero picture: the page's largest paint, so it loads at
+                        // once (no lazy loading, no entrance animation).
+                        <div class="docs-hero-art">
+                            <img
+                                src="/assets/learn/website-hero-1600.webp"
+                                srcset="/assets/learn/website-hero-800.webp 800w, /assets/learn/website-hero-1600.webp 1600w"
+                                sizes="(max-width: 1024px) 100vw, 840px"
+                                alt="Glowing beads lift off the solids of a grid world, gather into one small blank card, and travel along a single line to a page slab where a few slots glow."
+                                width="1600"
+                                height="900"
+                                fetchpriority="high"
+                                decoding="async"
+                            />
+                        </div>
                         <div class="docs-breadcrumb">
                             <a href="/learn">"Learn"</a>
                             <span class="separator">"/"</span>
@@ -902,6 +916,19 @@ hydrate();"#}</code></pre>
 
                         <div id="caching-failure" class="subsection">
                             <h3>"The Failure Table"</h3>
+                            <figure class="learn-figure">
+                                <img
+                                    src="/assets/learn/website-fig-1-1200.webp"
+                                    srcset="/assets/learn/website-fig-1-600.webp 600w, /assets/learn/website-fig-1-1200.webp 1200w"
+                                    sizes="(max-width: 660px) 92vw, (max-width: 1099px) 600px, 500px"
+                                    alt="A small blank card on the left sends a thin line toward a page slab on the right, the line broken by a gap in the middle, while a row of five slots on the slab stays lit."
+                                    width="1200"
+                                    height="900"
+                                    loading="lazy"
+                                    decoding="async"
+                                />
+                                <figcaption>"When the network is unreachable, the page keeps its baked values. The page is already correct before the fetch, and the fetch can only improve it."</figcaption>
+                            </figure>
                             <table class="docs-table">
                                 <thead>
                                     <tr><th>"Condition"</th><th>"Behavior"</th></tr>

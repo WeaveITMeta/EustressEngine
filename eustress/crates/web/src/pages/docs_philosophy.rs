@@ -156,6 +156,20 @@ pub fn DocsPhilosophyPage() -> impl IntoView {
 
                 <main class="docs-content">
                     <header class="docs-hero">
+                        // The hero picture: the page's largest paint, so it loads at
+                        // once (no lazy loading, no entrance animation).
+                        <div class="docs-hero-art">
+                            <img
+                                src="/assets/learn/philosophy-hero-1600.webp"
+                                srcset="/assets/learn/philosophy-hero-800.webp 800w, /assets/learn/philosophy-hero-1600.webp 1600w"
+                                sizes="(max-width: 1024px) 100vw, 840px"
+                                alt="A transparent glass cube on five steel pillars shows a grid platform of simple solids inside, with a cluster of linked nodes joined by a line to the central cube and a small glowing cone standing nearby."
+                                width="1600"
+                                height="900"
+                                fetchpriority="high"
+                                decoding="async"
+                            />
+                        </div>
                         <div class="docs-breadcrumb">
                             <a href="/learn">"Learn"</a>
                             <span class="separator">"/"</span>
@@ -579,6 +593,19 @@ scale = [10.0, 10.0, 10.0]     # a 10 cm cube"#}</code></pre>
 
                         <div id="determinism-seed" class="subsection">
                             <h3>"One Seed"</h3>
+                            <figure class="learn-figure">
+                                <img
+                                    src="/assets/learn/philosophy-fig-1-1200.webp"
+                                    srcset="/assets/learn/philosophy-fig-1-600.webp 600w, /assets/learn/philosophy-fig-1-1200.webp 1200w"
+                                    sizes="(max-width: 660px) 92vw, (max-width: 1099px) 600px, 500px"
+                                    alt="One green sphere joined by lines to two translucent cubes holding identical arrangements of small solids, and one violet sphere joined to a third cube holding a different arrangement."
+                                    width="1200"
+                                    height="900"
+                                    loading="lazy"
+                                    decoding="async"
+                                />
+                                <figcaption>"A run that uses randomness can be repeated from the Space alone. Changing the seed varies it on purpose."</figcaption>
+                            </figure>
                             <p>
                                 "Randomness that shapes a simulation comes from one seed. "<code>"GlobalRngSeed"</code>
                                 " is a fixed constant unless you set another, and the particle simulation and the

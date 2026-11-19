@@ -24,7 +24,6 @@ bevy = { workspace = true, default-features = false, features = [
 eustress-common = { path = "../common", features = ["async-assets"] }
 
 # Runtime (character, physics, ownership)
-eustress-runtime = { path = "../runtime", default-features = false, features = ["networking"] }
 
 # Networking. Hosting a session lives in `eustress_networking::session` and
 # `native`; this binary does not host yet (see the note in src/main.rs).

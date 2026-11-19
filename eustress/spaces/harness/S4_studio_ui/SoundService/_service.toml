@@ -1,0 +1,21 @@
+# SoundService — Controls global audio settings and 3D sound
+# _service.toml marks this folder as a Service and defines all editable properties.
+
+[service]
+class_name = "SoundService"
+icon = "soundservice"
+description = "Controls global audio settings, 3D sound, and audio effects"
+can_have_children = true
+
+[properties]
+ambient_reverb = "NoReverb"
+distance_factor = 3.33
+doppler_scale = 1.0
+rolloff_scale = 1.0
+volume_scale = 0.5
+respect_filtering_enabled = false
+
+[metadata]
+id = "soundservice-service"
+created = ""
+last_modified = ""

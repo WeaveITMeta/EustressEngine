@@ -164,15 +164,30 @@ impl ToolHandler for AiCameraCaptureTool {
         ToolDefinition {
             name: "ai_camera_capture",
             description: "Render the AI's own off-screen camera and return the image inline: your own eyes, separate from capture_viewport (which is the person's window). Aim it first with ai_camera_set_pose, ai_camera_orbit or ai_camera_frame. The camera powers up only for this shot, so it does not slow the person's view, and the call waits for the PNG to finish writing before it returns. Works in Edit and in Play, in every Space: the engine keeps exactly one AI camera, named \"AI Camera\", and puts it back at its starting pose whenever a Space opens. Requires Studio running; a headless engine has no renderer and answers with an error.",
-            input_schema: serde_json::json!({ "type": "object", "properties": {} }),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "width": { "type": "integer", "minimum": 1, "maximum": 16384, "description": "Render width in pixels. Give width and height together, or neither (default 1280x720)." },
+                    "height": { "type": "integer", "minimum": 1, "maximum": 16384, "description": "Render height in pixels. Give width and height together, or neither." },
+                    "path": { "type": "string", "description": "Where to write the PNG: must end in .png; absolute, or relative to the Space's .eustress folder. Default: <.eustress>/ai_camera.png." }
+                }
+            }),
             modes: &[WorkshopMode::General],
             requires_approval: false,
             stream_topics: &[],
         }
     }
 
-    fn execute(&self, _input: Value, ctx: &ToolContext) -> ToolResult {
-        match call_engine(&ctx.universe_root, "ai_camera.capture", serde_json::json!({})) {
+    fn execute(&self, input: Value, ctx: &ToolContext) -> ToolResult {
+        // Forward only the optional size and path that were given; `{}` is the
+        // request the tool always sent.
+        let mut params = serde_json::Map::new();
+        for key in ["width", "height", "path"] {
+            if let Some(v) = input.get(key).filter(|v| !v.is_null()) {
+                params.insert(key.to_string(), v.clone());
+            }
+        }
+        match call_engine(&ctx.universe_root, "ai_camera.capture", Value::Object(params)) {
             Ok(r) => crate::image_result::capture_result("ai_camera_capture", r, ctx),
             Err(e) => fail("ai_camera_capture", e),
         }

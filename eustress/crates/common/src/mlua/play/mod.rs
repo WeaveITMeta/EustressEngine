@@ -200,15 +200,17 @@ impl Watchdog {
 /// and the prelude are skipped.
 fn script_position(lua: &Lua, from: usize) -> Option<(String, u32)> {
     for level in from..from + 32 {
-        let frame = lua.inspect_stack(level)?;
-        let line = frame.curr_line();
-        if line <= 0 {
-            continue;
-        }
-        let source = frame.source();
-        match source.short_src.as_deref() {
-            Some(chunk) if chunk != PRELUDE_CHUNK && chunk != "[C]" => return Some((chunk.to_string(), line as u32)),
-            _ => {}
+        // `None` once the stack runs out; `Some(None)` for a frame that is
+        // not script code (a host function, the prelude, no line).
+        let found = lua.inspect_stack(level, |frame| {
+            let line = frame.current_line().filter(|&line| line > 0)?;
+            match frame.source().short_src.as_deref() {
+                Some(chunk) if chunk != PRELUDE_CHUNK && chunk != "[C]" => Some((chunk.to_string(), line as u32)),
+                _ => None,
+            }
+        })?;
+        if found.is_some() {
+            return found;
         }
     }
     None
@@ -1792,5 +1794,53 @@ mod tests {
             "Infinite yield possible: this thread called coroutine.yield() and nothing has resumed it for 5 s"
         );
         assert_eq!(warn.line, 1);
+    }
+
+    /// A ray on a road's surface reports the road, its material and the
+    /// surface under the hit. Naming the road in an exclude list skips its
+    /// surface; naming the Terrain (its voxel ground) does not.
+    #[test]
+    fn a_raycast_on_a_road_reports_the_road_and_its_surface() {
+        let (mut vm, dm, script) = session();
+        let road_bits = 77;
+        {
+            let mut g = dm.lock();
+            let ws = g.get_service("Workspace").unwrap();
+            let terrain = g.create_virtual("Terrain", "Terrain", Some(ws));
+            let layers = g.create_virtual("Folder", "Layers", Some(terrain));
+            let road = g.create_virtual("TerrainSpline", "Main_St", Some(layers));
+            g.bind_entity(road, road_bits);
+        }
+        // The road's surface collider is entity 900, which is no instance.
+        let rays = |q: &RayQuery| {
+            assert!(!q.include);
+            (!q.filter.contains(&road_bits)).then(|| RayHit {
+                entity: 900,
+                position: Vector3::new(0.0, 0.0, 0.0),
+                normal: Vector3::new(0.0, 1.0, 0.0),
+                distance: 5.0,
+                terrain: false,
+                material: Some(crate::terrain::material::TerrainMaterial::Asphalt),
+                owner: Some(road_bits),
+                surface: Some("Paint"),
+            })
+        };
+        let launch = ScriptLaunch {
+            instance: script,
+            source: r#"
+                local params = RaycastParams.new()
+                params.FilterType = Enum.RaycastFilterType.Exclude
+                params.FilterDescendantsInstances = { workspace.Terrain }
+                local hit = workspace:Raycast(Vector3.new(0, 5, 0), Vector3.new(0, -10, 0), params)
+                print(hit.Instance:GetFullName(), hit.Material.Name, hit.Surface)
+                params.FilterDescendantsInstances = { workspace.Terrain.Layers.Main_St }
+                print(workspace:Raycast(Vector3.new(0, 5, 0), Vector3.new(0, -10, 0), params))
+            "#
+            .into(),
+            chunk_name: "Shop".into(),
+        };
+        let no_terrain: &TerrainReadFn<'_> = &|_| {};
+        vm.run_scripts(vec![launch], &rays, no_terrain);
+        assert_eq!(output(&dm), ["Workspace.Terrain.Layers.Main_St Asphalt Paint", "nil"]);
     }
 }

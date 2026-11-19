@@ -361,13 +361,27 @@ pub fn finish_insert(plan: &LayerInsert, folder: &Path) {
 /// watcher spawns it; a spline created in the same breath may still be
 /// spawning, and `adopt_points_by_folder` parents the point once it has.
 pub fn append_spline_point(spline_dir: &Path, position: Vec3) -> Result<PathBuf, String> {
-    let index = read_spline_points(spline_dir).last().map_or(0.0, |(last, _)| last.floor() + 1.0);
-    let name = format!("Point{}", index.max(0.0) as u64 + 1);
-    let overrides = InstanceOverrides { position: Some(position), ..Default::default() };
-    let created = create_instance(spline_dir, ClassName::TerrainSplinePoint.as_str(), Some(name.as_str()), overrides)
-        .map_err(|e| e.to_string())?;
-    write_point_index(&created.toml_path, index);
-    Ok(created.folder_path)
+    append_spline_points(spline_dir, &[position]).pop().unwrap_or_else(|| Err("no point given".to_string()))
+}
+
+/// [`append_spline_point`] for each of `positions` in order: the folder is
+/// read once and the points numbered on from its last, so a long road costs
+/// one read however many points it has. One result per position.
+pub fn append_spline_points(spline_dir: &Path, positions: &[Vec3]) -> Vec<Result<PathBuf, String>> {
+    let first = read_spline_points(spline_dir).last().map_or(0.0, |(last, _)| last.floor() + 1.0).max(0.0);
+    positions
+        .iter()
+        .enumerate()
+        .map(|(k, position)| {
+            let index = first + k as f64;
+            let name = format!("Point{}", index as u64 + 1);
+            let overrides = InstanceOverrides { position: Some(*position), ..Default::default() };
+            let created = create_instance(spline_dir, ClassName::TerrainSplinePoint.as_str(), Some(name.as_str()), overrides)
+                .map_err(|e| e.to_string())?;
+            write_point_index(&created.toml_path, index);
+            Ok(created.folder_path)
+        })
+        .collect()
 }
 
 fn write_point_index(toml_path: &Path, index: f64) {
@@ -846,6 +860,24 @@ mod tests {
             assert!(eustress_common::instance_create::is_valid_uuid(&fresh), "{fresh}");
         }
         assert_ne!(uuid_of(copy.join("Point1")), uuid_of(copy.join("Point2")));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_long_spline_is_numbered_in_one_pass() {
+        // 300 points after two that are there: each numbered on from the
+        // last, in order, whatever the count.
+        let root = spline_with_points("batch", &[(0.0, Vec3::ZERO), (1.0, Vec3::X)]);
+        let spline = layers_dir(&root).join("Road");
+        let positions: Vec<Vec3> = (0..300).map(|k| Vec3::new(10.0 * (k as f32 + 2.0), 0.0, 0.0)).collect();
+        let made = append_spline_points(&spline, &positions);
+        assert!(made.iter().all(Result::is_ok), "{:?}", made.iter().find(|r| r.is_err()));
+        let points = read_spline_points(&spline);
+        assert_eq!(points.len(), 302);
+        for (k, (index, at)) in points.iter().enumerate() {
+            assert_eq!(*index, k as f64);
+            assert_eq!(at.x, 10.0 * k as f32, "point {k} out of order");
+        }
         let _ = std::fs::remove_dir_all(&root);
     }
 

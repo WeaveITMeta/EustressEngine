@@ -213,6 +213,20 @@ pub fn DocsPhysicsPage() -> impl IntoView {
 
                 <main class="docs-content">
                     <header class="docs-hero">
+                        // The hero picture: the page's largest paint, so it loads at
+                        // once (no lazy loading, no entrance animation).
+                        <div class="docs-hero-art">
+                            <img
+                                src="/assets/learn/physics-hero-1600.webp"
+                                srcset="/assets/learn/physics-hero-800.webp 800w, /assets/learn/physics-hero-1600.webp 1600w"
+                                sizes="(max-width: 1024px) 100vw, 840px"
+                                alt="On a grid platform a sphere bounces along an arc, a stack of cubes topples, a slab shows a dent with fine cracks, and one cube hangs fixed in the air on a pin of light."
+                                width="1600"
+                                height="900"
+                                fetchpriority="high"
+                                decoding="async"
+                            />
+                        </div>
                         <div class="docs-breadcrumb">
                             <a href="/learn">"Learn"</a>
                             <span class="separator">"/"</span>
@@ -544,6 +558,19 @@ restitution = 0.6         # bounce, 0 to 1"#}</code></pre>
 
                         <div id="bodies-shapes" class="subsection">
                             <h3>"Collider Shapes"</h3>
+                            <figure class="learn-figure">
+                                <img
+                                    src="/assets/learn/physics-fig-1-1200.webp"
+                                    srcset="/assets/learn/physics-fig-1-600.webp 600w, /assets/learn/physics-fig-1-1200.webp 1200w"
+                                    sizes="(max-width: 660px) 92vw, (max-width: 1099px) 600px, 500px"
+                                    alt="A sphere, a cylinder and a wedge in a row, each inside a thin glowing outline: the sphere and cylinder outlines fit closely, and the wedge outline is a full box around the slope."
+                                    width="1200"
+                                    height="900"
+                                    loading="lazy"
+                                    decoding="async"
+                                />
+                                <figcaption>"A collider is a simple shape fitted to the part's Size: a Ball collides as a sphere, a Cylinder as a cylinder, and a Wedge as its full bounding box."</figcaption>
+                            </figure>
                             <p>
                                 "Colliders are simple shapes fitted to the part's Size, which keeps contacts fast
                                 and stable:"

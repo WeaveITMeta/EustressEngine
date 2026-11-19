@@ -1640,7 +1640,7 @@ fn sync_god_rays(
     sky_light: Res<SkyLight>,
     suns: Query<(&SunClass, Option<&CascadeShadowConfig>), With<SunMarker>>,
     sun_rays: Query<&crate::classes::SunRaysEffect>,
-    cameras: Query<(Entity, &Camera, &GlobalTransform, Has<VolumetricFog>), With<SkyCamera>>,
+    cameras: Query<(Entity, &Camera, &GlobalTransform, Has<VolumetricFog>, Option<&Projection>), With<SkyCamera>>,
     mut haze: Query<(Entity, &mut FogVolume, &mut Transform), With<GodRayHaze>>,
 ) {
     let sun = suns.iter().next();
@@ -1663,7 +1663,7 @@ fn sync_god_rays(
     let strength = sky.god_rays * authored * daylight;
 
     if active.0 != SkyMode::Atmosphere || strength <= 1e-3 {
-        for (camera, _, _, has_fog) in cameras.iter() {
+        for (camera, _, _, has_fog, _) in cameras.iter() {
             if has_fog {
                 commands.entity(camera).remove::<VolumetricFog>();
             }
@@ -1674,7 +1674,19 @@ fn sync_god_rays(
         return;
     }
 
-    for (camera, _, _, has_fog) in cameras.iter() {
+    for (camera, _, _, has_fog, projection) in cameras.iter() {
+        // Bevy's volumetric fog marches rays from the view origin through each
+        // pixel, a perspective camera's rays. An orthographic view has parallel
+        // rays and no viewer position (`orthographic_sky`): looking straight
+        // down, its view axes line up with the haze box's planes, the march
+        // divides by zero, and the whole frame came out black in the browser
+        // (Pong's table, 2026-11-14). Parallel views get no shafts.
+        if matches!(projection, Some(Projection::Orthographic(_))) {
+            if has_fog {
+                commands.entity(camera).remove::<VolumetricFog>();
+            }
+            continue;
+        }
         if !has_fog {
             commands.entity(camera).insert(VolumetricFog {
                 // The environment map already lights the scene from the sky;
@@ -1687,7 +1699,7 @@ fn sync_god_rays(
         }
     }
 
-    let Some((_, _, view, _)) = cameras
+    let Some((_, _, view, _, _)) = cameras
         .iter()
         .filter(|(_, camera, ..)| camera.is_active)
         .min_by_key(|(_, camera, ..)| camera.order)

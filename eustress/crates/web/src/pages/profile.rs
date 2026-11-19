@@ -87,6 +87,12 @@ pub struct ProfileReply {
     /// True only when the account's identity was verified (`kyc_verified` on the account record).
     #[serde(default)]
     pub is_verified: bool,
+    /// `"agent"` for an AI agent account (docs/architecture/AGENT_ACCOUNTS.md); anything else, or absent, is a person.
+    #[serde(default)]
+    pub account_type: Option<String>,
+    /// An agent's sponsor, by username: an agent is never anonymous.
+    #[serde(default)]
+    pub sponsored_by: Option<String>,
     /// The signed-in viewer follows this account. False for a signed-out viewer.
     #[serde(default)]
     pub is_following: bool,
@@ -230,6 +236,17 @@ pub fn account_of(auth: &AuthState, delta: &DeltaState, profile_username: &str) 
 /// The name in the heading: the display name, or the username when there is none.
 pub fn name_of(profile: &ProfileReply) -> String {
     profile.display_name.as_deref().map(str::trim).filter(|n| !n.is_empty()).unwrap_or(&profile.username).to_string()
+}
+
+/// The line under an agent account's handle: "An AI agent, sponsored by @name". Nothing for a person.
+pub fn agent_line(profile: &ProfileReply) -> Option<String> {
+    if profile.account_type.as_deref() != Some("agent") {
+        return None;
+    }
+    Some(match profile.sponsored_by.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        Some(sponsor) => format!("An AI agent, sponsored by @{sponsor}"),
+        None => "An AI agent".to_string(),
+    })
 }
 
 /// The badges shown as chips. The Verified mark is drawn from `is_verified` alone, so a "verified" badge is never a chip.
@@ -607,6 +624,7 @@ pub fn ProfileBody(profile: ProfileReply, account: Signal<Option<Account>>, view
     let username = profile.username.clone();
     let badges = shown_badges(&profile);
     let verified = profile.is_verified;
+    let agent = agent_line(&profile);
     let joined = joined_words(&profile.join_date);
     // What is shown moves with a follow and with a saved edit.
     let shown = RwSignal::new(profile);
@@ -633,8 +651,10 @@ pub fn ProfileBody(profile: ProfileReply, account: Signal<Option<Account>>, view
                             "Verified"
                         </span>
                     })}
+                    {agent.is_some().then(|| view! { <span class="g-chip pn-agent" title="An AI agent account">"Agent"</span> })}
                 </div>
                 <div class="pn-handle">{handle_of(&username)}</div>
+                {agent.map(|line| view! { <div class="pn-agent-line">{line}</div> })}
                 {move || own.get().then(|| shown.with(|p| p.pending.display_name().map(|n| (n, note_words(p.pending_notes.display_name.as_ref()))))).flatten().map(|(name, note)| view! {
                     <div class="pn-pending"><span class="g-chip warn">"Pending review"</span><span class="pn-pending-text">{name}</span><small class="pn-pending-note">{note}</small></div>
                 })}
@@ -1129,7 +1149,7 @@ mod tests {
         use leptos::tachys::view::RenderHtml;
         use leptos_router::location::RequestUrl;
         // The current page starts its fetch while it is built; the futures executor parks it.
-        let _ = leptos::task::Executor::init_futures_executor();
+        let _ = any_spawner::Executor::init_futures_executor();
         let shared: std::sync::Arc<dyn SharedContext + Send + Sync> = std::sync::Arc::new(SsrSharedContext::new());
         let owner = Owner::new_root(Some(shared));
         let html = owner.with(|| {
@@ -1189,6 +1209,22 @@ mod tests {
         for yours in ["Your account", "Only you can see this", "/purchases", "/account/cases", "/settings", "/tickets", "/bliss", "/delta", "4,321", "12.50", "77", "profile-spend", "Edit profile", "/account/cases", "Your character in Eustress"] {
             assert!(mine.contains(yours), "your own profile shows {yours:?}");
         }
+    }
+
+    #[test]
+    fn an_agent_account_is_always_shown_as_one_with_its_sponsor_and_a_person_never_is() {
+        let person = worker_reply(true, "[]");
+        assert_eq!(agent_line(&person), None);
+        let mut agent = person.clone();
+        agent.account_type = Some("agent".to_string());
+        agent.sponsored_by = Some("Simbuilder".to_string());
+        assert_eq!(agent_line(&agent).as_deref(), Some("An AI agent, sponsored by @Simbuilder"));
+        agent.sponsored_by = None;
+        assert_eq!(agent_line(&agent).as_deref(), Some("An AI agent"));
+        agent.account_type = Some("human".to_string());
+        assert_eq!(agent_line(&agent), None);
+        let parsed: ProfileReply = serde_json::from_str(r#"{"username":"ClaudeBot9000","account_type":"agent","sponsored_by":"Simbuilder"}"#).expect("parses");
+        assert_eq!(agent_line(&parsed).as_deref(), Some("An AI agent, sponsored by @Simbuilder"));
     }
 
     #[test]

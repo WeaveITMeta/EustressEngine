@@ -1,0 +1,54 @@
+[asset]
+mesh = "parts/block.glb"
+scene = "Scene0"
+
+[attributes]
+mass_kg = 1.0
+
+[metadata]
+archivable = true
+class_name = "Part"
+created = "2026-11-16T00:00:00Z"
+last_modified = "2026-11-16T00:00:00Z"
+name = "Leg_3_1kg"
+unit = "m"
+uuid = "4519bc2c5d9869654c36dbfd6647dc91"
+
+[properties]
+anchored = false
+can_collide = true
+cast_shadow = true
+color = [
+    200,
+    200,
+    80,
+]
+destructible = false
+locked = false
+material = "SmoothPlastic"
+reflectance = 0.0
+transparency = 0.0
+
+[properties.physics]
+density = 1000.0
+density_unit = "kg/m3"
+friction_kinetic = 0.6
+friction_static = 0.6
+
+[transform]
+position = [
+    4.4,
+    0.05,
+    0.4,
+]
+rotation = [
+    0.0,
+    0.0,
+    0.0,
+    1.0,
+]
+scale = [
+    0.1,
+    0.1,
+    0.1,
+]

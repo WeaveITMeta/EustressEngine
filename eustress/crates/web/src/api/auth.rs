@@ -234,6 +234,11 @@ pub struct IdentityRegisterRequest {
     /// signup call. None = no email.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub toml_content: Option<String>,
+    /// The sign-up page's Marketing Emails box. The Worker works out again from
+    /// the request's country whether the box could start ticked, so this says
+    /// only whether it was ticked when the account was made.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub marketing_email: Option<bool>,
 }
 
 /// Debug without the claim secret, the private key or the email address.
@@ -259,6 +264,7 @@ pub async fn register_identity(
     kyc_claim_secret: Option<&str>,
     email: Option<&str>,
     toml_content: Option<&str>,
+    marketing_email: Option<bool>,
 ) -> Result<AuthResponse, ApiError> {
     let request = IdentityRegisterRequest {
         username: username.to_string(),
@@ -270,6 +276,7 @@ pub async fn register_identity(
         kyc_claim_secret: kyc_claim_secret.map(|s| s.to_string()),
         email: email.map(|s| s.to_string()),
         toml_content: toml_content.map(|s| s.to_string()),
+        marketing_email,
     };
 
     let response: AuthResponse = client.post("/api/auth/register", &request).await?;

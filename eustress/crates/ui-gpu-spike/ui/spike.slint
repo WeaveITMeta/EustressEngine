@@ -1,0 +1,174 @@
+// Spike UI. `StudioWindow` is Studio's own main window, compiled from the
+// engine's .slint files exactly as the engine compiles them (read only here),
+// so the two renderers are measured on the real UI. `GlassDemo` is the
+// backdrop-blur check.
+
+import { Button } from "std-widgets.slint";
+
+export { StudioWindow } from "../../engine/ui/slint/main.slint";
+
+// The raw shapes of Studio's `render_tests::text_past_the_i16_limit_draws`
+// (engine/src/ui/display_text.rs), side by side: a wrapped Text and an
+// unwrapped Text as large as their strings, and the script editor's shape (a
+// TextInput as tall as its text in a Flickable scrolled 150,000 px down).
+export component TextProbe inherits Window {
+    background: transparent;
+    in property <string> lines;
+    in property <string> long;
+    in property <length> scroll: 150000px;
+    Text {
+        x: 0px;
+        y: 0px;
+        width: 380px;
+        height: self.preferred-height;
+        text: root.lines;
+        wrap: word-wrap;
+        font-size: 14px;
+        color: white;
+    }
+    Text {
+        x: 400px;
+        y: 0px;
+        width: self.preferred-width;
+        height: self.preferred-height;
+        text: root.long;
+        wrap: no-wrap;
+        font-size: 14px;
+        color: white;
+    }
+    Flickable {
+        x: 800px;
+        y: 0px;
+        width: 380px;
+        height: 300px;
+        content-height: editor.preferred-height;
+        content-y: -root.scroll;
+        editor := TextInput {
+            width: 380px;
+            height: self.preferred-height;
+            text: root.lines;
+            single-line: false;
+            wrap: word-wrap;
+            font-size: 14px;
+            color: white;
+        }
+    }
+}
+
+component GlassPanel inherits Rectangle {
+    in property <length> blur;
+    backdrop-blur: root.blur;
+    background: #ffffff1c;
+    border-radius: 16px;
+    border-width: 1px;
+    border-color: #ffffff48;
+    drop-shadow-blur: 18px;
+    drop-shadow-color: #00000040;
+}
+
+export component GlassDemo inherits Window {
+    // Transparent, like StudioWindow: with no scene underlay the Bevy scene
+    // shows through the window, and backdrop-blur then has only transparent
+    // pixels to blur.
+    background: transparent;
+    title: "Glass demo";
+
+    // The Bevy scene, imported as a wgpu texture, drawn under the UI so
+    // backdrop-blur has the scene to blur. Empty when no underlay is used.
+    in property <image> scene;
+    in property <bool> scene-under: false;
+    in property <length> blur: 24px;
+    in-out property <int> clicks: 0;
+    out property <int> caret: input.cursor-position-byte-offset;
+
+    if root.scene-under: Image {
+        x: 0;
+        y: 0;
+        width: root.width;
+        height: root.height;
+        source: root.scene;
+        image-fit: fill;
+    }
+
+    // Left panel, shaped like Studio's Explorer.
+    left := GlassPanel {
+        x: 24px;
+        y: 24px;
+        width: 380px;
+        height: root.height - 48px;
+        blur: root.blur;
+        VerticalLayout {
+            padding: 20px;
+            spacing: 12px;
+            alignment: start;
+            Text {
+                text: "Glass panel";
+                font-size: 26px;
+                font-weight: 700;
+                color: white;
+            }
+            Text {
+                text: "backdrop-blur: " + (root.blur / 1px) + "px over the live Bevy scene";
+                font-size: 15px;
+                color: #ffffffd8;
+                wrap: word-wrap;
+            }
+            Text {
+                text: "Clicks: " + root.clicks;
+                font-size: 18px;
+                color: white;
+            }
+            button := Button {
+                text: "Click me";
+                clicked => {
+                    root.clicks += 1;
+                }
+            }
+            input-box := Rectangle {
+                height: 34px;
+                background: #00000033;
+                border-radius: 6px;
+                input := TextInput {
+                    x: 10px;
+                    width: parent.width - 20px;
+                    vertical-alignment: center;
+                    text: "The quick brown fox jumps over the lazy dog";
+                    font-size: 15px;
+                    color: white;
+                }
+            }
+            Text {
+                text: "Small text 11px: Explorer, Properties, Output, Toolbox";
+                font-size: 11px;
+                color: #ffffffc0;
+            }
+        }
+    }
+
+    // Right panel, shaped like Studio's Properties.
+    GlassPanel {
+        x: root.width - 404px;
+        y: 24px;
+        width: 380px;
+        height: root.height * 0.5;
+        blur: root.blur;
+        VerticalLayout {
+            padding: 20px;
+            spacing: 8px;
+            alignment: start;
+            Text { text: "Properties"; font-size: 20px; font-weight: 600; color: white; }
+            Text { text: "Position   12.0, 4.5, -3.0"; font-size: 14px; color: #ffffffd8; }
+            Text { text: "Size       4, 1, 2"; font-size: 14px; color: #ffffffd8; }
+            Text { text: "Material   Plastic"; font-size: 14px; color: #ffffffd8; }
+        }
+    }
+
+    // Exposed for the scripted input check, in logical px: the button's
+    // centre, and the left edge and vertical centre of the text field's text.
+    // (A child's x and y are relative to its parent; the layout fills the
+    // panel, so its children's x and y already include the padding.)
+    out property <length> button-x: left.x + button.x + button.width / 2;
+    out property <length> button-y: left.y + button.y + button.height / 2;
+    out property <length> input-x: left.x + input-box.x + input.x;
+    out property <length> input-y: left.y + input-box.y + input-box.height / 2;
+}

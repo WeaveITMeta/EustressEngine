@@ -21,7 +21,7 @@
 
 import { playCountOf } from './visits.mjs';
 import { cachedValue, defaultCache } from './body_cache.mjs';
-import { ratingCap, viewerHeaders } from './adult_content.mjs';
+import { ratingCap, viewerHeaders, SOLO } from './adult_content.mjs';
 import { cleanAvatarUrl } from './account_profile.mjs';
 
 export const MAKERS_DEFAULT_LIMIT = 8;
@@ -92,8 +92,9 @@ export async function handleMakers(url, env, cors, deps) {
   // One cached scan per age slice, and the slice is one of a fixed list, so nothing a client sends can add a cache entry.
   // The slice is `rating_max`, never past mature_17 while the viewer's Adult content is off and never past adult_18 while
   // it is on and the verified age is under 21 (ratingCap), and it is worked out from the viewer BEFORE the cache is read:
-  // a scan made for one viewer's slice is never handed to a viewer with a lower one.
-  const slice = ratingCap(url?.searchParams?.get('rating_max'), deps.viewer);
+  // a scan made for one viewer's slice is never handed to a viewer with a lower one. The makers list is the Gallery's
+  // search, a solo surface: signed out, its slice reaches mature_17 (src/adult_content.mjs SOLO).
+  const slice = ratingCap(url?.searchParams?.get('rating_max'), deps.viewer, SOLO);
   const scope = new URL('https://api.eustress.dev/api/simulations');
   scope.searchParams.set('rating_max', slice);
   const cache = deps.cache === undefined ? defaultCache() : deps.cache;

@@ -24,6 +24,18 @@ pub fn is_sim_id(id: &str) -> bool {
     (8..=64).contains(&n) && id.bytes().all(|b| b.is_ascii_hexdigit() || b == b'-')
 }
 
+/// The site's sign-in token from the `auth_token` value `localStorage`
+/// holds. The site writes it with `gloo_storage`, which stores JSON, so the
+/// value is a quoted string; a bare token is taken as it is. Sent with the
+/// quotes, the API reads it as no sign-in at all.
+pub fn token_from_storage(stored: &str) -> Option<String> {
+    let stored = stored.trim();
+    let token = serde_json::from_str::<String>(stored).unwrap_or_else(|_| stored.to_string());
+    let token = token.trim();
+    (!token.is_empty() && !token.contains(|c: char| c.is_whitespace() || c == '"'))
+        .then(|| token.to_string())
+}
+
 /// The page's API, with no trailing slash. Only the two Eustress APIs.
 pub fn api_origin(api_base: &str) -> Option<&str> {
     let api = api_base.trim().trim_end_matches('/');
@@ -117,6 +129,16 @@ mod tests {
             &"a".repeat(65),
         ] {
             assert!(!is_sim_id(bad), "{bad}");
+        }
+    }
+
+    #[test]
+    fn the_sites_stored_token_loses_its_json_quotes() {
+        // What the site's gloo_storage::LocalStorage::set("auth_token", ..) writes.
+        assert_eq!(token_from_storage("\"eyJ.a.b\"").as_deref(), Some("eyJ.a.b"));
+        assert_eq!(token_from_storage("eyJ.a.b").as_deref(), Some("eyJ.a.b"));
+        for empty in ["", "  ", "\"\"", "\" \"", "\"a b\"", "\"a\\\"b\""] {
+            assert_eq!(token_from_storage(empty), None, "{empty}");
         }
     }
 

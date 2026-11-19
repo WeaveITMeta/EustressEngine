@@ -1,0 +1,45 @@
+[asset]
+mesh = "parts/block.glb"
+scene = "Scene0"
+
+[metadata]
+archivable = true
+class_name = "Part"
+created = "2026-11-16T00:00:00Z"
+last_modified = "2026-11-16T00:00:00Z"
+name = "Baseplate"
+unit = "m"
+uuid = "4eb47e5652bb157a61477ccc33f25fb3"
+
+[properties]
+anchored = true
+can_collide = true
+cast_shadow = true
+color = [
+    99,
+    95,
+    98,
+]
+destructible = false
+locked = false
+material = "SmoothPlastic"
+reflectance = 0.0
+transparency = 0.0
+
+[transform]
+position = [
+    0.0,
+    -0.5,
+    0.0,
+]
+rotation = [
+    0.0,
+    0.0,
+    0.0,
+    1.0,
+]
+scale = [
+    64.0,
+    1.0,
+    64.0,
+]

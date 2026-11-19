@@ -14,15 +14,21 @@
 // Routes (section 3):
 //   PUT /api/simulations/{id}/page               owner   validate, store the draft, queue the review
 //   PUT /api/simulations/{id}/page/image/{slot}  owner   PNG, JPEG or WebP, at most 2 MB, stored at R2 universes/{id}/page/{slot}
-//   GET /api/simulations/{id}/page               public  the approved page, withheld with the listing
-//   GET /api/simulations/{id}/page/image/{slot}  public  the image bytes, only when approved
+//   GET /api/simulations/{id}/page               public  the approved page, withheld with the listing; an adult listing's
+//                                                        only to a viewer the listing GET would show it to, never cached,
+//                                                        its images named by signed URL (src/adult_content.mjs)
+//   GET /api/simulations/{id}/page/image/{slot}  public  the image bytes, only when approved; an adult listing's only on a
+//                                                        valid signed URL
 //   GET /api/simulations/{id}/page/review        owner   each link and image: pending, approved or removed, with why
 
 import { prepareUserImage, USER_IMAGE_HEADERS } from './user_images.mjs';
-import { contentLockedFor, inReview, simWithLegalLock } from './moderation.mjs';
+import { contentLockedFor, inReview, simWithLegalLock, isListable } from './moderation.mjs';
+import { isAdultListing, refuseAdult, refuseUnsignedImage, imageCacheControl, signedImageUrl, verifyImageUrl, SOLO } from './adult_content.mjs';
+import { withPlayPass } from './play_pass.mjs';
 import {
   normalizeLinkUrl, hasUrl, PAGE_LINK_KINDS, PAGE_IMAGE_SLOTS, pageDraftKey, pageImageR2Key, readLinkState, writeLinkState,
   readPageDraft, syncLinkEntries, queueLinkReview, stepLinkReview, reviewView, listingFacts, linkKindPermitted,
+  README_IMAGE_SLOTS, README_MAX_BYTES, pageReadmeKey, readPageReadme, prepareReadme, publicReadmeView, readmeImageSlots, readmeStateFor,
 } from './link_review.mjs';
 
 export const PAGE_SCHEMA = 1;
@@ -176,9 +182,13 @@ export const pageWithheld = listing => !listing || PAGE_WITHHELD_STATUSES.includ
 export const pageImagePath = (simId, slot) => `/api/simulations/${simId}/page/image/${slot}`;
 
 /// The page as the public is shown it, in the shape the website reads: the validated theme, the approved images as
-/// `/api/simulations/{id}/page/image/{slot}` paths (null, or left out of the gallery, while pending or removed), and only
-/// the approved links the listing may carry now (section 7 checked again at read time). Pure.
-export function publicPageView(simId, draft, state, listing) {
+/// `/api/simulations/{id}/page/image/{slot}` paths (null, or left out of the gallery, while pending or removed), only
+/// the approved links the listing may carry now (section 7 checked again at read time), and the README once reviewed
+/// (docs/design/SIM_PAGE_README_AND_TABS.md). A listing with a README and no PageSpec gets `theme: null` and no links.
+/// Pure.
+export function publicPageView(simId, draft, state, listing, readme = null) {
+  const readmeView = publicReadmeView(simId, readme, state, listing);
+  if (!draft?.spec) return { theme: null, images: { logo: null, banner: null, gallery: [] }, links: [], readme: readmeView };
   const spec = draft.spec;
   const facts = listingFacts(listing);
   const approvedImage = slot => state.images?.[slot]?.status === 'approved';
@@ -195,6 +205,7 @@ export function publicPageView(simId, draft, state, listing) {
       gallery: spec.images.gallery.filter(approvedImage).map(slot => pageImagePath(simId, slot)),
     },
     links,
+    readme: readmeView,
   };
 }
 
@@ -211,11 +222,55 @@ async function ownedListing(request, simId, env, deps) {
   return { auth, sim };
 }
 
-// The listing as serving sees it (its legal lock read from R2), for the public routes.
+// The listing as serving sees it (its legal lock read from R2), for the public routes, and whether it is public by the
+// listing GET's own rule (moderation.mjs isListable: approved and public; a pending listing is not). `listing` is null
+// for none.
 async function servingListing(env, simId) {
   const raw = await env.SOCIAL.get(`sim:${simId}`);
-  if (!raw) return null;
-  return simWithLegalLock(env, JSON.parse(raw));
+  if (!raw) return { listing: null, listed: false };
+  const listing = await simWithLegalLock(env, JSON.parse(raw));
+  return { listing, listed: isListable(listing) };
+}
+
+/// An adult listing's page view with every image it names given as a signed URL (src/adult_content.mjs signedImageUrl), the
+/// only kind its image route serves: the logo, the banner, the gallery, and each image in the README's Markdown and its
+/// `images` list. An image whose URL cannot be signed (no JWT_SECRET) is left out, and in the README becomes its alt text.
+/// For a viewer the gate already let see the listing.
+async function signedPageView(env, origin, view) {
+  const sign = async (path) => (path ? signedImageUrl(env, origin, path) : null);
+  const out = {
+    ...view,
+    images: {
+      logo: await sign(view.images?.logo),
+      banner: await sign(view.images?.banner),
+      gallery: (await Promise.all((view.images?.gallery || []).map(sign))).filter(Boolean),
+    },
+  };
+  if (view.readme) {
+    let markdown = view.readme.markdown;
+    const images = [];
+    for (const path of view.readme.images || []) {
+      const signed = await sign(path);
+      if (signed) images.push(signed);
+      // publicReadmeView writes each image as `![alt](path)` with no bracket left in the alt text.
+      const escaped = path.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      markdown = markdown.replace(new RegExp(`!\\[([^\\]]*)\\]\\(${escaped}\\)`, 'g'), (whole, alt) => (signed ? `![${alt}](${signed})` : alt));
+    }
+    out.readme = { ...view.readme, markdown, images };
+  }
+  return out;
+}
+
+/// The listing GET's own answer (index.js handleGetSimulation: 404 `Simulation not found`) when the listing is not public
+/// (`listed` from servingListing, moderation.mjs isListable: approved and public, so a pending listing is held back too) and
+/// the viewer is neither its author nor an admin; null when the page may be shown. `deps.requireAdmin` is index.js's;
+/// without it nobody is an admin.
+async function hiddenAsListingGet(request, env, listing, listed, authenticate, deps) {
+  if (listed) return null;
+  const auth = await authenticate(request, env);
+  const admin = auth && auth !== listing.author_id && deps.requireAdmin ? await deps.requireAdmin(request, env) : null;
+  if (auth && (auth === listing.author_id || admin)) return null;
+  return deps.json({ error: 'Simulation not found' }, 404, { ...deps.cors, 'Cache-Control': 'no-store' });
 }
 
 // The review is started without holding the response: in the Worker on waitUntil, elsewhere awaited.
@@ -258,13 +313,65 @@ export async function handlePageRoute(request, url, env, ctx, deps) {
       return json({ ok: true, theme_notes: checked.notes, review: reviewView(after, draft) }, 200, cors);
     }
     if (m === 'GET') {
-      const listing = await servingListing(env, simId);
-      const draft = listing && !pageWithheld(listing) ? await readPageDraft(env, simId) : null;
-      if (!draft?.spec) return json({ error: 'page_not_found' }, 404, { ...cors, 'Cache-Control': 'no-store' });
-      const state = await readLinkState(env, simId);
-      return json(publicPageView(simId, draft, state, listing), 200, { ...cors, 'Cache-Control': 'public, max-age=60' });
+      const { listing, listed } = await servingListing(env, simId);
+      const open = listing && !pageWithheld(listing);
+      // The page is the listing's: it goes only to a viewer the listing GET would show the listing to (src/adult_content.mjs,
+      // a solo surface), judged as the request's session or its play pass for this listing. Adult content (adult_18,
+      // adult_21, no rating) needs a signed-in account that turned Adult content on; every other listing passes for anyone.
+      // A listing that is not public shows its page only where its listing GET shows it: to its author and an admin.
+      const authenticate = withPlayPass(deps.verifyAuth, simId);
+      if (open) {
+        const hidden = await hiddenAsListingGet(request, env, listing, listed, authenticate, deps);
+        if (hidden) return hidden;
+        const refused = await refuseAdult(request, env, listing, { authenticate, json, cors, surface: SOLO });
+        if (refused) return refused;
+      }
+      // Private and signed when adult, or when not public (its images then go only by signed URL, as an adult's do).
+      const adult = !!open && (isAdultListing(listing) || !listed);
+      const draft = open ? await readPageDraft(env, simId) : null;
+      const readme = open ? await readPageReadme(env, simId) : null;
+      const state = draft?.spec || readme ? await readLinkState(env, simId) : null;
+      const view = state ? publicPageView(simId, draft, state, listing, readme) : null;
+      if (!view || (!draft?.spec && !view.readme)) return json({ error: 'page_not_found' }, 404, { ...cors, 'Cache-Control': 'no-store' });
+      // An adult listing's page is never cached, and names its images by signed URL, the only kind their route serves.
+      if (adult) return json(await signedPageView(env, url.origin, view), 200, { ...cors, 'Cache-Control': 'private, no-store' });
+      return json(view, 200, { ...cors, 'Cache-Control': 'public, max-age=60' });
     }
     return null;
+  }
+
+  // The README (docs/design/SIM_PAGE_README_AND_TABS.md): PUT stores it and starts its review, DELETE removes it.
+  if ((match = path.match(/^\/api\/simulations\/([a-f0-9-]+)\/page\/readme$/)) && (m === 'PUT' || m === 'DELETE')) {
+    const simId = match[1];
+    const owned = await ownedListing(request, simId, env, deps);
+    if (owned.error) return owned.error;
+    // Studio sends DELETE on every publish of a Space without a README: with nothing stored it is a 404 whatever the
+    // listing's state, so a listing in review never fails a publish over a README it never had.
+    const had = m === 'DELETE' ? await readPageReadme(env, simId) : null;
+    if (m === 'DELETE' && !had) return json({ error: 'No README to remove' }, 404, cors);
+    if (await contentLockedFor(env, owned.sim, owned.auth)) return inReview(json, cors);
+    const state = await readLinkState(env, simId);
+    const draft = await readPageDraft(env, simId);
+    if (m === 'DELETE') {
+      await env.SOCIAL.delete(pageReadmeKey(simId));
+      state.readme = null;
+      await syncLinkEntries(state, owned.sim, draft, Date.now(), null);
+      await writeLinkState(env, simId, state);
+      return json({ ok: true, removed: true }, 200, cors);
+    }
+    const declared = Number(request.headers.get('Content-Length'));
+    if (Number.isFinite(declared) && declared > README_MAX_BYTES) return json({ error: `The README is larger than ${README_MAX_BYTES / 1024} KiB.`, rule: 'size' }, 413, cors);
+    const prepared = await prepareReadme(await request.arrayBuffer());
+    if (!prepared.ok) return json({ error: prepared.error, rule: 'readme' }, prepared.status, cors);
+    const readme = { text: prepared.text, sha256: prepared.sha256, put_at: new Date().toISOString(), author_id: owned.auth };
+    await env.SOCIAL.put(pageReadmeKey(simId), JSON.stringify(readme));
+    state.readme = readmeStateFor(state.readme, prepared.sha256, new TextEncoder().encode(prepared.text).byteLength);
+    await syncLinkEntries(state, owned.sim, draft, Date.now(), readme);
+    await writeLinkState(env, simId, state);
+    await queueLinkReview(env, simId);
+    await startReview(env, simId, ctx, deps);
+    const after = await readLinkState(env, simId);
+    return json({ ok: true, review: reviewView(after, draft) }, 200, cors);
   }
 
   if ((match = path.match(/^\/api\/simulations\/([a-f0-9-]+)\/page\/review$/)) && m === 'GET') {
@@ -302,18 +409,29 @@ export async function handlePageRoute(request, url, env, ctx, deps) {
     if (m === 'GET') {
       const notFound = () => json({ error: 'Image not found' }, 404, { ...cors, 'Cache-Control': 'no-store' });
       if (!PAGE_IMAGE_SLOTS.includes(slot)) return notFound();
-      const listing = await servingListing(env, simId);
+      const { listing, listed } = await servingListing(env, simId);
       if (pageWithheld(listing)) return notFound();
+      // A listing that is not public (`listed`, isListable): its page images only on the signed URL its page GET gave its
+      // author or an admin; anyone else gets the listing GET's own answer.
+      if (!listed && !(await verifyImageUrl(env, request.url)).ok) return json({ error: 'Simulation not found' }, 404, { ...cors, 'Cache-Control': 'no-store' });
+      // An adult listing's page image needs the signed URL its page gives an allowed viewer, whoever asks: an image tag
+      // carries no session (src/adult_content.mjs), so the signature is the proof the page GET's gate passed.
+      const unsigned = await refuseUnsignedImage(request, env, listing, json, cors);
+      if (unsigned) return unsigned;
       const [state, draft] = [await readLinkState(env, simId), await readPageDraft(env, simId)];
       const img = state.images[slot];
-      const named = [draft?.spec?.images?.logo, draft?.spec?.images?.banner, ...(draft?.spec?.images?.gallery || [])].includes(slot);
+      // A README slot is named only by a README whose own text passed review.
+      const readme = README_IMAGE_SLOTS.includes(slot) ? await readPageReadme(env, simId) : null;
+      const readmeNames = readme && state.readme?.status === 'approved' && state.readme.sha256 === readme.sha256 ? readmeImageSlots(readme.text) : [];
+      const named = [draft?.spec?.images?.logo, draft?.spec?.images?.banner, ...(draft?.spec?.images?.gallery || []), ...readmeNames].includes(slot);
       if (!named || img?.status !== 'approved') return notFound();
       const object = await env.SCENES.get(pageImageR2Key(simId, slot));
       if (!object) return notFound();
       // Only the bytes that were reviewed: an object replaced since serves nothing until its own review passes.
       const sum = object.checksums?.sha256 ? [...new Uint8Array(object.checksums.sha256)].map(b => b.toString(16).padStart(2, '0')).join('') : null;
       if (sum !== img.sha256) { await object.body?.cancel?.(); return notFound(); }
-      return new Response(object.body, { headers: { ...cors, ...USER_IMAGE_HEADERS, 'Content-Type': img.content_type, 'Cache-Control': 'public, max-age=300' } });
+      // A listing that is not adult content keeps its public caching; an adult one's is private, never past its signature.
+      return new Response(object.body, { headers: { ...cors, ...USER_IMAGE_HEADERS, 'Content-Type': img.content_type, 'Cache-Control': imageCacheControl(request, listing, listed ? 'public, max-age=300' : 'private, max-age=300') } });
     }
     return null;
   }

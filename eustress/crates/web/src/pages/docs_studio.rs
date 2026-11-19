@@ -203,6 +203,20 @@ pub fn DocsStudioPage() -> impl IntoView {
 
                 <main class="docs-content">
                     <header class="docs-hero">
+                        // The hero picture: the page's largest paint, so it loads at
+                        // once (no lazy loading, no entrance animation).
+                        <div class="docs-hero-art">
+                            <img
+                                src="/assets/learn/studio-hero-1600.webp"
+                                srcset="/assets/learn/studio-hero-800.webp 800w, /assets/learn/studio-hero-1600.webp 1600w"
+                                sizes="(max-width: 1024px) 100vw, 840px"
+                                alt="A grid viewport with a selected cube carrying a three-axis move handle, framed by three blank panels: a tree of indented bars on the left, empty rows on the right and a strip of small squares along the top."
+                                width="1600"
+                                height="900"
+                                fetchpriority="high"
+                                decoding="async"
+                            />
+                        </div>
                         <div class="docs-breadcrumb">
                             <a href="/learn">"Learn"</a>
                             <span class="separator">"/"</span>
@@ -600,6 +614,19 @@ pub fn DocsStudioPage() -> impl IntoView {
 
                         <div id="tools-smart" class="subsection">
                             <h3>"Smart Build Tools"</h3>
+                            <figure class="learn-figure">
+                                <img
+                                    src="/assets/learn/studio-fig-1-1200.webp"
+                                    srcset="/assets/learn/studio-fig-1-600.webp 600w, /assets/learn/studio-fig-1-1200.webp 1200w"
+                                    sizes="(max-width: 660px) 92vw, (max-width: 1099px) 600px, 500px"
+                                    alt="Three groups of identical cubes: four in a straight row, eight in a circle around a thin vertical rod, and eight in a two by two by two block."
+                                    width="1200"
+                                    height="900"
+                                    loading="lazy"
+                                    decoding="async"
+                                />
+                                <figcaption>"The array tools copy the selection in a row, around an axis, or in a 3D grid. Each array is one undo step."</figcaption>
+                            </figure>
                             <p>
                                 "The Drafting tab holds tools that work from picks or from the whole selection.
                                 While one is armed, the Tool Options bar at the top left of the viewport shows the

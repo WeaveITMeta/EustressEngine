@@ -1,0 +1,9 @@
+[material]
+name = "H_R7_M2"
+description = "Harness S1 grid: roughness 1.0 metallic 0.5"
+
+[pbr]
+base_color = [1.0, 1.0, 1.0, 1.0]
+metallic = 0.5
+roughness = 1.0
+reflectance = 0.5

@@ -1,7 +1,7 @@
 //! # Hosting a session from Studio
 //!
-//! **Start Server** (F9, Network > Start Local Server, or Start in the Test
-//! tab's Server group) hosts the Space being played so Players can join it:
+//! **Start Server** (F9, Network > Start Server, or the Test tab's Host
+//! group) hosts the open Space so Players can join it:
 //!
 //! 1. Save edits not yet saved, when editing, so players get what the host
 //!    sees.
@@ -10,14 +10,54 @@
 //!    ([`crate::space::echk_export`]).
 //! 3. Listen for WebTransport sessions ([`eustress_networking::native`]):
 //!    on this machine only by default, on the local network when asked.
-//! 4. Enter Play with a character, if not already playing.
+//! 4. From Edit, enter Play as the server alone ([`ServerView`]): the
+//!    simulation runs here, with no character and no Player for the host.
+//!    Already playing, the session keeps what it has.
 //! 5. Show the join link, and leave it where a Player on this machine finds
 //!    it (`<workspace>/.eustress/hosts/<port>.link`).
 //!
 //! **Stop Server**, or returning to Edit, ends the session. Pausing does not.
+//! Stopping a server that entered Play for itself also returns to Edit.
 //!
 //! The host is authoritative: its scripts and physics run here, and players
 //! see the host's world plus every avatar in real time.
+//!
+//! ## The host is the server, not a player
+//!
+//! Started from Edit, the host enters Play the way Run does
+//! ([`PlayModeType::Solo`]): physics and server scripts run, Studio keeps its
+//! free camera as the server's view, and no character is spawned. The
+//! [`ServerView`] resource, held for that Play session, also keeps Studio's
+//! own `Player` out of the session tree (`play_datamodel::seed`), so:
+//!
+//! - no slot is taken: the session counts the host only while its character
+//!   exists (`HostSession::set_host_plays`, fed by `track_host_character`);
+//! - joined players see no Player for the host in `Players`, and
+//!   `PlayerAdded` fires only for them;
+//! - no server script can give the host a character (`LoadCharacter` acts
+//!   on the local player, and there is none);
+//! - LocalScripts run on each joined Player, never in Studio.
+//!
+//! Why not keep a characterless Player for the host: it was replicated to
+//! every joiner as a Player with no body, counted by `GetPlayers()`, and a
+//! script that loads characters on `PlayerAdded` spawned the host's avatar
+//! anyway. The session still announces its host by name to each joiner
+//! (`PeerJoined` for peer 0): that names who hosts, for chat, and builds no
+//! body without the host's avatar frames.
+//!
+//! Started while already playing, the session keeps what Play has: with a
+//! character, the creator plays and counts as one of the players; without
+//! one, Studio's own Player stays in the list. The notice says which
+//! ([`hosting_notice`]).
+//!
+//! ## Testing as a player: Add Player
+//!
+//! Add Player opens the session's loopback join link
+//! ([`HostRequest::local_join_link`]) with the OS. The Player registers
+//! itself for `eustress-player://` links each time it runs (the client's
+//! `systems::link_handler`), so the installed Player opens and joins. The
+//! link always goes to the clipboard too, and when no Player is registered
+//! for the links the notice says so ([`add_player_notice`]).
 //!
 //! ## Settings
 //!
@@ -60,7 +100,7 @@ use eustress_networking::{
 
 use crate::keybindings::Action;
 use crate::notifications::NotificationManager;
-use crate::play_mode::{PlayModeState, PlayModeType, StartPlayEvent};
+use crate::play_mode::{PlayModeState, PlayModeType, StartPlayEvent, StopPlayEvent};
 use crate::ui::MenuActionEvent;
 use crate::ui::slint_ui::OutputConsole;
 
@@ -105,6 +145,88 @@ struct ActiveHost {
     /// The certificate pin, once listening.
     pin: Option<[u8; 32]>,
     saw_playing: bool,
+    /// What the creator has in this session.
+    view: HostView,
+}
+
+/// Held for a Play session that Start Server entered from Edit: Studio is
+/// the server alone, with no Player and no character of its own (see the
+/// module doc). `play_datamodel::seed` reads it as Play begins; the session's
+/// end removes it. `--server` holds it from its start (`server_mode`).
+#[derive(Resource, Debug, Default)]
+pub struct ServerView;
+
+/// What the creator has in a hosted session.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HostView {
+    /// Studio is the server alone: free camera, no character, no player slot.
+    Server,
+    /// Studio was already playing with a character, which counts as a player.
+    WithCharacter,
+    /// Studio was already playing with no character; its own Player stays in
+    /// the session's player list.
+    PlayingWithoutCharacter,
+}
+
+/// Where hosting is, for the Network surfaces.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum HostPhase {
+    #[default]
+    Off,
+    /// Asked for, baking, or bound but not yet listening.
+    Starting,
+    /// Listening: the port and the join link are known.
+    Hosting,
+}
+
+impl HostPhase {
+    /// The word the Slint `HostingUi.state` property carries.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            HostPhase::Off => "off",
+            HostPhase::Starting => "starting",
+            HostPhase::Hosting => "on",
+        }
+    }
+}
+
+/// Hosting at a glance, as the ribbon, the Network menu and the Network panel
+/// show it.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct HostingSnapshot {
+    pub phase: HostPhase,
+    /// The UDP port, once listening; 0 before.
+    pub port: u16,
+    /// Players in the session, the creator's character included while it
+    /// exists ([`HostSession::player_count`]).
+    pub players: usize,
+    /// The most the session holds; 0 while not hosting.
+    pub max_players: u16,
+    /// The link players use (the local network address when the session
+    /// accepts other computers); empty until listening.
+    pub join_link: String,
+    /// The joined players' names, in the order they joined.
+    pub names: Vec<String>,
+    /// The creator's own character is one of the players.
+    pub host_plays: bool,
+}
+
+/// Build the [`HostingSnapshot`] from the request, the session (present once
+/// hosting began) and the joined players' names.
+pub fn hosting_snapshot(request: &HostRequest, host: Option<&HostSession>, names: Vec<String>) -> HostingSnapshot {
+    let phase = request.phase();
+    let Some(host) = host.filter(|_| phase != HostPhase::Off) else {
+        return HostingSnapshot { phase, ..Default::default() };
+    };
+    HostingSnapshot {
+        phase,
+        port: request.listen_port().unwrap_or(0),
+        players: host.player_count(),
+        max_players: host.max_players(),
+        join_link: request.join_link().map(|link| link.to_link()).unwrap_or_default(),
+        names,
+        host_plays: host.host_plays(),
+    }
 }
 
 /// Where hosting is: asked for, baking, or running.
@@ -145,6 +267,32 @@ impl HostRequest {
             return None;
         }
         Some(join_link(active, Some(pin)))
+    }
+
+    /// Off, starting (asked for, baking, or not yet listening), or hosting.
+    pub fn phase(&self) -> HostPhase {
+        match &self.active {
+            Some(active) if active.port != 0 && active.pin.is_some() => HostPhase::Hosting,
+            Some(_) => HostPhase::Starting,
+            None if self.wanted || self.pending.is_some() => HostPhase::Starting,
+            None => HostPhase::Off,
+        }
+    }
+
+    /// The link a Player on this computer joins with: the loopback address,
+    /// which a host listening on every network connection accepts too.
+    pub fn local_join_link(&self) -> Option<JoinLink> {
+        let active = self.active.as_ref()?;
+        let pin = active.pin?;
+        if active.port == 0 {
+            return None;
+        }
+        Some(JoinLink { host: "127.0.0.1".into(), port: active.port, key: Some(active.join_key.clone()), pin: Some(pin) })
+    }
+
+    /// What the creator has in the running session.
+    pub fn host_view(&self) -> Option<HostView> {
+        self.active.as_ref().map(|active| active.view)
     }
 }
 
@@ -199,7 +347,14 @@ impl Plugin for MultiplayerPlugin {
             )
             // After Update, so it sees an exit asked for anywhere this frame.
             .add_systems(Last, stop_listing_on_exit);
+        // A server alone lasts one Play session; the next Play is the
+        // creator's own again.
+        crate::play_mode::add_session_end_systems(app, end_server_view);
     }
+}
+
+fn end_server_view(mut commands: Commands) {
+    commands.remove_resource::<ServerView>();
 }
 
 /// Seconds between the beats that keep a session live in the gallery; it
@@ -419,7 +574,9 @@ fn parse_public_address(raw: &str) -> Option<(String, Option<u16>)> {
 /// when the session ends. Each change in what the gallery shows, or why it
 /// shows nothing, goes to the Output once; hosting goes on either way.
 fn gallery_heartbeat(
-    time: Res<Time>,
+    // Real time: the beat keeps its 30 s cadence while simulated time is
+    // paused (a paused Play session, or an empty server that pauses).
+    time: Res<Time<bevy::time::Real>>,
     request: Res<HostRequest>,
     mut host: Option<ResMut<HostSession>>,
     auth: Option<Res<crate::auth::AuthState>>,
@@ -556,6 +713,15 @@ fn live_url(sim: &str) -> String {
     eustress_common::api_base::api_url(&format!("/api/simulations/{sim}/live"))
 }
 
+/// Where a stop goes: the live marker, naming the server that is stopping
+/// (`server_id`, the id its heartbeats carry: `EUSTRESS_SERVER_ID`, or
+/// `default`). A listing can have several servers, and a stop that names
+/// none ends every one of them; a hosted session's own credential is
+/// refused a stop that names none.
+fn live_stop_url(sim: &str, server_id: &str) -> String {
+    format!("{}?server_id={server_id}", live_url(sim))
+}
+
 /// One live-marker request, on a thread of its own. A POST's answer goes to
 /// `answers` with its `number`.
 fn gallery_request(
@@ -566,7 +732,11 @@ fn gallery_request(
     token: &str,
     body: Option<serde_json::Value>,
 ) {
-    let url = live_url(sim);
+    let url = if method == "DELETE" {
+        live_stop_url(sim, &crate::dedicated::server_id_from_env())
+    } else {
+        live_url(sim)
+    };
     let auth = format!("Bearer {token}");
     let answered = answers.clone();
     let started = std::thread::Builder::new().name("eustress-gallery-live".into()).spawn(move || {
@@ -615,7 +785,7 @@ fn stop_listing_on_exit(
         return;
     }
     let Some((sim, token)) = listing_to_stop(&beat, gallery_bearer(auth.as_deref()).as_deref()) else { return };
-    match ureq::delete(&live_url(&sim))
+    match ureq::delete(&live_stop_url(&sim, &crate::dedicated::server_id_from_env()))
         .timeout(std::time::Duration::from_secs(3))
         .set("Authorization", &format!("Bearer {token}"))
         .call()
@@ -707,7 +877,7 @@ fn ask_gallery(sim: &str, token: &str, ticket: &str, audience: &str) -> Result<A
     }
 }
 
-fn env_flag(name: &str) -> bool {
+pub(crate) fn env_flag(name: &str) -> bool {
     std::env::var(name).map(|v| is_yes(&v)).unwrap_or(false)
 }
 
@@ -1080,6 +1250,167 @@ fn join_link(active: &ActiveHost, pin: Option<[u8; 32]>) -> JoinLink {
         "127.0.0.1".into()
     };
     JoinLink { host, port: active.port, key: Some(active.join_key.clone()), pin }
+}
+
+/// The notice when the server starts listening: who can join, and what the
+/// creator has in the session.
+pub fn hosting_notice(lan: bool, port: u16, view: HostView) -> String {
+    let reach = if lan { "for this computer and your local network" } else { "for this computer only" };
+    let you = match view {
+        HostView::Server => {
+            "Studio is the server: you have no character and take no player slot, and the free camera is your view. \
+             Add Player opens the Player to join as a player."
+        }
+        HostView::WithCharacter => {
+            "You keep playing with your character, which counts as one of the session's players. \
+             Add Player opens the Player to join as another player."
+        }
+        HostView::PlayingWithoutCharacter => {
+            "This Play session had no character, so the free camera stays your view, but its own Player stays in \
+             the player list. To host as the server alone, stop Play, then Start Server from Edit."
+        }
+    };
+    format!("Server running {reach} on port {port}. {you}")
+}
+
+/// What became of Add Player's attempt to open the Player.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PlayerLaunch {
+    /// The OS took the link; the Player registered for it opens and joins.
+    Opened,
+    /// No Player is registered for `eustress-player://` links for this user.
+    NotRegistered,
+    /// Opening the link failed (`why`).
+    Failed(String),
+}
+
+/// Add Player's notice, and whether it reports a problem. `copied`: the join
+/// link went to the clipboard instead.
+pub fn add_player_notice(launch: &PlayerLaunch, copied: bool) -> (bool, String) {
+    let clipboard = if copied { " The join link is on your clipboard." } else { "" };
+    match launch {
+        PlayerLaunch::Opened => (false, "Opening the Player on this computer. It joins this server as a new player.".to_string()),
+        PlayerLaunch::NotRegistered => (
+            true,
+            format!(
+                "No Player on this computer opens join links yet. Run the Player once and it sets that up; \
+                 then Add Player opens it.{clipboard}"
+            ),
+        ),
+        PlayerLaunch::Failed(why) => (true, format!("Could not open the Player ({why}).{clipboard}")),
+    }
+}
+
+/// Add Player: open the loopback join link with the Player registered for
+/// `eustress-player://` links; when none is, or opening fails, put the link
+/// on the clipboard. `None` while no server is listening.
+pub fn add_player(request: &HostRequest) -> Option<(bool, String)> {
+    let link = request.local_join_link()?.to_link();
+    let launch = match player_link_handler_registered() {
+        Some(false) => PlayerLaunch::NotRegistered,
+        _ => match open::that(&link) {
+            Ok(()) => PlayerLaunch::Opened,
+            Err(e) => PlayerLaunch::Failed(e.to_string()),
+        },
+    };
+    let copied = launch != PlayerLaunch::Opened && copy_text(&link).is_ok();
+    Some(add_player_notice(&launch, copied))
+}
+
+/// Whether a Player is registered for `eustress-player://` links for this
+/// user: the Player writes `HKEY_CURRENT_USER\Software\Classes\eustress-player`
+/// each time it runs. `None` where Studio cannot tell (not Windows, or the
+/// query could not run), and the link is opened anyway.
+fn player_link_handler_registered() -> Option<bool> {
+    #[cfg(windows)]
+    let registered = {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        let mut query = std::process::Command::new("reg");
+        query
+            .args(["query", r"HKCU\Software\Classes\eustress-player\shell\open\command", "/ve"])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .creation_flags(CREATE_NO_WINDOW);
+        query.status().ok().map(|status| status.success())
+    };
+    #[cfg(not(windows))]
+    let registered = None;
+    registered
+}
+
+/// Put `text` on the clipboard.
+fn copy_text(text: &str) -> Result<(), String> {
+    #[cfg(feature = "clipboard")]
+    let copied = arboard::Clipboard::new()
+        .and_then(|mut clipboard| clipboard.set_text(text.to_string()))
+        .map_err(|e| e.to_string());
+    #[cfg(not(feature = "clipboard"))]
+    let copied: Result<(), String> = {
+        let _ = text;
+        Err("this build has no clipboard support".to_string())
+    };
+    copied
+}
+
+/// Who a copied join link reaches.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ShareReach {
+    ThisComputer,
+    LocalNetwork,
+    Internet,
+}
+
+/// The link to share: this computer's (`local`, as the host prints it) when
+/// only this computer may join; the public address once it is known (typed,
+/// or the echo's answer, with the router's outside port when one is typed);
+/// else the local network address.
+fn share_link(local: JoinLink, lan: bool, public: ListingAddress) -> (JoinLink, ShareReach) {
+    if !lan {
+        return (local, ShareReach::ThisComputer);
+    }
+    match public {
+        ListingAddress::At(host, outside) => {
+            let port = outside.unwrap_or(local.port);
+            (JoinLink { host, port, ..local }, ShareReach::Internet)
+        }
+        ListingAddress::Waiting | ListingAddress::Unknown => (local, ShareReach::LocalNetwork),
+    }
+}
+
+fn copy_link_notice(share: ShareReach) -> String {
+    match share {
+        ShareReach::ThisComputer => {
+            "Join link copied. It works on this computer only: turn on Other Computers, then start the server again \
+             to share it."
+        }
+        ShareReach::LocalNetwork => {
+            "Join link copied, with this computer's local network address. Players on the internet need your public \
+             address, which Studio is still finding or you can type in Settings > Hosting."
+        }
+        ShareReach::Internet => {
+            "Join link copied, with your public address. Players outside your network also need the port forwarded \
+             to this computer."
+        }
+    }
+    .to_string()
+}
+
+/// Copy Link: the link to share on the clipboard ([`share_link`]). Returns
+/// the notice and whether it reports a problem.
+pub fn copy_join_link(request: &HostRequest, reach: &HostingReach) -> (bool, String) {
+    let (Some(active), Some(link)) = (request.active.as_ref(), request.join_link()) else {
+        return (true, "Start Server first. The join link exists once the server is listening.".to_string());
+    };
+    let public = match &reach.choice {
+        Some(choice) => listing_address(choice, Some(&reach.detected)),
+        None => ListingAddress::Unknown,
+    };
+    let (link, share) = share_link(link, active.lan, public);
+    match copy_text(&link.to_link()) {
+        Ok(()) => (false, copy_link_notice(share)),
+        Err(e) => (true, format!("Could not copy the join link: {e}")),
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1947,7 +2278,8 @@ fn folder_name(path: &std::path::Path) -> String {
     path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| "Untitled".to_string())
 }
 
-/// When the bake finishes, start listening and enter Play.
+/// When the bake finishes, start listening and, from Edit, enter Play as the
+/// server alone.
 fn poll_host_export(
     mut commands: Commands,
     mut request: ResMut<HostRequest>,
@@ -1955,6 +2287,9 @@ fn poll_host_export(
     mut notifications: Option<ResMut<NotificationManager>>,
     mut output: Option<ResMut<OutputConsole>>,
     mut reach: ResMut<HostingReach>,
+    state: Option<Res<State<PlayModeState>>>,
+    server_view: Option<Res<ServerView>>,
+    local_avatar: Query<(), (With<eustress_common::avatar::LocalAvatar>, With<eustress_common::avatar::SpawnedByAvatarRuntime>)>,
 ) {
     let result = {
         let Some(pending) = &request.pending else { return };
@@ -2032,11 +2367,25 @@ fn poll_host_export(
             sim_id: pending.sim_id,
         },
     );
-    request.active = Some(ActiveHost { join_key: options.join_key, lan: options.lan, port: 0, pin: None, saw_playing: false });
+    // Started from Edit and still in Edit (Play pressed during the bake keeps
+    // the creator's own Play): enter Play the way Run does, as the server
+    // alone. `ServerView` is in place before the session tree is seeded.
+    let editing = state.as_deref().map_or(true, |s| *s.get() == PlayModeState::Editing);
+    let view = if pending.start_play && editing {
+        commands.insert_resource(ServerView);
+        start_play.write(StartPlayEvent { play_type: PlayModeType::Solo });
+        HostView::Server
+    } else if server_view.is_some() {
+        // Play was seeded as the server alone (`--server`).
+        HostView::Server
+    } else if !local_avatar.is_empty() {
+        HostView::WithCharacter
+    } else {
+        HostView::PlayingWithoutCharacter
+    };
+    request.active =
+        Some(ActiveHost { join_key: options.join_key, lan: options.lan, port: 0, pin: None, saw_playing: false, view });
     reach.begin(pending.choice);
-    if pending.start_play {
-        start_play.write(StartPlayEvent { play_type: PlayModeType::WithCharacter });
-    }
 }
 
 /// Returning to Edit ends the session. Pausing does not.
@@ -2065,6 +2414,9 @@ fn report_net_notices(
     mut request: ResMut<HostRequest>,
     mut notifications: Option<ResMut<NotificationManager>>,
     mut output: Option<ResMut<OutputConsole>>,
+    server_view: Option<Res<ServerView>>,
+    state: Option<Res<State<PlayModeState>>>,
+    mut stop_play: MessageWriter<StopPlayEvent>,
 ) {
     for notice in notices.read() {
         match notice {
@@ -2075,12 +2427,10 @@ fn report_net_notices(
                 let link = join_link(active, Some(*pin));
                 let text = link.to_link();
                 native::write_host_file(&eustress_bridge_client::default_workspace_root(), &link);
-                let reach = if active.lan { "on your local network" } else { "on this computer" };
-                info!("multiplayer: hosting {reach}; join with {text}");
+                let line = hosting_notice(active.lan, *port, active.view);
+                info!("multiplayer: {line} Join link: {text}");
                 if let Some(n) = notifications.as_mut() {
-                    n.success(format!(
-                        "Hosting {reach} on port {port}. A Player on this computer joins with: eustress-client --connect 127.0.0.1:{port}"
-                    ));
+                    n.success(line);
                 }
                 if let Some(o) = output.as_mut() {
                     o.info(format!("Join link: {text}"));
@@ -2095,6 +2445,12 @@ fn report_net_notices(
                 }
                 if let Some(n) = notifications.as_mut() {
                     n.info(format!("Server stopped: {reason}."));
+                }
+                // A server alone has nothing to show once it stops: back to
+                // Edit, as the creator was before Start Server.
+                let playing = state.as_deref().is_some_and(|s| *s.get() != PlayModeState::Editing);
+                if server_view.is_some() && playing {
+                    stop_play.write(StopPlayEvent);
                 }
             }
             NetNotice::PeerJoined { name, .. } => {
@@ -2195,6 +2551,17 @@ fn refresh_host_file(time: Res<Time<Real>>, request: Res<HostRequest>, mut next_
 mod tests {
     use super::*;
 
+    /// A stop names its own server, as its heartbeats do: a listing can have
+    /// several servers, and a stop naming none would end them all.
+    #[test]
+    fn a_stop_names_its_own_server() {
+        let sim = "07d084d8-9098-4192-bb48-84d2c428db36";
+        let url = live_stop_url(sim, "srv-1");
+        assert!(url.ends_with(&format!("/api/simulations/{sim}/live?server_id=srv-1")), "{url}");
+        assert_eq!(url, format!("{}?server_id=srv-1", live_url(sim)));
+        assert!(live_stop_url(sim, "default").ends_with("/live?server_id=default"));
+    }
+
     fn host_config(sim_id: Option<&str>) -> HostConfig {
         HostConfig {
             host_name: "Host".into(),
@@ -2217,9 +2584,9 @@ mod tests {
         beat.sent = 1;
         beat.unanswered.insert(1);
         beat.answers.lock().unwrap().push((1, answer));
-        let hosting = ActiveHost { join_key: "key".into(), lan: false, port: 7777, pin: None, saw_playing: false };
+        let hosting = ActiveHost { join_key: "key".into(), lan: false, port: 7777, pin: None, saw_playing: false, view: HostView::Server };
         let mut app = App::new();
-        app.init_resource::<Time>()
+        app.init_resource::<Time<bevy::time::Real>>()
             .insert_resource(HostRequest { active: Some(hosting), ..Default::default() })
             .init_resource::<OutputConsole>()
             .insert_resource(host)
@@ -2369,7 +2736,7 @@ mod tests {
     fn the_output_says_when_a_space_turns_the_movement_check_off() {
         use eustress_common::avatar::space_character::SpaceCharacterPolicy;
         let app_with = |setting: Option<bool>| {
-            let hosting = ActiveHost { join_key: "key".into(), lan: false, port: 7777, pin: None, saw_playing: false };
+            let hosting = ActiveHost { join_key: "key".into(), lan: false, port: 7777, pin: None, saw_playing: false, view: HostView::Server };
             let mut app = App::new();
             app.insert_resource(HostRequest { active: Some(hosting), ..Default::default() })
                 .init_resource::<OutputConsole>()
@@ -2807,5 +3174,104 @@ mod tests {
         assert_eq!(logs.downloads.get("log-1"), Some(&Ok(std::path::PathBuf::from("CHANGELOG-v7.md"))));
         assert_eq!(logs.downloads.get("log-2"), Some(&Err("The download stopped without an answer.".to_string())));
         assert!(logs.saving.is_empty());
+    }
+
+    fn listening(lan: bool, view: HostView) -> HostRequest {
+        let mut request = HostRequest::default();
+        request.active =
+            Some(ActiveHost { join_key: "key".into(), lan, port: 7777, pin: Some([7; 32]), saw_playing: false, view });
+        request
+    }
+
+    /// The Network surfaces read off, starting and hosting from the request,
+    /// and a Player on this computer joins over loopback whoever else may.
+    #[test]
+    fn hosting_phase_and_the_local_link_follow_the_request() {
+        let mut request = HostRequest::default();
+        assert_eq!(request.phase(), HostPhase::Off);
+        assert!(request.local_join_link().is_none());
+        request.request_start();
+        assert_eq!(request.phase(), HostPhase::Starting, "asked for");
+        let mut request = listening(true, HostView::Server);
+        request.active.as_mut().unwrap().pin = None;
+        assert_eq!(request.phase(), HostPhase::Starting, "bound, not yet listening");
+        assert!(request.local_join_link().is_none());
+
+        let request = listening(true, HostView::Server);
+        assert_eq!(request.phase(), HostPhase::Hosting);
+        assert_eq!(request.host_view(), Some(HostView::Server));
+        let local = request.local_join_link().expect("listening");
+        assert_eq!((local.host.as_str(), local.port), ("127.0.0.1", 7777), "loopback, even for a local network host");
+        assert_eq!((local.key.as_deref(), local.pin), (Some("key"), Some([7; 32])));
+    }
+
+    /// The count and the cap come from the session; the creator counts only
+    /// while its character exists.
+    #[test]
+    fn the_snapshot_counts_the_creator_only_while_it_plays() {
+        let request = listening(false, HostView::Server);
+        let mut host = HostSession::new(host_config(None));
+        let snap = hosting_snapshot(&request, Some(&host), vec!["Ada".into()]);
+        assert_eq!(snap.phase, HostPhase::Hosting);
+        assert_eq!((snap.port, snap.players, snap.max_players), (7777, 0, 8), "a server alone takes no slot");
+        assert!(!snap.host_plays);
+        assert!(snap.join_link.starts_with("eustress-player://join/127.0.0.1:7777?key=key"), "{}", snap.join_link);
+        assert_eq!(snap.names, ["Ada"]);
+        host.set_host_plays(true);
+        let snap = hosting_snapshot(&request, Some(&host), Vec::new());
+        assert_eq!(snap.players, 1, "a character counts");
+        assert!(snap.host_plays);
+
+        let off = hosting_snapshot(&HostRequest::default(), Some(&host), vec!["Ada".into()]);
+        assert_eq!(off, HostingSnapshot::default(), "nothing shows while not hosting");
+    }
+
+    /// The notice says what the creator has, for each way hosting starts.
+    #[test]
+    fn the_hosting_notice_says_what_the_creator_has() {
+        let server = hosting_notice(false, 7777, HostView::Server);
+        assert!(server.contains("for this computer only on port 7777"), "{server}");
+        assert!(server.contains("no character") && server.contains("no player slot"), "{server}");
+        let playing = hosting_notice(true, 7777, HostView::WithCharacter);
+        assert!(playing.contains("your local network"), "{playing}");
+        assert!(playing.contains("counts as one of the session's players"), "{playing}");
+        let watching = hosting_notice(false, 7777, HostView::PlayingWithoutCharacter);
+        assert!(watching.contains("Start Server from Edit"), "{watching}");
+        for line in [server, playing, watching] {
+            assert!(!line.contains('\u{2014}'), "no em dash: {line}");
+        }
+    }
+
+    /// Add Player says whether the Player opened, and where the link went
+    /// when it did not.
+    #[test]
+    fn add_player_says_what_happened() {
+        let (problem, line) = add_player_notice(&PlayerLaunch::Opened, false);
+        assert!(!problem && line.contains("Opening the Player"), "{line}");
+        assert!(!line.contains("clipboard"), "{line}");
+        let (problem, line) = add_player_notice(&PlayerLaunch::NotRegistered, true);
+        assert!(problem && line.contains("Run the Player once") && line.contains("on your clipboard"), "{line}");
+        let (_, line) = add_player_notice(&PlayerLaunch::NotRegistered, false);
+        assert!(!line.contains("clipboard"), "only a copy that happened is claimed: {line}");
+        let (problem, line) = add_player_notice(&PlayerLaunch::Failed("no handler".into()), true);
+        assert!(problem && line.contains("(no handler)") && line.contains("clipboard"), "{line}");
+    }
+
+    /// Copy Link shares as far as the session reaches: this computer, the
+    /// local network, or the public address once known.
+    #[test]
+    fn the_copied_link_reaches_as_far_as_the_session_does() {
+        let local = JoinLink { host: "192.168.1.20".into(), port: 7777, key: Some("key".into()), pin: Some([7; 32]) };
+        let (link, share) = share_link(local.clone(), false, ListingAddress::At("81.2.69.160".into(), None));
+        assert_eq!((link, share), (local.clone(), ShareReach::ThisComputer), "a host for this computer only");
+        let (link, share) = share_link(local.clone(), true, ListingAddress::Waiting);
+        assert_eq!((link, share), (local.clone(), ShareReach::LocalNetwork));
+        let (link, share) = share_link(local.clone(), true, ListingAddress::At("play.example.com".into(), Some(30000)));
+        assert_eq!(share, ShareReach::Internet);
+        assert_eq!((link.host.as_str(), link.port), ("play.example.com", 30000), "the router's outside port");
+        assert_eq!((link.key, link.pin), (local.key.clone(), local.pin), "the same session");
+        let (link, _) = share_link(local.clone(), true, ListingAddress::At("81.2.69.160".into(), None));
+        assert_eq!(link.port, 7777, "no outside port typed: the host's own");
+        assert!(copy_link_notice(ShareReach::ThisComputer).contains("this computer only"));
     }
 }

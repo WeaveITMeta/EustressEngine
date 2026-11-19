@@ -1,0 +1,19 @@
+{
+  "generated_at": "2026-11-18T03:22:47.939354+00:00",
+  "play_state": "editing",
+  "sim_values": {},
+  "entity_names": {},
+  "component_types": [],
+  "pid": 118960,
+  "space": "RH1_sphere_grid",
+  "owns_universe": true,
+  "tick": 0,
+  "sim_time_s": 0.0,
+  "runs": {
+    "acks": [],
+    "completed": [],
+    "current": null,
+    "last": null,
+    "pending": null
+  }
+}

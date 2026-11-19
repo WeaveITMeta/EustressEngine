@@ -1,0 +1,98 @@
+{
+  "display_information": {
+    "name": "Eustress Engine",
+    "description": "Simulation & Data Platform with Game.",
+    "background_color": "#2C2D30",
+    "long_description": "Eustress is a simulation and data platform; it also builds games and interactive worlds. Creators build Spaces in Eustress Studio, publish them to the Gallery, and people play them in the Eustress Player or right in the browser.\n\nEustress Engine brings those Spaces into Slack with one command, /eustress:\n- /eustress space <name>: find a Space and share its card, with Open and Play buttons.\n- /eustress live: see the Spaces with people in them right now, and join one.\n- /eustress profile @someone: show the Eustress profile of a person who has connected their Slack account.\n- /eustress me: your Bliss, Tickets and notifications, visible only to you.\n- /eustress follow: follow a Space or a creator into a channel. Eustress Engine posts a card when it is published, updated or goes live. The person who added the app, or a workspace admin, can change what a channel follows. Invite the app to the channel first with /invite @Eustress Engine.\n\nWhat it can and cannot do:\n- It uses three permissions: run its slash command, post messages in channels it has been invited to, and view the member list, which it uses only to check whether the person changing a channel's follows is a workspace admin.\n- It cannot read your messages, channels or files.\n- Content rated above G to PG never appears in channels.\n\nConnect Slack: in Settings on eustress.dev you can link your Slack account to your Eustress account, so /eustress me and /eustress profile know who you are. Eustress reads only your Slack name and workspace, revokes the sign-in token right away, and keeps no Slack token. You can disconnect at any time from Settings."
+  },
+  "features": {
+    "app_home": {
+      "home_tab_enabled": true,
+      "messages_tab_enabled": true,
+      "messages_tab_read_only_enabled": false
+    },
+    "bot_user": {
+      "display_name": "Eustress Engine",
+      "always_online": true
+    },
+    "slash_commands": [
+      {
+        "command": "/eustress",
+        "url": "https://api.eustress.dev/api/slack/commands",
+        "description": "Find Spaces, see who is live, show profiles, and follow Spaces in a channel",
+        "usage_hint": "space <name> | live | profile @someone | me | follow ... | help",
+        "should_escape": true
+      },
+      {
+        "command": "/eustress-space",
+        "url": "https://api.eustress.dev/api/slack/commands",
+        "description": "Find a listed Space and share its card here",
+        "usage_hint": "<name>",
+        "should_escape": true
+      },
+      {
+        "command": "/eustress-live",
+        "url": "https://api.eustress.dev/api/slack/commands",
+        "description": "See the Spaces with people in them right now",
+        "should_escape": true
+      },
+      {
+        "command": "/eustress-profile",
+        "url": "https://api.eustress.dev/api/slack/commands",
+        "description": "Show the Eustress profile of someone who linked Slack",
+        "usage_hint": "@someone",
+        "should_escape": true
+      },
+      {
+        "command": "/eustress-me",
+        "url": "https://api.eustress.dev/api/slack/commands",
+        "description": "Your Bliss, Tickets and notifications, only you see it",
+        "should_escape": true
+      },
+      {
+        "command": "/eustress-follow",
+        "url": "https://api.eustress.dev/api/slack/commands",
+        "description": "Follow a Space or a creator into this channel",
+        "usage_hint": "space <name> | creator <username> | list | remove <name>",
+        "should_escape": true
+      }
+    ]
+  },
+  "oauth_config": {
+    "redirect_urls": [
+      "https://eustress.dev/auth/slack/callback",
+      "https://www.eustress.dev/auth/slack/callback",
+      "https://staging.eustress-cbb.pages.dev/auth/slack/callback",
+      "https://api.eustress.dev/api/slack/oauth_redirect",
+      "https://api-staging.eustress.dev/api/slack/oauth_redirect"
+    ],
+    "scopes": {
+      "bot": [
+        "commands",
+        "chat:write",
+        "users:read"
+      ],
+      "user": [
+        "openid",
+        "profile"
+      ]
+    }
+  },
+  "settings": {
+    "event_subscriptions": {
+      "request_url": "https://api.eustress.dev/api/slack/events",
+      "bot_events": [
+        "app_home_opened",
+        "app_uninstalled",
+        "tokens_revoked"
+      ]
+    },
+    "interactivity": {
+      "is_enabled": true,
+      "request_url": "https://api.eustress.dev/api/slack/interactivity"
+    },
+    "org_deploy_enabled": true,
+    "socket_mode_enabled": false,
+    "token_rotation_enabled": false
+  }
+}

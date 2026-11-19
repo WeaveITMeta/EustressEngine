@@ -52,6 +52,10 @@ parking_lot = "0.12"
 # Hostname detection
 hostname = "0.4"
 
+# The fleet host agent's heartbeat to the control plane (fleet_host).
+# The same requirement as eustress-engine, so it resolves to the ureq 2 already in the lock.
+ureq = { version = "2", features = ["json"] }
+
 [features]
 default = ["full"]
 full = ["metrics", "quic"]

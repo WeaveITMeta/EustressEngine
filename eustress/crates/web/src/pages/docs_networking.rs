@@ -231,6 +231,20 @@ pub fn DocsNetworkingPage() -> impl IntoView {
 
                 <main class="docs-content">
                     <header class="docs-hero">
+                        // The hero picture: the page's largest paint, so it loads at
+                        // once (no lazy loading, no entrance animation).
+                        <div class="docs-hero-art">
+                            <img
+                                src="/assets/learn/networking-hero-1600.webp"
+                                srcset="/assets/learn/networking-hero-800.webp 800w, /assets/learn/networking-hero-1600.webp 1600w"
+                                sizes="(max-width: 1024px) 100vw, 840px"
+                                alt="A large central grid platform holding a small world is joined by lines carrying bright pulses to five smaller platforms, each holding a fainter copy of the same world."
+                                width="1600"
+                                height="900"
+                                fetchpriority="high"
+                                decoding="async"
+                            />
+                        </div>
                         <div class="docs-breadcrumb">
                             <a href="/learn">"Learn"</a>
                             <span class="separator">"/"</span>
@@ -513,6 +527,19 @@ curl -N "http://127.0.0.1:43000/topics/scene_deltas/replay?from=0""#}</code></pr
 
                         <div id="authority-owners" class="subsection">
                             <h3>"Owners"</h3>
+                            <figure class="learn-figure">
+                                <img
+                                    src="/assets/learn/networking-fig-1-1200.webp"
+                                    srcset="/assets/learn/networking-fig-1-600.webp 600w, /assets/learn/networking-fig-1-1200.webp 1200w"
+                                    sizes="(max-width: 660px) 92vw, (max-width: 1099px) 600px, 500px"
+                                    alt="A large platform and a small platform joined by a line, with three cubes on the large one: one glowing green like the large platform, one glowing violet and joined by a line to the small platform, and one inside a closed translucent box."
+                                    width="1200"
+                                    height="900"
+                                    loading="lazy"
+                                    decoding="async"
+                                />
+                                <figcaption>"Every networked entity has exactly one owner: the server by default, or one client, or the server with the entity locked so every ownership request is refused. The rules are written in code and wait for a transport to carry them."</figcaption>
+                            </figure>
                             <p>
                                 "Authority decides whose word counts for an entity. The rules are written in the
                                 shared networking crate and wait for a transport to carry them. Every networked

@@ -1,0 +1,24 @@
+[journal]
+stage = "idle"
+updated_at = "2026-11-16T00:00:00Z"
+resumable = true
+
+[[checkpoints]]
+name = "scan"
+completed = false
+updated_at = "2026-11-16T00:00:00Z"
+
+[[checkpoints]]
+name = "package"
+completed = false
+updated_at = "2026-11-16T00:00:00Z"
+
+[[checkpoints]]
+name = "upload"
+completed = false
+updated_at = "2026-11-16T00:00:00Z"
+
+[[checkpoints]]
+name = "commit"
+completed = false
+updated_at = "2026-11-16T00:00:00Z"

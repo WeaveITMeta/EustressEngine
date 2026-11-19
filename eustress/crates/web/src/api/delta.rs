@@ -31,6 +31,9 @@ pub struct DeltaBalance {
     /// The account's plan: `free`, `player_plus`, `creator`, `professional` or `bundle`.
     #[serde(default)]
     pub plan: Option<String>,
+    /// The account holds a lifetime plan with unlimited Delta: its tools never spend any, whatever the balance says.
+    #[serde(default)]
+    pub unlimited: bool,
 }
 
 impl DeltaBalance {

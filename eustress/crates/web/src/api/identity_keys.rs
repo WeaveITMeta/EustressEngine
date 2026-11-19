@@ -68,6 +68,9 @@ pub struct Credentials {
     pub webhooks: Vec<WebhookInfo>,
     #[serde(default)]
     pub discord_linked: bool,
+    /// A Slack account is linked (Worker: src/slack_link.mjs).
+    #[serde(default)]
+    pub slack_linked: bool,
     #[serde(default)]
     pub payout_connected: bool,
     /// The passkeys on the account: they sign in to the website, so replacing the identity file
@@ -101,6 +104,8 @@ pub struct RevokeList {
     pub api_keys: Vec<String>,
     pub webhooks: Vec<String>,
     pub discord: bool,
+    /// Revoke the Slack link in the same step.
+    pub slack: bool,
     /// Passkey ids to remove in the same step.
     pub passkeys: Vec<String>,
 }

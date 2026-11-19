@@ -131,7 +131,7 @@ pub fn DeltaPage() -> impl IntoView {
             {move || {
                 let mut items = Vec::new();
                 if let DeltaState::Balance(b) = balance.get() {
-                    items.push(("Your balance", format!("{} Delta", format_count(b.whole()))));
+                    items.push(("Your balance", if b.unlimited { "Unlimited Delta".to_string() } else { format!("{} Delta", format_count(b.whole())) }));
                     if let Some(plan) = b.plan.as_deref().and_then(plan_label) {
                         items.push(("Your plan", plan));
                     }

@@ -1060,7 +1060,7 @@ fn handle_stop_play(
         info!("🛑 Stopping play mode");
         
         // Pause physics during editor mode
-        physics_time.pause();
+        crate::simulation::plugin::hold_physics(&mut physics_time);
         
         // Despawn all entities that were spawned during play mode
         let mut despawned_count = 0;
@@ -1350,7 +1350,7 @@ fn restore_scene_on_enter_edit(
     mut despawn_avatars: MessageWriter<eustress_common::avatar::DespawnAllAvatars>,
 ) {
     // Edit mode never simulates physics.
-    physics_time.pause();
+    crate::simulation::plugin::hold_physics(&mut physics_time);
 
     // Act only when a play snapshot is still pending — i.e. the
     // trigger-gated `handle_stop_play` did NOT already restore + clear it.
@@ -1564,7 +1564,7 @@ fn handle_pause_toggle(
     match current_state.get() {
         PlayModeState::Playing => {
             info!("⏸️ Pausing play mode - physics frozen");
-            physics_time.pause();
+            crate::simulation::plugin::hold_physics(&mut physics_time);
             next_state.set(PlayModeState::Paused);
         }
         PlayModeState::Paused => {
@@ -2539,7 +2539,7 @@ fn activate_physics_for_unanchored_parts(
 
 /// Pause physics on startup (Edit mode doesn't need physics simulation)
 fn pause_physics_on_startup(mut physics_time: ResMut<Time<avian3d::prelude::Physics>>) {
-    physics_time.pause();
+    crate::simulation::plugin::hold_physics(&mut physics_time);
     info!("⏸️ Physics paused in Edit mode (will unpause in Play mode)");
 }
 
@@ -2568,7 +2568,7 @@ fn deactivate_physics_for_parts(
     }
     
     // Pause physics when exiting Play mode
-    physics_time.pause();
+    crate::simulation::plugin::hold_physics(&mut physics_time);
     info!("⏸️ Physics paused (Edit mode)");
     
     if deactivated_count > 0 {
@@ -2749,7 +2749,8 @@ fn restore_gui_on_stop(
 }
 
 // Multiplayer hosting is not a play-mode type: Start Server (F9) hosts the
-// Space and enters Play with a character. See `crate::multiplayer`.
+// Space and, from Edit, enters Play as Run does (`Solo`), as the server alone
+// with no character or Player of Studio's own. See `crate::multiplayer`.
 
 #[cfg(test)]
 mod session_start_tests {

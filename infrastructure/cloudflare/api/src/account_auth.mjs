@@ -19,6 +19,7 @@
 //   begin_rotation   a one-time challenge for replacing the key
 //   mark_prompt_seen the one-time prompt to replace the key has been shown
 //   unlink_discord   the owner unlinked Discord (replacing the key, or in Settings)
+//   unlink_slack     a key replacement revoked the Slack link
 //   ack_notice       the route sent the notice of a key change
 //   rotate           replace the key: two signatures, one step
 //   admin_replace_key an administrator replaces the key after a manual identity check
@@ -524,6 +525,7 @@ export class AccountAuth {
       state.credentials_pending = { api_keys: [...(revoke.api_keys || [])], webhooks: [...(revoke.webhooks || [])], attempts: 0, next_at: this.now };
       // Every replacement that revokes the link moves the time: a link made after an earlier unlink goes too.
       if (revoke.discord) state.discord_unlinked_at = state.key_changed_at;
+      if (revoke.slack) state.slack_unlinked_at = state.key_changed_at;
       if (!credentialsOwed(state)) state.credentials_pending = null;
     }
 
@@ -633,6 +635,7 @@ function publicState(state, now) {
     admin_review: state.admin_review_flags || [],
     admin_undo_until: state.admin_undo ? state.admin_undo.until : null,
     discord_unlinked_at: state.discord_unlinked_at || null,
+    slack_unlinked_at: state.slack_unlinked_at || null,
     email_verified_at: email.verified_at,
     email_aged: email.aged,
     email_change_pending: email.pending,
@@ -964,6 +967,21 @@ const OPS = {
       await this.commit(state, 'discord_unlinked', {});
     }
     return { ok: true, discord_unlinked_at: state.discord_unlinked_at };
+  },
+
+  /// The Slack link revoked, when replacing the key: the same rule as
+  /// unlink_discord. The link lives in KV (src/slack_link.mjs); a reader shows
+  /// only a link made after this time.
+  async unlink_slack(args) {
+    const { state, error } = await this.load(args);
+    if (error) return error;
+    const keyChange = state.key_changed_at || null;
+    const behind = !!keyChange && (!state.slack_unlinked_at || state.slack_unlinked_at < keyChange);
+    if (!state.slack_unlinked_at || behind) {
+      state.slack_unlinked_at = behind ? keyChange : new Date(this.now).toISOString();
+      await this.commit(state, 'slack_unlinked', {});
+    }
+    return { ok: true, slack_unlinked_at: state.slack_unlinked_at };
   },
 
   /// The one-time "replace your key" prompt has been shown to this account.

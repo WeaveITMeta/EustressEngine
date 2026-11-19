@@ -20,6 +20,9 @@ use crate::commands::{SelectionManager, TransformManager};
 
 // Slint UI with software renderer
 pub mod slint_ui;
+/// The drain contract: the startup guard and tests that keep
+/// `drain_slint_actions` from being skipped by a missing registration.
+pub(crate) mod drain_contract;
 /// Data-driven Insert-menu catalog (ClassRegistry → grouped descriptors).
 pub mod insert_classes;
 pub mod particle_sim_panel;
@@ -35,6 +38,8 @@ pub mod sound_panel;
 pub mod property_enums;
 /// Dock layouts per mode and discipline, remembered user layouts and pins.
 pub mod layout_tables;
+/// A harness Space's pinned panel layout and selection, restored on open.
+pub mod harness_pins;
 /// How much of an outside string a Text draws (the renderer's i16 limit).
 pub mod display_text;
 /// The Publish dialog's "Publish to" picker (Publish As...).

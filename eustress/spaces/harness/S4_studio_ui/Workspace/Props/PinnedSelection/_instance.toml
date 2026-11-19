@@ -1,0 +1,45 @@
+[asset]
+mesh = "parts/block.glb"
+scene = "Scene0"
+
+[metadata]
+archivable = true
+class_name = "Part"
+created = "2026-11-16T00:00:00Z"
+last_modified = "2026-11-16T00:00:00Z"
+name = "PinnedSelection"
+unit = "m"
+uuid = "62616faf08348f5c2a645b60b91dab7f"
+
+[properties]
+anchored = true
+can_collide = true
+cast_shadow = true
+color = [
+    163,
+    162,
+    165,
+]
+destructible = false
+locked = false
+material = "SmoothPlastic"
+reflectance = 0.0
+transparency = 0.0
+
+[transform]
+position = [
+    0.0,
+    0.5,
+    -4.0,
+]
+rotation = [
+    0.0,
+    0.0,
+    0.0,
+    1.0,
+]
+scale = [
+    4.0,
+    1.0,
+    2.0,
+]

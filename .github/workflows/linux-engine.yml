@@ -22,7 +22,7 @@ jobs:
         with:
           submodules: false
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.100.0
 
       - name: Install Linux system deps
         run: |
@@ -62,7 +62,7 @@ jobs:
         with:
           submodules: false
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.100.0
 
       - name: Install Linux system deps
         run: |

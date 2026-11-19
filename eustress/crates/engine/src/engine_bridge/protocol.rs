@@ -224,6 +224,12 @@ pub enum MethodName {
     /// records (create/delete with provenance) as serde views. The AI's
     /// "what changed, in order, and why" read surface. Read-only.
     OplogTail,
+    /// The world-simulation inspector: each prefetch source's predicted
+    /// cells, lead times, budget and hit and miss counts; simulation LOD's
+    /// tiers, transitions and per-body tiers; and the frame timeline with
+    /// its critical stage (`eustress_common::world_sim::inspect_json`).
+    /// Read-only.
+    SimInspect,
     /// Deterministically advance the fixed-timestep simulation by N ticks
     /// (the POMDP control primitive). Unpauses physics for exactly those
     /// ticks, drives FixedMain manually (wall-clock-independent), restores.
@@ -416,6 +422,7 @@ where
         "entity.promote" => MethodName::EntityPromote,
         "entity.demote" => MethodName::EntityDemote,
         "oplog.tail" => MethodName::OplogTail,
+        "sim.inspect" => MethodName::SimInspect,
         "sim.step" => MethodName::SimStep,
         "scene.raycast" => MethodName::Raycast,
         "scene.overview" => MethodName::SceneOverview,
@@ -587,6 +594,19 @@ pub mod handlers {
         }
     }
 
+    /// `sim.inspect`: what prefetch, simulation LOD and the frame timeline
+    /// are doing right now. Params: `limit` (tiered bodies listed, default
+    /// 200, at most 5000). Read-only.
+    pub fn sim_inspect(world: &mut World, req: &BridgeRequest) -> BridgeResponse {
+        let limit = req
+            .params
+            .get("limit")
+            .and_then(|v| v.as_u64())
+            .map(|n| n.min(5_000) as usize)
+            .unwrap_or(200);
+        BridgeResponse::ok(req.id.clone(), eustress_common::world_sim::inspect_json(world, limit))
+    }
+
     /// Deterministically advance the fixed-timestep simulation by `ticks` fixed
     /// updates (default 1, capped 10000), then return — the POMDP control
     /// primitive. Drives the sim with the SAME manual loop the determinism test
@@ -653,9 +673,10 @@ pub mod handlers {
         if let (Some(was), Some(mut c)) = (particles_budgeted, world.get_resource_mut::<ParticleSimControl>()) {
             c.budgeted = was;
         }
-        // Leave physics PAUSED so the world is frozen between steps.
+        // Leave physics HELD so the world is frozen between steps: exactly
+        // the ticks pumped above ran, and none follows on the next frame.
         if let Some(mut pt) = world.get_resource_mut::<Time<avian3d::prelude::Physics>>() {
-            pt.pause();
+            crate::simulation::plugin::hold_physics(&mut pt);
         }
         ran
     }
@@ -2806,7 +2827,13 @@ pub mod handlers {
                         .spawn(async move {
                             match img.try_into_dynamic() {
                                 Ok(dyn_img) => {
-                                    if let Err(e) = dyn_img.save(&p) {
+                                    // The window's frame carries an alpha
+                                    // channel in which the 3D view is partly
+                                    // transparent. The capture is what the
+                                    // screen shows, so it is written opaque;
+                                    // with the alpha kept, a viewer that
+                                    // honours it shows a washed-out picture.
+                                    if let Err(e) = dyn_img.to_rgb8().save(&p) {
                                         tracing::warn!("viewport.capture save failed: {}", e);
                                     } else {
                                         tracing::info!("viewport.capture → {:?}", p);
@@ -3004,7 +3031,123 @@ pub mod handlers {
             .map(|sr| sr.0.join(".eustress"))
             .unwrap_or_else(|| std::env::temp_dir().join("eustress-ai-camera"));
         let _ = std::fs::create_dir_all(&dir);
-        let path = dir.join("ai_camera.png");
+        // Optional `width` and `height` (pixels, both or neither) and `path`
+        // (a `.png`, absolute or relative to the `.eustress` folder). With
+        // none of them the request behaves as it always did: the default size
+        // to `<.eustress>/ai_camera.png`.
+        let side = |key: &str| -> Result<Option<u32>, String> {
+            match req.params.get(key) {
+                None | Some(Value::Null) => Ok(None),
+                Some(v) => match v.as_u64() {
+                    Some(n) if (1..=crate::ai_camera::MAX_CAPTURE_SIDE as u64).contains(&n) => {
+                        Ok(Some(n as u32))
+                    }
+                    _ => Err(format!(
+                        "`{key}` must be a whole number of pixels from 1 to {}",
+                        crate::ai_camera::MAX_CAPTURE_SIDE
+                    )),
+                },
+            }
+        };
+        let (width, height) = match (side("width"), side("height")) {
+            (Err(e), _) | (_, Err(e)) => {
+                return BridgeResponse::error(req.id.clone(), BridgeError::invalid_params(e));
+            }
+            (Ok(Some(w)), Ok(Some(h))) => (w, h),
+            (Ok(None), Ok(None)) => (crate::ai_camera::AI_CAM_WIDTH, crate::ai_camera::AI_CAM_HEIGHT),
+            _ => {
+                return BridgeResponse::error(
+                    req.id.clone(),
+                    BridgeError::invalid_params("give `width` and `height` together, or neither"),
+                );
+            }
+        };
+        let path = match req.params.get("path") {
+            None | Some(Value::Null) => dir.join("ai_camera.png"),
+            Some(v) => {
+                let Some(text) = v.as_str().filter(|s| !s.trim().is_empty()) else {
+                    return BridgeResponse::error(
+                        req.id.clone(),
+                        BridgeError::invalid_params("`path` must be a non-empty string"),
+                    );
+                };
+                let requested = std::path::PathBuf::from(text);
+                let is_png = requested
+                    .extension()
+                    .and_then(|e| e.to_str())
+                    .is_some_and(|e| e.eq_ignore_ascii_case("png"));
+                if !is_png {
+                    return BridgeResponse::error(
+                        req.id.clone(),
+                        BridgeError::invalid_params("`path` must end in .png"),
+                    );
+                }
+                let full = if requested.is_absolute() { requested } else { dir.join(requested) };
+                if let Some(parent) = full.parent() {
+                    if let Err(e) = std::fs::create_dir_all(parent) {
+                        return BridgeResponse::error(
+                            req.id.clone(),
+                            BridgeError::invalid_params(format!(
+                                "cannot create the folder for `path`: {e}"
+                            )),
+                        );
+                    }
+                }
+                full
+            }
+        };
+        // Optional `ticks` (an array of whole numbers, or `"0,60,300,600"`):
+        // capture at those simulation tick indices of the current Play run
+        // instead of now. One PNG per tick, `<stem>_t<tick:06>.png` beside
+        // `path` (default `<.eustress>/tick_captures/tick`), and a log
+        // `<stem>_tick_log.json` beside them. Refused, with a named error and no
+        // frame, unless `sim.time_scale` is 1.0. The caller opens Play; tick 0
+        // is the run's first step. Without `ticks` nothing here applies.
+        if let Some(ticks_value) = req.params.get("ticks").filter(|v| !v.is_null()) {
+            let text = match ticks_value {
+                Value::String(s) => s.clone(),
+                Value::Array(a) => a
+                    .iter()
+                    .map(|n| n.as_u64().map(|n| n.to_string()).unwrap_or_else(|| "?".to_string()))
+                    .collect::<Vec<_>>()
+                    .join(","),
+                _ => String::new(),
+            };
+            let ticks = match crate::ai_camera::parse_ticks(&text) {
+                Ok(t) => t,
+                Err(e) => {
+                    return BridgeResponse::error(
+                        req.id.clone(),
+                        BridgeError::invalid_params(format!("`ticks`: {e}")),
+                    );
+                }
+            };
+            let named = req.params.get("path").is_some_and(|v| !v.is_null());
+            let (tick_dir, stem) = if named {
+                (
+                    path.parent().map(std::path::Path::to_path_buf).unwrap_or_else(|| dir.clone()),
+                    path.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_else(|| "tick".to_string()),
+                )
+            } else {
+                (dir.join("tick_captures"), "tick".to_string())
+            };
+            return match crate::ai_camera::arm_tick_captures(world, ticks.clone(), tick_dir.clone(), &stem, width, height) {
+                Ok(log) => BridgeResponse::ok(
+                    req.id.clone(),
+                    serde_json::json!({
+                        "ticks": ticks,
+                        "dir": tick_dir.to_string_lossy(),
+                        "stem": stem,
+                        "log": log.to_string_lossy(),
+                        "width": width,
+                        "height": height,
+                        "tick_source": "physics steps executed since the Play run began",
+                        "note": "tick capture armed; the PNGs and the log land as the run reaches each tick, so read the log",
+                    }),
+                ),
+                Err(e) => BridgeResponse::error(req.id.clone(), BridgeError::invalid_params(e)),
+            };
+        }
         // Clear the stale frame so a premature read errors instead of
         // returning the previous capture.
         let _ = std::fs::remove_file(&path);
@@ -3014,11 +3157,13 @@ pub mod handlers {
                 BridgeError::internal("AiCameraState not available"),
             );
         };
-        crate::ai_camera::request_capture(&mut *state, path.clone());
+        crate::ai_camera::request_capture_sized(&mut *state, path.clone(), width, height);
         BridgeResponse::ok(
             req.id.clone(),
             serde_json::json!({
                 "path": path.to_string_lossy(),
+                "width": width,
+                "height": height,
                 "note": "AI camera capture queued; the PNG lands within about 10 frames, so read the path after a moment",
             }),
         )

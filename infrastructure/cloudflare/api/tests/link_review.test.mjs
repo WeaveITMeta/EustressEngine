@@ -68,7 +68,7 @@ function network(pages) {
       const body = JSON.parse(init.body);
       net.scanBodies.push(body);
       const id = `00000000-0000-4000-8000-${String(++n).padStart(12, '0')}`;
-      net.scans.set(id, { url: body.url, polls: 0 });
+      net.scans.set(id, { url: body.url, polls: 0, nth: net.scanBodies.filter(b => b.url === body.url).length });
       return Response.json({ uuid: id, api: 'x', visibility: 'unlisted', url: body.url, message: 'Submission successful' });
     }
     const [kind, id] = rest.split('/');
@@ -77,6 +77,8 @@ function network(pages) {
     const s = pages[scan.url] || {};
     if (kind === 'result') {
       if ((s.pending || 0) > scan.polls) { scan.polls += 1; return new Response('{}', { status: 404 }); }
+      // `unloadable`: how many of this URL's scans could not load the page (the documented `task.success: false`).
+      if ((s.unloadable || 0) >= scan.nth) return Response.json({ task: { url: scan.url, uuid: id, success: false, status: 'Failed' }, verdicts: { overall: { malicious: false } }, meta: { processors: {} } });
       return Response.json({
         task: { url: scan.url, uuid: id, success: true },
         page: { url: s.finalUrl || scan.url, title: s.title || '' },
@@ -85,6 +87,7 @@ function network(pages) {
         data: { requests: [] },
       });
     }
+    if (kind === 'dom' && s.domStatus) return new Response('no', { status: s.domStatus });
     if (kind === 'dom') return new Response(s.html || page(s.title || 'A page', '<p>Hello</p>'), { headers: { 'content-type': 'text/plain' } });
     return new Response('?', { status: 400 });
   };
@@ -215,7 +218,18 @@ test('a link that ends on a different registrable domain is removed (redirects_e
   assert.equal(net.anthropic.length, 1, 'only the same-site page is judged');
 });
 
-test('the scan is Unlisted with the EustressLinkReview agent, and a scan still running is polled on a later step, never in a loop', async () => {
+test('the scan is Public by default (the Free plan has no unlisted scans), and Unlisted only when the var says exactly that', async () => {
+  for (const [vis, want] of [[undefined, 'Public'], ['Unlisted', 'Unlisted'], ['unlisted', 'Public'], ['Private', 'Public']]) {
+    const env = { ...setup(), ...(vis === undefined ? {} : { URLSCANNER_VISIBILITY: vis }) };
+    const url = 'https://shop.example-robotics.com/kits';
+    const net = network({ [url]: MARKET[url] });
+    await listing(env, { links: [{ url }] });
+    await stepLinkReview(env, SIM, { scannerFetch: net.fetch, anthropicFetch: net.fetch, policyText: GUARDIAN_POLICY_TEXT }, { now: Date.now(), submitOnly: true });
+    assert.deepEqual(net.scanBodies.map(b => b.visibility), [want], String(vis));
+  }
+});
+
+test('the scan carries the EustressLinkReview agent, and a scan still running is polled on a later step, never in a loop', async () => {
   const env = setup();
   const url = 'https://slow.example-robotics.com/';
   const net = network({ [url]: { pending: 2, title: 'Slow', ai: answer() } });
@@ -223,7 +237,7 @@ test('the scan is Unlisted with the EustressLinkReview agent, and a scan still r
   const deps = { scannerFetch: net.fetch, anthropicFetch: net.fetch, policyText: GUARDIAN_POLICY_TEXT };
   const t0 = Date.now();
   await stepLinkReview(env, SIM, deps, { now: t0, submitOnly: true });
-  assert.deepEqual(net.scanBodies, [{ url, visibility: 'Unlisted', customagent: 'EustressLinkReview/1' }]);
+  assert.deepEqual(net.scanBodies, [{ url, visibility: 'Public', customagent: 'EustressLinkReview/1' }]);
   await stepLinkReview(env, SIM, deps, { now: t0 + 2 * MINUTE });
   assert.equal(net.calls.filter(c => c.includes('/result/')).length, 1, 'one poll per step');
   assert.equal(only(await readLinkState(env, SIM)).status, 'pending');
@@ -524,4 +538,49 @@ test('scannerFacts reads the documented v2 domainCategories shape: an item named
   const shop = scannerFacts({ meta: { processors: { domainCategories: { data: [{ name: 'Shopping', isPrimary: true, inherited: null }] } } } }, 'https://shop.example.com/');
   assert.equal(shop.malicious, false);
   assert.deepEqual(shop.categories, ['Shopping']);
+});
+
+// ── a page the scanner cannot load (task.success false) ─────────────────────
+
+test('scannerFacts reads task.success false as a page that did not load', () => {
+  assert.equal(scannerFacts({ task: { success: false, status: 'Failed' } }, 'https://down.example.com/').loaded, false);
+  assert.equal(scannerFacts({ task: { success: true } }, 'https://up.example.com/').loaded, true);
+  assert.equal(scannerFacts({}, 'https://up.example.com/').loaded, true);
+});
+
+test('a page the scanner cannot load is scanned once more, then removed as unreachable: no AI call, nothing cached', async () => {
+  const env = setup();
+  const url = 'https://down.example-shop.com/';
+  const net = network({ [url]: { title: 'Down shop', unloadable: 99 } });
+  await listing(env, { links: [{ url }] });
+  const e = only(await run(env, net, SIM, 8));
+  assert.equal(e.status, 'removed');
+  assert.equal(e.code, 'page_unreachable');
+  assert.equal(e.reason, LINK_REASONS.page_unreachable);
+  assert.equal(net.scanBodies.length, 2, 'scanned twice, not the shared failed scan again');
+  assert.equal(net.anthropic.length, 0);
+  assert.equal(net.calls.filter(c => c.includes('/dom/')).length, 0);
+  assert.equal(await env.SOCIAL.get(`linkreview:${createHash('sha256').update(url).digest('hex')}`), null);
+});
+
+test('a site down for one scan is approved on the next', async () => {
+  const env = setup();
+  const url = 'https://blip.example-robotics.com/';
+  const net = network({ [url]: { title: 'Blip Robotics: actuators and kits', unloadable: 1, ai: answer({ risk_score: 6, kind: 'engineering' }) } });
+  await listing(env, { links: [{ url }] });
+  const e = only(await run(env, net, SIM, 8));
+  assert.equal(e.status, 'approved');
+  assert.equal(net.scanBodies.length, 2);
+});
+
+test('a scan whose DOM cannot be read is removed after a bounded number of tries, never looped', async () => {
+  const env = setup();
+  const url = 'https://nodom.example-shop.com/';
+  const net = network({ [url]: { title: 'No DOM shop', domStatus: 500 } });
+  await listing(env, { links: [{ url }] });
+  const e = only(await run(env, net, SIM, 10));
+  assert.equal(e.status, 'removed');
+  assert.equal(e.code, 'review_failed');
+  assert.equal(net.calls.filter(c => c.includes('/dom/')).length, 3);
+  assert.equal(net.anthropic.length, 0);
 });

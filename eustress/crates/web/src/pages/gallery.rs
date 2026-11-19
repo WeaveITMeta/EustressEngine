@@ -229,14 +229,17 @@ pub fn GalleryPage() -> impl IntoView {
     let filter = RwSignal::new(Filter::All);
     let runs = StoredValue::new(0u64);
 
+    // An answer can arrive after the visitor has left the Gallery and the page's signals are gone; `try_set` then does
+    // nothing, where `set` would panic and stop the whole app ("a reactive value that has already been disposed").
     let load = move || {
         shelf.set(Shelf::Loading);
         spawn_local(async move {
             let client = ApiClient::new(&api_url.get_value());
-            match catalog::fetch_listings(&client).await {
-                Ok(list) => shelf.set(Shelf::Ready(list)),
-                Err(e) => shelf.set(Shelf::Failed(api::failure_sentence(&e))),
-            }
+            let answer = match catalog::fetch_listings(&client).await {
+                Ok(list) => Shelf::Ready(list),
+                Err(e) => Shelf::Failed(api::failure_sentence(&e)),
+            };
+            shelf.try_set(answer);
         });
     };
 
@@ -245,7 +248,7 @@ pub fn GalleryPage() -> impl IntoView {
         load();
         spawn_local(async move {
             let client = ApiClient::new(&api_url.get_value());
-            tags.set(catalog::fetch_popular_tags(&client).await);
+            tags.try_set(catalog::fetch_popular_tags(&client).await);
         });
         let run = runs.get_value() + 1;
         runs.set_value(run);
@@ -564,6 +567,8 @@ pub(crate) fn ListingCard(listing: Listing, live: RwSignal<LiveNow>) -> impl Int
     let corner_listing = listing.clone();
     let play_id = id.clone();
     let play_label = format!("Play {name}");
+    // Share Source is on: anyone may open a copy in Studio. The copy is a new Universe of the visitor's own.
+    let studio_copy = listing.studio_copy_link().map(|link| (link, format!("Open a copy of {name} in Eustress Studio")));
 
     view! {
         <article class="g-card" class:hot=move || hot.get()
@@ -591,6 +596,9 @@ pub(crate) fn ListingCard(listing: Listing, live: RwSignal<LiveNow>) -> impl Int
                     }).collect_view()}
                     <span class="g-chip">{if multiplayer { "Multiplayer" } else { "Solo" }}</span>
                     {rating.map(|r| view! { <span class="g-chip">{r}</span> })}
+                    {studio_copy.map(|(link, label)| view! {
+                        <a class="g-chip g-studio" href=link title=label.clone() aria-label=label>"Open in Studio"</a>
+                    })}
                 </div>
                 <div class="g-facts">
                     <span><b>{visits}</b>{if visits == 1 { " visit" } else { " visits" }}</span>
@@ -604,9 +612,11 @@ pub(crate) fn ListingCard(listing: Listing, live: RwSignal<LiveNow>) -> impl Int
 
 /// A live session's art in the rail, or nothing when it has none. The Worker answers 404 for art it will not serve (animated,
 /// transparent, several images, not an image, too large), so a picture that fails to load clears art_ok and the box is left
-/// empty, as for a session with no art, never the browser's broken-image icon. Each card makes its own signal.
+/// empty, as for a session with no art, never the browser's broken-image icon. Each card makes its own signal. The error
+/// can fire after the card was drawn again and its signal is gone (a picture still loading when the rail refreshed), so
+/// it uses `try_set`, which then does nothing, where `set` would panic.
 fn live_picture(art: Option<String>, art_ok: RwSignal<bool>) -> impl IntoView {
-    move || art.clone().filter(|_| art_ok.get()).map(|u| view! { <img src=u alt="" loading="lazy" decoding="async" on:error=move |_| art_ok.set(false) /> })
+    move || art.clone().filter(|_| art_ok.get()).map(|u| view! { <img src=u alt="" loading="lazy" decoding="async" on:error=move |_| { art_ok.try_set(false); } /> })
 }
 
 /// A live session in the rail: the Space, who hosts it, where, how full it is, and Join (which opens the chooser).
@@ -736,7 +746,10 @@ mod tests {
         let at = page.find("src=u alt=\"\"").unwrap();
         let start = page[..at].rfind("<img").expect("an img tag");
         let tag = &page[start..start + page[start..].find("/>").expect("the tag ends")];
-        assert!(tag.contains("on:error=move |_| art_ok.set(false)"), "{tag}");
+        // try_set: the error can come after the card's signal is gone, and set would then panic and stop the app.
+        assert!(tag.contains("on:error=move |_| { art_ok.try_set(false); }"), "{tag}");
+        // The same for the answers GalleryPage awaits: the visitor may have left the page before they arrive.
+        assert!(page.contains("shelf.try_set(answer);") && page.contains("tags.try_set(catalog::fetch_popular_tags(&client).await);"));
         assert!(page.contains("art.clone().filter(|_| art_ok.get())"), "the picture is drawn only while art_ok");
         // One signal for each card: a signal shared by the cards would blank every card at the first failure.
         assert!(page.contains("{live_picture(art, RwSignal::new(true))}</a>"));

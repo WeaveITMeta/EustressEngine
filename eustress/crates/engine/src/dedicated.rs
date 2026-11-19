@@ -92,6 +92,36 @@ pub fn stop_file_present(status_file: &Path) -> bool {
     stop_path(status_file).is_file()
 }
 
+/// The status file's `phase` when the server left because nobody was in it
+/// for `EUSTRESS_SERVER_EMPTY_EXIT_SECS`. A fleet reads it to tell an empty
+/// exit from a crash or a stop.
+pub const EMPTY_EXIT_PHASE: &str = "exited-empty";
+
+/// The status file's `phase` when the server left because it could not host:
+/// the world bake, the bind or the listener failed, so nobody could join.
+/// The process ends with a non-zero code. A fleet frees the slot and starts
+/// a fresh server.
+pub const HOST_FAILED_PHASE: &str = "host-failed";
+
+/// The shortest empty wait `EUSTRESS_SERVER_EMPTY_EXIT_SECS` may ask for:
+/// two gallery heartbeats (30 s apart), so a session the gallery has just
+/// listed is not gone before a player can click Play.
+pub const MIN_EMPTY_EXIT_SECS: f64 = 60.0;
+
+/// Seconds an empty server waits before it leaves, from
+/// `EUSTRESS_SERVER_EMPTY_EXIT_SECS`. Unset, empty, not a number, not
+/// finite, zero or negative means never; anything shorter than
+/// [`MIN_EMPTY_EXIT_SECS`] reads as that.
+pub fn empty_exit_secs_from(raw: Option<&str>) -> Option<f64> {
+    raw.and_then(|text| text.trim().parse::<f64>().ok())
+        .filter(|secs| secs.is_finite() && *secs > 0.0)
+        .map(|secs| secs.max(MIN_EMPTY_EXIT_SECS))
+}
+
+pub fn empty_exit_secs_from_env() -> Option<f64> {
+    empty_exit_secs_from(std::env::var("EUSTRESS_SERVER_EMPTY_EXIT_SECS").ok().as_deref())
+}
+
 /// The open Universe's listing on the staging API.
 pub fn staging_listing_id(space_root: &Path) -> Result<String, String> {
     let universe = crate::space::universe_root_for_path(space_root).unwrap_or_else(|| space_root.to_path_buf());
@@ -167,6 +197,23 @@ pub fn download_dir(sim_id: &str) -> PathBuf {
         .join(sim_id)
 }
 
+/// The directory one server downloads its listing into.
+///
+/// A start clears this directory before it writes the world
+/// (`gallery_edit::download_for_host`), so it is one server's own and never
+/// holds anything else. A server a launcher named (`EUSTRESS_SERVER_ID`) and
+/// gave a status file downloads into `world`, beside that status file: the
+/// launcher gives each server its own status directory, so two servers of
+/// one listing on one machine never clear each other's world, status file or
+/// stop file. Any other server downloads into
+/// `<listing cache>/<server id>/world`.
+pub fn server_download_dir(sim_id: &str, server_id: &str, status_file: Option<&Path>) -> PathBuf {
+    match status_file.and_then(Path::parent) {
+        Some(dir) if server_id != "default" && !dir.as_os_str().is_empty() => dir.join("world"),
+        _ => download_dir(sim_id).join(server_id).join("world"),
+    }
+}
+
 /// What the child writes, and what the status window reads.
 #[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
 pub struct DedicatedStatus {
@@ -178,6 +225,11 @@ pub struct DedicatedStatus {
     pub join_link: String,
     pub public_host: String,
     pub players: usize,
+    /// Seats taken: the players in the world and the ones still joining
+    /// (`HostSession::seated_count`). A fleet places by this, because a
+    /// player downloading the world is not in `players` yet.
+    #[serde(default)]
+    pub seated: usize,
     pub max_players: u16,
     pub sim_id: String,
     pub server_scripts: bool,
@@ -334,16 +386,43 @@ fn cpu_model() -> String {
         .unwrap_or_default()
 }
 
-/// GPU and CPU class for the heartbeat. Read once. An empty GPU is unknown,
-/// not a guessed model.
+// The fleet host agent's GPU read (`eustress-forge`, `gpu_probe.rs`), compiled
+// here as well so both report a GPU the same way: an operating-system query
+// (`nvidia-smi`, `/sys/class/drm`, the registry), never a GPU device.
+#[allow(dead_code)]
+#[path = "../../forge/src/gpu_probe.rs"]
+mod gpu_probe;
+
+/// GPU and CPU class for the heartbeat. An empty GPU is unknown or none, not
+/// a guessed model. The GPU is read on a background thread the first time
+/// this is asked, so a frame never waits on it; until the read answers, the
+/// class carries no GPU and is not kept.
 pub fn hardware_class() -> serde_json::Value {
     static CACHED: std::sync::OnceLock<serde_json::Value> = std::sync::OnceLock::new();
-    CACHED.get_or_init(|| {
-        let cpu = cpu_model();
-        let gpu = String::new();
-        let tier = part_tier(&gpu).max(part_tier(&cpu));
-        serde_json::json!({ "gpu": gpu, "cpu": cpu, "tier": tier_name(tier) })
-    }).clone()
+    if let Some(done) = CACHED.get() {
+        return done.clone();
+    }
+    gpu_probe::start();
+    let cpu = cpu_model();
+    match gpu_probe::ready() {
+        Some(gpu) => CACHED.get_or_init(|| hardware_json(&gpu.name, gpu.vram_mb, gpu.available, &cpu)).clone(),
+        None => hardware_json("", 0, false, &cpu),
+    }
+}
+
+/// The heartbeat's `hardware`: `gpu`, `cpu` and `tier` as every host sends
+/// them, and `gpu_vram_mb` (0 where the platform does not expose it) and
+/// `gpu_available` (a hardware GPU, not a software or display-only adapter),
+/// which the API reads when present.
+pub fn hardware_json(gpu: &str, gpu_vram_mb: u64, gpu_available: bool, cpu: &str) -> serde_json::Value {
+    let tier = part_tier(gpu).max(part_tier(cpu));
+    serde_json::json!({
+        "gpu": gpu,
+        "cpu": cpu,
+        "tier": tier_name(tier),
+        "gpu_vram_mb": gpu_vram_mb,
+        "gpu_available": gpu_available,
+    })
 }
 
 static LATENCY_MS: Mutex<Option<u32>> = Mutex::new(None);
@@ -759,6 +838,71 @@ mod tests {
     use super::*;
 
     #[test]
+    fn the_hardware_class_keeps_its_shape_and_adds_the_gpu() {
+        let with = hardware_json("NVIDIA GeForce RTX 2080 Ti", 11_264, true, "Intel(R) Core(TM) i9-10980XE");
+        assert_eq!(
+            with,
+            serde_json::json!({
+                "gpu": "NVIDIA GeForce RTX 2080 Ti",
+                "cpu": "Intel(R) Core(TM) i9-10980XE",
+                "tier": "high",
+                "gpu_vram_mb": 11_264,
+                "gpu_available": true,
+            })
+        );
+        let none = hardware_json("", 0, false, "");
+        assert_eq!(none["gpu"], "");
+        assert_eq!(none["tier"], "unknown", "no GPU and no CPU name is unknown, not a guess");
+        assert_eq!(none["gpu_available"], false);
+    }
+
+    /// A start clears its download directory. Two servers of one listing on
+    /// one machine (a fleet's warm server beside a session with players)
+    /// must never share that directory, and it must never hold a status file
+    /// or a stop file: clearing it would take the world from under a running
+    /// server and delete the file that stops it.
+    #[test]
+    fn each_server_downloads_into_its_own_directory() {
+        let sim = "07d084d8-9098-4192-bb48-84d2c428db36";
+        let listing = download_dir(sim);
+        let status_a = listing.join("a").join("status.json");
+        let status_b = listing.join("b").join("status.json");
+        let world_a = server_download_dir(sim, "a", Some(&status_a));
+        let world_b = server_download_dir(sim, "b", Some(&status_b));
+        assert_eq!(world_a, listing.join("a").join("world"), "beside its own status file");
+        assert_ne!(world_a, world_b, "two servers of one listing share a download directory");
+        assert!(!world_a.starts_with(&world_b) && !world_b.starts_with(&world_a));
+        let (stop_a, stop_b) = (stop_path(&status_a), stop_path(&status_b));
+        for world in [&world_a, &world_b] {
+            for kept in [&status_a, &status_b, &stop_a, &stop_b] {
+                assert!(!kept.starts_with(world), "{} would be deleted with {}", kept.display(), world.display());
+            }
+        }
+
+        // A server nobody named, and one with no status file, keep to the listing's cache, each under its own id.
+        let default = server_download_dir(sim, "default", None);
+        assert_eq!(default, listing.join("default").join("world"));
+        assert_eq!(server_download_dir(sim, "a", None), listing.join("a").join("world"));
+        assert!(!status_a.starts_with(&default) && !world_a.starts_with(&default));
+        // Studio keeps its own server's status beside the open Universe; the download never goes there.
+        let studio_status = Path::new("universe").join(".eustress").join("dedicated-server.json");
+        assert_eq!(server_download_dir(sim, "default", Some(&studio_status)), default);
+        // A status file with no directory names no place to download into.
+        assert_eq!(server_download_dir(sim, "a", Some(Path::new("status.json"))), listing.join("a").join("world"));
+    }
+
+    /// The status file an older launcher reads has no `seated`; one an older
+    /// engine wrote has none either and reads as 0.
+    #[test]
+    fn a_status_without_seated_reads_as_zero() {
+        let old = r#"{"pid":1,"phase":"hosting","port":7777,"listening":true,"pin":"","join_link":"","public_host":"","players":2,"max_players":4,"sim_id":"","server_scripts":false,"script_note":"","probe":"","error":""}"#;
+        let status: DedicatedStatus = serde_json::from_str(old).expect("an older status file still reads");
+        assert_eq!((status.players, status.seated), (2, 0));
+        let written = serde_json::to_value(DedicatedStatus { players: 1, seated: 3, ..Default::default() }).unwrap();
+        assert_eq!(written["seated"], 3);
+    }
+
+    #[test]
     fn a_binding_request_is_twenty_bytes_and_its_answer_parses() {
         let id = [1u8, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12];
         let request = stun_binding_request(&id);
@@ -811,5 +955,14 @@ mod tests {
         let status = Path::new("/tmp/universe/.eustress/dedicated-server.json");
         assert_eq!(stop_path(status), Path::new("/tmp/universe/.eustress/dedicated.stop"));
         assert_eq!(log_path(status), Path::new("/tmp/universe/.eustress/dedicated-server.log"));
+    }
+
+    #[test]
+    fn an_empty_exit_is_off_unless_asked_and_never_shorter_than_a_minute() {
+        for never in [None, Some(""), Some("soon"), Some("0"), Some("-60"), Some("inf"), Some("NaN")] {
+            assert_eq!(empty_exit_secs_from(never), None, "{never:?}");
+        }
+        assert_eq!(empty_exit_secs_from(Some(" 300 ")), Some(300.0));
+        assert_eq!(empty_exit_secs_from(Some("5")), Some(MIN_EMPTY_EXIT_SECS));
     }
 }

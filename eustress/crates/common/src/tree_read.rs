@@ -305,17 +305,19 @@ fn read(records: &[(String, Vec<u8>)], rule: Option<TransformRule>, posed: bool)
             if skip_dir(service) {
                 continue;
             }
-            // A service is bound by its class, never by a key. StarterPlayer
-            // carries its character settings from its service file.
+            // A service is bound by its class, never by a key. Its service
+            // file gives StarterPlayer its character settings, and any
+            // service its attributes and tags, as Studio's seed gives them.
+            let key = format!("{service}/_service.toml");
+            let doc = index.file(&key).and_then(|i| reader.parse(&key, i));
             let props = match service.as_str() {
-                "StarterPlayer" => {
-                    let key = format!("{service}/_service.toml");
-                    let doc = index.file(&key).and_then(|i| reader.parse(&key, i));
-                    doc.as_ref().map(starter_player_props).unwrap_or_default()
-                }
+                "StarterPlayer" => doc.as_ref().map(starter_player_props).unwrap_or_default(),
                 _ => Vec::new(),
             };
             let id = reader.dm.create_scene(service, service, Some(root), props);
+            if let Some(doc) = &doc {
+                reader.seed_file_data(id, doc);
+            }
             reader.walk(service, id, GlobalTransform::IDENTITY, service, None);
         }
     }
@@ -1170,6 +1172,24 @@ mod tests {
             Some(DmValue::CFrame(cf)) => cf.position.to_vec3(),
             other => panic!("{other:?}"),
         }
+    }
+
+    /// A service's `[attributes]` are the service's own: an import folds the
+    /// value objects that sat directly under a Roblox service into them.
+    #[test]
+    fn a_services_attributes_come_from_its_service_file() {
+        let tree = read_space_records(&[
+            rec(
+                "ReplicatedStorage/_service.toml",
+                "[service]\nclass_name = \"ReplicatedStorage\"\n\n[attributes]\nRoundTime = 90\n",
+            ),
+            rec("Workspace/_service.toml", "[service]\nclass_name = \"Workspace\"\n"),
+        ]);
+        assert!(tree.report.problems.is_empty(), "{:?}", tree.report.problems);
+        let storage = tree.dm.find_service("ReplicatedStorage").expect("ReplicatedStorage");
+        assert_eq!(tree.dm.get_attribute(storage, "RoundTime"), Some(DmValue::Number(90.0)));
+        let workspace = tree.dm.find_service("Workspace").expect("Workspace");
+        assert_eq!(tree.dm.get_attribute(workspace, "RoundTime"), None);
     }
 
     #[test]

@@ -1,0 +1,2998 @@
+warning: usage of an `unsafe` block
+  --> vendor\lsm-tree\src\binary_search.rs:25:20
+   |
+25 |         let item = unsafe { slice.get_unchecked(mid) };
+   |                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+note: the lint level is defined here
+  --> vendor\lsm-tree\src\binary_search.rs:24:16
+   |
+24 |         #[warn(unsafe_code)]
+   |                ^^^^^^^^^^^
+
+warning: unused variable: `path`
+  --> vendor\lsm-tree\src\file.rs:47:24
+   |
+47 | pub fn fsync_directory(path: &Path) -> std::io::Result<()> {
+   |                        ^^^^ help: if this is intentional, prefix it with an underscore: `_path`
+   |
+   = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: `lsm-tree` (lib) generated 2 warnings (run `cargo fix --lib -p lsm-tree` to apply 1 suggestion)
+warning: unused variable: `segment_size`
+   --> crates\stream\src\storage\mmap.rs:166:39
+    |
+166 | fn find_or_create_segment(dir: &Path, segment_size: usize) -> Result<(PathBuf, u64, usize), StreamError> {
+    |                                       ^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_segment_size`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: function `find_or_create_segment_pub` is never used
+   --> crates\stream\src\storage\mmap.rs:157:8
+    |
+157 | pub fn find_or_create_segment_pub(
+    |        ^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: missing documentation for a module
+  --> crates\stream\src\lib.rs:57:1
+   |
+57 | pub mod error;
+   | ^^^^^^^^^^^^^
+   |
+note: the lint level is defined here
+  --> crates\stream\src\lib.rs:54:9
+   |
+54 | #![warn(missing_docs)]
+   |         ^^^^^^^^^^^^
+
+warning: missing documentation for an enum
+ --> crates\stream\src\error.rs:4:1
+  |
+4 | pub enum StreamError {
+  | ^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a variant
+ --> crates\stream\src\error.rs:6:5
+  |
+6 |     Io(String),
+  |     ^^
+
+warning: missing documentation for a variant
+ --> crates\stream\src\error.rs:9:5
+  |
+9 |     Compression(String),
+  |     ^^^^^^^^^^^
+
+warning: missing documentation for a variant
+  --> crates\stream\src\error.rs:12:5
+   |
+12 |     OutOfRange { offset: u64, len: usize },
+   |     ^^^^^^^^^^
+
+warning: missing documentation for a struct field
+  --> crates\stream\src\error.rs:12:18
+   |
+12 |     OutOfRange { offset: u64, len: usize },
+   |                  ^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+  --> crates\stream\src\error.rs:12:31
+   |
+12 |     OutOfRange { offset: u64, len: usize },
+   |                               ^^^^^^^^^^
+
+warning: missing documentation for a variant
+  --> crates\stream\src\error.rs:15:5
+   |
+15 |     TopicNotFound(String),
+   |     ^^^^^^^^^^^^^
+
+warning: missing documentation for a variant
+  --> crates\stream\src\error.rs:18:5
+   |
+18 |     SubscriberLimit(String),
+   |     ^^^^^^^^^^^^^^^
+
+warning: missing documentation for a variant
+  --> crates\stream\src\error.rs:21:5
+   |
+21 |     Serialize(String),
+   |     ^^^^^^^^^
+
+warning: missing documentation for an associated constant
+  --> crates\stream\src\message.rs:37:5
+   |
+37 |     pub const SIZE: usize = std::mem::size_of::<MessageHeader>(); // 32 bytes
+   |     ^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for an associated function
+  --> crates\stream\src\message.rs:39:5
+   |
+39 |     pub fn new(offset: u64, payload: &[u8]) -> Self {
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+  --> crates\stream\src\message.rs:65:5
+   |
+65 |     pub topic:     &'a str,
+   |     ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+  --> crates\stream\src\message.rs:66:5
+   |
+66 |     pub offset:    u64,
+   |     ^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+  --> crates\stream\src\message.rs:67:5
+   |
+67 |     pub timestamp: u64,
+   |     ^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+  --> crates\stream\src\message.rs:68:5
+   |
+68 |     pub data:      &'a [u8],
+   |     ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct
+  --> crates\stream\src\message.rs:95:1
+   |
+95 | pub struct OwnedMessage {
+   | ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+  --> crates\stream\src\message.rs:96:5
+   |
+96 |     pub topic:     String,
+   |     ^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+  --> crates\stream\src\message.rs:97:5
+   |
+97 |     pub offset:    u64,
+   |     ^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+  --> crates\stream\src\message.rs:98:5
+   |
+98 |     pub timestamp: u64,
+   |     ^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct
+  --> crates\stream\src\ring.rs:33:1
+   |
+33 | pub struct RingBuffer {
+   | ^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct
+   --> crates\stream\src\storage\mmap.rs:105:1
+    |
+105 | pub struct MmapBackend {
+    | ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for an associated function
+   --> crates\stream\src\storage\mmap.rs:110:5
+    |
+110 |     pub fn open(dir: PathBuf, segment_size: usize, compression_level: i32) -> Result<Self, StreamError> {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct
+ --> crates\stream\src\storage\null.rs:9:1
+  |
+9 | pub struct NullBackend {
+  | ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a method
+   --> crates\stream\src\stream.rs:164:5
+    |
+164 |     pub fn head(&self, topic: &str) -> u64 {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a method
+   --> crates\stream\src\stream.rs:168:5
+    |
+168 |     pub fn subscriber_count(&self, topic: &str) -> usize {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a method
+   --> crates\stream\src\stream.rs:172:5
+    |
+172 |     pub fn config(&self) -> &StreamConfig {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a method
+   --> crates\stream\src\stream.rs:219:5
+    |
+219 |     pub fn topic_name(&self) -> &str { &self.topic.name }
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a method
+   --> crates\stream\src\stream.rs:220:5
+    |
+220 |     pub fn head(&self) -> u64 { self.topic.head() }
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct
+  --> crates\stream\src\topic.rs:38:1
+   |
+38 | pub struct Topic {
+   | ^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+  --> crates\stream\src\topic.rs:39:5
+   |
+39 |     pub name: String,
+   |     ^^^^^^^^^^^^^^^^
+
+warning: missing documentation for an associated function
+  --> crates\stream\src\topic.rs:48:5
+   |
+48 | /     pub fn new(
+49 | |         name: impl Into<String>,
+50 | |         ring_capacity: usize,
+51 | |         storage: Option<Arc<dyn StorageBackend>>,
+52 | |         max_subscribers: usize,
+53 | |     ) -> Arc<Self> {
+   | |__________________^
+
+warning: missing documentation for a method
+   --> crates\stream\src\topic.rs:152:5
+    |
+152 |     pub fn unsubscribe(&self, id: SubscriberId) {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a method
+   --> crates\stream\src\topic.rs:180:5
+    |
+180 |     pub fn head(&self) -> u64 { self.ring.head() }
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a method
+   --> crates\stream\src\topic.rs:181:5
+    |
+181 |     pub fn subscriber_count(&self) -> usize { self.subs.read().len() }
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: `eustress-stream` (lib) generated 37 warnings (run `cargo fix --lib -p eustress-stream` to apply 1 suggestion)
+warning: field `journal_recovery_mode` is never read
+  --> vendor\fjall\src\config.rs:49:16
+   |
+14 | pub struct Config {
+   |            ------ field in this struct
+...
+49 |     pub(crate) journal_recovery_mode: RecoveryMode,
+   |                ^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `Config` has a derived impl for the trait `Clone`, but this is intentionally ignored during dead code analysis
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: method `outstanding_flushes` is never used
+  --> vendor\fjall\src\stats.rs:26:12
+   |
+25 | impl Stats {
+   | ---------- method in this implementation
+26 |     pub fn outstanding_flushes(&self) -> usize {
+   |            ^^^^^^^^^^^^^^^^^^^
+
+warning: hiding a lifetime that's elided elsewhere is confusing
+  --> vendor\fjall\src\tx\keyspace.rs:42:21
+   |
+42 |     pub fn write_tx(&self) -> WriteTransaction {
+   |                     ^^^^^     ^^^^^^^^^^^^^^^^ the same lifetime is hidden here
+   |                     |
+   |                     the lifetime is elided here
+   |
+   = help: the same lifetime is referred to in inconsistent ways, making the signature confusing
+   = note: `#[warn(mismatched_lifetime_syntaxes)]` on by default
+help: use `'_` for type paths
+   |
+42 |     pub fn write_tx(&self) -> WriteTransaction<'_> {
+   |                                               ++++
+
+   Compiling eustress-common v0.1.0 (E:\Workspace\EustressEngine\eustress\crates\common)
+warning: `fjall` (lib) generated 3 warnings (run `cargo fix --lib -p fjall` to apply 1 suggestion)
+warning: missing documentation for a struct field
+  --> crates\worlddb\src\changestream.rs:73:9
+   |
+73 |         entity: EntityId,
+   |         ^^^^^^^^^^^^^^^^
+   |
+note: the lint level is defined here
+  --> crates\worlddb\src\lib.rs:42:9
+   |
+42 | #![warn(missing_docs)]
+   |         ^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+  --> crates\worlddb\src\changestream.rs:74:9
+   |
+74 |         component: ComponentTypeId,
+   |         ^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+  --> crates\worlddb\src\changestream.rs:85:9
+   |
+85 |         entity: EntityId,
+   |         ^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+  --> crates\worlddb\src\changestream.rs:86:9
+   |
+86 |         component: ComponentTypeId,
+   |         ^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+  --> crates\worlddb\src\changestream.rs:90:17
+   |
+90 |     Despawned { entity: EntityId },
+   |                 ^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+  --> crates\worlddb\src\changestream.rs:98:5
+   |
+98 |     pub tx_id: TxId,
+   |     ^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+  --> crates\worlddb\src\changestream.rs:99:5
+   |
+99 |     pub changes: Vec<EntityChange>,
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a variant
+  --> crates\worlddb\src\mutations.rs:25:5
+   |
+25 |     Create,
+   |     ^^^^^^
+
+warning: missing documentation for a variant
+  --> crates\worlddb\src\mutations.rs:26:5
+   |
+26 |     Update,
+   |     ^^^^^^
+
+warning: missing documentation for a variant
+  --> crates\worlddb\src\mutations.rs:27:5
+   |
+27 |     Delete,
+   |     ^^^^^^
+
+warning: missing documentation for a variant
+  --> crates\worlddb\src\mutations.rs:33:5
+   |
+33 |     User,
+   |     ^^^^
+
+warning: missing documentation for a variant
+  --> crates\worlddb\src\mutations.rs:34:5
+   |
+34 |     Script(String),
+   |     ^^^^^^
+
+warning: missing documentation for a variant
+  --> crates\worlddb\src\mutations.rs:35:5
+   |
+35 |     Mcp(String),
+   |     ^^^
+
+warning: missing documentation for a variant
+  --> crates\worlddb\src\mutations.rs:36:5
+   |
+36 |     Importer,
+   |     ^^^^^^^^
+
+warning: missing documentation for a variant
+  --> crates\worlddb\src\mutations.rs:37:5
+   |
+37 |     FileWatcher,
+   |     ^^^^^^^^^^^
+
+warning: missing documentation for a variant
+  --> crates\worlddb\src\mutations.rs:38:5
+   |
+38 |     System,
+   |     ^^^^^^
+
+warning: missing documentation for a struct field
+  --> crates\worlddb\src\mutations.rs:50:5
+   |
+50 |     pub ts_nanos: u64,
+   |     ^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+  --> crates\worlddb\src\mutations.rs:51:5
+   |
+51 |     pub actor: MutationActor,
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+  --> crates\worlddb\src\mutations.rs:52:5
+   |
+52 |     pub op: MutationOp,
+   |     ^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+  --> crates\worlddb\src\mutations.rs:53:5
+   |
+53 |     pub class_name: String,
+   |     ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> crates\worlddb\src\mutations.rs:103:5
+    |
+103 |     pub seq: u64,
+    |     ^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> crates\worlddb\src\mutations.rs:104:5
+    |
+104 |     pub tx_id: u64,
+    |     ^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> crates\worlddb\src\mutations.rs:105:5
+    |
+105 |     pub ts_nanos: u64,
+    |     ^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> crates\worlddb\src\mutations.rs:110:5
+    |
+110 |     pub class: String,
+    |     ^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> crates\worlddb\src\mutations.rs:111:5
+    |
+111 |     pub uuid: String,
+    |     ^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> crates\worlddb\src\mutations.rs:112:5
+    |
+112 |     pub rel_path: Option<String>,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> crates\worlddb\src\mutations.rs:113:5
+    |
+113 |     pub has_before: bool,
+    |     ^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> crates\worlddb\src\mutations.rs:114:5
+    |
+114 |     pub has_after: bool,
+    |     ^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> crates\worlddb\src\mutations.rs:115:5
+    |
+115 |     pub parent_tx: Option<u64>,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> crates\worlddb\src\mutations.rs:116:5
+    |
+116 |     pub reason: Option<String>,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> crates\worlddb\src\mutations.rs:341:5
+    |
+341 |     pub applied: usize,
+    |     ^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+  --> crates\worlddb\src\projection.rs:53:5
+   |
+53 |     pub class: String,
+   |     ^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+  --> crates\worlddb\src\projection.rs:54:5
+   |
+54 |     pub mesh: Option<String>,
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+  --> crates\worlddb\src\projection.rs:55:5
+   |
+55 |     pub scene: Option<String>,
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+  --> crates\worlddb\src\projection.rs:56:5
+   |
+56 |     pub material: Option<String>,
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+  --> crates\worlddb\src\projection.rs:59:5
+   |
+59 |     pub transparency: f32,
+   |     ^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+  --> crates\worlddb\src\projection.rs:60:5
+   |
+60 |     pub reflectance: f32,
+   |     ^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+  --> crates\worlddb\src\projection.rs:61:5
+   |
+61 |     pub transform: TransformSnapshot,
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+  --> crates\worlddb\src\projection.rs:62:5
+   |
+62 |     pub anchored: bool,
+   |     ^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+  --> crates\worlddb\src\projection.rs:63:5
+   |
+63 |     pub can_collide: bool,
+   |     ^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+  --> crates\worlddb\src\projection.rs:64:5
+   |
+64 |     pub cast_shadow: bool,
+   |     ^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+  --> crates\worlddb\src\projection.rs:65:5
+   |
+65 |     pub locked: bool,
+   |     ^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+  --> crates\worlddb\src\projection.rs:66:5
+   |
+66 |     pub tags: Vec<String>,
+   |     ^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+  --> crates\worlddb\src\projection.rs:76:5
+   |
+76 |     pub parent_uuid: Option<String>,
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> crates\worlddb\src\projection.rs:141:5
+    |
+141 |     pub entities: Vec<EntitySnapshot>,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a variant
+   --> crates\worlddb\src\rkyv_values.rs:120:5
+    |
+120 |     String(String),
+    |     ^^^^^^
+
+warning: missing documentation for a variant
+   --> crates\worlddb\src\rkyv_values.rs:121:5
+    |
+121 |     Int(i64),
+    |     ^^^
+
+warning: missing documentation for a variant
+   --> crates\worlddb\src\rkyv_values.rs:122:5
+    |
+122 |     Float(f64),
+    |     ^^^^^
+
+warning: missing documentation for a variant
+   --> crates\worlddb\src\rkyv_values.rs:123:5
+    |
+123 |     Bool(bool),
+    |     ^^^^
+
+warning: missing documentation for a variant
+   --> crates\worlddb\src\rkyv_values.rs:124:5
+    |
+124 |     Datetime(String),
+    |     ^^^^^^^^
+
+warning: missing documentation for a variant
+   --> crates\worlddb\src\rkyv_values.rs:125:5
+    |
+125 |     Array(#[rkyv(omit_bounds)] Vec<EusValue>),
+    |     ^^^^^
+
+warning: missing documentation for a variant
+   --> crates\worlddb\src\rkyv_values.rs:126:5
+    |
+126 |     Table(#[rkyv(omit_bounds)] Vec<(String, EusValue)>),
+    |     ^^^^^
+
+warning: missing documentation for a struct field
+   --> crates\worlddb\src\rkyv_values.rs:229:5
+    |
+229 |     pub class_name: String,
+    |     ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> crates\worlddb\src\rkyv_values.rs:242:5
+    |
+242 |     pub transparency: f32,
+    |     ^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> crates\worlddb\src\rkyv_values.rs:243:5
+    |
+243 |     pub reflectance: f32,
+    |     ^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> crates\worlddb\src\rkyv_values.rs:244:5
+    |
+244 |     pub anchored: bool,
+    |     ^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> crates\worlddb\src\rkyv_values.rs:245:5
+    |
+245 |     pub can_collide: bool,
+    |     ^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> crates\worlddb\src\rkyv_values.rs:246:5
+    |
+246 |     pub cast_shadow: bool,
+    |     ^^^^^^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> crates\worlddb\src\rkyv_values.rs:247:5
+    |
+247 |     pub locked: bool,
+    |     ^^^^^^^^^^^^^^^^
+
+warning: missing documentation for a struct field
+   --> crates\worlddb\src\rkyv_values.rs:250:5
+    |
+250 |     pub tags: Vec<String>,
+    |     ^^^^^^^^^^^^^^^^^^^^^
+
+warning: `eustress-worlddb` (lib) generated 60 warnings
+warning: unused import: `glam::Vec3`
+ --> crates\mesh-edit\src\ops.rs:7:5
+  |
+7 | use glam::Vec3;
+  |     ^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: value assigned to `new_positions` is never read
+  --> crates\mesh-edit\src\ops.rs:47:29
+   |
+47 |     let mut new_positions = old_positions.clone();
+   |                             ^^^^^^^^^^^^^^^^^^^^^ this value is reassigned later and never used
+...
+73 |     new_positions = mesh.vertices.iter().map(|v| v.position).collect();
+   |     ------------- `new_positions` is overwritten here before the previous value is read
+   |
+   = note: `#[warn(unused_assignments)]` (part of `#[warn(unused)]`) on by default
+
+warning: value assigned to `new_positions` is never read
+   --> crates\mesh-edit\src\ops.rs:124:29
+    |
+124 |     let mut new_positions = mesh.vertices.iter().map(|v| v.position).collect::<Vec<_>>();
+    |                             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ this value is reassigned later and never used
+...
+158 |     new_positions = mesh.vertices.iter().map(|v| v.position).collect();
+    |     ------------- `new_positions` is overwritten here before the previous value is read
+
+warning: `eustress-mesh-edit` (lib) generated 3 warnings (run `cargo fix --lib -p eustress-mesh-edit` to apply 1 suggestion)
+warning: type `PendingChallenge` is more private than the item `ApiState::challenges`
+  --> crates\bliss\src\api.rs:49:5
+   |
+49 |     pub challenges: std::sync::Arc<tokio::sync::RwLock<std::collections::HashMap<String, PendingChallenge>>>,
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ field `ApiState::challenges` is reachable at visibility `pub`
+   |
+note: but type `PendingChallenge` is only usable at visibility `pub(self)`
+  --> crates\bliss\src\api.rs:61:1
+   |
+61 | struct PendingChallenge {
+   | ^^^^^^^^^^^^^^^^^^^^^^^
+   = note: `#[warn(private_interfaces)]` on by default
+
+warning: `eustress-bliss` (lib) generated 1 warning
+warning: eustress-engine@0.3.8: Embedding icon from: "\\\\?\\E:\\Workspace\\EustressEngine\\eustress\\crates\\engine\\assets\\icon.ico"
+warning: eustress-engine@0.3.8: Γ£à Icon embedded in executable successfully
+warning: use of deprecated method `bevy::bevy_ecs::schedule::SystemCondition::and`: use `.and_then(...)` instead, or `.and_eager(...)` to evaluate the conditions eagerly
+  --> crates\geo\src\plugin.rs:46:73
+   |
+46 |                 spawn_vector_layers.run_if(resource_exists::<GeoConfig>.and(not(geo_layers_loaded))),
+   |                                                                         ^^^
+   |
+   = note: `#[warn(deprecated)]` on by default
+
+warning: use of deprecated method `bevy::bevy_ecs::schedule::SystemCondition::and`: use `.and_then(...)` instead, or `.and_eager(...)` to evaluate the conditions eagerly
+  --> crates\geo\src\plugin.rs:47:79
+   |
+47 |                 spawn_terrain_from_config.run_if(resource_exists::<GeoConfig>.and(not(geo_terrain_loaded))),
+   |                                                                               ^^^
+
+warning: `eustress-geo` (lib) generated 2 warnings
+warning: unused doc comment
+   --> crates\common\src\events.rs:354:1
+    |
+354 | / /// Thread-local holder for the EventBus during Rune script execution.
+355 | | /// Set before execution, cleared after (same pattern as `SPATIAL_BRIDGE`).
+    | |_--------------------------------------------------------------------------^
+    |   |
+    |   rustdoc does not generate documentation for macro invocations
+    |
+    = help: to document an item produced by a macro, the macro must produce the documentation as part of its expansion
+    = note: `#[warn(unused_doc_comments)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused imports: `AssetSource` and `ContentHash`
+  --> crates\common\src\assets\categories.rs:26:13
+   |
+26 | use super::{ContentHash, AssetSource};
+   |             ^^^^^^^^^^^  ^^^^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `super::rig::HumanoidBone`
+   --> crates\common\src\avatar\control.rs:491:9
+    |
+491 |     use super::rig::HumanoidBone;
+    |         ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `AvatarControl`
+  --> crates\common\src\avatar\locomotion.rs:47:13
+   |
+47 | use super::{AvatarControl, AvatarSystems, SpawnedByAvatarRuntime};
+   |             ^^^^^^^^^^^^^
+
+warning: unused imports: `ClassName` and `Instance`
+  --> crates\common\src\plugins\character_plugin.rs:29:22
+   |
+29 | use crate::classes::{Instance, ClassName};
+   |                      ^^^^^^^^  ^^^^^^^^^
+
+warning: unused import: `CharacterRoot`
+  --> crates\common\src\plugins\character_plugin.rs:31:24
+   |
+31 |     Player, Character, CharacterRoot,
+   |                        ^^^^^^^^^^^^^
+
+warning: unused imports: `apply_procedural_limb_animation`, `update_character_facing_system`, and `update_head_look_system`
+   --> crates\common\src\plugins\character_plugin.rs:148:13
+    |
+148 |             apply_procedural_limb_animation,
+    |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+149 |             update_character_facing_system,
+    |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+150 |             update_head_look_system,
+    |             ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `tracing::info`
+ --> crates\common\src\plugins\humanoid.rs:8:5
+  |
+8 | use tracing::info;
+  |     ^^^^^^^^^^^^^
+
+warning: unused import: `crate::classes::BasePart`
+  --> crates\common\src\plugins\humanoid.rs:10:5
+   |
+10 | use crate::classes::BasePart;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `AnimationState`
+  --> crates\common\src\plugins\humanoid.rs:15:50
+   |
+15 |     LocomotionController, AnimationStateMachine, AnimationState,
+   |                                                  ^^^^^^^^^^^^^^
+
+warning: unused imports: `AnimationService` and `LayerMask`
+  --> crates\common\src\plugins\animation_plugin.rs:33:40
+   |
+33 |     FootIK, HumanoidRig, HumanoidBone, LayerMask, AnimationService,
+   |                                        ^^^^^^^^^  ^^^^^^^^^^^^^^^^
+
+warning: unused imports: `CoordinateSystem`, `OctreeNode`, `PointCloudImportSettings`, and `PointCloudPointNormal`
+  --> crates\common\src\pointcloud\processing.rs:32:22
+   |
+32 |     PointCloudPoint, PointCloudPointNormal, PointCloudLOD, PointCloudFormat,
+   |                      ^^^^^^^^^^^^^^^^^^^^^
+33 |     PointCloudImportSettings, OctreeNode, PointCloudHeader, CoordinateSystem,
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^                    ^^^^^^^^^^^^^^^^
+
+warning: unused imports: `ElevationFormat`, `import_asc`, and `import_hgt`
+  --> crates\common\src\pointcloud\elevation_import.rs:24:37
+   |
+24 | use super::formats::{ElevationData, ElevationFormat, import_elevation, import_geotiff, import_asc, import_hgt};
+   |                                     ^^^^^^^^^^^^^^^                                    ^^^^^^^^^^  ^^^^^^^^^^
+
+warning: unused import: `warn`
+  --> crates\common\src\services\team.rs:20:21
+   |
+20 | use tracing::{info, warn};
+   |                     ^^^^
+
+warning: unused import: `std::collections::HashMap`
+  --> crates\common\src\mlua\compat.rs:13:5
+   |
+13 | use std::collections::HashMap;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `RwLock`
+  --> crates\common\src\mlua\raycast.rs:35:22
+   |
+35 | use std::sync::{Arc, RwLock};
+   |                      ^^^^^^
+
+warning: unused import: `std::collections::HashMap`
+  --> crates\common\src\mlua\raycast.rs:36:5
+   |
+36 | use std::collections::HashMap;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `Mutex`
+  --> crates\common\src\scripting\instance.rs:13:22
+   |
+13 | use std::sync::{Arc, Mutex, RwLock};
+   |                      ^^^^^
+
+warning: unused imports: `Connection` and `SignalArg`
+  --> crates\common\src\scripting\services.rs:19:29
+   |
+19 | use super::events::{Signal, Connection, SignalArg};
+   |                             ^^^^^^^^^^  ^^^^^^^^^
+
+warning: unused import: `ScriptingServices`
+  --> crates\common\src\scripting\plugin.rs:15:79
+   |
+15 | use super::services::{RunService, TaskScheduler, DebrisService, TweenService, ScriptingServices, FrameTime};
+   |                                                                               ^^^^^^^^^^^^^^^^^
+
+warning: unused import: `build_sides`
+  --> crates\common\src\terrain\road_surface.rs:71:27
+   |
+71 |     build_designed_zoned, build_sides, build_sides_zoned, build_structures, tunnel_carves, DesignedRoad, MeshData, RoadZones, Surface,
+   |                           ^^^^^^^^^^^
+
+warning: unexpected `cfg` condition value: `realism-quantum`
+  --> crates\common\src\realism\mod.rs:81:7
+   |
+81 | #[cfg(feature = "realism-quantum")]
+   |       ^^^^^^^^^^-----------------
+   |                 |
+   |                 help: there is a expected value with a similar name: `"realism-wasm"`
+   |
+   = note: expected values for `feature` are: `async-assets`, `avatar-profile`, `avian3d`, `aws-config`, `aws-sdk-s3`, `base64`, `bytes`, `candle-core`, `candle-nn`, `candle-transformers`, `default`, `encase`, `generation`, `generation-candle`, `generation_placeholders`, `geotiff`, `gltf`, `gui`, `image`, `kiddo`, `mlua`, `model-import`, `physics`, `realism`, `realism-full`, `realism-gpu`, `realism-scripting`, `realism-spatial`, `realism-symbolic`, `realism-wasm`, `reqwest`, `rstar`, `rune`, `rune-wasm`, and `s3` and 9 more
+   = help: consider adding `realism-quantum` as a feature in `Cargo.toml`
+   = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+   = note: `#[warn(unexpected_cfgs)]` on by default
+
+warning: unused import: `bevy::math::Vec3`
+ --> crates\common\src\realism\laws\electromagnetism\induction.rs:3:5
+  |
+3 | use bevy::math::Vec3;
+  |     ^^^^^^^^^^^^^^^^
+
+warning: ambiguous glob re-exports
+  --> crates\common\src\realism\laws\mod.rs:30:13
+   |
+30 |     pub use super::electromagnetism::prelude::*;
+   |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ the name `ELEMENTARY_CHARGE` in the value namespace is first re-exported here
+31 |     pub use super::kinetics::prelude::*;
+32 |     pub use super::optics::prelude::*;
+   |             ------------------------- but the name `ELEMENTARY_CHARGE` in the value namespace is also re-exported here
+   |
+   = note: `#[warn(ambiguous_glob_reexports)]` on by default
+
+warning: ambiguous glob re-exports
+  --> crates\common\src\realism\laws\mod.rs:30:13
+   |
+30 |     pub use super::electromagnetism::prelude::*;
+   |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ the name `critical_angle` in the value namespace is first re-exported here
+31 |     pub use super::kinetics::prelude::*;
+32 |     pub use super::optics::prelude::*;
+   |             ------------------------- but the name `critical_angle` in the value namespace is also re-exported here
+
+warning: ambiguous glob re-exports
+  --> crates\common\src\realism\laws\mod.rs:31:13
+   |
+31 |     pub use super::kinetics::prelude::*;
+   |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^ the name `michaelis_menten` in the value namespace is first re-exported here
+...
+34 |     pub use super::biology::prelude::*;
+   |             -------------------------- but the name `michaelis_menten` in the value namespace is also re-exported here
+
+warning: ambiguous glob re-exports
+  --> crates\common\src\realism\laws\mod.rs:34:13
+   |
+29 |     pub use super::electrochemistry::*;
+   |             -------------------------- but the name `nernst_potential` in the value namespace is also re-exported here
+...
+34 |     pub use super::biology::prelude::*;
+   |             ^^^^^^^^^^^^^^^^^^^^^^^^^^ the name `nernst_potential` in the value namespace is first re-exported here
+
+warning: unused imports: `mechanics` and `thermodynamics`
+  --> crates\common\src\realism\particles\systems.rs:19:28
+   |
+19 | use crate::realism::laws::{thermodynamics, mechanics};
+   |                            ^^^^^^^^^^^^^^  ^^^^^^^^^
+
+warning: unused import: `crate::realism::laws::thermodynamics`
+  --> crates\common\src\realism\fluids\water.rs:15:5
+   |
+15 | use crate::realism::laws::thermodynamics;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `Particle`
+  --> crates\common\src\realism\visualizers\property_overlay.rs:14:45
+   |
+14 | use crate::realism::particles::components::{Particle, ThermodynamicState, KineticState};
+   |                                             ^^^^^^^^
+
+warning: ambiguous glob re-exports
+  --> crates\common\src\realism\visualizers\mod.rs:18:13
+   |
+18 |     pub use super::property_overlay::*;
+   |             ^^^^^^^^^^^^^^^^^^^^^^^^^^ the name `temperature_to_color` in the value namespace is first re-exported here
+19 |     pub use super::vector_field::*;
+20 |     pub use super::heat_map::*;
+   |             ------------------ but the name `temperature_to_color` in the value namespace is also re-exported here
+
+warning: unused import: `VertexAttributeValues`
+ --> crates\common\src\realism\deformation\fracture_mesh.rs:6:24
+  |
+6 | use bevy::mesh::{Mesh, VertexAttributeValues, Indices, PrimitiveTopology};
+  |                        ^^^^^^^^^^^^^^^^^^^^^
+
+warning: ambiguous glob re-exports
+  --> crates\common\src\realism\thermocycles\mod.rs:12:13
+   |
+12 |     pub use super::rankine::*;
+   |             ^^^^^^^^^^^^^^^^^ the name `turbine_work` in the value namespace is first re-exported here
+13 |     pub use super::brayton::*;
+   |             ----------------- but the name `turbine_work` in the value namespace is also re-exported here
+
+warning: unexpected `cfg` condition value: `realism-quantum`
+   --> crates\common\src\realism\mod.rs:122:11
+    |
+122 |     #[cfg(feature = "realism-quantum")]
+    |           ^^^^^^^^^^-----------------
+    |                     |
+    |                     help: there is a expected value with a similar name: `"realism-wasm"`
+    |
+    = note: expected values for `feature` are: `async-assets`, `avatar-profile`, `avian3d`, `aws-config`, `aws-sdk-s3`, `base64`, `bytes`, `candle-core`, `candle-nn`, `candle-transformers`, `default`, `encase`, `generation`, `generation-candle`, `generation_placeholders`, `geotiff`, `gltf`, `gui`, `image`, `kiddo`, `mlua`, `model-import`, `physics`, `realism`, `realism-full`, `realism-gpu`, `realism-scripting`, `realism-spatial`, `realism-symbolic`, `realism-wasm`, `reqwest`, `rstar`, `rune`, `rune-wasm`, and `s3` and 9 more
+    = help: consider adding `realism-quantum` as a feature in `Cargo.toml`
+    = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+
+warning: ambiguous glob re-exports
+   --> crates\common\src\realism\mod.rs:96:13
+    |
+ 96 |     pub use super::laws::prelude::*;
+    |             ^^^^^^^^^^^^^^^^^^^^^^^ the name `magnetic_energy_density` in the value namespace is first re-exported here
+...
+110 |     pub use super::plasma::prelude::*;
+    |             ------------------------- but the name `magnetic_energy_density` in the value namespace is also re-exported here
+
+warning: ambiguous glob re-exports
+   --> crates\common\src\realism\mod.rs:96:13
+    |
+ 96 |     pub use super::laws::prelude::*;
+    |             ^^^^^^^^^^^^^^^^^^^^^^^ the name `carnot_efficiency` in the value namespace is first re-exported here
+...
+108 |     pub use super::thermocycles::prelude::*;
+    |             ------------------------------- but the name `carnot_efficiency` in the value namespace is also re-exported here
+
+warning: ambiguous glob re-exports
+   --> crates\common\src\realism\mod.rs:96:13
+    |
+ 96 |     pub use super::laws::prelude::*;
+    |             ^^^^^^^^^^^^^^^^^^^^^^^ the name `cop_refrigerator` in the value namespace is first re-exported here
+...
+108 |     pub use super::thermocycles::prelude::*;
+    |             ------------------------------- but the name `cop_refrigerator` in the value namespace is also re-exported here
+
+warning: ambiguous glob re-exports
+   --> crates\common\src\realism\mod.rs:96:13
+    |
+ 96 |     pub use super::laws::prelude::*;
+    |             ^^^^^^^^^^^^^^^^^^^^^^^ the name `cop_heat_pump` in the value namespace is first re-exported here
+...
+108 |     pub use super::thermocycles::prelude::*;
+    |             ------------------------------- but the name `cop_heat_pump` in the value namespace is also re-exported here
+
+warning: ambiguous glob re-exports
+  --> crates\common\src\realism\mod.rs:96:13
+   |
+95 |     pub use super::units::*;
+   |             --------------- but the name `kinetic_energy` in the value namespace is also re-exported here
+96 |     pub use super::laws::prelude::*;
+   |             ^^^^^^^^^^^^^^^^^^^^^^^ the name `kinetic_energy` in the value namespace is first re-exported here
+
+warning: ambiguous glob re-exports
+  --> crates\common\src\realism\mod.rs:96:13
+   |
+95 |     pub use super::units::*;
+   |             --------------- but the name `work` in the value namespace is also re-exported here
+96 |     pub use super::laws::prelude::*;
+   |             ^^^^^^^^^^^^^^^^^^^^^^^ the name `work` in the value namespace is first re-exported here
+
+warning: ambiguous glob re-exports
+  --> crates\common\src\realism\mod.rs:96:13
+   |
+96 |     pub use super::laws::prelude::*;
+   |             ^^^^^^^^^^^^^^^^^^^^^^^ the name `WaterPhase` in the type namespace is first re-exported here
+...
+99 |     pub use super::fluids::prelude::*;
+   |             ------------------------- but the name `WaterPhase` in the type namespace is also re-exported here
+
+warning: ambiguous glob re-exports
+   --> crates\common\src\realism\mod.rs:98:13
+    |
+ 98 |     pub use super::materials::prelude::*;
+    |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^ the name `critical_crack_length` in the value namespace is first re-exported here
+...
+107 |     pub use super::structures::prelude::*;
+    |             ----------------------------- but the name `critical_crack_length` in the value namespace is also re-exported here
+
+warning: unexpected `cfg` condition value: `realism-quantum`
+   --> crates\common\src\realism\mod.rs:325:15
+    |
+325 |         #[cfg(feature = "realism-quantum")]
+    |               ^^^^^^^^^^-----------------
+    |                         |
+    |                         help: there is a expected value with a similar name: `"realism-wasm"`
+    |
+    = note: expected values for `feature` are: `async-assets`, `avatar-profile`, `avian3d`, `aws-config`, `aws-sdk-s3`, `base64`, `bytes`, `candle-core`, `candle-nn`, `candle-transformers`, `default`, `encase`, `generation`, `generation-candle`, `generation_placeholders`, `geotiff`, `gltf`, `gui`, `image`, `kiddo`, `mlua`, `model-import`, `physics`, `realism`, `realism-full`, `realism-gpu`, `realism-scripting`, `realism-spatial`, `realism-symbolic`, `realism-wasm`, `reqwest`, `rstar`, `rune`, `rune-wasm`, and `s3` and 9 more
+    = help: consider adding `realism-quantum` as a feature in `Cargo.toml`
+    = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+
+warning: unused import: `std::sync::Arc`
+  --> crates\common\src\streaming\chunk_grid.rs:18:5
+   |
+18 | use std::sync::Arc;
+   |     ^^^^^^^^^^^^^^
+
+warning: use of deprecated function `eustress_format::load_eustress`: RON scene format is deprecated. Use binary format for new scenes.
+   --> crates\common\src\lib.rs:368:5
+    |
+368 |     load_eustress, save_eustress, save_for_engine, save_for_client,
+    |     ^^^^^^^^^^^^^
+    |
+    = note: `#[warn(deprecated)]` on by default
+
+warning: use of deprecated function `eustress_format::save_eustress`: RON scene format is deprecated. Use save_binary_scene instead.
+   --> crates\common\src\lib.rs:368:20
+    |
+368 |     load_eustress, save_eustress, save_for_engine, save_for_client,
+    |                    ^^^^^^^^^^^^^
+
+warning: use of deprecated function `eustress_format::save_for_engine`: RON scene format is deprecated. Use save_binary_scene instead.
+   --> crates\common\src\lib.rs:368:35
+    |
+368 |     load_eustress, save_eustress, save_for_engine, save_for_client,
+    |                                   ^^^^^^^^^^^^^^^
+
+warning: use of deprecated function `eustress_format::save_for_client`: RON scene format is deprecated. Use save_binary_scene instead.
+   --> crates\common\src\lib.rs:368:52
+    |
+368 |     load_eustress, save_eustress, save_for_engine, save_for_client,
+    |                                                    ^^^^^^^^^^^^^^^
+
+warning: use of deprecated function `eustress_format::is_client_scene`: Use is_eustress_file instead. Client/Engine distinction removed.
+   --> crates\common\src\lib.rs:371:23
+    |
+371 |     is_eustress_file, is_client_scene, is_engine_scene, is_legacy_format,
+    |                       ^^^^^^^^^^^^^^^
+
+warning: use of deprecated function `eustress_format::is_engine_scene`: Use is_eustress_file instead. .eustressengine is now a legacy extension.
+   --> crates\common\src\lib.rs:371:40
+    |
+371 |     is_eustress_file, is_client_scene, is_engine_scene, is_legacy_format,
+    |                                        ^^^^^^^^^^^^^^^
+
+warning: use of deprecated function `eustress_format::to_engine_path`: Use to_eustress_path instead. .eustressengine is deprecated.
+   --> crates\common\src\lib.rs:373:23
+    |
+373 |     to_eustress_path, to_engine_path, to_client_path,
+    |                       ^^^^^^^^^^^^^^
+
+warning: use of deprecated function `eustress_format::to_client_path`: Use to_eustress_path instead. Client/Engine distinction removed.
+   --> crates\common\src\lib.rs:373:39
+    |
+373 |     to_eustress_path, to_engine_path, to_client_path,
+    |                                       ^^^^^^^^^^^^^^
+
+warning: use of deprecated constant `eustress_format::EXTENSION_CLIENT`: Use EXTENSION instead. .eustressengine is deprecated in favor of .eustress
+   --> crates\common\src\lib.rs:380:5
+    |
+380 |     EXTENSION_CLIENT, EXTENSION_ENGINE,
+    |     ^^^^^^^^^^^^^^^^
+
+warning: use of deprecated constant `eustress_format::EXTENSION_ENGINE`: Use EXTENSION instead. .eustressengine is deprecated in favor of .eustress
+   --> crates\common\src\lib.rs:380:23
+    |
+380 |     EXTENSION_CLIENT, EXTENSION_ENGINE,
+    |                       ^^^^^^^^^^^^^^^^
+
+warning: use of deprecated constant `eustress_format::DEFAULT_ENGINE_EXTENSION`: Use DEFAULT_EXTENSION instead
+   --> crates\common\src\lib.rs:381:5
+    |
+381 |     DEFAULT_ENGINE_EXTENSION, DEFAULT_CLIENT_EXTENSION,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: use of deprecated constant `eustress_format::DEFAULT_CLIENT_EXTENSION`: Use DEFAULT_EXTENSION instead
+   --> crates\common\src\lib.rs:381:31
+    |
+381 |     DEFAULT_ENGINE_EXTENSION, DEFAULT_CLIENT_EXTENSION,
+    |                               ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: use of deprecated method `bevy::bevy_app::App::insert_non_send_resource`: use App::insert_non_send
+  --> crates\common\src\gui\plugin.rs:21:13
+   |
+21 |         app.insert_non_send_resource(SlintGuiAdapters::default())
+   |             ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `avian3d::prelude`
+  --> crates\common\src\plugins\character_plugin.rs:26:5
+   |
+26 | use avian3d::prelude::*;
+   |     ^^^^^^^^^^^^^^^^
+
+warning: unused import: `avian3d::prelude`
+ --> crates\common\src\plugins\humanoid.rs:7:5
+  |
+7 | use avian3d::prelude::*;
+  |     ^^^^^^^^^^^^^^^^
+
+warning: unused import: `avian3d::prelude`
+  --> crates\common\src\plugins\skinned_character.rs:22:5
+   |
+22 | use avian3d::prelude::*;
+   |     ^^^^^^^^^^^^^^^^
+
+warning: unused import: `rayon::prelude`
+  --> crates\common\src\realism\particles\systems.rs:14:5
+   |
+14 | use rayon::prelude::*;
+   |     ^^^^^^^^^^^^^^
+
+warning: unused import: `rayon::prelude`
+  --> crates\common\src\realism\fluids\sph.rs:14:5
+   |
+14 | use rayon::prelude::*;
+   |     ^^^^^^^^^^^^^^
+
+warning: value captured by `mirror_shutdown` is never read
+   --> crates\common\src\toml_materializer.rs:261:21
+    |
+261 |             let m = mirror_shutdown.lock().await;
+    |                     ^^^^^^^^^^^^^^^
+    |
+    = help: did you mean to capture by reference instead?
+    = note: `#[warn(unused_assignments)]` (part of `#[warn(unused)]`) on by default
+
+warning: value captured by `config_shutdown` is never read
+   --> crates\common\src\toml_materializer.rs:262:39
+    |
+262 |             let _ = write_mirror(&m, &config_shutdown).await;
+    |                                       ^^^^^^^^^^^^^^^
+    |
+    = help: did you mean to capture by reference instead?
+
+warning: unused variable: `mirror_shutdown`
+   --> crates\common\src\toml_materializer.rs:248:9
+    |
+248 |     let mirror_shutdown = Arc::clone(&mirror);
+    |         ^^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_mirror_shutdown`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `config_shutdown`
+   --> crates\common\src\toml_materializer.rs:249:9
+    |
+249 |     let config_shutdown = config.clone();
+    |         ^^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_config_shutdown`
+
+warning: unused variable: `worst`
+   --> crates\common\src\avatar\anim.rs:265:13
+    |
+265 |         let worst = probe.peak_bone.unwrap_or(HumanoidBone::Hips);
+    |             ^^^^^ help: if this is intentional, prefix it with an underscore: `_worst`
+
+warning: unused variable: `loco_detail`
+   --> crates\common\src\avatar\anim.rs:269:13
+    |
+269 |         let loco_detail = format!(
+    |             ^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_loco_detail`
+
+warning: variable `wall_ahead` is assigned to, but never used
+   --> crates\common\src\avatar\locomotion.rs:589:13
+    |
+589 |         let mut wall_ahead: Option<Vec3> = None;
+    |             ^^^^^^^^^^^^^^
+    |
+    = note: consider using `_wall_ahead` instead
+
+warning: value assigned to `wall_ahead` is never read
+   --> crates\common\src\avatar\locomotion.rs:607:25
+    |
+607 |                         wall_ahead = Some(n);
+    |                         ^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: maybe it is overwritten before being read?
+
+warning: unused variable: `rig`
+   --> crates\common\src\avatar\spawn.rs:170:35
+    |
+170 |     for (root, root_global, body, rig, mesh_child, mut pending) in q.iter_mut() {
+    |                                   ^^^ help: if this is intentional, prefix it with an underscore: `_rig`
+
+warning: unused variable: `id`
+    --> crates\common\src\parameters.rs:1537:39
+     |
+1537 |     pub fn register_domain(&mut self, id: String, config: DomainConfig) {
+     |                                       ^^ help: if this is intentional, prefix it with an underscore: `_id`
+
+warning: unused variable: `char_up`
+   --> crates\common\src\plugins\animation_plugin.rs:692:13
+    |
+692 |         let char_up = global_transform.up();
+    |             ^^^^^^^ help: if this is intentional, prefix it with an underscore: `_char_up`
+
+warning: unused variable: `spatial_query`
+   --> crates\common\src\plugins\animation_plugin.rs:752:5
+    |
+752 |     spatial_query: &SpatialQuery,
+    |     ^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_spatial_query`
+
+warning: unused variable: `origin`
+   --> crates\common\src\plugins\animation_plugin.rs:753:5
+    |
+753 |     origin: Vec3,
+    |     ^^^^^^ help: if this is intentional, prefix it with an underscore: `_origin`
+
+warning: unused variable: `direction`
+   --> crates\common\src\plugins\animation_plugin.rs:754:5
+    |
+754 |     direction: Vec3,
+    |     ^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_direction`
+
+warning: unused variable: `forward`
+   --> crates\common\src\plugins\animation_plugin.rs:905:13
+    |
+905 |         let forward = transform.forward().as_vec3();
+    |             ^^^^^^^ help: if this is intentional, prefix it with an underscore: `_forward`
+
+warning: variable does not need to be mutable
+   --> crates\common\src\pointcloud\mesh_optimization.rs:309:9
+    |
+309 |     let mut vertices = points.to_vec();
+    |         ----^^^^^^^^
+    |         |
+    |         help: remove this `mut`
+    |
+    = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+warning: variable does not need to be mutable
+   --> crates\common\src\pointcloud\mesh_optimization.rs:310:9
+    |
+310 |     let mut mesh_normals = normals.map(|n| n.to_vec())
+    |         ----^^^^^^^^^^^^
+    |         |
+    |         help: remove this `mut`
+
+warning: unused variable: `file_len`
+   --> crates\common\src\pointcloud\formats.rs:348:9
+    |
+348 |     let file_len = file.metadata().map_err(|e| e.to_string())?.len();
+    |         ^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_file_len`
+
+warning: unused variable: `actual_index`
+   --> crates\common\src\pointcloud\formats.rs:371:21
+    |
+371 |                 let actual_index = if index < 0 { !index } else { index };
+    |                     ^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_actual_index`
+
+warning: variable does not need to be mutable
+   --> crates\common\src\pointcloud\formats.rs:442:9
+    |
+442 |     let mut vertices: Vec<Vec3> = Vec::new();
+    |         ----^^^^^^^^
+    |         |
+    |         help: remove this `mut`
+
+warning: unused variable: `data_start`
+   --> crates\common\src\pointcloud\formats.rs:455:25
+    |
+455 |             if let Some(data_start) = trimmed.find("*") {
+    |                         ^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_data_start`
+
+warning: unused variable: `v`
+   --> crates\common\src\pointcloud\formats.rs:476:27
+    |
+476 |                 if let Ok(v) = part.trim().parse::<f64>() {
+    |                           ^
+    |
+help: you might have meant to pattern match on the similarly named constant `G`
+    |
+476 -                 if let Ok(v) = part.trim().parse::<f64>() {
+476 +                 if let Ok(physics::gravity::G) = part.trim().parse::<f64>() {
+    |
+help: if this is intentional, prefix it with an underscore
+    |
+476 |                 if let Ok(_v) = part.trim().parse::<f64>() {
+    |                           +
+
+warning: value assigned to `normals` is never read
+    --> crates\common\src\pointcloud\formats.rs:1442:27
+     |
+1442 |         let mut normals = Vec::new();
+     |                           ^^^^^^^^^^ this value is reassigned later and never used
+...
+1473 |         normals = vec![Vec3::ZERO; vertices.len()];
+     |         ------- `normals` is overwritten here before the previous value is read
+
+warning: unused variable: `max_x`
+   --> crates\common\src\pointcloud\elevation_import.rs:496:17
+    |
+496 |             let max_x = min_x + config.chunk_size;
+    |                 ^^^^^ help: if this is intentional, prefix it with an underscore: `_max_x`
+
+warning: unused variable: `max_z`
+   --> crates\common\src\pointcloud\elevation_import.rs:497:17
+    |
+497 |             let max_z = min_z + config.chunk_size;
+    |                 ^^^^^ help: if this is intentional, prefix it with an underscore: `_max_z`
+
+warning: unused variable: `lat_rad`
+   --> crates\common\src\pointcloud\elevation_import.rs:579:9
+    |
+579 |     let lat_rad = lat.to_radians();
+    |         ^^^^^^^ help: if this is intentional, prefix it with an underscore: `_lat_rad`
+
+warning: unreachable pattern
+    --> crates\common\src\mlua\runtime.rs:2127:17
+     |
+1877 |                 "GetDescendants" => {
+     |                 ---------------- matches all the relevant values
+...
+2127 |                 "GetDescendants" => {
+     |                 ^^^^^^^^^^^^^^^^ no value can reach this
+     |
+     = note: `#[warn(unreachable_patterns)]` (part of `#[warn(unused)]`) on by default
+
+warning: unreachable pattern
+    --> crates\common\src\mlua\runtime.rs:2147:17
+     |
+1942 |                 "GetFullName" => {
+     |                 ------------- matches all the relevant values
+...
+2147 |                 "GetFullName" => {
+     |                 ^^^^^^^^^^^^^ no value can reach this
+
+warning: unused variable: `animator`
+    --> crates\common\src\mlua\runtime.rs:3771:57
+     |
+3771 |         let load_animation = lua.create_function(|lua, (animator, animation): (mlua::Table, mlua::Table)| {
+     |                                                         ^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_animator`
+
+warning: unused variable: `key`
+    --> crates\common\src\mlua\runtime.rs:4012:61
+     |
+4012 |         sim_service.set("GetValue", lua.create_function(|_, key: String| {
+     |                                                             ^^^ help: if this is intentional, prefix it with an underscore: `_key`
+
+warning: unused variable: `class_filter`
+    --> crates\common\src\mlua\runtime.rs:4054:72
+     |
+4054 |         workspace_query.set("QueryEntities", lua.create_function(|lua, class_filter: Option<String>| {
+     |                                                                        ^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_class_filter`
+
+warning: variable does not need to be mutable
+   --> crates\common\src\mlua\compat.rs:480:13
+    |
+480 |         let mut output = source.to_string();
+    |             ----^^^^^^
+    |             |
+    |             help: remove this `mut`
+
+warning: unused variable: `old_value`
+   --> crates\common\src\scripting\instance.rs:210:13
+    |
+210 |         let old_value = self.properties.insert(name.to_string(), value.clone());
+    |             ^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_old_value`
+
+warning: unused variable: `delta`
+   --> crates\common\src\scripting\plugin.rs:256:9
+    |
+256 |     let delta = time.delta_secs_f64();
+    |         ^^^^^ help: if this is intentional, prefix it with an underscore: `_delta`
+
+warning: unused variable: `instance_registry`
+   --> crates\common\src\scripting\plugin.rs:268:5
+    |
+268 |     instance_registry: Res<InstanceRegistryResource>,
+    |     ^^^^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_instance_registry`
+
+warning: unused variable: `delta`
+   --> crates\common\src\scripting\plugin.rs:270:9
+    |
+270 |     let delta = time.delta_secs_f64();
+    |         ^^^^^ help: if this is intentional, prefix it with an underscore: `_delta`
+
+warning: unused variable: `delta`
+   --> crates\common\src\scripting\plugin.rs:283:9
+    |
+283 |     let delta = time.delta_secs_f64();
+    |         ^^^^^ help: if this is intentional, prefix it with an underscore: `_delta`
+
+warning: unused variable: `next_pt`
+   --> crates\common\src\terrain\height_query.rs:258:14
+    |
+258 |         let (next_pt, next_diff) = sample_at(next_t);
+    |              ^^^^^^^ help: if this is intentional, prefix it with an underscore: `_next_pt`
+
+warning: unused variable: `nrm`
+   --> crates\common\src\terrain\road_junction.rs:781:13
+    |
+781 |         let nrm: Vec<P2> = self.approaches.iter().map(|a| P2::normal(a.heading)).collect();
+    |             ^^^ help: if this is intentional, prefix it with an underscore: `_nrm`
+
+warning: variable does not need to be mutable
+   --> crates\common\src\terrain\worldgen\climate.rs:228:18
+    |
+228 |     let (mut wx, mut wz) = (params.wind_dx as f64, params.wind_dz as f64);
+    |                  ----^^
+    |                  |
+    |                  help: remove this `mut`
+
+warning: unused variable: `params`
+   --> crates\common\src\terrain\worldgen\materials.rs:407:5
+    |
+407 |     params: &MaterialParams,
+    |     ^^^^^^ help: if this is intentional, prefix it with an underscore: `_params`
+
+warning: unused variable: `meshes`
+   --> crates\common\src\terrain\mod.rs:555:5
+    |
+555 |     meshes: &mut Assets<Mesh>,
+    |     ^^^^^^ help: if this is intentional, prefix it with an underscore: `_meshes`
+
+warning: unused variable: `quad_entity`
+  --> crates\common\src\gui\input.rs:27:10
+   |
+27 |     for (quad_entity, quad_transform, child_of) in &quad_query {
+   |          ^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_quad_entity`
+
+warning: unused variable: `placeholder`
+   --> crates\common\src\gui\generator.rs:209:9
+    |
+209 |     let placeholder = elem.text.as_deref().unwrap_or("");
+    |         ^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_placeholder`
+
+warning: variable does not need to be mutable
+    --> crates\common\src\physics\exotic_propulsion.rs:1226:10
+     |
+1226 |     for (mut laser, mut reactor, _gradient, mut transform) in query.iter_mut() {
+     |          ----^^^^^
+     |          |
+     |          help: remove this `mut`
+
+warning: unused variable: `neighbor_entity`
+   --> crates\common\src\realism\particles\systems.rs:108:13
+    |
+108 |         for neighbor_entity in neighbors {
+    |             ^^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_neighbor_entity`
+
+warning: unused variable: `transform`
+   --> crates\common\src\realism\particles\systems.rs:237:33
+    |
+237 |     for (particle, mut kinetic, transform, thermo, fluid) in query.iter_mut() {
+    |                                 ^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_transform`
+
+warning: unused variable: `entity`
+   --> crates\common\src\realism\visualizers\property_overlay.rs:232:10
+    |
+232 |     for (entity, transform, overlay, thermo, kinetic, stress, fracture) in query.iter() {
+    |          ^^^^^^ help: if this is intentional, prefix it with an underscore: `_entity`
+
+warning: unused variable: `impact_point`
+   --> crates\common\src\realism\deformation\fracture_mesh.rs:585:5
+    |
+585 |     impact_point: Vec3,
+    |     ^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_impact_point`
+
+warning: unused variable: `mat_a`
+   --> crates\common\src\realism\thermal_conduction.rs:187:41
+    |
+187 |             let (entity_a, transform_a, mat_a) = entities[i];
+    |                                         ^^^^^ help: if this is intentional, prefix it with an underscore: `_mat_a`
+
+warning: variable does not need to be mutable
+   --> crates\common\src\realism\numerics\interpolation.rs:135:9
+    |
+135 |     let mut rhs_w = rhs.clone();
+    |         ----^^^^^
+    |         |
+    |         help: remove this `mut`
+
+warning: unused variable: `name`
+   --> crates\common\src\simulation\recorder.rs:448:14
+    |
+448 |         for (name, series) in &self.series {
+    |              ^^^^ help: if this is intentional, prefix it with an underscore: `_name`
+
+warning: type `ForceEntry` is more private than the item `ForceMetatable::get_force`
+   --> crates\common\src\physics\dynamic_gravity.rs:197:5
+    |
+197 |     pub fn get_force(&self, source: Entity, target: Entity) -> Option<&ForceEntry> {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ method `ForceMetatable::get_force` is reachable at visibility `pub`
+    |
+note: but type `ForceEntry` is only usable at visibility `pub(self)`
+   --> crates\common\src\physics\dynamic_gravity.rs:163:1
+    |
+163 | struct ForceEntry {
+    | ^^^^^^^^^^^^^^^^^
+    = note: `#[warn(private_interfaces)]` on by default
+
+warning: function `hang_standoff` is never used
+   --> crates\common\src\avatar\climb.rs:397:21
+    |
+397 | pub(crate) const fn hang_standoff() -> f32 {
+    |                     ^^^^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: function `climb_body_rotation` is never used
+   --> crates\common\src\avatar\climb.rs:495:15
+    |
+495 | pub(crate) fn climb_body_rotation(grip: &Grip, holds: &[Vec3; 2]) -> Quat {
+    |               ^^^^^^^^^^^^^^^^^^^
+
+warning: function `probe_config_for` is never used
+   --> crates\common\src\avatar\climb.rs:803:15
+    |
+803 | pub(crate) fn probe_config_for(body: &AvatarBody, feet_y: f32) -> ProbeConfig {
+    |               ^^^^^^^^^^^^^^^^
+
+warning: function `ease_out` is never used
+    --> crates\common\src\avatar\climb.rs:2187:4
+     |
+2187 | fn ease_out(t: f32) -> f32 {
+     |    ^^^^^^^^
+
+warning: function `character_movement_physics` is never used
+   --> crates\common\src\plugins\character_plugin.rs:418:4
+    |
+418 | fn character_movement_physics(
+    |    ^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `character_jump` is never used
+   --> crates\common\src\plugins\character_plugin.rs:425:4
+    |
+425 | fn character_jump(
+    |    ^^^^^^^^^^^^^^
+
+warning: function `ground_check` is never used
+   --> crates\common\src\plugins\character_plugin.rs:432:4
+    |
+432 | fn ground_check(
+    |    ^^^^^^^^^^^^
+
+warning: function `update_locomotion` is never used
+   --> crates\common\src\plugins\character_plugin.rs:439:4
+    |
+439 | fn update_locomotion(
+    |    ^^^^^^^^^^^^^^^^^
+
+warning: function `animate_arm` is never used
+   --> crates\common\src\plugins\humanoid.rs:204:4
+    |
+204 | fn animate_arm(
+    |    ^^^^^^^^^^^
+
+warning: function `animate_leg` is never used
+   --> crates\common\src\plugins\humanoid.rs:271:4
+    |
+271 | fn animate_leg(
+    |    ^^^^^^^^^^^
+
+warning: field `chunks_written` is never read
+   --> crates\common\src\pointcloud\processing.rs:663:5
+    |
+661 | struct ExportStats {
+    |        ----------- field in this struct
+662 |     compression_ratio: f32,
+663 |     chunks_written: usize,
+    |     ^^^^^^^^^^^^^^
+
+warning: function `with_params_mut` is never used
+   --> crates\common\src\mlua\raycast.rs:162:4
+    |
+162 | fn with_params_mut<F>(handle: usize, callback: F)
+    |    ^^^^^^^^^^^^^^^
+
+warning: field `signal_id` is never read
+  --> crates\common\src\scripting\events.rs:34:5
+   |
+31 | pub struct Connection {
+   |            ---------- field in this struct
+...
+34 |     signal_id: u64,
+   |     ^^^^^^^^^
+   |
+   = note: `Connection` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+
+warning: fields `table_name` and `region` are never read
+   --> crates\common\src\scripting\datastore.rs:220:5
+    |
+216 | pub struct DataStore {
+    |            --------- fields in this struct
+...
+220 |     table_name: String,
+    |     ^^^^^^^^^^
+221 |     /// AWS region
+222 |     region: String,
+    |     ^^^^^^
+    |
+    = note: `DataStore` has a derived impl for the trait `Clone`, but this is intentionally ignored during dead code analysis
+
+warning: fields `table_name`, `region`, `access_key_id`, and `secret_access_key` are never read
+   --> crates\common\src\scripting\datastore.rs:400:5
+    |
+396 | pub struct OrderedDataStore {
+    |            ---------------- fields in this struct
+...
+400 |     table_name: String,
+    |     ^^^^^^^^^^
+401 |     /// AWS region
+402 |     region: String,
+    |     ^^^^^^
+403 |     /// AWS access key ID
+404 |     access_key_id: Option<String>,
+    |     ^^^^^^^^^^^^^
+405 |     /// AWS secret access key
+406 |     secret_access_key: Option<String>,
+    |     ^^^^^^^^^^^^^^^^^
+    |
+    = note: `OrderedDataStore` has a derived impl for the trait `Clone`, but this is intentionally ignored during dead code analysis
+
+warning: field `distance` is never read
+   --> crates\common\src\physics\dynamic_gravity.rs:171:5
+    |
+163 | struct ForceEntry {
+    |        ---------- field in this struct
+...
+171 |     distance: f64,
+    |     ^^^^^^^^
+    |
+    = note: `ForceEntry` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+
+warning: field `total_pairs` is never read
+   --> crates\common\src\physics\dynamic_gravity.rs:190:5
+    |
+182 | pub struct ForceMetatable {
+    |            -------------- field in this struct
+...
+190 |     total_pairs: usize,
+    |     ^^^^^^^^^^^
+
+warning: field `current_cell_offset` is never read
+   --> crates\common\src\realism\particles\spatial.rs:234:5
+    |
+230 | pub struct NeighborIterator<'a> {
+    |            ---------------- field in this struct
+...
+234 |     current_cell_offset: i32,
+    |     ^^^^^^^^^^^^^^^^^^^
+
+warning: function `damage_to_color` is never used
+   --> crates\common\src\realism\visualizers\stress_viz.rs:133:4
+    |
+133 | fn damage_to_color(damage: f32) -> Color {
+    |    ^^^^^^^^^^^^^^^
+
+warning: constant `GAMMA_AIR` is never used
+ --> crates\common\src\realism\thermocycles\brayton.rs:3:7
+  |
+3 | const GAMMA_AIR: f32 = 1.4;
+  |       ^^^^^^^^^
+
+warning: unused `std::result::Result` that must be used
+   --> crates\common\src\events.rs:218:5
+    |
+218 | /     queue.stream.subscribe(topic, move |view| {
+219 | |         // Encode raw bytes as a base64 string so they fit into SignalArg::String.
+220 | |         use std::fmt::Write;
+221 | |         let raw = view.data;
+...   |
+227 | |         bus_fire.fire(topic, vec![SignalArg::String(hex)]);
+228 | |     });
+    | |______^
+    |
+    = note: this `Result` may be an `Err` variant, which should be handled
+    = note: `#[warn(unused_must_use)]` (part of `#[warn(unused)]`) on by default
+help: use `let _ = ...` to ignore the resulting value
+    |
+218 |     let _ = queue.stream.subscribe(topic, move |view| {
+    |     +++++++
+
+warning: call to `.clone()` on a reference in this situation does nothing
+   --> crates\common\src\soul\rune_runtime.rs:251:31
+    |
+251 |             ctx.install(module.clone())
+    |                               ^^^^^^^^
+    |
+    = note: the type `rune::Module` does not implement `Clone`, so calling `clone` on `&rune::Module` copies the reference, which does not do anything and can be removed
+    = note: `#[warn(noop_method_call)]` on by default
+help: remove this redundant call
+    |
+251 -             ctx.install(module.clone())
+251 +             ctx.install(module)
+    |
+help: if you meant to clone `rune::Module`, implement `Clone` for it
+   --> C:\Users\miksu\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\rune-0.14.2\src\module\module.rs:52:1
+    |
+ 52 + #[derive(Clone)]
+ 53 | pub struct Module {
+    |
+
+warning: call to `.clone()` on a reference in this situation does nothing
+   --> crates\common\src\soul\rune_runtime.rs:571:27
+    |
+571 |         ctx.install(module.clone())
+    |                           ^^^^^^^^
+    |
+    = note: the type `rune::Module` does not implement `Clone`, so calling `clone` on `&rune::Module` copies the reference, which does not do anything and can be removed
+help: remove this redundant call
+    |
+571 -         ctx.install(module.clone())
+571 +         ctx.install(module)
+    |
+help: if you meant to clone `rune::Module`, implement `Clone` for it
+   --> C:\Users\miksu\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\rune-0.14.2\src\module\module.rs:52:1
+    |
+ 52 + #[derive(Clone)]
+ 53 | pub struct Module {
+    |
+
+warning: unused `std::result::Result` that must be used
+   --> crates\common\src\mlua\runtime.rs:668:9
+    |
+668 |         env.set_metatable(Some(meta)); // returns () in mlua 0.10, not Result
+    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: this `Result` may be an `Err` variant, which should be handled
+help: use `let _ = ...` to ignore the resulting value
+    |
+668 |         let _ = env.set_metatable(Some(meta)); // returns () in mlua 0.10, not Result
+    |         +++++++
+
+warning: unused `std::result::Result` that must be used
+   --> crates\common\src\mlua\play\mod.rs:285:9
+    |
+285 |         handles.set_metatable(Some(weak));
+    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: this `Result` may be an `Err` variant, which should be handled
+help: use `let _ = ...` to ignore the resulting value
+    |
+285 |         let _ = handles.set_metatable(Some(weak));
+    |         +++++++
+
+warning: unused `std::result::Result` that must be used
+   --> crates\common\src\mlua\play\mod.rs:811:13
+    |
+811 |             obj.set_metatable(Some(meta));
+    |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: this `Result` may be an `Err` variant, which should be handled
+help: use `let _ = ...` to ignore the resulting value
+    |
+811 |             let _ = obj.set_metatable(Some(meta));
+    |             +++++++
+
+warning: unused `std::result::Result` that must be used
+   --> crates\common\src\mlua\play\mod.rs:959:5
+    |
+959 |     env.set_metatable(Some(meta));
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: this `Result` may be an `Err` variant, which should be handled
+help: use `let _ = ...` to ignore the resulting value
+    |
+959 |     let _ = env.set_metatable(Some(meta));
+    |     +++++++
+
+warning: unused `std::result::Result` that must be used
+    --> crates\common\src\mlua\play\instance.rs:1565:5
+     |
+1565 |     result.set_metatable(Some(meta));
+     |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+     |
+     = note: this `Result` may be an `Err` variant, which should be handled
+help: use `let _ = ...` to ignore the resulting value
+     |
+1565 |     let _ = result.set_metatable(Some(meta));
+     |     +++++++
+
+warning: variable `k╬⌐` should have a snake case name
+   --> crates\common\src\realism\units.rs:493:25
+    |
+493 |     pub fn from_kilohms(k╬⌐: f32) -> Self { Self(k╬⌐ * 1e3) }
+    |                         ^^ help: convert the identifier to snake case: `k_╧ë`
+    |
+    = note: `#[warn(non_snake_case)]` (part of `#[warn(nonstandard_style)]`) on by default
+
+warning: variable `m╬⌐` should have a snake case name
+   --> crates\common\src\realism\units.rs:495:26
+    |
+495 |     pub fn from_megaohms(m╬⌐: f32) -> Self { Self(m╬⌐ * 1e6) }
+    |                          ^^ help: convert the identifier to snake case: `m_╧ë`
+
+warning: variable `m╬⌐` should have a snake case name
+   --> crates\common\src\realism\units.rs:497:27
+    |
+497 |     pub fn from_milliohms(m╬⌐: f32) -> Self { Self(m╬⌐ * 1e-3) }
+    |                           ^^ help: convert the identifier to snake case: `m_╧ë`
+
+   Compiling eustress-roblox-import v0.1.0 (E:\Workspace\EustressEngine\eustress\crates\roblox-import)
+   Compiling eustress-networking v0.2.0 (E:\Workspace\EustressEngine\eustress\crates\common\eustress-networking)
+   Compiling eustress-tools v0.1.0 (E:\Workspace\EustressEngine\eustress\crates\tools)
+warning: unused imports: `ContentId`, `Content`, `Enum`, and `Tags`
+  --> crates\roblox-import\src\property_map.rs:61:81
+   |
+61 |     Axes, BinaryString, BrickColor, CFrame, Color3, Color3uint8, ColorSequence, Content,
+   |                                                                                 ^^^^^^^
+62 |     ContentId, Enum, Faces, Font, MaterialColors, NumberRange, NumberSequence,
+   |     ^^^^^^^^^  ^^^^
+63 |     PhysicalProperties, Ray, Rect, Ref, Region3, Region3int16, SharedString, Tags, UDim, UDim2,
+   |                                                                              ^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `Path`
+  --> crates\tools\src\website_tools.rs:19:17
+   |
+19 | use std::path::{Path, PathBuf};
+   |                 ^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+   Compiling eustress-roblox-assets v0.1.0 (E:\Workspace\EustressEngine\eustress\crates\roblox-assets)
+warning: unused imports: `NetworkError` and `NetworkResult`
+  --> crates\common\eustress-networking\src\ownership.rs:41:20
+   |
+41 | use crate::error::{NetworkError, NetworkResult};
+   |                    ^^^^^^^^^^^^  ^^^^^^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unexpected `cfg` condition value: `server`
+   --> crates\common\eustress-networking\src\ownership.rs:668:15
+    |
+668 |         #[cfg(feature = "server")]
+    |               ^^^^^^^^^^^^^^^^^^
+    |
+    = note: expected values for `feature` are: `default` and `native`
+    = help: consider adding `server` as a feature in `Cargo.toml`
+    = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+    = note: requested on the command line with `-W unexpected-cfgs`
+
+warning: unexpected `cfg` condition value: `client`
+   --> crates\common\eustress-networking\src\ownership.rs:683:15
+    |
+683 |         #[cfg(feature = "client")]
+    |               ^^^^^^^^^^^^^^^^^^
+    |
+    = note: expected values for `feature` are: `default` and `native`
+    = help: consider adding `client` as a feature in `Cargo.toml`
+    = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+
+warning: unused imports: `Deserialize` and `Serialize`
+  --> crates\common\eustress-networking\src\replication.rs:13:13
+   |
+13 | use serde::{Deserialize, Serialize};
+   |             ^^^^^^^^^^^  ^^^^^^^^^
+
+warning: unused import: `EntityState`
+  --> crates\common\eustress-networking\src\replication.rs:17:36
+   |
+17 | use crate::protocol::{EntityDelta, EntityState, NetworkTransform, NetworkVelocity};
+   |                                    ^^^^^^^^^^^
+
+warning: variable does not need to be mutable
+   --> crates\common\eustress-networking\src\ownership.rs:623:5
+    |
+623 |     mut manager: ResMut<OwnershipManager>,
+    |     ----^^^^^^^
+    |     |
+    |     help: remove this `mut`
+    |
+    = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `manager`
+   --> crates\common\eustress-networking\src\ownership.rs:623:5
+    |
+623 |     mut manager: ResMut<OwnershipManager>,
+    |     ^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_manager`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: type alias `NetworkResult` is never used
+   --> crates\common\eustress-networking\src\error.rs:211:10
+    |
+211 | pub type NetworkResult<T> = Result<T, NetworkError>;
+    |          ^^^^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: `eustress-roblox-import` (lib) generated 1 warning (run `cargo fix --lib -p eustress-roblox-import` to apply 1 suggestion)
+warning: `eustress-tools` (lib) generated 1 warning (run `cargo fix --lib -p eustress-tools` to apply 1 suggestion)
+   Compiling eustress-play-runtime v0.1.0 (E:\Workspace\EustressEngine\eustress\crates\play-runtime)
+warning: `eustress-networking` (lib) generated 8 warnings (run `cargo fix --lib -p eustress-networking` to apply 5 suggestions)
+warning: unused import: `Family`
+  --> crates\play-runtime\src\billboards.rs:59:56
+   |
+59 |     Attrs, Buffer as TextBuffer, Color as CosmicColor, Family, FontSystem, Metrics,
+   |                                                        ^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: use of deprecated trait `bevy::bevy_image::BevyDefault`: Use ExtractedView::texture_format where possible. Bevy does not encourage a default TextureFormat anymore. If you really need this, use TextureFormat::Rgba8UnormSrgb
+   --> crates\play-runtime\src\billboard_pipeline.rs:100:18
+    |
+100 | use bevy::image::BevyDefault;
+    |                  ^^^^^^^^^^^
+    |
+    = note: `#[warn(deprecated)]` on by default
+
+warning: use of deprecated associated constant `bevy::bevy_render::view::ViewTarget::TEXTURE_FORMAT_HDR`: Use ExtractedView::target_format where possible. Bevy does not encourage a default HDR TextureFormat anymore. If you really need this, use TextureFormat::Rgba16Float
+   --> crates\play-runtime\src\billboard_pipeline.rs:571:57
+    |
+571 |                         bevy::render::view::ViewTarget::TEXTURE_FORMAT_HDR
+    |                                                         ^^^^^^^^^^^^^^^^^^
+
+warning: use of deprecated associated function `bevy::bevy_image::BevyDefault::bevy_default`: Use ExtractedView::texture_format where possible. Bevy does not encourage a default TextureFormat anymore. If you really need this, use TextureFormat::Rgba8UnormSrgb
+   --> crates\play-runtime\src\billboard_pipeline.rs:575:40
+    |
+575 |                         TextureFormat::bevy_default()
+    |                                        ^^^^^^^^^^^^
+
+warning: use of deprecated method `bevy::bevy_ecs::world::World::insert_non_send_resource`: use World::insert_non_send
+    --> crates\play-runtime\src\billboards.rs:3033:11
+     |
+3033 |     world.insert_non_send_resource(BillboardAtlas::new(texture, INITIAL_ATLAS_ROWS, cols, max_dim));
+     |           ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: variable does not need to be mutable
+   --> crates\play-runtime\src\billboard_pipeline.rs:797:5
+    |
+797 |     mut pipeline_cache: ResMut<PipelineCache>,
+    |     ----^^^^^^^^^^^^^^
+    |     |
+    |     help: remove this `mut`
+    |
+    = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `u`
+   --> crates\play-runtime\src\billboards.rs:666:17
+    |
+666 |             (m, u) if m > 0.0 => m,
+    |                 ^ help: if this is intentional, prefix it with an underscore: `_u`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `asset_server`
+   --> crates\play-runtime\src\material_registry.rs:745:5
+    |
+745 |     asset_server: &AssetServer,
+    |     ^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_asset_server`
+
+warning: unused variable: `mat_toml_dir`
+   --> crates\play-runtime\src\material_registry.rs:746:5
+    |
+746 |     mat_toml_dir: &Path,
+    |     ^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_mat_toml_dir`
+
+warning: unused variable: `space_root`
+   --> crates\play-runtime\src\material_registry.rs:747:5
+    |
+747 |     space_root: &Path,
+    |     ^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_space_root`
+
+warning: variable does not need to be mutable
+   --> crates\play-runtime\src\materials.rs:161:13
+    |
+161 |         let mut all_patched = true;
+    |             ----^^^^^^^^^^^
+    |             |
+    |             help: remove this `mut`
+
+warning: type `MaterialCacheKey` is more private than the item `MaterialRegistry::dedup_get_or_insert`
+   --> crates\play-runtime\src\material_registry.rs:309:5
+    |
+309 | /     pub(crate) fn dedup_get_or_insert(
+310 | |         &mut self,
+311 | |         key: MaterialCacheKey,
+312 | |         handle: Handle<StandardMaterial>,
+313 | |     ) -> Handle<StandardMaterial> {
+    | |_________________________________^ method `MaterialRegistry::dedup_get_or_insert` is reachable at visibility `pub(crate)`
+    |
+note: but type `MaterialCacheKey` is only usable at visibility `pub(self)`
+   --> crates\play-runtime\src\material_registry.rs:198:1
+    |
+198 | struct MaterialCacheKey {
+    | ^^^^^^^^^^^^^^^^^^^^^^^
+    = note: `#[warn(private_interfaces)]` on by default
+
+warning: `eustress-play-runtime` (lib) generated 12 warnings (run `cargo fix --lib -p eustress-play-runtime` to apply 7 suggestions)
+warning: `eustress-common` (lib) generated 146 warnings (run `cargo fix --lib -p eustress-common` to apply 73 suggestions)
+   Compiling eustress-engine v0.3.8 (E:\Workspace\EustressEngine\eustress\crates\engine)
+warning: unused import: `ClaudeConfig`
+  --> crates\engine\src\soul\build_pipeline.rs:13:77
+   |
+13 | use eustress_common::soul::{SoulAST, SoulParser, SoulConfig, GeneratedCode, ClaudeConfig};
+   |                                                                             ^^^^^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused doc comment
+  --> crates\engine\src\soul\rune_ecs_module.rs:33:1
+   |
+33 | / /// Thread-local holder for the ScriptSpatialQuery bridge.
+34 | | /// Set before Rune script execution, cleared after.
+   | |_---------------------------------------------------^
+   |   |
+   |   rustdoc does not generate documentation for macro invocations
+   |
+   = help: to document an item produced by a macro, the macro must produce the documentation as part of its expansion
+   = note: `#[warn(unused_doc_comments)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused doc comment
+  --> crates\engine\src\soul\rune_ecs_module.rs:75:1
+   |
+75 | /// Thread-local holder for ECS bindings during script execution.
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ rustdoc does not generate documentation for macro invocations
+   |
+   = help: to document an item produced by a macro, the macro must produce the documentation as part of its expansion
+
+warning: unused doc comment
+    --> crates\engine\src\soul\rune_ecs_module.rs:1465:1
+     |
+1465 | / /// Thread-local hierarchy snapshot of the LIVE World, seeded before each
+1466 | | /// script run. See the module doc comment above for why this exists
+1467 | | /// instead of direct `World` access.
+1468 | | ///
+...    |
+1471 | | /// 100K-entry map 60 times a second. [`RuneHierarchySnapshot`] is the cached
+1472 | | /// handle the caller keeps.
+     | |_---------------------------^
+     |   |
+     |   rustdoc does not generate documentation for macro invocations
+     |
+     = help: to document an item produced by a macro, the macro must produce the documentation as part of its expansion
+
+warning: unused doc comment
+    --> crates\engine\src\soul\rune_ecs_module.rs:1560:1
+     |
+1560 | / /// Live entities the script asked to destroy this run
+1561 | | /// (`InstanceRune::destroy`). `execute_rune_oneshot`'s caller drains this
+1562 | | /// via `drain_pending_destroys` AFTER the script returns and performs the
+1563 | | /// actual trash-move + despawn ΓÇö this module never touches the
+1564 | | /// filesystem or `Commands` directly (see the module doc comment above).
+     | |_------------------------------------------------------------------------^
+     |   |
+     |   rustdoc does not generate documentation for macro invocations
+     |
+     = help: to document an item produced by a macro, the macro must produce the documentation as part of its expansion
+
+warning: unused doc comment
+    --> crates\engine\src\soul\rune_ecs_module.rs:1593:1
+     |
+1593 | / /// The records a Play session has already despawned. A second delete of the same
+1594 | | /// name in that session answers false, so a loop that deletes until it gets false ends.
+     | |_---------------------------------------------------------------------------------------^
+     |   |
+     |   rustdoc does not generate documentation for macro invocations
+     |
+     = help: to document an item produced by a macro, the macro must produce the documentation as part of its expansion
+
+warning: unused doc comment
+    --> crates\engine\src\soul\rune_ecs_module.rs:1783:1
+     |
+1783 | / /// Thread-local holder for the (Pending-store) InstanceRegistry.
+1784 | | /// Set before Rune script execution, cleared after.
+     | |_---------------------------------------------------^
+     |   |
+     |   rustdoc does not generate documentation for macro invocations
+     |
+     = help: to document an item produced by a macro, the macro must produce the documentation as part of its expansion
+
+warning: unused doc comment
+    --> crates\engine\src\soul\rune_ecs_module.rs:2505:1
+     |
+2505 | /// Thread-local holder for the TweenService.
+     | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ rustdoc does not generate documentation for macro invocations
+     |
+     = help: to document an item produced by a macro, the macro must produce the documentation as part of its expansion
+
+warning: unused doc comment
+    --> crates\engine\src\soul\rune_ecs_module.rs:2714:1
+     |
+2714 | /// Thread-local holder for the TaskScheduler.
+     | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ rustdoc does not generate documentation for macro invocations
+     |
+     = help: to document an item produced by a macro, the macro must produce the documentation as part of its expansion
+
+warning: unused doc comment
+    --> crates\engine\src\soul\rune_ecs_module.rs:2812:1
+     |
+2812 | /// Thread-local holder for input state.
+     | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ rustdoc does not generate documentation for macro invocations
+     |
+     = help: to document an item produced by a macro, the macro must produce the documentation as part of its expansion
+
+warning: unused doc comment
+    --> crates\engine\src\soul\rune_ecs_module.rs:3058:1
+     |
+3058 | /// Thread-local holder for the DataStoreService.
+     | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ rustdoc does not generate documentation for macro invocations
+     |
+     = help: to document an item produced by a macro, the macro must produce the documentation as part of its expansion
+
+warning: unused doc comment
+    --> crates\engine\src\soul\rune_ecs_module.rs:3479:1
+     |
+3479 | /// Thread-local tag storage for entities (script-run scope).
+     | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ rustdoc does not generate documentation for macro invocations
+     |
+     = help: to document an item produced by a macro, the macro must produce the documentation as part of its expansion
+
+warning: unused import: `std::sync::Arc`
+  --> crates\engine\src\soul\rune_ecs_module.rs:14:5
+   |
+14 | use std::sync::Arc;
+   |     ^^^^^^^^^^^^^^
+
+warning: unused import: `Function`
+  --> crates\engine\src\soul\rune_ecs_module.rs:24:44
+   |
+24 | use rune::{Module, ContextError, runtime::{Function, Value}};
+   |                                            ^^^^^^^^
+
+warning: unused import: `IntoParallelIterator`
+ --> crates\engine\src\soul\parallel_execution.rs:9:19
+  |
+9 | use rayon::iter::{IntoParallelIterator, ParallelIterator};
+  |                   ^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `Vm`
+  --> crates\engine\src\soul\parallel_execution.rs:12:21
+   |
+12 | use rune::{Context, Vm, Source, Sources, Value as RuneValue};
+   |                     ^^
+
+warning: unused import: `VmPoolError`
+  --> crates\engine\src\soul\parallel_execution.rs:15:44
+   |
+15 | use super::vm_pool::{VmPool, VmPoolConfig, VmPoolError};
+   |                                            ^^^^^^^^^^^
+
+warning: unused import: `Workspace`
+  --> crates\engine\src\play_mode.rs:41:48
+   |
+41 | use eustress_common::services::{PlayerService, Workspace, spawn_feet_position};
+   |                                                ^^^^^^^^^
+
+warning: unused imports: `CharacterHead`, `CharacterRoot`, `Character`, and `Player`
+  --> crates\engine\src\play_mode.rs:42:41
+   |
+42 | use eustress_common::services::player::{Player, Character, CharacterRoot, CharacterHead};
+   |                                         ^^^^^^  ^^^^^^^^^  ^^^^^^^^^^^^^  ^^^^^^^^^^^^^
+
+warning: unused imports: `AnimationStateMachine`, `LocomotionController`, and `ProceduralAnimation`
+  --> crates\engine\src\play_mode.rs:43:44
+   |
+43 | use eustress_common::services::animation::{AnimationStateMachine, LocomotionController, ProceduralAnimation};
+   |                                            ^^^^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^
+
+warning: unused imports: `PlayModePhysicsBody`, `spawn_play_mode_camera`, and `spawn_play_mode_character`
+  --> crates\engine\src\play_mode.rs:50:22
+   |
+50 |     PlayModeRuntime, PlayModePhysicsBody, PlayModeCharacterConfig,
+   |                      ^^^^^^^^^^^^^^^^^^^
+51 |     spawn_play_mode_character, spawn_play_mode_camera, cleanup_play_mode_entities,
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `CursorOptions`
+  --> crates\engine\src\play_mode_runtime.rs:21:36
+   |
+21 | use bevy::window::{CursorGrabMode, CursorOptions};
+   |                                    ^^^^^^^^^^^^^
+
+warning: unused import: `bevy::input::mouse::MouseMotion`
+  --> crates\engine\src\play_mode_runtime.rs:22:5
+   |
+22 | use bevy::input::mouse::MouseMotion;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `avian3d::prelude::*`
+  --> crates\engine\src\play_mode_runtime.rs:23:5
+   |
+23 | use avian3d::prelude::*;
+   |     ^^^^^^^^^^^^^^^^^^^
+
+warning: unused imports: `ClassName`, `Humanoid`, and `Instance`
+  --> crates\engine\src\play_mode_runtime.rs:24:32
+   |
+24 | use eustress_common::classes::{Humanoid, Instance, ClassName};
+   |                                ^^^^^^^^  ^^^^^^^^  ^^^^^^^^^
+
+warning: unused imports: `CharacterHead`, `CharacterRoot`, `Character`, and `Player`
+  --> crates\engine\src\play_mode_runtime.rs:26:5
+   |
+26 |     Player, Character, CharacterRoot, CharacterHead,
+   |     ^^^^^^  ^^^^^^^^^  ^^^^^^^^^^^^^  ^^^^^^^^^^^^^
+
+warning: unused imports: `AnimationStateMachine`, `LocomotionController`, and `ProceduralAnimation`
+  --> crates\engine\src\play_mode_runtime.rs:30:5
+   |
+30 |     AnimationStateMachine, LocomotionController, ProceduralAnimation,
+   |     ^^^^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^^^^^
+
+warning: unused imports: `CharacterGender` and `CharacterModel`
+  --> crates\engine\src\play_mode_runtime.rs:33:30
+   |
+33 |     spawn_skinned_character, CharacterModel, CharacterGender,
+   |                              ^^^^^^^^^^^^^^  ^^^^^^^^^^^^^^^
+
+warning: unused imports: `PlayModeState` and `PlayMode`
+  --> crates\engine\src\play_mode_runtime.rs:45:24
+   |
+45 | use super::play_mode::{PlayModeState, PlayMode};
+   |                        ^^^^^^^^^^^^^  ^^^^^^^^
+
+warning: unused import: `DataModel`
+  --> crates\engine\src\play_datamodel\remote_players.rs:41:44
+   |
+41 | use eustress_common::datamodel::{user_key, DataModel, DmEvent, DmValue, InstanceId};
+   |                                            ^^^^^^^^^
+
+warning: unused doc comment
+   --> crates\engine\src\script_editor\runtime_snapshot.rs:171:1
+    |
+171 | / /// Per-thread cache ΓÇö the LSP runs several async tasks but each one
+172 | | /// reads the snapshot at most once per request; sharing via a
+173 | | /// thread_local saves the parse cost on repeated hovers.
+    | |_--------------------------------------------------------^
+    |   |
+    |   rustdoc does not generate documentation for macro invocations
+    |
+    = help: to document an item produced by a macro, the macro must produce the documentation as part of its expansion
+
+warning: unused import: `Symbol`
+  --> crates\engine\src\script_editor\workspace.rs:32:36
+   |
+32 | use super::analyzer::{self, Range, Symbol, SymbolIndex, SymbolKind};
+   |                                    ^^^^^^
+
+warning: unused import: `Startup`
+  --> crates\engine\src\lsp_launcher.rs:49:39
+   |
+49 | use bevy::app::{App, AppExit, Plugin, Startup};
+   |                                       ^^^^^^^
+
+warning: duplicated attribute
+    --> crates\engine\src\studio_modes.rs:1353:5
+     |
+1353 |     #[test]
+     |     ^^^^^^^
+     |
+     = note: `#[warn(duplicate_macro_attributes)]` on by default
+
+warning: unused import: `crate::space::service_loader::PropertyValue`
+    --> crates\engine\src\space\instance_loader.rs:2447:9
+     |
+2447 |     use crate::space::service_loader::PropertyValue;
+     |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused doc comment
+   --> crates\engine\src\spatial_query_bridge.rs:336:1
+    |
+336 | / /// Per-thread counter handing out raycast call slots. Reset once per frame by
+337 | | /// the play-mode driver via [`reset_raycast_slots`].
+    | |_----------------------------------------------------^
+    |   |
+    |   rustdoc does not generate documentation for macro invocations
+    |
+    = help: to document an item produced by a macro, the macro must produce the documentation as part of its expansion
+
+warning: unused imports: `BranchNode` and `Evidence`
+  --> crates\engine\src\scenarios\engine.rs:22:20
+   |
+22 | use super::types::{BranchNode, BranchStatus, Evidence, Scenario};
+   |                    ^^^^^^^^^^                ^^^^^^^^
+
+warning: unused imports: `SystemTime` and `UNIX_EPOCH`
+   --> crates\engine\src\scenarios\engine.rs:237:25
+    |
+237 |         use std::time::{SystemTime, UNIX_EPOCH};
+    |                         ^^^^^^^^^^  ^^^^^^^^^^
+
+warning: unused import: `EvidenceType`
+  --> crates\engine\src\scenarios\adapters.rs:19:30
+   |
+19 |     DataSourceRef, Evidence, EvidenceType, FileFormat, ParameterValue,
+   |                              ^^^^^^^^^^^^
+
+warning: unused import: `ParameterValue`
+  --> crates\engine\src\scenarios\hierarchy.rs:16:20
+   |
+16 | use super::types::{ParameterValue, Scenario, ScenarioScale};
+   |                    ^^^^^^^^^^^^^^
+
+warning: unused import: `std::io::Read`
+ --> crates\engine\src\scenarios\persistence.rs:9:5
+  |
+9 | use std::io::Read;
+  |     ^^^^^^^^^^^^^
+
+warning: unused import: `ScenarioStatus`
+   --> crates\engine\src\scenarios\persistence.rs:326:50
+    |
+326 |     use crate::scenarios::types::{ScenarioScale, ScenarioStatus};
+    |                                                  ^^^^^^^^^^^^^^
+
+warning: unused imports: `Unit` and `runtime::RuntimeContext`
+  --> crates\engine\src\scenarios\scripting.rs:32:62
+   |
+32 | use rune::{Context, Vm, Source, Sources, Value as RuneValue, Unit, runtime::RuntimeContext};
+   |                                                              ^^^^  ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `crate::play_mode::PlayModeState`
+  --> crates\engine\src\workshop\watchman.rs:49:5
+   |
+49 | use crate::play_mode::PlayModeState;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `std::any::TypeId`
+  --> crates\engine\src\spawners\audio_vfx\particle_emitter.rs:54:5
+   |
+54 | use std::any::TypeId;
+   |     ^^^^^^^^^^^^^^^^
+
+warning: unused import: `TimeSeries`
+  --> crates\engine\src\simulation\plugin.rs:12:26
+   |
+12 |     SimulationRecording, TimeSeries, WatchPoint, BreakPoint, Comparison,
+   |                          ^^^^^^^^^^
+
+warning: unused imports: `BreakPointRegistry`, `BreakPoint`, `Comparison`, and `WatchPoint`
+ --> crates\engine\src\simulation\rune_bindings.rs:8:25
+  |
+8 |     WatchPointRegistry, BreakPointRegistry, WatchPoint, BreakPoint, Comparison,
+  |                         ^^^^^^^^^^^^^^^^^^  ^^^^^^^^^^  ^^^^^^^^^^  ^^^^^^^^^^
+
+warning: unused import: `TcpStream`
+  --> crates\engine\src\engine_bridge\server.rs:38:31
+   |
+38 | use tokio::net::{TcpListener, TcpStream};
+   |                               ^^^^^^^^^
+
+warning: use of deprecated constant `ui::display_text::render_tests::_::WARNING`: The property 'viewport-height' has been deprecated: Please use 'content-height' instead
+   --> crates\engine\src\ui\display_text.rs:295:17
+    |
+295 |                 viewport-height: input.preferred-height;
+    |                 ^^^^^^^^
+    |
+    = note: `#[warn(deprecated)]` on by default
+
+warning: use of deprecated constant `ui::display_text::render_tests::_::WARNING`: The property 'viewport-y' has been deprecated: Please use 'content-y' instead
+   --> crates\engine\src\ui\display_text.rs:296:17
+    |
+296 |                 viewport-y: -root.scroll;
+    |                 ^^^^^^^^
+
+warning: use of deprecated constant `ui::display_text::render_tests::_::WARNING`: 'slint!' has no '#[edition]', so the language behavior changes up to 1.19 don't apply: review them at https://slint.dev/releases/1.19.0/docs/slint/guide/language/concepts/editions/#behavior-changes, then add '#[edition = "1.19"]'
+   --> crates\engine\src\ui\display_text.rs:277:9
+    |
+277 |         export component WrappedProbe inherits Window {
+    |         ^^^^^^
+
+warning: use of deprecated function `space::instance_loader::load_instance_definition_with_defaults`: use `load_instance_definition` ΓÇö the common-crate class schema is the source of truth and is loaded automatically.
+   --> crates\engine\src\space\mod.rs:489:31
+    |
+489 |     load_instance_definition, load_instance_definition_with_defaults,
+    |                               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: use of deprecated function `space::instance_loader::load_instance_definition_with_defaults`: use `load_instance_definition` ΓÇö the common-crate class schema is the source of truth and is loaded automatically.
+    --> crates\engine\src\space\file_watcher.rs:2098:43
+     |
+2098 |             match super::instance_loader::load_instance_definition_with_defaults(&event.path, class_defaults) {
+     |                                           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: use of deprecated function `serialization::load_unified_scene`: RON scene format is deprecated. Use binary format for new scenes.
+   --> crates\engine\src\startup.rs:909:39
+    |
+909 |     let scene = crate::serialization::load_unified_scene(path)
+    |                                       ^^^^^^^^^^^^^^^^^^
+
+warning: use of deprecated method `bevy_ecs::world::World::insert_non_send_resource`: use World::insert_non_send
+    --> crates\engine\src\ui\slint_ui.rs:3232:11
+     |
+3232 |     world.insert_non_send_resource(SlintUiState {
+     |           ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: use of deprecated method `bevy_ecs::world::World::get_non_send_resource`: use World::get_non_send
+   --> crates\engine\src\ui\restore_points.rs:209:10
+    |
+209 |         .get_non_send_resource::<crate::ui::slint_ui::SlintUiState>()
+    |          ^^^^^^^^^^^^^^^^^^^^^
+
+warning: use of deprecated method `bevy::bevy_app::App::insert_non_send_resource`: use App::insert_non_send
+  --> crates\engine\src\ui\webview.rs:22:13
+   |
+22 |         app.insert_non_send_resource(WebViewManager::default())
+   |             ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: use of deprecated method `bevy_ecs::world::World::get_non_send_resource`: use World::get_non_send
+   --> crates\engine\src\space\rename.rs:176:29
+    |
+176 |     let Some(slint) = world.get_non_send_resource::<SlintUiState>() else { return };
+    |                             ^^^^^^^^^^^^^^^^^^^^^
+
+warning: use of deprecated method `bevy_ecs::world::World::get_non_send_resource`: use World::get_non_send
+   --> crates\engine\src\space\rename.rs:201:32
+    |
+201 |     if let Some(slint) = world.get_non_send_resource::<SlintUiState>() {
+    |                                ^^^^^^^^^^^^^^^^^^^^^
+
+warning: use of deprecated method `bevy::bevy_asset::AssetServer::load_with_settings`: Use `asset_server.load_builder().with_settings(settings).load(path)` instead
+   --> crates\engine\src\decal_place_tool.rs:998:40
+    |
+998 |                 let tex = asset_server.load_with_settings(
+    |                                        ^^^^^^^^^^^^^^^^^^
+
+warning: use of deprecated method `bevy::bevy_asset::AssetServer::load_with_settings`: Use `asset_server.load_builder().with_settings(settings).load(path)` instead
+    --> crates\engine\src\decal_place_tool.rs:1508:44
+     |
+1508 |                     let tex = asset_server.load_with_settings(
+     |                                            ^^^^^^^^^^^^^^^^^^
+
+warning: use of deprecated method `bevy_ecs::component::Components::get_resource_id`: use get_id
+   --> crates\engine\src\class_registry\loop5_assertion.rs:342:49
+    |
+342 |     let Some(component_id) = world.components().get_resource_id(type_id) else {
+    |                                                 ^^^^^^^^^^^^^^^
+
+warning: use of deprecated method `bevy_ecs::world::World::get_non_send_resource`: use World::get_non_send
+  --> crates\engine\src\engine_bridge\action_outcome.rs:48:26
+   |
+48 |     let Some(ui) = world.get_non_send_resource::<SlintUiState>() else { return Vec::new() };
+   |                          ^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `ParallelIterator`
+ --> crates\engine\src\soul\parallel_execution.rs:9:41
+  |
+9 | use rayon::iter::{IntoParallelIterator, ParallelIterator};
+  |                                         ^^^^^^^^^^^^^^^^
+
+warning: unused import: `PropertyAccess`
+  --> crates\engine\src\property_service.rs:31:63
+   |
+31 | use eustress_common::classes::{BasePart, ClassName, Instance, PropertyAccess, PropertyValue};
+   |                                                               ^^^^^^^^^^^^^^
+
+warning: unused import: `eustress_worlddb::WorldDb`
+    --> crates\engine\src\space\active_db.rs:2095:9
+     |
+2095 |     use eustress_worlddb::WorldDb;
+     |         ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `ClassSpawner`
+  --> crates\engine\src\space\world_db_binary.rs:50:54
+   |
+50 | use eustress_common::class_registry::{ClassRegistry, ClassSpawner};
+   |                                                      ^^^^^^^^^^^^
+
+warning: unused variable: `entity_name`
+   --> crates\engine\src\soul\rune_ecs_module.rs:437:16
+    |
+437 | fn get_voltage(entity_name: &str) -> f32 {
+    |                ^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_entity_name`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `entity_name`
+   --> crates\engine\src\soul\rune_ecs_module.rs:446:12
+    |
+446 | fn get_soc(entity_name: &str) -> f32 {
+    |            ^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_entity_name`
+
+warning: unused variable: `entity_name`
+   --> crates\engine\src\soul\rune_ecs_module.rs:453:20
+    |
+453 | fn get_temperature(entity_name: &str) -> f32 {
+    |                    ^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_entity_name`
+
+warning: unused variable: `entity_name`
+   --> crates\engine\src\soul\rune_ecs_module.rs:460:22
+    |
+460 | fn get_dendrite_risk(entity_name: &str) -> f32 {
+    |                      ^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_entity_name`
+
+warning: unused variable: `svc`
+    --> crates\engine\src\soul\rune_ecs_module.rs:2671:23
+     |
+2671 |             if let Ok(svc) = service.read() {
+     |                       ^^^ help: if this is intentional, prefix it with an underscore: `_svc`
+
+warning: unused variable: `char_config`
+   --> crates\engine\src\play_mode.rs:732:5
+    |
+732 |     char_config: Res<PlayModeCharacterConfig>,
+    |     ^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_char_config`
+
+warning: variable does not need to be mutable
+     --> crates\engine\src\ui\slint_ui.rs:11675:29
+      |
+11675 |                         let mut mgr = sel_mgr.0.write();
+      |                             ----^^^
+      |                             |
+      |                             help: remove this `mut`
+      |
+      = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `world`
+    --> crates\engine\src\space\space_ops.rs:1932:31
+     |
+1932 | pub fn create_universe_folder(world: &mut World, universe_name: &str) -> Result<PathBuf, String> {
+     |                               ^^^^^ help: if this is intentional, prefix it with an underscore: `_world`
+
+warning: unused variable: `cell`
+   --> crates\engine\src\space\hlod.rs:720:22
+    |
+720 | fn build_merged_mesh(cell: Cell, origin: Vec3, cores: Vec<(u64, Vec<u8>)>) -> Option<MergedMesh> {
+    |                      ^^^^ help: if this is intentional, prefix it with an underscore: `_cell`
+
+warning: unused variable: `ctx`
+   --> crates\engine\src\duplicate_place_tool.rs:131:47
+    |
+131 |     fn on_click(&mut self, hit: &ViewportHit, ctx: &mut ToolContext) -> ToolStepResult {
+    |                                               ^^^ help: if this is intentional, prefix it with an underscore: `_ctx`
+
+warning: variable does not need to be mutable
+   --> crates\engine\src\cad_assembly.rs:139:5
+    |
+139 |     mut pending_anchors: Option<ResMut<crate::cad_mate_tool::PendingMateAnchors>>,
+    |     ----^^^^^^^^^^^^^^^
+    |     |
+    |     help: remove this `mut`
+
+warning: variable does not need to be mutable
+   --> crates\engine\src\crash.rs:103:5
+    |
+103 |     mut settings: Option<ResMut<bevy::light::cluster::GlobalClusterSettings>>,
+    |     ----^^^^^^^^
+    |     |
+    |     help: remove this `mut`
+
+warning: variable does not need to be mutable
+   --> crates\engine\src\clipboard.rs:961:5
+    |
+961 |     mut meshes: ResMut<Assets<Mesh>>,
+    |     ----^^^^^^
+    |     |
+    |     help: remove this `mut`
+
+warning: unused variable: `meshes`
+   --> crates\engine\src\clipboard.rs:961:5
+    |
+961 |     mut meshes: ResMut<Assets<Mesh>>,
+    |     ^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_meshes`
+
+warning: variable does not need to be mutable
+   --> crates\engine\src\script_plugin_host.rs:183:16
+    |
+183 |             Ok(mut rt) => {
+    |                ----^^
+    |                |
+    |                help: remove this `mut`
+
+warning: variable does not need to be mutable
+   --> crates\engine\src\script_plugin_host.rs:570:5
+    |
+570 |     mut runtime_state: ResMut<MluaRuntimeState>,
+    |     ----^^^^^^^^^^^^^
+    |     |
+    |     help: remove this `mut`
+
+warning: unused variable: `m2_id`
+   --> crates\engine\src\scenarios\hierarchy.rs:341:13
+    |
+341 |         let m2_id = macro2.id;
+    |             ^^^^^ help: if this is intentional, prefix it with an underscore: `_m2_id`
+
+warning: unused variable: `result`
+   --> crates\engine\src\scenarios\pruning.rs:451:13
+    |
+451 |         let result = apply_soft_pruning(&mut scenario, &config);
+    |             ^^^^^^ help: if this is intentional, prefix it with an underscore: `_result`
+
+warning: unused variable: `context`
+   --> crates\engine\src\scenarios\scripting.rs:252:9
+    |
+252 |         context: &mut Context,
+    |         ^^^^^^^ help: if this is intentional, prefix it with an underscore: `_context`
+
+warning: unused variable: `script_context`
+   --> crates\engine\src\scenarios\scripting.rs:253:9
+    |
+253 |         script_context: &ScriptContext,
+    |         ^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_script_context`
+
+warning: unused variable: `bridge_runtime`
+   --> crates\engine\src\engine_bridge\mod.rs:931:5
+    |
+931 |     bridge_runtime: Option<Res<BridgeRuntime>>,
+    |     ^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_bridge_runtime`
+
+warning: unused variable: `queue`
+   --> crates\engine\src\engine_bridge\mod.rs:932:5
+    |
+932 |     queue: Res<BridgePendingQueue>,
+    |     ^^^^^ help: if this is intentional, prefix it with an underscore: `_queue`
+
+warning: type `ScriptPluginsDiscovered` is more private than the item `handle_reload_plugins_action`
+   --> crates\engine\src\script_plugin_host.rs:564:1
+    |
+564 | / pub fn handle_reload_plugins_action(
+565 | |     mut events: MessageReader<PluginActionEvent>,
+566 | |     mut tab_registry: ResMut<TabRegistry>,
+567 | |     mut registry: ResMut<ScriptPluginRegistry>,
+...   |
+571 | |     mut notifications: ResMut<NotificationManager>,
+572 | | ) {
+    | |_^ function `handle_reload_plugins_action` is reachable at visibility `pub`
+    |
+note: but type `ScriptPluginsDiscovered` is only usable at visibility `pub(self)`
+   --> crates\engine\src\script_plugin_host.rs:122:1
+    |
+122 | struct ScriptPluginsDiscovered(bool);
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    = note: `#[warn(private_interfaces)]` on by default
+
+warning: useless assignment of variable of type `usize` to itself
+   --> crates\engine\src\script_editor\lsp.rs:494:17
+    |
+494 |                 i = i; // no highlight ΓÇö skip emitting a token rather than
+    |                 ^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: field `cache_dir` is never read
+  --> crates\engine\src\soul\cache.rs:15:5
+   |
+14 | pub struct SoulCache {
+   |            --------- field in this struct
+15 |     cache_dir: PathBuf,
+   |     ^^^^^^^^^
+
+warning: methods `build_markdown_prompt` and `build_markdown_prompt_with_scene` are never used
+   --> crates\engine\src\soul\claude_client.rs:759:8
+    |
+229 | impl ClaudeClient {
+    | ----------------- methods in this implementation
+...
+759 |     fn build_markdown_prompt(&self, markdown: &str, script_name: &str) -> String {
+    |        ^^^^^^^^^^^^^^^^^^^^^
+...
+814 |     fn build_markdown_prompt_with_scene(
+    |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: method `call_vision_api` is never used
+    --> crates\engine\src\soul\claude_client.rs:1759:8
+     |
+1314 | impl ClaudeClient {
+     | ----------------- method in this implementation
+...
+1759 |     fn call_vision_api(&self, request: &VisionRequest) -> Result<String, ClaudeError> {
+     |        ^^^^^^^^^^^^^^^
+
+warning: function `strip_markdown_code_blocks` is never used
+  --> crates\engine\src\soul\build_pipeline.rs:55:4
+   |
+55 | fn strip_markdown_code_blocks(response: &str) -> String {
+   |    ^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `extract_missing_local` is never used
+  --> crates\engine\src\soul\build_pipeline.rs:78:4
+   |
+78 | fn extract_missing_local(error: &str) -> Option<String> {
+   |    ^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `inject_variable_declaration` is never used
+  --> crates\engine\src\soul\build_pipeline.rs:92:4
+   |
+92 | fn inject_variable_declaration(code: &str, var_name: &str) -> String {
+   |    ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: field `code_cache` is never read
+   --> crates\engine\src\soul\build_pipeline.rs:251:5
+    |
+233 | pub struct SoulBuildPipeline {
+    |            ----------------- field in this struct
+...
+251 |     code_cache: std::collections::HashMap<String, GeneratedCode>,
+    |     ^^^^^^^^^^
+
+warning: function `with_ecs_bindings` is never used
+  --> crates\engine\src\soul\rune_ecs_module.rs:99:4
+   |
+99 | fn with_ecs_bindings<F, R>(fallback: R, callback: F) -> R
+   |    ^^^^^^^^^^^^^^^^^
+
+warning: function `apply_billboard_gui_to_toml` is never used
+   --> crates\engine\src\billboard_gui.rs:222:4
+    |
+222 | fn apply_billboard_gui_to_toml(
+    |    ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `save_billboard_gui_changes` is never used
+   --> crates\engine\src\billboard_gui.rs:267:4
+    |
+267 | fn save_billboard_gui_changes(
+    |    ^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `apply_text_label_to_toml` is never used
+   --> crates\engine\src\billboard_gui.rs:313:4
+    |
+313 | fn apply_text_label_to_toml(
+    |    ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `save_text_label_changes` is never used
+   --> crates\engine\src\billboard_gui.rs:380:4
+    |
+380 | fn save_text_label_changes(
+    |    ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `apply_frame_to_toml` is never used
+   --> crates\engine\src\billboard_gui.rs:413:4
+    |
+413 | fn apply_frame_to_toml(
+    |    ^^^^^^^^^^^^^^^^^^^
+
+warning: function `save_frame_changes` is never used
+   --> crates\engine\src\billboard_gui.rs:438:4
+    |
+438 | fn save_frame_changes(
+    |    ^^^^^^^^^^^^^^^^^^
+
+warning: function `apply_text_button_to_toml` is never used
+   --> crates\engine\src\billboard_gui.rs:464:4
+    |
+464 | fn apply_text_button_to_toml(
+    |    ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `save_text_button_changes` is never used
+   --> crates\engine\src\billboard_gui.rs:515:4
+    |
+515 | fn save_text_button_changes(
+    |    ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `apply_text_box_to_toml` is never used
+   --> crates\engine\src\billboard_gui.rs:541:4
+    |
+541 | fn apply_text_box_to_toml(
+    |    ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `save_text_box_changes` is never used
+   --> crates\engine\src\billboard_gui.rs:588:4
+    |
+588 | fn save_text_box_changes(
+    |    ^^^^^^^^^^^^^^^^^^^^^
+
+warning: fields `asset_server`, `meshes`, and `materials` are never read
+   --> crates\engine\src\play_mode.rs:700:5
+    |
+698 | struct PlayStartResources<'w, 's> {
+    |        ------------------ fields in this struct
+699 |     player_service: Res<'w, PlayerService>,
+700 |     asset_server: Res<'w, AssetServer>,
+    |     ^^^^^^^^^^^^
+701 |     meshes: ResMut<'w, Assets<Mesh>>,
+    |     ^^^^^^
+702 |     materials: ResMut<'w, Assets<StandardMaterial>>,
+    |     ^^^^^^^^^
+
+warning: field `symbols` is never read
+  --> crates\engine\src\script_editor\workspace.rs:59:5
+   |
+57 | struct FileEntry {
+   |        --------- field in this struct
+58 |     mtime: SystemTime,
+59 |     symbols: SymbolIndex,
+   |     ^^^^^^^
+   |
+   = note: `FileEntry` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+
+warning: function `justice_public_but_judge_submode_gated` is never used
+    --> crates\engine\src\studio_modes.rs:1649:8
+     |
+1649 |     fn justice_public_but_judge_submode_gated() {
+     |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `to_color` is never used
+   --> crates\engine\src\space\gui_loader.rs:908:4
+    |
+908 | fn to_color(rgba: &[f32; 4]) -> Color {
+    |    ^^^^^^^^
+
+warning: function `resolve_text_props` is never used
+   --> crates\engine\src\space\gui_loader.rs:913:4
+    |
+913 | fn resolve_text_props(text_props: Option<&GuiTomlText>) -> (String, Color, f32, JustifyContent, AlignItems) {
+    |    ^^^^^^^^^^^^^^^^^^
+
+warning: function `scaffold_space` is never used
+    --> crates\engine\src\space\space_ops.rs:2004:4
+     |
+2004 | fn scaffold_space(space_root: &Path) {
+     |    ^^^^^^^^^^^^^^
+
+warning: function `decode_transform` is never used
+    --> crates\engine\src\space\world_db_plugin.rs:1292:15
+     |
+1292 | pub(crate) fn decode_transform(bytes: &[u8]) -> Option<Transform> {
+     |               ^^^^^^^^^^^^^^^^
+
+warning: function `counter_scale_from` is never used
+   --> crates\engine\src\selection_box.rs:324:4
+    |
+324 | fn counter_scale_from(parent_world_scale: Vec3, world_scale_target: f32) -> Vec3 {
+    |    ^^^^^^^^^^^^^^^^^^
+
+warning: function `render_plugin_ui` is never used
+    --> crates\engine\src\studio_plugins\mod.rs:1032:4
+     |
+1032 | fn render_plugin_ui(
+     |    ^^^^^^^^^^^^^^^^
+
+warning: field `request` is never read
+  --> crates\engine\src\viga\pipeline.rs:98:5
+   |
+96 | struct VigaTask {
+   |        -------- field in this struct
+97 |     /// The original request
+98 |     request: VigaRequest,
+   |     ^^^^^^^
+
+warning: field `leaf_id` is never read
+  --> crates\engine\src\scenarios\engine.rs:98:5
+   |
+94 | struct BranchSample {
+   |        ------------ field in this struct
+...
+98 |     leaf_id: Uuid,
+   |     ^^^^^^^
+   |
+   = note: `BranchSample` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+
+warning: method `parse_ron` is never used
+   --> crates\engine\src\scenarios\adapters.rs:149:8
+    |
+101 | impl LocalFileAdapter {
+    | --------------------- method in this implementation
+...
+149 |     fn parse_ron(&self, contents: &str) -> Result<ron::Value, AdapterError> {
+    |        ^^^^^^^^^
+
+warning: fields `source_hash`, `source`, and `compiled_at` are never read
+   --> crates\engine\src\scenarios\scripting.rs:124:5
+    |
+122 | struct CompiledScript {
+    |        -------------- fields in this struct
+123 |     /// Source code hash for cache invalidation
+124 |     source_hash: String,
+    |     ^^^^^^^^^^^
+125 |     /// The original source code
+126 |     source: String,
+    |     ^^^^^^
+127 |     /// When this was compiled
+128 |     compiled_at: DateTime<Utc>,
+    |     ^^^^^^^^^^^
+    |
+    = note: `CompiledScript` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+
+warning: methods `interpret`, `parse_set_probability`, and `parse_add_branch` are never used
+   --> crates\engine\src\scenarios\scripting.rs:446:8
+    |
+131 | impl ScenarioScriptEngine {
+    | ------------------------- methods in this implementation
+...
+446 |     fn interpret(
+    |        ^^^^^^^^^
+...
+520 |     fn parse_set_probability(
+    |        ^^^^^^^^^^^^^^^^^^^^^
+...
+552 |     fn parse_add_branch(
+    |        ^^^^^^^^^^^^^^^^
+
+warning: constant `WORKSHOP_SYSTEM_PROMPT` is never used
+   --> crates\engine\src\workshop\claude_bridge.rs:180:7
+    |
+180 | const WORKSHOP_SYSTEM_PROMPT: &str = r#"You are the Workshop assistant in Eustress Engine, helping users design and create products...
+    |       ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `read_optional_ref` is never used
+   --> crates\engine\src\spawners\data7\mod.rs:198:15
+    |
+198 | pub(crate) fn read_optional_ref(bag: &PropertyBag, key: &str) -> Option<u32> {
+    |               ^^^^^^^^^^^^^^^^^
+
+warning: field `project_root` is never read
+  --> crates\engine\src\txt_to_toml_watcher.rs:31:5
+   |
+29 | pub struct TxtToTomlWatcher {
+   |            ---------------- field in this struct
+30 |     /// Path to the project root
+31 |     project_root: PathBuf,
+   |     ^^^^^^^^^^^^
+
+warning: fields `handle` and `token` are never read
+  --> crates\engine\src\engine_bridge\mod.rs:95:5
+   |
+94 | struct BridgeRuntime {
+   |        ------------- fields in this struct
+95 |     handle: tokio::runtime::Handle,
+   |     ^^^^^^
+...
+99 |     token: Arc<str>,
+   |     ^^^^^
+
+warning: `eustress-engine` (lib test) generated 127 warnings (run `cargo fix --lib -p eustress-engine --tests` to apply 56 suggestions)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 8m 30s
+warning: the following packages contain code that will be rejected by a future version of Rust: nom v3.2.1, quick-xml v0.22.0
+note: to see what the problems were, use the option `--future-incompat-report`, or run `cargo report future-incompatibilities --id 1`
+     Running unittests src\lib.rs (C:/EustressBuild/target\debug\build\eustress-engine/3f602dcb5735337c\out\eustress_engine-3f602dcb5735337c.exe)
+
+running 4 tests
+
+thread 'ui::drain_contract::tests::drain_consumes_a_queued_action' (117648) panicked at C:\Users\miksu\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\bevy_ecs-0.19.0\src\error\handler.rs:130:1:
+Encountered an error in system `eustress_engine::ui::slint_ui::drain_slint_actions`: Parameter `ResMut<'_, LabelEditState>` failed validation: Resource does not exist
+If this is an expected state, wrap the parameter in `Option<T>` and handle `None` when it happens, or wrap the parameter in `If<T>` to skip the system when it happens.
+
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+Encountered a panic in system `eustress_engine::ui::slint_ui::drain_slint_actions`!
+Encountered a panic in system `bevy_app::main_schedule::Main::run_main`!
+test ui::drain_contract::tests::drain_consumes_a_queued_action ... FAILED
+
+thread 'ui::drain_contract::tests::every_required_drain_param_is_registered' (55492) panicked at C:\Users\miksu\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\bevy_ecs-0.19.0\src\error\handler.rs:130:1:
+Encountered an error in system `eustress_engine::ui::slint_ui::drain_slint_actions`: Parameter `ResMut<'_, LabelEditState>` failed validation: Resource does not exist
+If this is an expected state, wrap the parameter in `Option<T>` and handle `None` when it happens, or wrap the parameter in `If<T>` to skip the system when it happens.
+
+Encountered a panic in system `eustress_engine::ui::slint_ui::drain_slint_actions`!
+Encountered a panic in system `bevy_app::main_schedule::Main::run_main`!
+test ui::drain_contract::tests::every_required_drain_param_is_registered ... FAILED
+test ui::drain_contract::tests::studio_state_is_defined_exactly_once ... StudioState definitions: ["E:\\Workspace\\EustressEngine\\eustress\\crates\\engine\\..\\engine\\src\\ui\\mod.rs:269"]
+ok
+test ui::drain_contract::tests::the_definition_scan_counts_code_not_comments ... ok
+
+failures:
+
+failures:
+    ui::drain_contract::tests::drain_consumes_a_queued_action
+    ui::drain_contract::tests::every_required_drain_param_is_registered
+
+test result: FAILED. 2 passed; 2 failed; 0 ignored; 0 measured; 2531 filtered out; finished in 443.75s
+
+error: test failed, to rerun pass `-p eustress-engine --lib`

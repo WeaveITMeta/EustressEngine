@@ -1,0 +1,45 @@
+[asset]
+mesh = "parts/block.glb"
+scene = "Scene0"
+
+[metadata]
+archivable = true
+class_name = "Part"
+created = "2026-11-16T00:00:00Z"
+last_modified = "2026-11-16T00:00:00Z"
+name = "Ceiling"
+unit = "m"
+uuid = "6dc1c9a77b1913cdfa048895bcb30a0a"
+
+[properties]
+anchored = true
+can_collide = true
+cast_shadow = true
+color = [
+    200,
+    196,
+    188,
+]
+destructible = false
+locked = false
+material = "H_Matte"
+reflectance = 0.0
+transparency = 0.0
+
+[transform]
+position = [
+    0.0,
+    3.1,
+    0.0,
+]
+rotation = [
+    0.0,
+    0.0,
+    0.0,
+    1.0,
+]
+scale = [
+    6.4,
+    0.2,
+    8.4,
+]

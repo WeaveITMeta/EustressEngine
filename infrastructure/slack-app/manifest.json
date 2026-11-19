@@ -1,0 +1,58 @@
+{
+  "display_information": {
+    "name": "Eustress Engine",
+    "description": "Simulation & Data Platform with Game.",
+    "background_color": "#2C2D30",
+    "long_description": "Eustress is a simulation and data platform; it also builds games and interactive worlds. Creators build Spaces in Eustress Studio, publish them to the Gallery, and people play them in the Eustress Player or right in the browser.\r\n\r\nThe Eustress app for Slack connects your Slack account to your Eustress account.\r\n\r\nHow it works:\r\n- Open Settings on eustress.dev and choose Connect Slack.\r\n- Slack asks you to approve the app, then sends you back to Eustress.\r\n- Settings shows the Slack name and workspace you connected.\r\n\r\nWhat it reads, and what it does not:\r\n- It asks Slack only for who you are: your Slack user ID, your name, and the workspace's name and ID. It does not ask for your email.\r\n- Eustress revokes the Slack sign-in token as soon as it has read who you are, and keeps no Slack token.\r\n- It cannot read, post or delete messages, and it cannot see your channels or files.\r\n\r\nYou can disconnect at any time from Settings on eustress.dev, which removes the link."
+  },
+  "features": {
+    "app_home": {
+      "home_tab_enabled": true,
+      "messages_tab_enabled": false,
+      "messages_tab_read_only_enabled": true
+    },
+    "bot_user": {
+      "display_name": "Eustress (local)",
+      "always_online": true
+    },
+    "shortcuts": [
+      {
+        "callback_id": "sample_shortcut_id",
+        "description": "Runs a sample shortcut",
+        "name": "Run sample shortcut",
+        "type": "global"
+      }
+    ],
+    "slash_commands": [
+      {
+        "command": "/sample-command",
+        "description": "Runs a sample command",
+        "should_escape": false
+      }
+    ]
+  },
+  "oauth_config": {
+    "redirect_urls": [
+      "https://eustress.dev/auth/slack/callback",
+      "https://www.eustress.dev/auth/slack/callback",
+      "https://staging.eustress-cbb.pages.dev/auth/slack/callback"
+    ],
+    "scopes": {
+      "bot": ["channels:history", "chat:write", "commands"],
+      "user": ["openid", "profile"]
+    }
+  },
+  "settings": {
+    "socket_mode_enabled": true,
+    "org_deploy_enabled": true,
+    "interactivity": {
+      "is_enabled": true
+    },
+    "event_subscriptions": {
+      "bot_events": ["app_home_opened", "message.channels"]
+    },
+    "token_rotation_enabled": false,
+    "app_level_token_rotation_enabled": false,
+    "is_mcp_enabled": false
+  }
+}

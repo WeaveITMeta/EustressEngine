@@ -53,6 +53,8 @@ fn registry() -> &'static ToolRegistry {
         r.register(crate::bridge_tools::CaptureViewportTool);
         // Causal op-log read surface (Phase 1, Way 8) — the AI's audit trail.
         r.register(crate::bridge_tools::OplogTailTool);
+        // Prefetch, simulation LOD and the frame timeline, live.
+        r.register(crate::bridge_tools::InspectWorldSimTool);
         // POMDP control primitive (Phase 2) — deterministic stepped simulation.
         r.register(crate::bridge_tools::SimStepTool);
         // POMDP sense primitive (Phase 2) — world-space raycast.
@@ -184,6 +186,7 @@ pub const BRIDGE_TOOL_NAMES: &[&str] = &[
     "play_input",
     "capture_viewport",
     "oplog_tail",
+    "inspect_world_sim",
     "sim_step",
     "scene_raycast",
     "ai_camera_set_pose",
@@ -326,12 +329,19 @@ fn mcp_permissions() -> eustress_tools::Permissions {
     let moderator = std::env::var("EUSTRESS_MODERATOR_TOKEN")
         .map(|v| !v.trim().is_empty())
         .unwrap_or(false);
+    // judge_verdict is allowed for every MCP client by name: it reaches only the
+    // Eustress API's stateless judge emulator with the caller's own listing and
+    // answer, so any agent can check a Space before publishing (McKale,
+    // 2026-11-14). The rest of the Network class stays moderator-only.
     if moderator {
         eustress_tools::Permissions::standard()
             .grant(eustress_tools::Capability::Network)
+            .allow_network_tool("judge_verdict")
             .for_principal("mcp-moderator")
     } else {
-        eustress_tools::Permissions::standard().for_principal("mcp-client")
+        eustress_tools::Permissions::standard()
+            .allow_network_tool("judge_verdict")
+            .for_principal("mcp-client")
     }
 }
 

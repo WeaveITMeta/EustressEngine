@@ -17,20 +17,17 @@ uuid = { version = "1.8", features = ["v4", "v5", "serde"] }
 chrono = { version = "0.4", features = ["serde"] }
 
 # Error handling
-thiserror = "2.0"
 anyhow = "1.0"
 
 # Logging and diagnostics
 tracing = "0.1"
 
 # File system paths and home directory resolution
-dirs = "5.0"
 
 # Parallel TOML scan for bulk operations across the tool registry
 rayon = "1.10"
 
 # File watching — hot-reload .tool.toml changes into the in-memory index
-notify = { version = "6.1", default-features = false, features = ["macos_fsevent"] }
 
 # HTTP client for IoT telemetry polling and Amazon Product Advertising API
 reqwest = { version = "0.12", features = ["json", "blocking"], optional = true }
@@ -39,7 +36,6 @@ reqwest = { version = "0.12", features = ["json", "blocking"], optional = true }
 tokio = { version = "1", features = ["rt", "sync", "time", "macros"], optional = true }
 
 # MQTT for real-time IoT tool telemetry (GPS chips, status sensors)
-rumqttc = { version = "0.24", optional = true }
 
 # Bevy ECS integration for 3D digital twin Space
 # Each .tool.toml spawns as an instanced mesh entity with a ToolComponent
@@ -50,24 +46,21 @@ bevy = { version = "0.19", default-features = false, features = [
 ], optional = true }
 
 # URL encoding for Amazon Product Advertising API v5 requests
-urlencoding = { version = "2", optional = true }
 
 # Cryptographic signing for Amazon PA-API v5 (HMAC-SHA256 + AWS SigV4)
-hmac = { version = "0.12", optional = true }
-sha2 = { version = "0.10", optional = true }
 base64 = { version = "0.22", optional = true }
 
 [features]
 default = ["iot-mqtt", "procurement"]
 
 # IoT telemetry streaming via MQTT (GPS chips, tool sensors broadcasting location + status)
-iot-mqtt = ["rumqttc", "tokio"]
+iot-mqtt = ["tokio"]
 
 # HTTP polling fallback for IoT telemetry (REST endpoints instead of MQTT broker)
 iot-http = ["reqwest", "tokio"]
 
 # Amazon Product Advertising API v5 — generates purchase lists for missing tools/materials
-procurement = ["reqwest", "tokio", "urlencoding", "hmac", "sha2", "base64"]
+procurement = ["reqwest", "tokio", "base64"]
 
 # Bevy ECS integration — each .tool.toml spawns a 3D instanced mesh entity in the digital twin Space
 bevy-twin = ["bevy"]

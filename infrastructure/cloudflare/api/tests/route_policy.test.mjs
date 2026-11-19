@@ -65,10 +65,12 @@ test('the routes that matter are in the class they must be in', () => {
     ['POST', '/api/simulations/abc-123/submit', FRESH], ['POST', '/api/simulations/abc-123/appeal', FRESH],
     ['POST', '/api/simulations/abc-123/live', FRESH], ['DELETE', '/api/simulations/abc-123/live', FRESH], ['POST', '/api/simulations/abc-123/live/admit', FRESH],
     ['POST', '/api/simulations/abc-123/server-credential', FRESH], ['DELETE', '/api/simulations/abc-123/server-credential', FRESH],
+    ['POST', '/api/auth/slack/begin', FRESH], ['POST', '/api/auth/slack/finish', FRESH],
     // session: the cheap check is enough
     ['POST', '/api/auth/logout', SESSION], ['PUT', '/api/avatar', SESSION], ['POST', '/api/social/follow', SESSION],
     ['POST', '/api/identity/ticket', SESSION], ['POST', '/api/tickets/checkout', SESSION], ['POST', '/api/stripe/checkout', SESSION],
     ['POST', '/api/simulations/abc-123/play', SESSION], ['POST', '/api/delta/checkout', SESSION],
+    ['POST', '/api/auth/slack/unlink', SESSION],
   ];
   for (const [method, p, klass] of expected) {
     const r = routePolicy(method, p);

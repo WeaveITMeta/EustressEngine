@@ -53,12 +53,14 @@
 
 use std::{
     cell::RefCell,
+    collections::HashMap,
     fs,
     path::{Path, PathBuf},
     sync::Arc,
     time::{SystemTime, UNIX_EPOCH},
 };
 
+use eustress_web::critical_css::{classes_in_html, critical, inline_critical, strip_critical, stylesheet_hrefs};
 use eustress_web::seo::{
     build_date, defer_app_start, first_h1, is_doc_route, llms_full, pristine_shell, routes_from_sitemap, sitemap_with_lastmod, splice,
     splice_not_found, strip_tags, DocPage, MarkdownDoc, MARKDOWN_DOCS, NOT_FOUND_PROBE,
@@ -142,20 +144,33 @@ thread_local! {
 fn render_route(route: &str) -> Result<String, String> {
     let path = route.to_string();
     LAST_PANIC.with(|p| *p.borrow_mut() = None);
-    std::panic::catch_unwind(move || {
+    let rendered = std::panic::catch_unwind(move || {
         // A root owner with a server shared context is what the official
-        // integrations build per request; it is what lets Suspense and the
-        // router render without a browser.
+        // integrations build per request (leptos_integration_utils); it is
+        // what lets Suspense and the router render without a browser.
         let shared: Arc<dyn SharedContext + Send + Sync> = Arc::new(SsrSharedContext::new());
         let owner = Owner::new_root(Some(shared));
         let html = owner.with(|| {
             provide_context(RequestUrl::new(&path));
             App().to_html()
         });
-        owner.cleanup();
+        // `new_root` leaves the owner as this thread's current one. Ending the
+        // render the way the integrations end a request (cleanup, and the
+        // thread's slot emptied) keeps one route's signals and contexts from
+        // being reachable while the next route renders.
+        owner.unset_with_forced_cleanup();
         html
-    })
-    .map_err(|_| {
+    });
+    if rendered.is_err() {
+        // The panic unwound past the line above, so the failed route's owner
+        // is still current. Clear the slot without running its cleanups: they
+        // belong to a render that broke partway, and one of them panicking
+        // here would end the whole run instead of skipping one route.
+        if let Some(owner) = Owner::current() {
+            owner.unset();
+        }
+    }
+    rendered.map_err(|_| {
         LAST_PANIC
             .with(|p| p.borrow().clone())
             .unwrap_or_else(|| "panicked without a message".to_string())
@@ -171,6 +186,28 @@ fn output_path(dist: &Path, route: &str) -> PathBuf {
     } else {
         dist.join(format!("{}.html", route.trim_start_matches('/')))
     }
+}
+
+/// The page with the CSS its static copy needs inline and the full stylesheets
+/// loading behind the first paint (see eustress_web::critical_css). A
+/// stylesheet that cannot be read leaves the page as it was, its stylesheets
+/// blocking as before, with a warning naming the file.
+fn with_critical_css(page: &str, dist: &Path, sheets: &mut HashMap<String, Option<String>>, name: &str) -> String {
+    let mut css = String::new();
+    for href in stylesheet_hrefs(page) {
+        let text = sheets.entry(href.clone()).or_insert_with(|| fs::read_to_string(dist.join(href.trim_start_matches('/'))).ok());
+        match text {
+            Some(text) => {
+                css.push_str(text);
+                css.push('\n');
+            }
+            None => {
+                eprintln!("warn  {name}: cannot read {href} in {}; its stylesheets stay blocking", dist.display());
+                return page.to_string();
+            }
+        }
+    }
+    inline_critical(page, &critical(&css, &classes_in_html(page)))
 }
 
 // -----------------------------------------------------------------------------
@@ -229,6 +266,10 @@ fn main() {
             shell
         }
     };
+    // A previous run wrote the home page's critical CSS into index.html.
+    let shell = strip_critical(&shell);
+    // Each stylesheet the shell links, read from dist once (None: unreadable).
+    let mut sheets: HashMap<String, Option<String>> = HashMap::new();
 
     let whole_site = args.routes.is_empty();
     let routes = if whole_site { sitemap_routes(&args.dist) } else { args.routes.clone() };
@@ -239,7 +280,8 @@ fn main() {
 
     // Park spawned futures instead of aborting on them (see Cargo.toml). A
     // second init is an error only because it already happened, so ignore it.
-    let _ = leptos::task::Executor::init_futures_executor();
+    // (Leptos 0.9 no longer re-exports the executor; it is any_spawner's.)
+    let _ = any_spawner::Executor::init_futures_executor();
     // Printed as well as stored: a panic inside a Drop while unwinding aborts
     // the process before the route's FAIL line, and this is then the only
     // trace of which component reached for the browser.
@@ -274,6 +316,7 @@ fn main() {
     for route in &routes {
         match render_route(route).and_then(|body| splice(&shell, route, &body).map(|page| (body, page))) {
             Ok((body, page)) => {
+                let page = with_critical_css(&page, &args.dist, &mut sheets, route);
                 let out = output_path(&args.dist, route);
                 if let Some(parent) = out.parent() {
                     fs::create_dir_all(parent).unwrap_or_else(|e| {
@@ -305,7 +348,7 @@ fn main() {
 
     // The page for an address nothing owns: the router's own fallback.
     match render_route(NOT_FOUND_PROBE).and_then(|body| splice_not_found(&shell, &body)) {
-        Ok(page) => match write_atomic(&args.dist.join("404.html"), &page) {
+        Ok(page) => match write_atomic(&args.dist.join("404.html"), &with_critical_css(&page, &args.dist, &mut sheets, "404.html")) {
             Ok(()) => println!("ok    {:<26} not-found page", "404.html"),
             Err(msg) => {
                 failed += 1;

@@ -557,12 +557,12 @@ export component OutputConsole inherits Rectangle {
     // it and pauses the following; scrolling back down or "Jump to latest"
     // sets it again.
     property <bool> pinned: true;
-    property <bool> at-bottom: list.viewport-y <= list.visible-height - list.viewport-height + 4px;
+    property <bool> at-bottom: list.content-y <= list.visible-height - list.content-height + 4px;
     // New rows arrived while paused.
     property <bool> unseen: false;
 
     function scroll-to-end() {
-        list.viewport-y = min(0px, list.visible-height - list.viewport-height);
+        list.content-y = min(0px, list.visible-height - list.content-height);
     }
     changed rows-revision => {
         if root.auto-scroll && root.pinned {

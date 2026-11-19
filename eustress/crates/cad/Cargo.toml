@@ -35,7 +35,6 @@ thiserror = { workspace = true }
 # Math — Bevy types for interop with the rest of the engine.
 # The CAD crate itself doesn't depend on Bevy ECS; only Bevy's
 # glam Vec3/Quat so callers can hand off positions cleanly.
-glam = "0.29"
 
 # Time stamps for audit metadata.
 chrono = { workspace = true }

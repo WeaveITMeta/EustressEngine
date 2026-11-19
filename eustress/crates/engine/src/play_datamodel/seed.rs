@@ -34,16 +34,24 @@ pub fn seed_session(world: &mut World) {
     let (seeded, service_count) = seed_scene(world, &dm);
 
     // ── Camera, player, PlayerGui ──────────────────────────────────────
-    let player_gui_entity = world
-        .spawn((
-            Instance { name: "PlayerGui".into(), class_name: ClassName::Folder, archivable: false, id: 0, uuid: String::new(), ai: false },
-            ServiceComponent { class_name: "PlayerGui".into(), ..Default::default() },
-            Name::new("PlayerGui"),
-            Transform::default(),
-            Visibility::default(),
-            DataModelSpawned,
-        ))
-        .id();
+    // Start Server from Edit, and `--server`, host as the server alone
+    // (`crate::multiplayer::ServerView`): the session's players are the ones
+    // who join, so Studio adds no Player of its own, no PlayerGui, and runs
+    // no LocalScript. Joined players then never see a Player for the host,
+    // and no script can give the host a character.
+    let server_view = world.contains_resource::<crate::multiplayer::ServerView>();
+    let player_gui_entity = (!server_view).then(|| {
+        world
+            .spawn((
+                Instance { name: "PlayerGui".into(), class_name: ClassName::Folder, archivable: false, id: 0, uuid: String::new(), ai: false },
+                ServiceComponent { class_name: "PlayerGui".into(), ..Default::default() },
+                Name::new("PlayerGui"),
+                Transform::default(),
+                Visibility::default(),
+                DataModelSpawned,
+            ))
+            .id()
+    });
     let display_name = world
         .get_resource::<crate::auth::AuthState>()
         .and_then(|a| a.user.as_ref().map(|u| u.username.clone()))
@@ -70,27 +78,34 @@ pub fn seed_session(world: &mut World) {
                   "ReplicatedStorage", "ServerStorage", "ServerScriptService", "Lighting", "Teams"] {
             let _ = g.get_service(s);
         }
-        // The player joins after the server scripts have started (see
-        // `drive_mlua`), as in Roblox, so `PlayerAdded` plus a
-        // `GetPlayers()` sweep sets each player up exactly once.
-        let player = g.create_virtual("Player", &display_name, None);
-        let _ = g.set_prop(player, "DisplayName", DmValue::String(display_name.clone()));
-        let _ = g.set_prop(player, "UserId", DmValue::Number(1.0));
-        g.create_bound("PlayerGui", "PlayerGui", player_gui_entity.to_bits(), Some(player), Vec::new());
-        g.create_virtual("Backpack", "Backpack", Some(player));
-        g.create_virtual("PlayerScripts", "PlayerScripts", Some(player));
-        // What every app's session starts from (`Players.LocalPlayer`, a
-        // fresh `CurrentCamera`, `workspace.Gravity`, `RespawnTime`,
-        // `CharacterAutoLoads`), from the one function the Player calls too.
-        eustress_common::play_session::begin_session(
-            &mut g,
-            player,
-            &eustress_common::play_session::SessionStart {
-                camera: eustress_common::play_session::SessionCamera::Fresh,
-                gravity: live_gravity,
-                character_auto_loads,
-            },
-        );
+        let start = eustress_common::play_session::SessionStart {
+            camera: eustress_common::play_session::SessionCamera::Fresh,
+            gravity: live_gravity,
+            character_auto_loads,
+        };
+        let player = match player_gui_entity {
+            Some(player_gui_entity) => {
+                // The player joins after the server scripts have started (see
+                // `drive_mlua`), as in Roblox, so `PlayerAdded` plus a
+                // `GetPlayers()` sweep sets each player up exactly once.
+                let player = g.create_virtual("Player", &display_name, None);
+                let _ = g.set_prop(player, "DisplayName", DmValue::String(display_name.clone()));
+                let _ = g.set_prop(player, "UserId", DmValue::Number(1.0));
+                g.create_bound("PlayerGui", "PlayerGui", player_gui_entity.to_bits(), Some(player), Vec::new());
+                g.create_virtual("Backpack", "Backpack", Some(player));
+                g.create_virtual("PlayerScripts", "PlayerScripts", Some(player));
+                // What every app's session starts from (`Players.LocalPlayer`, a
+                // fresh `CurrentCamera`, `workspace.Gravity`, `RespawnTime`,
+                // `CharacterAutoLoads`), from the one function the Player calls too.
+                eustress_common::play_session::begin_session(&mut g, player, &start);
+                Some(player)
+            }
+            None => {
+                // The same, with `Players.LocalPlayer` left nil.
+                eustress_common::play_session::begin_server_session(&mut g, &start);
+                None
+            }
+        };
         let starter = g.find_service("StarterGui");
         let kids: Vec<InstanceId> = starter.map(|s| g.children(s).to_vec()).unwrap_or_default();
         let _ = g.take_dirty();
@@ -99,10 +114,11 @@ pub fn seed_session(world: &mut World) {
 
     // Roblox copies StarterGui into each player's PlayerGui; the copies are
     // what render and what runs. The originals are hidden for the session
-    // (restored with the rest of the GUI state on Stop).
+    // (restored with the rest of the GUI state on Stop). A server alone has
+    // no PlayerGui, so it shows no GUI at all.
     {
         let mut g = dm.lock();
-        let player_gui = g.find_first_child(player_id, "PlayerGui", false);
+        let player_gui = player_id.and_then(|p| g.find_first_child(p, "PlayerGui", false));
         if let Some(pg) = player_gui {
             for child in &starter_gui_children {
                 if let Some(copy) = g.clone_instance(*child) {
@@ -130,7 +146,12 @@ pub fn seed_session(world: &mut World) {
     hide_storage(world, &dm);
 
     // ── Scripts to start ────────────────────────────────────────────────
-    let (server, client) = collect_launches(&dm.lock());
+    let (server, mut client) = collect_launches(&dm.lock());
+    if server_view && !client.is_empty() {
+        // LocalScripts run on each joined Player, never on the server.
+        info!("🖥️ Hosting as the server: {} LocalScript(s) run on joined Players, not in Studio", client.len());
+        client.clear();
+    }
 
     // ── The VM ──────────────────────────────────────────────────────────
     match PlayMlua::new(dm.clone()) {
@@ -140,7 +161,7 @@ pub fn seed_session(world: &mut World) {
                 vm,
                 pending_server: server,
                 pending_client: client,
-                joining_player: Some(player_id),
+                joining_player: player_id,
             });
             info!("🌙 Luau Play VM ready: {} server and {} client script(s) queued", ns, nc);
         }
@@ -203,6 +224,8 @@ pub fn seed_scene(world: &mut World, dm: &eustress_common::datamodel::SharedData
             }
             let id = g.create_bound(class, class, service_entity.to_bits(), Some(root), Vec::new());
             g.register_service(class, id);
+            // The service's own attributes (its `_service.toml` `[attributes]`).
+            seed_attributes(world, *service_entity, id, &mut g);
             seeded += 1;
             let mut stack: Vec<(Entity, InstanceId)> = vec![(*service_entity, id)];
             while let Some((parent_entity, parent_id)) = stack.pop() {

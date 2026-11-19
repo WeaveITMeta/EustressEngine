@@ -92,9 +92,14 @@ pub fn best_rate(packs: &[Pack]) -> Option<String> {
     (top > 0.0 && packs.iter().filter(|p| (rate(p) - top).abs() < 1e-9).count() == 1).then(|| best.id.clone())
 }
 
-/// The name of a Delta pack from its Stripe lookup key: "eustress_delta_week" is "Week".
+/// The name of a Delta pack from its Stripe lookup key: "eustress_delta_week" is "Week". A pack is an amount of Delta that lasts
+/// its 12 months however fast it is spent, so no pack is named for a length of use: the `eustress_delta_month` key (kept, so
+/// Stripe's prices need no change) is sold as "Distance".
 pub fn delta_pack_name(key: &str) -> String {
     let word = key.rsplit('_').next().unwrap_or(key);
+    if word == "month" {
+        return "Distance".to_string();
+    }
     let mut chars = word.chars();
     chars.next().map(|c| c.to_uppercase().collect::<String>() + chars.as_str()).unwrap_or_default()
 }
@@ -509,6 +514,8 @@ mod tests {
     fn a_delta_pack_is_named_from_its_lookup_key() {
         assert_eq!(delta_pack_name("eustress_delta_week"), "Week");
         assert_eq!(delta_pack_name("eustress_delta_studio"), "Studio");
+        // No pack is named for a length of time: the month key sells as Distance.
+        assert_eq!(delta_pack_name("eustress_delta_month"), "Distance");
         assert_eq!(delta_pack_name("solo"), "Solo");
         assert_eq!(delta_pack_name(""), "");
     }

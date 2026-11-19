@@ -1,0 +1,96 @@
+{
+  "item": "G6.03",
+  "status": "MEASURED",
+  "note": "MEASURED 2026-11-17 by L1 with the item's three checker steps. second release build of 2026-11-17 on C:\\EustressBuild\\target: Finished release in 42m 45s at 15:53 Arizona, exit 0 (the first, cold build with Slint 1.19.0: 70m 23s at 13:09, exit 0); source = commit bb910190620076e4073a727a5ea20d49afa83e26 plus the uncommitted working tree.",
+  "test_command": "cargo test -p eustress-engine --lib ui::drain_contract -- --test-threads=1 --nocapture",
+  "approach": "SystemState validation of drain_slint_actions's own parameter set (SystemParamFunction::Param, so it cannot drift from the signature) against a headless App built from register_drain_requirements (the function SlintUiPlugin calls) plus foreign_registrations (other plugins' registrations).",
+  "required_params_owned_by_slint_ui_plugin": [
+    {
+      "param": "ResMut<LabelEditState>",
+      "registered_at": "eustress/crates/engine/src/ui/slint_ui.rs:1989"
+    },
+    {
+      "param": "DrainResources::terrain_visibility ResMut<TerrainVisibility>",
+      "registered_at": "eustress/crates/engine/src/ui/slint_ui.rs:1992"
+    },
+    {
+      "param": "ResMut<PendingInsertSelection>",
+      "registered_at": "eustress/crates/engine/src/ui/slint_ui.rs:1995"
+    },
+    {
+      "param": "DrainEventWriters::file_events MessageWriter<FileEvent>",
+      "registered_at": "eustress/crates/engine/src/ui/slint_ui.rs:2001"
+    },
+    {
+      "param": "DrainEventWriters::menu_events MessageWriter<MenuActionEvent>",
+      "registered_at": "eustress/crates/engine/src/ui/slint_ui.rs:2002"
+    },
+    {
+      "param": "DrainEventWriters::undo_events MessageWriter<UndoCommandEvent>",
+      "registered_at": "eustress/crates/engine/src/ui/slint_ui.rs:2004"
+    },
+    {
+      "param": "DrainEventWriters::redo_events MessageWriter<RedoCommandEvent>",
+      "registered_at": "eustress/crates/engine/src/ui/slint_ui.rs:2005"
+    },
+    {
+      "param": "DrainEventWriters::history_events MessageWriter<HistoryActionEvent>",
+      "registered_at": "eustress/crates/engine/src/ui/slint_ui.rs:2006"
+    }
+  ],
+  "required_params_owned_by_other_plugins": "see foreign_registrations in eustress/crates/engine/src/ui/drain_contract.rs and docs/PROMPTS/artifacts/G6.01/ux_baseline_census.json drain_required_params",
+  "tests": [
+    "ui::drain_contract::tests::every_required_drain_param_is_registered",
+    "ui::drain_contract::tests::drain_consumes_a_queued_action",
+    "ui::drain_contract::tests::studio_state_is_defined_exactly_once",
+    "ui::drain_contract::tests::the_definition_scan_counts_code_not_comments"
+  ],
+  "positive_run": {
+    "file": "positive_run.txt",
+    "exit_code": 0,
+    "tests_passed": 4,
+    "sha256": "sha256:e12dfd0f81f98c116512dbbcfb0d88bbe5228f968f208cd6dc05df6d64d5f835",
+    "line": "test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 2531 filtered out"
+  },
+  "negative_runs": [
+    {
+      "param": "LabelEditState",
+      "line_commented": "eustress/crates/engine/src/ui/slint_ui.rs:1989",
+      "file": "negative_run_LabelEditState.txt",
+      "exit_code": 101,
+      "tests_failed": [
+        "drain_consumes_a_queued_action",
+        "every_required_drain_param_is_registered"
+      ],
+      "failure_message": "Encountered an error in system `eustress_engine::ui::slint_ui::drain_slint_actions`: Parameter `ResMut<'_, LabelEditState>` failed validation: Resource does not exist",
+      "sha256": "sha256:25deb8e964b6c1573c8a9aacbfb9b82665a19e8451594e40498332b2c0be0229"
+    },
+    {
+      "param": "TerrainVisibility",
+      "line_commented": "eustress/crates/engine/src/ui/slint_ui.rs:1992",
+      "file": "negative_run_TerrainVisibility.txt",
+      "exit_code": 101,
+      "tests_failed": [
+        "drain_consumes_a_queued_action",
+        "every_required_drain_param_is_registered"
+      ],
+      "failure_message": "Encountered an error in system `eustress_engine::ui::slint_ui::drain_slint_actions`: Parameter `DrainResources<'_>::terrain_visibility` failed validation: Resource does not exist",
+      "sha256": "sha256:0cee32e3ca181e4b55425e7203bfc9d204d3bb9a04ca020cedd5debbdd3d4e14"
+    }
+  ],
+  "dead_module": {
+    "deleted": "eustress/crates/engine/src/ui/slint_main.rs (607 lines, 136 SlintAction references, git-tracked)",
+    "proof_before_delete": [
+      "rg slint_main eustress/crates -g !target: 6 hits, all comments (slint_ui.rs:879,3002,20062,20899; viewport_context_menu.rs:100; slint_bridge.rs:216)",
+      "ui/mod.rs module declarations: no slint_main",
+      "rg #[path in engine/src: only notifications.rs",
+      "rg slint_main in engine Cargo.toml, engine build.rs, workspace Cargo.toml, .github, scripts: 0",
+      "no include!/include_str! naming it"
+    ],
+    "check_2_output_after_delete": "refs=0 file_exists=False / DEADCODE_OK, exit 0 (2026-11-17)",
+    "remaining_refs": []
+  },
+  "commit": "bb910190620076e4073a727a5ea20d49afa83e26",
+  "restore": "both mutated files were put back from kept copies; their SHA-256 prefixes match the kept copies (slint_ui.rs 3bb74ef33841725f, plugin.rs 0a5c6fa1a67e1c2e); the positive run after the restore exits 0",
+  "source_matches_commit": false
+}

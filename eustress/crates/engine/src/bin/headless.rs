@@ -50,6 +50,9 @@ OPTIONS:
     --no-autoplay                Boot into Edit state; wait for run_simulation via bridge/MCP
     --autoplay-delay-frames <N>  Frames to wait before entering Play so the Space
                                  finishes loading (default 120 ≈ 2 s at 60 Hz)
+    --time-scale <F>             Simulation clock time scale (default 1.0)
+    --max-ticks-per-frame <N>    Simulation clock tick cap per frame (default 10)
+    --export-stepcount <path>    Also write the run's physics step-count report here
     -h, --help                   Show this help";
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -63,6 +66,9 @@ struct HeadlessArgs {
     tick_rate: f64,
     autoplay: bool,
     autoplay_delay_frames: u64,
+    time_scale: Option<f64>,
+    max_ticks_per_frame: Option<u32>,
+    export_stepcount: Option<PathBuf>,
 }
 
 fn parse_args() -> Result<HeadlessArgs, String> {
@@ -73,6 +79,9 @@ fn parse_args() -> Result<HeadlessArgs, String> {
     let mut tick_rate: f64 = 60.0;
     let mut autoplay = true;
     let mut autoplay_delay_frames: u64 = 120;
+    let mut time_scale: Option<f64> = None;
+    let mut max_ticks_per_frame: Option<u32> = None;
+    let mut export_stepcount: Option<PathBuf> = None;
 
     let mut i = 0;
     while i < argv.len() {
@@ -101,6 +110,19 @@ fn parse_args() -> Result<HeadlessArgs, String> {
                 autoplay_delay_frames = take_value(&mut i)?.parse::<u64>()
                     .map_err(|e| format!("--autoplay-delay-frames: {e}"))?
             }
+            "--time-scale" => {
+                let v = take_value(&mut i)?.parse::<f64>()
+                    .map_err(|e| format!("--time-scale: {e}"))?;
+                if !(v >= 0.0) || !v.is_finite() {
+                    return Err("--time-scale must be a finite number >= 0".into());
+                }
+                time_scale = Some(v);
+            }
+            "--max-ticks-per-frame" => {
+                max_ticks_per_frame = Some(take_value(&mut i)?.parse::<u32>()
+                    .map_err(|e| format!("--max-ticks-per-frame: {e}"))?)
+            }
+            "--export-stepcount" => export_stepcount = Some(PathBuf::from(take_value(&mut i)?)),
             "-h" | "--help" => {
                 println!("{USAGE}");
                 std::process::exit(0);
@@ -118,11 +140,21 @@ fn parse_args() -> Result<HeadlessArgs, String> {
             .ok_or_else(|| format!("--universe {}: no Space found inside", u.display()))?,
         (None, None) => return Err(format!("--space or --universe is required\n\n{USAGE}")),
     };
+    let space = eustress_engine::startup::absolute_launch_path(space);
     if !space.is_dir() {
         return Err(format!("Space directory not found: {}", space.display()));
     }
 
-    Ok(HeadlessArgs { space, ticks, tick_rate, autoplay, autoplay_delay_frames })
+    Ok(HeadlessArgs {
+        space,
+        ticks,
+        tick_rate,
+        autoplay,
+        autoplay_delay_frames,
+        time_scale,
+        max_ticks_per_frame,
+        export_stepcount,
+    })
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -277,6 +309,29 @@ fn main() {
     app.insert_resource(eustress_engine::engine_bridge::BridgeInstanceKind(
         eustress_bridge_client::InstanceKind::Headless,
     ));
+
+    // Optional clock overrides and step-count export, inserted before the
+    // core tier so its init_resource calls keep them. Without the flags
+    // nothing is inserted here.
+    if args.time_scale.is_some() || args.max_ticks_per_frame.is_some() {
+        let base = SimulationClock::default();
+        app.insert_resource(SimulationClock {
+            time_scale: args.time_scale.unwrap_or(base.time_scale),
+            max_ticks_per_frame: args.max_ticks_per_frame.unwrap_or(base.max_ticks_per_frame),
+            ..base
+        });
+    }
+    if let Some(path) = args.export_stepcount.clone() {
+        app.insert_resource(eustress_engine::simulation::plugin::StepCountRun {
+            start: None,
+            export_path: Some(path),
+        });
+        // A step-count run compares the physics step counter with the clock
+        // over the same simulated time, so each frame advances time by
+        // exactly one fixed step instead of by the wall clock. Runs without
+        // `--export-stepcount` keep the wall clock.
+        app.insert_resource(bevy::time::TimeUpdateStrategy::FixedTimesteps(1));
+    }
 
     // The shared core simulation tier — identical to the editor's.
     app_core::add_core_sim_plugins(&mut app, &args.space);

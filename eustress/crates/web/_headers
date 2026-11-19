@@ -17,6 +17,10 @@
 /economics-draft
   X-Robots-Tag: noindex, nofollow
 
+# The Invest page says only what a live offering allows; it stays out of search results (docs/finance/REGULATION_A_TIER_2.md).
+/invest
+  X-Robots-Tag: noindex, nofollow
+
 # The legal act pages stay out of search results until McKale approves their text.
 /legal/*
   X-Robots-Tag: noindex, nofollow
@@ -25,6 +29,10 @@
 /cases/*
   X-Robots-Tag: noindex, nofollow
 /account/cases
+  X-Robots-Tag: noindex, nofollow
+
+# The Linked Roles page (Discord sends members here) is nobody's search result.
+/discord/roles
   X-Robots-Tag: noindex, nofollow
 
 # The page that verifies one signed-in account is nobody's search result.

@@ -60,7 +60,7 @@ export function renderKeyNotice(kind, d) {
     '  - Use the new identity file on every computer you use.',
     ...(frozen ? [`  - Payouts, withdrawals and transfers are paused until ${frozen}.`] : []),
     ...(pinned ? [`  - The payout bank account cannot be changed until ${pinned}.`] : []),
-    ...(d.revoked && (d.revoked.api_keys || d.revoked.webhooks || d.revoked.discord || d.revoked.passkeys)
+    ...(d.revoked && (d.revoked.api_keys || d.revoked.webhooks || d.revoked.discord || d.revoked.slack || d.revoked.passkeys)
       ? [`  - Revoked at your request: ${revokedList(d.revoked)}.`]
       : []),
     '',
@@ -80,7 +80,7 @@ export function renderKeyNotice(kind, d) {
     'Files you made earlier may still hold your birthday and an ID hash, and may be in old emails. Delete old copies, including the emails that carried them.',
   ];
   const text = lines.join('\n');
-  const revoked = d.revoked && (d.revoked.api_keys || d.revoked.webhooks || d.revoked.discord || d.revoked.passkeys)
+  const revoked = d.revoked && (d.revoked.api_keys || d.revoked.webhooks || d.revoked.discord || d.revoked.slack || d.revoked.passkeys)
     ? `Revoked at your request: ${revokedList(d.revoked)}.`
     : '';
   const body = html`${paragraph(byAdmin
@@ -113,7 +113,7 @@ ${note('Files you made earlier may still hold your birthday and an ID hash, and 
 
 /// What a replacement revoked, in words. Passkeys are named only when some were.
 function revokedList(r) {
-  return `${r.api_keys || 0} API key(s), ${r.webhooks || 0} webhook endpoint(s)${r.passkeys ? `, ${r.passkeys} passkey(s)` : ''}${r.discord ? ', the Discord link' : ''}`;
+  return `${r.api_keys || 0} API key(s), ${r.webhooks || 0} webhook endpoint(s)${r.passkeys ? `, ${r.passkeys} passkey(s)` : ''}${r.discord ? ', the Discord link' : ''}${r.slack ? ', the Slack link' : ''}`;
 }
 
 /// A passkey was added to the account, or removed from it. Like every key

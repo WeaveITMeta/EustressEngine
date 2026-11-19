@@ -1,0 +1,29 @@
+# PageLink - Website: one off-site link on the sim's public page. A child of
+# the Website service, like Reference. Publish bakes every PageLink into the
+# PageSpec v1 document (docs/design/SIM_PAGE_THEME_AND_LINKS.md section 2) and
+# the Worker reviews each URL before the page shows it: a risky link is removed
+# and the author is told why.
+#
+# A data class with a template and no ClassName variant, exactly like
+# Reference: the class folder is all the registry needs, the Explorer shows the
+# folder, and the bake reads the file. It is created by the website_link_add
+# tool or by adding a folder under Website by hand.
+#
+# Caps per page: one website, eight social, four shop, four other.
+
+[metadata]
+class_name = "PageLink"
+archivable = true
+
+[attributes]
+# website | social | shop | other. shop covers stores, payment and donation
+# pages. An unknown kind drops the link at publish with a warning.
+kind = "website"
+
+# https only, at most 500 characters, no user name or password, no port, no IP
+# address, a public host name. Link the destination itself: a shortener or a
+# redirect is removed at review.
+url = ""
+
+# What the visitor reads on the link: plain text, 1 to 40 characters, not a URL.
+label = ""

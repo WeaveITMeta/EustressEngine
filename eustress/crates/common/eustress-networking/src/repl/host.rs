@@ -121,6 +121,9 @@ pub type Outgoing = Vec<(Audience, ReplOp)>;
 pub struct HostReplicator {
     ids: NetIdMap,
     next_runtime: u64,
+    /// This host's origin in its universe: the high bits of every id it
+    /// mints ([`NetId::origin`]). 0 for a host on its own.
+    origin: u32,
     /// Every instance players have now, and who has it.
     sent: HashMap<NetId, Audience>,
     /// Where each of those sits on players.
@@ -208,6 +211,21 @@ impl HostReplicator {
         }
     }
 
+    /// This host's origin in a universe of several hosts, so no id it mints
+    /// equals one another host minted (see [`NetId::origin`]). Set before
+    /// [`Self::bind_tree`]. Refused past [`NetId::MAX_ORIGIN`].
+    pub fn set_origin(&mut self, origin: u32) -> Result<(), u32> {
+        if origin > NetId::MAX_ORIGIN {
+            return Err(origin);
+        }
+        self.origin = origin;
+        Ok(())
+    }
+
+    pub fn origin(&self) -> u32 {
+        self.origin
+    }
+
     /// A joined player's `Player` instance.
     pub fn set_player(&mut self, player: InstanceId, peer: PeerId) {
         self.players.insert(player, peer);
@@ -263,8 +281,61 @@ impl HostReplicator {
     }
 
     fn mint(&mut self) -> NetId {
-        self.next_runtime += 1;
-        NetId::runtime(self.next_runtime)
+        loop {
+            self.next_runtime += 1;
+            let net = NetId::runtime_in(self.origin, self.next_runtime);
+            // An id adopted from a handoff is never minted over.
+            if self.ids.local(net).is_none() {
+                return net;
+            }
+        }
+    }
+
+    /// Whether `net` could name an instance arriving by handoff: not none,
+    /// not `game`, and bound to nothing here.
+    pub fn id_free(&self, net: NetId) -> bool {
+        !net.is_none() && net != NetId::ROOT && self.ids.local(net).is_none()
+    }
+
+    /// Bind `net`, the id another host gave an instance, to `local`, the
+    /// instance this host just made from that host's handoff snapshot
+    /// (`crate::handoff::materialize`). Players are then sent it under the
+    /// same id, so an instance keeps one id across hosts. Call before the
+    /// next [`Self::observe`]. Refused, with nothing bound, when `net` names
+    /// another instance here or `local` already has another id.
+    pub fn adopt(&mut self, net: NetId, local: InstanceId) -> Result<(), NetId> {
+        if net.is_none() || net == NetId::ROOT {
+            return Err(net);
+        }
+        let taken = self.ids.local(net).is_some_and(|other| other != local);
+        let renamed = self.ids.net(local).is_some_and(|other| other != net);
+        if taken || renamed {
+            return Err(net);
+        }
+        self.ids.bind(net, local);
+        // Players never loaded it with this world: a joiner is sent it whole.
+        self.absent_from_world.insert(net);
+        Ok(())
+    }
+
+    /// `root` and everything under it that players have, as spawns, parents
+    /// first: the instances a handoff snapshot carries, with the ids they
+    /// keep on the destination. The root's parent is its id here (a
+    /// service, or a scene instance the destination also loads). Peer ids
+    /// are left out: they belong to one host's session. `None` when players
+    /// do not have `root`.
+    pub fn handoff_ops(&self, dm: &DataModel, root: InstanceId) -> Option<Vec<SpawnOp>> {
+        self.live(root)?;
+        let mut out = Vec::new();
+        let mut stack = vec![root];
+        while let Some(node) = stack.pop() {
+            let Some((net, _)) = self.live(node) else { continue };
+            let Some(mut op) = self.spawn_op(dm, node, net) else { continue };
+            op.peer = None;
+            out.push(op);
+            stack.extend(dm.children(node).iter().rev().copied());
+        }
+        Some(out)
     }
 
     fn wire(&self, v: &eustress_common::datamodel::DmValue) -> WireValue {

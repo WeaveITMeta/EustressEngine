@@ -65,7 +65,8 @@ use super::road_design::RoadClass;
 use super::road_furniture::{junction_furniture, road_streetlights, road_trees, Finish, FurnitureMeshes};
 use super::api::{apply_terrain_command, TerrainCommand, TerrainFill};
 use super::dirty::TerrainDirtyChunks;
-use super::road_junction::{NetworkJunction, CROSSWALK_LENGTH, STOP_BAR_GAP, STOP_BAR_WIDTH};
+use super::road_hit::{RoadHitMap, RoadJunctionRoads};
+use super::road_junction::{kerb_offset, NetworkJunction, CROSSWALK_LENGTH, STOP_BAR_GAP, STOP_BAR_WIDTH};
 use super::road_mesh::{
     build_designed_zoned, build_sides, build_sides_zoned, build_structures, tunnel_carves, DesignedRoad, MeshData, RoadZones, Surface,
 };
@@ -275,8 +276,11 @@ pub fn sync_road_surfaces(
     surfaces.pending = false;
 
     let mut kept: HashMap<Entity, BuiltSurface> = HashMap::with_capacity(surfaces.built.len());
+    // Each road spline by its layer id, for the junctions to name their roads.
+    let mut road_of_layer: HashMap<u64, Entity> = HashMap::new();
     for (spline_entity, instance) in &splines {
         let id = layer_id(instance.map(|i| i.uuid.as_str()), spline_entity);
+        road_of_layer.insert(id, spline_entity);
         let Some((spline, stations)) = baked.baked_spline(id) else { continue };
         let half_width = (spline.width * 0.5).max(0.0);
         if spline.mode != SplineMode::Road || !(half_width > 0.0) {
@@ -328,12 +332,23 @@ pub fn sync_road_surfaces(
                 .and_then(|slot| slots.as_deref().and_then(|s| s.get(slot)))
                 .map_or(super::material::TerrainMaterial::Asphalt, |s| s.base);
             commands.entity(surface).try_insert(RoadMaterial(road_material));
+            // Paved shoulders are the bed's asphalt; unpaved ones the
+            // shoulder material, or gravel (ground) without one.
+            let shoulder_material = if design.standard.shoulder_paved {
+                road_material
+            } else {
+                spline
+                    .shoulder_material
+                    .filter(|s| *s != MATERIAL_SLOT_NONE)
+                    .and_then(|slot| slots.as_deref().and_then(|s| s.get(slot)))
+                    .map_or(super::material::TerrainMaterial::Ground, |s| s.base)
+            };
             let parts = build_designed_surface(
                 &mut commands,
                 surface,
                 design,
                 &zones,
-                DesignedLooks { bed, color, shoulder },
+                DesignedLooks { bed, color, shoulder, materials: [road_material, shoulder_material] },
                 config.seed,
                 meshes.as_deref_mut(),
                 materials.as_deref_mut(),
@@ -440,7 +455,10 @@ pub fn sync_road_surfaces(
         keep
     });
     for (fingerprint, junction) in wanted {
-        if surfaces.junctions.iter().any(|(f, _)| *f == fingerprint) {
+        // Its roads as they stand: a junction outlives a respawned spline.
+        let roads = junction_roads(junction, &road_of_layer);
+        if let Some((_, entity)) = surfaces.junctions.iter().find(|(f, _)| *f == fingerprint) {
+            commands.entity(*entity).try_insert(roads);
             continue;
         }
         let entity = build_junction_surface(
@@ -451,6 +469,7 @@ pub fn sync_road_surfaces(
             asset_server.as_deref(),
             &mut surfaces.part_materials,
         );
+        commands.entity(entity).try_insert(roads);
         surfaces.junctions.push((fingerprint, entity));
     }
 }
@@ -458,6 +477,21 @@ pub fn sync_road_surfaces(
 /// Marks the surface entity of one junction of the designed roads.
 #[derive(Component, Clone, Copy, Debug, PartialEq, Eq)]
 pub struct RoadJunctionSurface;
+
+/// Junction `j`'s legs' roads (their spline entities, from `road_of_layer`)
+/// with each leg's foot, heading and half width, for reporting hits.
+fn junction_roads(j: &NetworkJunction, road_of_layer: &HashMap<u64, Entity>) -> RoadJunctionRoads {
+    RoadJunctionRoads(
+        j.legs
+            .iter()
+            .enumerate()
+            .filter_map(|(i, leg)| {
+                let a = j.junction.approaches.get(i)?;
+                Some((*road_of_layer.get(&leg.road)?, j.junction.foot(i), a.heading, kerb_offset(&a.standard)))
+            })
+            .collect(),
+    )
+}
 
 /// One finish of a road's or a junction's furniture (poles, signal heads,
 /// signs, luminaires), a child of its surface.
@@ -569,11 +603,16 @@ fn spawn_furniture(
 
 /// Length of solid centre line on each approach to a junction, metres.
 const JUNCTION_SOLID: f64 = 30.0;
+/// How far behind an end leg's foot its road's gap reaches: past any end
+/// the junction finder accepts (its ends lie within `END_CLEAR` of the
+/// foot), metres.
+const ROAD_END_REACH: f64 = 1.0e4;
 
 /// Where road `id`'s junctions cover or paint it: over each leg, the
-/// junction's box (from the meeting point out to the leg's setback) is a
-/// gap; past the box, its crosswalk and stop bar are bare; and the next
-/// [`JUNCTION_SOLID`] metres are no-passing.
+/// junction's box (from the leg's foot out to its setback) is a gap, and so
+/// is the road behind the foot of a road that ends there (the stretch of it
+/// a merged junction's box covers); past the box, its crosswalk and stop bar
+/// are bare; and the next [`JUNCTION_SOLID`] metres are no-passing.
 pub fn junction_zones<'a>(id: u64, junctions: impl Iterator<Item = &'a NetworkJunction>) -> RoadZones {
     let mut zones = RoadZones::default();
     for j in junctions {
@@ -583,7 +622,10 @@ pub fn junction_zones<'a>(id: u64, junctions: impl Iterator<Item = &'a NetworkJu
             let bare = if marked { CROSSWALK_LENGTH + STOP_BAR_GAP + STOP_BAR_WIDTH + 0.3 } else { 0.5 };
             let dir = if leg.outward { 1.0 } else { -1.0 };
             let at = |d: f64| leg.s + dir * d;
-            zones.gaps.push((at(0.0).min(at(setback)), at(0.0).max(at(setback))));
+            // A road that ends here is drawn from its foot; one passing
+            // through has its other leg's gap behind the foot.
+            let behind = if leg.ends_here { -ROAD_END_REACH } else { 0.0 };
+            zones.gaps.push((at(behind).min(at(setback)), at(behind).max(at(setback))));
             zones.bare.push((at(setback).min(at(setback + bare)), at(setback).max(at(setback + bare))));
             let far = setback + bare + JUNCTION_SOLID;
             zones.no_passing.push((at(setback).min(at(far)), at(setback).max(at(far))));
@@ -625,8 +667,16 @@ fn build_junction_surface(
     cache: &mut HashMap<PartLook, Handle<StandardMaterial>>,
 ) -> Entity {
     let built = j.meshes(DESIGNED_SURFACE_LIFT);
+    let hits = RoadHitMap::new(built.parts.iter().map(|(kind, mesh)| {
+        let material = match kind {
+            Surface::Kerb => super::material::TerrainMaterial::Concrete,
+            Surface::Sidewalk => super::material::TerrainMaterial::Pavement,
+            _ => super::material::TerrainMaterial::Asphalt,
+        };
+        (*kind, material, mesh)
+    }));
     let root = commands
-        .spawn((Name::new("RoadJunction"), RoadJunctionSurface, Transform::IDENTITY, Visibility::default()))
+        .spawn((Name::new("RoadJunction"), RoadJunctionSurface, hits, Transform::IDENTITY, Visibility::default()))
         .id();
     let mut meshes = meshes;
     let mut materials = materials;
@@ -821,6 +871,8 @@ struct DesignedLooks {
     color: [f32; 3],
     /// The shoulder material's swatch, if the spline paints its shoulders.
     shoulder: Option<[f32; 3]>,
+    /// What the carriageway and the shoulders are made of, as a hit reports them.
+    materials: [super::material::TerrainMaterial; 2],
 }
 
 /// Give `surface` the meshes and collider of `design`: one child per surface
@@ -849,6 +901,17 @@ fn build_designed_surface(
         .filter(|(kind, mesh)| mesh.triangle_count() > 0 && (painted || !is_marking(*kind)))
         .collect();
     commands.entity(surface).try_remove::<(Mesh3d, MeshMaterial3d<StandardMaterial>)>();
+    // What a ray or contact on its collider lies on.
+    let [carriageway, shoulder] = looks.materials;
+    commands.entity(surface).try_insert(RoadHitMap::new(parts.iter().map(|(kind, mesh)| {
+        let material = match kind {
+            Surface::Shoulder => shoulder,
+            Surface::Kerb => super::material::TerrainMaterial::Concrete,
+            Surface::Sidewalk => super::material::TerrainMaterial::Pavement,
+            Surface::Carriageway | Surface::MarkingWhite | Surface::MarkingYellow => carriageway,
+        };
+        (*kind, material, mesh)
+    })));
 
     let mut children = Vec::new();
     if let (Some(meshes), Some(materials)) = (meshes.as_deref_mut(), materials.as_deref_mut()) {
@@ -1020,7 +1083,7 @@ fn part_look(kind: Surface, design: &DesignedRoad, looks: DesignedLooks) -> Part
 }
 
 /// The material of `look`. The asphalt textures repeat every
-/// [`ASPHALT_TILE_METRES`] (the meshes' UVs are metres across and along);
+/// [`ASPHALT_TILE_METRES`] (the meshes' UVs are world metres in X and Z);
 /// without an asset server they fall back to their grey.
 fn part_material(look: PartLook, asset_server: Option<&AssetServer>) -> StandardMaterial {
     let texture = |name: &str, srgb: bool| {

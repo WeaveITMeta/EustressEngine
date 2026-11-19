@@ -1,0 +1,55 @@
+/* The Discord pages (src/pages/discord.rs, src/pages/discord_roles.rs).
+   Built on the Gallery's tokens and parts (gallery.css): glass panels and buttons. This file adds only the layout of these two pages.
+   Text keeps 4.5:1 or better: --g-text and --g-text-2 on the glass. Nothing here is wider than the window: the grid collapses to one
+   column and the table scrolls inside its own box. */
+
+.dc-wrap { width: min(1040px, 100% - 32px); margin: 0 auto; padding: 28px 0 56px; }
+.dc-hero { padding: 34px 36px; }
+.dc-title { margin: 0 0 12px; font-size: clamp(30px, 5vw, 48px); line-height: 1.08; font-weight: 700; letter-spacing: -0.025em; overflow-wrap: anywhere; }
+.dc-lede { margin: 0 0 22px; max-width: 640px; color: var(--g-text-2); font-size: 16.5px; }
+.dc-actions { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; }
+/* The community invite in Discord's own color. White on #5865F2 is 4.8:1; the hover is darker still. The icon is drawn white. */
+.dc-join { background: #5865F2; border-color: #5865F2; color: #fff; display: inline-flex; align-items: center; justify-content: center; gap: 10px; }
+.dc-join:hover, .dc-join:focus-visible { background: #4752C4; border-color: #4752C4; color: #fff; }
+.dc-join img { width: 20px; height: 20px; filter: brightness(0) invert(1); }
+.dc-install-notes { margin: 20px 0 0; padding-left: 20px; color: var(--g-text-2); }
+.dc-install-notes li { margin: 6px 0; }
+.dc-install-notes strong { color: var(--g-text); }
+
+.dc-section { margin-top: 40px; }
+.dc-section h2 { margin: 0 0 16px; font-size: clamp(22px, 3vw, 28px); letter-spacing: -0.015em; }
+.dc-plain { margin: 12px 0 0; max-width: 720px; color: var(--g-text-2); }
+.dc-plain a { color: var(--g-accent-bright); text-decoration: underline; }
+.dc-list { margin: 8px 0 0; padding-left: 20px; color: var(--g-text-2); }
+.dc-list li { margin: 6px 0; }
+
+.dc-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 300px), 1fr)); gap: 16px; }
+.dc-card { padding: 22px 24px; min-width: 0; }
+.dc-card p { margin: 0 0 10px; color: var(--g-text-2); }
+.dc-cmd { margin: 0 0 8px; font-size: 20px; }
+.dc-cmd code, .dc-example code { font-family: var(--g-mono); overflow-wrap: anywhere; }
+.dc-example code { display: block; padding: 8px 10px; border-radius: 8px; background: rgba(143, 160, 182, 0.1); color: var(--g-text); font-size: 13.5px; }
+.dc-note { color: var(--g-muted); font-size: 13.5px; }
+.dc-card-title { margin: 0 0 12px; font-size: clamp(22px, 3.5vw, 30px); line-height: 1.15; }
+
+.dc-table-wrap { overflow-x: auto; }
+.dc-table { width: 100%; border-collapse: collapse; }
+.dc-table th, .dc-table td { padding: 14px 18px; text-align: left; vertical-align: top; border-bottom: 1px solid var(--g-line); }
+.dc-table tbody tr:last-child th, .dc-table tbody tr:last-child td { border-bottom: 0; }
+.dc-table thead th { color: var(--g-muted); font-size: 13px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.04em; }
+.dc-table tbody th { color: var(--g-text); font-weight: 600; white-space: nowrap; }
+.dc-table td { color: var(--g-text-2); }
+
+.dc-roles { max-width: 640px; }
+.dc-error { margin: 14px 0 0; color: #ff8b84; }
+
+@media (max-width: 640px) {
+    .dc-hero { padding: 24px 20px; }
+    .dc-actions .g-btn { flex: 1 1 100%; }
+    .dc-table tbody th { white-space: normal; }
+    .dc-table th, .dc-table td { padding: 12px 14px; }
+}
+
+/* The quiet line under the Connect Discord row in Settings (src/pages/settings.rs). */
+.settings-hint { margin: 6px 0 0; color: var(--color-text-muted); font-size: 13px; }
+.settings-hint a { color: var(--color-accent); text-decoration: underline; }

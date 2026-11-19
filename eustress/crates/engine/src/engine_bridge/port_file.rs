@@ -223,7 +223,7 @@ pub fn resolve_universe_root(space_root: Option<&Path>) -> PathBuf {
 
     // (2) Authoritative: the Universe of the Space the engine actually opened.
     if let Some(space) = space_root {
-        if let Some(universe) = crate::space::universe_root_for_path(space) {
+        if let Some(universe) = open_space_universe(space) {
             return universe;
         }
     }
@@ -235,4 +235,96 @@ pub fn resolve_universe_root(space_root: Option<&Path>) -> PathBuf {
     // `resync_port_file_to_space` system re-points the file to the loaded
     // Space's real Universe (step 2) the moment `SpaceRoot` appears.
     crate::space::best_default_universe_root()
+}
+
+/// The Universe whose `.eustress/engine.port` an engine with `space` open
+/// writes: the Universe of the Space that is actually open.
+///
+/// A Space inside the user's workspace resolves exactly as it always has
+/// ([`crate::space::universe_root_for_path`]). A Space outside it (a test
+/// harness, a checkout, a dedicated server's download) has its own Universe:
+/// the folder that contains it, by the layout rule the rest of the engine
+/// uses ([`crate::workshop::product_meshes::universe_root_of`]). `None` when
+/// the open Space has no Universe of its own (the scratch Space, or a Space
+/// whose containing folder is the workspace itself or above it); the caller
+/// then keeps the slot it already has instead of taking the user's.
+pub fn open_space_universe(space: &Path) -> Option<PathBuf> {
+    if let Some(universe) = crate::space::universe_root_for_path(space) {
+        return Some(universe);
+    }
+    universe_outside_workspace(
+        space,
+        &crate::space::workspace_root(),
+        crate::space::format_migration::is_scratch_space(space),
+    )
+}
+
+/// The pure part of [`open_space_universe`] for a Space the workspace scan
+/// did not place: the folder containing `space` (its parent, or the parent's
+/// parent when that is a `Spaces`/`spaces` tier). Refused when `space` is the
+/// scratch Space, has no parent, or when that folder is `workspace` or one of
+/// its ancestors, so an engine never writes the workspace-level slot as if it
+/// were a Universe.
+pub(crate) fn universe_outside_workspace(space: &Path, workspace: &Path, is_scratch: bool) -> Option<PathBuf> {
+    if is_scratch {
+        return None;
+    }
+    space.parent()?;
+    let universe = crate::workshop::product_meshes::universe_root_of(space);
+    if workspace.starts_with(&universe) {
+        return None;
+    }
+    Some(universe)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn workspace() -> PathBuf {
+        PathBuf::from("/home/user/Documents/Eustress")
+    }
+
+    #[test]
+    fn a_space_directly_in_a_harness_universe_writes_to_that_universe() {
+        let space = PathBuf::from("/repo/eustress/spaces/harness/RH1_sphere_grid");
+        assert_eq!(
+            universe_outside_workspace(&space, &workspace(), false),
+            Some(PathBuf::from("/repo/eustress/spaces/harness"))
+        );
+    }
+
+    #[test]
+    fn a_space_under_a_spaces_tier_writes_to_the_universe_above_it() {
+        let space = PathBuf::from("/elsewhere/Universe2/Spaces/Space1");
+        assert_eq!(
+            universe_outside_workspace(&space, &workspace(), false),
+            Some(PathBuf::from("/elsewhere/Universe2"))
+        );
+    }
+
+    #[test]
+    fn a_space_whose_folder_is_the_workspace_never_takes_the_workspace_slot() {
+        let in_root = workspace().join("LooseSpace");
+        assert_eq!(universe_outside_workspace(&in_root, &workspace(), false), None);
+        assert_eq!(universe_outside_workspace(&workspace(), &workspace(), false), None);
+    }
+
+    #[test]
+    fn the_scratch_space_and_a_parentless_path_have_no_universe() {
+        let space = PathBuf::from("/tmp/Eustress scratch Space");
+        assert_eq!(universe_outside_workspace(&space, &workspace(), true), None);
+        assert_eq!(universe_outside_workspace(Path::new("/"), &workspace(), false), None);
+    }
+
+    #[test]
+    fn the_port_file_lands_in_the_open_universes_eustress_folder() {
+        let dir = std::env::temp_dir().join(format!("eustress-port-file-test-{}", std::process::id()));
+        let universe = dir.join("harness");
+        let pf = PortFile::write_for_universe(&universe, 1).unwrap();
+        assert_eq!(pf.path(), universe.join(".eustress").join("engine.port").as_path());
+        assert_eq!(pf.global_path(), Some(dir.join(".eustress").join("engine.port").as_path()));
+        drop(pf);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

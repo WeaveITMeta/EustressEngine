@@ -205,6 +205,20 @@ pub fn DocsBuildingPage() -> impl IntoView {
 
                 <main class="docs-content">
                     <header class="docs-hero">
+                        // The hero picture: the page's largest paint, so it loads at
+                        // once (no lazy loading, no entrance animation).
+                        <div class="docs-hero-art">
+                            <img
+                                src="/assets/learn/building-hero-1600.webp"
+                                srcset="/assets/learn/building-hero-800.webp 800w, /assets/learn/building-hero-1600.webp 1600w"
+                                sizes="(max-width: 1024px) 100vw, 840px"
+                                alt="A small structure assembled from cubes, a wedge, a cylinder and a sphere on a grid platform, one block with a round hole cut through it, a patch of low terrain at the edge and a small light above."
+                                width="1600"
+                                height="900"
+                                fetchpriority="high"
+                                decoding="async"
+                            />
+                        </div>
                         <div class="docs-breadcrumb">
                             <a href="/learn">"Learn"</a>
                             <span class="separator">"/"</span>
@@ -756,6 +770,19 @@ view_distance = 256.0      # chunks cover -4 to +4 around the origin"#}</code></
 
                         <div id="lighting-lights" class="subsection">
                             <h3>"Light Objects"</h3>
+                            <figure class="learn-figure">
+                                <img
+                                    src="/assets/learn/building-fig-1-1200.webp"
+                                    srcset="/assets/learn/building-fig-1-600.webp 600w, /assets/learn/building-fig-1-1200.webp 1200w"
+                                    sizes="(max-width: 660px) 92vw, (max-width: 1099px) 600px, 500px"
+                                    alt="Four light sources in a row: a sphere with an even halo, a cylinder with a cone of light, a cube with a cone of light out of one face, and a wide slab with parallel rays falling straight down."
+                                    width="1200"
+                                    height="900"
+                                    loading="lazy"
+                                    decoding="async"
+                                />
+                                <figcaption>"A PointLight shines in every direction, a SpotLight in a cone, and a SurfaceLight in a cone out of one face of its part. A DirectionalLight shines in parallel rays across the whole Space."</figcaption>
+                            </figure>
                             <p>
                                 "A light object adds a real light to the scene. A PointLight shines in every
                                 direction, a SpotLight in a cone, and a SurfaceLight in a cone out of one face
@@ -885,6 +912,19 @@ view_distance = 256.0      # chunks cover -4 to +4 around the origin"#}</code></
 
                         <div id="scale-streaming" class="subsection">
                             <h3>"Streaming Very Large Spaces"</h3>
+                            <figure class="learn-figure">
+                                <img
+                                    src="/assets/learn/building-fig-2-1200.webp"
+                                    srcset="/assets/learn/building-fig-2-600.webp 600w, /assets/learn/building-fig-2-1200.webp 1200w"
+                                    sizes="(max-width: 660px) 92vw, (max-width: 1099px) 600px, 500px"
+                                    alt="A square grid floor with a small camera marker at its center, many separate bright blocks in the nearby cells, and one dim merged block in each distant cell, divided by a thin ring."
+                                    width="1200"
+                                    height="900"
+                                    loading="lazy"
+                                    decoding="async"
+                                />
+                                <figcaption>"In a very large Space, Studio loads the parts near the camera. Everything farther away is drawn as stand-ins, one merged mesh per cell."</figcaption>
+                            </figure>
                             <p>
                                 "When a Space's database holds more than 100,000 objects, Studio stops
                                 loading everything at open. It loads the parts within 350 m of the camera and

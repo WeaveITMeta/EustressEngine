@@ -1,0 +1,52 @@
+[asset]
+mesh = "parts/block.glb"
+scene = "Scene0"
+
+[attributes]
+albedo_srgb = [
+    200,
+    200,
+    200,
+]
+
+[metadata]
+archivable = true
+class_name = "Part"
+created = "2026-11-16T00:00:00Z"
+last_modified = "2026-11-16T00:00:00Z"
+name = "Patch_20_neutral_8"
+unit = "m"
+uuid = "32224dd774e0f9081dfa2add191b5c4a"
+
+[properties]
+anchored = true
+can_collide = true
+cast_shadow = true
+color = [
+    200,
+    200,
+    200,
+]
+destructible = false
+locked = false
+material = "H_Matte"
+reflectance = 0.0
+transparency = 0.0
+
+[transform]
+position = [
+    -0.45,
+    0.55,
+    -3.97,
+]
+rotation = [
+    0.0,
+    0.0,
+    0.0,
+    1.0,
+]
+scale = [
+    0.26,
+    0.26,
+    0.01,
+]

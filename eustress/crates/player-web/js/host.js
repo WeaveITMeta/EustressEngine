@@ -29,7 +29,14 @@
 // The two builds sit beside this file (/player/webgpu/ and /player/webgl2/ on
 // the site), so the bundle can move to another host, such as R2 when a
 // build passes the 25 MiB Pages cap, with no change here.
-const BUILDS = { webgpu: new URL("webgpu/", import.meta.url), webgl2: new URL("webgl2/", import.meta.url) };
+//
+// package_player.mjs rewrites BUILD_DIRS to each build's own folder, named by
+// its content (webgpu/<hash>/). The browser caches this file and the glue for
+// hours, and a glue file only runs the wasm it was generated with: a page that
+// cached an older host.js keeps loading the older build whole (the package
+// carries it forward), and a newer host.js never meets an older cached glue.
+const BUILD_DIRS = { webgpu: "webgpu/", webgl2: "webgl2/" };
+const BUILDS = { webgpu: new URL(BUILD_DIRS.webgpu, import.meta.url), webgl2: new URL(BUILD_DIRS.webgl2, import.meta.url) };
 // The Player's own assets, shared by both builds: its default source and the
 // bundled library (`bundled://`) a Space can name.
 const ASSETS = new URL("assets/", import.meta.url);

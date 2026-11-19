@@ -116,11 +116,33 @@ fn startup_size() -> (u32, u32) {
     STARTUP_SIZE
 }
 
+/// A fixed window size from `EUSTRESS_WINDOW_SIZE=WxH` in physical pixels
+/// (`3840x2160`), for a measurement run that needs the same frame every
+/// time. Unset, empty, or not two positive numbers reads as none.
+pub fn fixed_size_from(raw: Option<&str>) -> Option<(u32, u32)> {
+    let (w, h) = raw?.trim().split_once(['x', 'X'])?;
+    let (w, h) = (w.trim().parse::<u32>().ok()?, h.trim().parse::<u32>().ok()?);
+    (w > 0 && h > 0).then_some((w, h))
+}
+
+/// This run's fixed window size, read once.
+fn fixed_size() -> Option<(u32, u32)> {
+    static SIZE: std::sync::OnceLock<Option<(u32, u32)>> = std::sync::OnceLock::new();
+    *SIZE.get_or_init(|| fixed_size_from(std::env::var("EUSTRESS_WINDOW_SIZE").ok().as_deref()))
+}
+
 /// The primary window as it should be created: most of the work area,
 /// centered, and maximized unless the saved placement says the user last had
 /// it restored. `track_window_placement` then maximizes it, or applies the
-/// saved rectangle, once the native window is showing.
+/// saved rectangle, once the native window is showing. A run with a fixed
+/// size gets exactly that size, and its placement is neither restored nor
+/// saved.
 pub fn startup_window(mut window: Window) -> Window {
+    if let Some((width, height)) = fixed_size() {
+        window.resolution = bevy::window::WindowResolution::new(width, height);
+        window.position = bevy::window::WindowPosition::Centered(bevy::window::MonitorSelection::Primary);
+        return window;
+    }
     let (width, height) = startup_size();
     window.resolution = bevy::window::WindowResolution::new(width, height);
     window.position = bevy::window::WindowPosition::Centered(bevy::window::MonitorSelection::Primary);
@@ -292,6 +314,11 @@ mod win32 {
         time: Res<Time<Real>>,
         mut tracker: Local<Tracker>,
     ) {
+        // A fixed-size run keeps its size and leaves the user's saved
+        // placement alone.
+        if super::fixed_size().is_some() {
+            return;
+        }
         let Ok(handle) = windows.single() else { return };
         let RawWindowHandle::Win32(win32) = handle.get_window_handle() else { return };
         let hwnd = win32.hwnd.get() as HWND;
@@ -340,6 +367,17 @@ mod tests {
     use super::*;
 
     const WORK: Edges = Edges { left: 0, top: 0, right: 1920, bottom: 1032 };
+
+    #[test]
+    fn a_fixed_size_reads_width_by_height() {
+        assert_eq!(fixed_size_from(Some("3840x2160")), Some((3840, 2160)));
+        assert_eq!(fixed_size_from(Some(" 1920 X 1080 ")), Some((1920, 1080)));
+        assert_eq!(fixed_size_from(None), None);
+        assert_eq!(fixed_size_from(Some("")), None);
+        assert_eq!(fixed_size_from(Some("1920")), None);
+        assert_eq!(fixed_size_from(Some("0x1080")), None);
+        assert_eq!(fixed_size_from(Some("widexhigh")), None);
+    }
 
     #[test]
     fn a_window_inside_the_work_area_is_unchanged() {

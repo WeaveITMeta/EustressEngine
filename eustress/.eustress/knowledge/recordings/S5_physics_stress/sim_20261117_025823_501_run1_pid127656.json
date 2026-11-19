@@ -1,0 +1,27 @@
+{
+  "metadata": {
+    "name": "simulation_run",
+    "started_at": "",
+    "simulation_duration_s": 10.023705999999992,
+    "wall_duration_s": 10.023705999999992,
+    "total_ticks": 601,
+    "compression_ratio": 1.0,
+    "tags": {},
+    "step_count": {
+      "schema": "eustress.stepcount.v1",
+      "physics_steps_executed": 602,
+      "physics_step_counter_at_start": 0,
+      "physics_step_counter_at_end": 602,
+      "clock_tick_count": 601,
+      "clock_tick_count_implied_by_time": 601,
+      "dropped_steps": -1,
+      "simulation_time_s": 10.023705999999992,
+      "wall_time_s": 10.023705999999992,
+      "fixed_timestep_s": 0.016666666666666666,
+      "time_scale": 1.0,
+      "max_ticks_per_frame": 10
+    }
+  },
+  "series": {},
+  "events": []
+}

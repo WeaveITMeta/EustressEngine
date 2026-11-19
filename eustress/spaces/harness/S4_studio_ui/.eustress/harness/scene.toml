@@ -1,0 +1,7 @@
+# Harness scene marker. Emitted by harness-scenes (eustress/crates/engine/src/bin/harness_scenes.rs); never edit by hand.
+[harness]
+scene_id = "S4"
+space_dir = "S4_studio_ui"
+seed = 42
+generator = "harness-scenes"
+title = "Studio UI: pinned Space, pinned selection, pinned panel layout, pinned window size"

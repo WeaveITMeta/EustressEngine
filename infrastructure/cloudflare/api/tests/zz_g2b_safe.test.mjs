@@ -24,21 +24,30 @@ function everythingStored(env) {
   return parts.join('\n');
 }
 
-test('SAFE: an expired, forged or garbage token is signed out for the ages_10 cap on list, page, download, play and live', async () => {
+// McKale, 2026-11-19: solo routes take a signed-out visitor up to mature_17; the live read keeps ages_10, and adult content
+// stays closed. A bad token is signed out on each of them.
+const ADULT = 'eeeeeeee-5555-4555-8555-eeeeeeeeeeee';
+test('SAFE: an expired, forged or garbage token is signed out: the solo cap on list, page, download and play, the ages_10 cap on live', async () => {
   const env = environment();
   await seed(env);
   await env.SOCIAL.put(`sim:${TEEN}`, JSON.stringify(listing(TEEN, { rating: 'teen_13' }, { r2_key: `universes/${TEEN}/universe.pak` })));
   await env.SCENES.put(`universes/${TEEN}/universe.pak`, 'the world');
+  await env.SOCIAL.put(`sim:${ADULT}`, JSON.stringify(listing(ADULT, { rating: 'adult_18' }, { r2_key: `universes/${ADULT}/universe.pak` })));
+  await env.SCENES.put(`universes/${ADULT}/universe.pak`, 'the adult world');
   const bad = { expired: token(PLAYER, { exp: Math.floor(Date.now() / 1000) - 10 }), forged: token(PLAYER, { secret: 'wrong' }), garbage: 'not.a.token' };
+  const solo = (id) => [['GET', `/api/simulations/${id}`], ['GET', `/api/simulations/${id}/download`], ['POST', `/api/simulations/${id}/play`]];
   for (const [what, t] of Object.entries(bad)) {
     const list = (await call(env, 'GET', '/api/simulations', { token: t })).body.simulations.map((s) => s.id);
-    assert.ok(!list.includes(TEEN) && list.includes(SIM), `${what}: list`);
-    for (const [m, path] of [['GET', `/api/simulations/${TEEN}`], ['GET', `/api/simulations/${TEEN}/download`], ['POST', `/api/simulations/${TEEN}/play`], ['GET', `/api/simulations/${TEEN}/live`]]) {
+    assert.ok(list.includes(TEEN) && list.includes(SIM) && !list.includes(ADULT), `${what}: list`);
+    for (const [m, path] of solo(TEEN)) assert.equal((await call(env, m, path, { token: t, headers: IP })).status, 200, `${what}: ${m} ${path}`);
+    for (const [m, path] of solo(ADULT)) {
       const r = await call(env, m, path, { token: t, headers: IP });
-      assert.deepEqual([r.status, r.body?.code], [403, 'sign_in_required'], `${what}: ${m} ${path}`);
+      assert.deepEqual([r.status, r.body?.code, r.body?.signed_in], [403, 'adult_content_off', false], `${what}: ${m} ${path}`);
     }
+    const live = await call(env, 'GET', `/api/simulations/${TEEN}/live`, { token: t, headers: IP });
+    assert.deepEqual([live.status, live.body?.code], [403, 'sign_in_required'], `${what}: live`);
   }
-  for (const [m, path] of [['GET', `/api/simulations/${TEEN}`], ['GET', `/api/simulations/${TEEN}/download`], ['POST', `/api/simulations/${TEEN}/play`]]) {
+  for (const [m, path] of solo(TEEN)) {
     assert.equal((await call(env, m, path, { token: player })).status, 200, `signed in: ${m} ${path}`);
   }
   // What a signed-out visitor learns: 404 for a missing or unlisted id, 403 sign_in_required for a listed one above ages_10.
@@ -82,17 +91,20 @@ test('SAFE: a refused and an unavailable chat check log and store no text', asyn
   });
 });
 
-test('SAFE: the world routes and the makers and tags lists apply the signed-out cap', async () => {
+test('SAFE: the world routes and the makers and tags lists apply the solo signed-out cap: adult content stays out', async () => {
   const env = environment();
   await seed(env);
+  // McKale, 2026-11-19: a teen listing is solo play, open signed out; an adult one is not.
   await env.SOCIAL.put(`sim:${TEEN}`, JSON.stringify(listing(TEEN, { rating: 'teen_13' }, { format: 'echk', r2_key: `universes/${TEEN}/world/manifest.json`, tags: ['racing'] })));
-  for (const path of [`/api/simulations/${TEEN}/world/manifest`, `/api/simulations/${TEEN}/world/chunks/${"a".repeat(64)}`, `/api/simulations/${TEEN}/world/source`]) {
+  await env.SOCIAL.put(`sim:${ADULT}`, JSON.stringify(listing(ADULT, { rating: 'adult_18' }, { format: 'echk', r2_key: `universes/${ADULT}/world/manifest.json`, tags: ['nightlife'] })));
+  for (const path of [`/api/simulations/${ADULT}/world/manifest`, `/api/simulations/${ADULT}/world/chunks/${"a".repeat(64)}`, `/api/simulations/${ADULT}/world/source`]) {
     const r = await call(env, 'GET', path, { headers: IP });
-    console.log(`signed out ${path.split(TEEN)[1]}: ${r.status} ${r.body?.code}`);
-    assert.equal(r.status, 403, path);
+    console.log(`signed out ${path.split(ADULT)[1]}: ${r.status} ${r.body?.code}`);
+    assert.deepEqual([r.status, r.body?.code], [403, 'adult_content_off'], path);
   }
   const tags = await call(env, 'GET', '/api/simulations/tags');
-  assert.ok(!JSON.stringify(tags.body).includes('racing'), 'tags signed out');
+  assert.ok(JSON.stringify(tags.body).includes('racing'), 'tags signed out: the teen listing');
+  assert.ok(!JSON.stringify(tags.body).includes('nightlife'), 'tags signed out: never the adult listing');
   const makers = await call(env, 'GET', '/api/makers');
   console.log(`makers signed out: ${makers.status} ${JSON.stringify(makers.body).slice(0, 200)}`);
 });

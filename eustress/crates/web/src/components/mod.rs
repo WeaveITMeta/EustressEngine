@@ -33,6 +33,7 @@ pub mod currency_ui;
 pub mod notify_me;
 pub mod player_download;
 pub mod pass_store;
+pub mod readme;
 pub mod adult_content;
 
 pub use layout::Layout;

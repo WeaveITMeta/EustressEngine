@@ -43,7 +43,6 @@ serde = { workspace = true }
 thiserror = { workspace = true }
 parking_lot = { workspace = true }
 chrono = { workspace = true }
-bytes = { workspace = true }
 uuid = { workspace = true }
 toml = "0.8"
 # Deterministic per-chunk content hashing for `.echk` bake → R2 delta

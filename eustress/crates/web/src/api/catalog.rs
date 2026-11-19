@@ -81,9 +81,31 @@ pub struct Listing {
     /// Present, and false, only on a record that is not in the Gallery (its author's view).
     #[serde(default)]
     pub listable: Option<bool>,
+    /// Whether the author lets it be listed (`is_public`), on the author's view of a listing that is not in the Gallery.
+    /// Absent on a Gallery record, which is public by being there (`Listing::is_public_now`).
+    #[serde(default)]
+    pub is_public: Option<bool>,
     /// The author's review of a listing that is not in the Gallery.
     #[serde(default)]
     pub moderation: Option<ReviewView>,
+    /// The author turned on Share Source: anyone may open a copy in Studio (`eustress://edit/<id>`), which becomes a new
+    /// Universe of their own, never linked to this listing.
+    #[serde(default)]
+    pub is_open_source: bool,
+}
+
+impl Listing {
+    /// Whether the author has it public: what the author's view says, and otherwise yes, for a record in the Gallery.
+    pub fn is_public_now(&self) -> bool {
+        self.is_public.unwrap_or(self.listable != Some(false))
+    }
+
+    /// The link that opens a copy of this listing in Studio, when its author shares the source. Studio downloads the source
+    /// world into a new Universe; publishing that copy makes a new listing, and this one is untouched.
+    pub fn studio_copy_link(&self) -> Option<String> {
+        let id_ok = !self.id.is_empty() && self.id.len() <= 64 && self.id.chars().all(|c| c.is_ascii_hexdigit() || c == '-');
+        (self.is_open_source && id_ok).then(|| format!("eustress://edit/{}", self.id.to_ascii_lowercase()))
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -336,6 +358,21 @@ mod tests {
 
     fn listing(id: &str) -> Listing {
         Listing { id: id.to_string(), name: id.to_string(), ..Default::default() }
+    }
+
+    #[test]
+    fn only_a_listing_that_shares_its_source_offers_a_copy_in_studio() {
+        let id = "c9caf0e2-1b2c-4d5e-8f90-0123456789AB";
+        assert_eq!(listing(id).studio_copy_link(), None, "Share Source off: no copy");
+        let open = Listing { is_open_source: true, ..listing(id) };
+        assert_eq!(open.studio_copy_link().as_deref(), Some("eustress://edit/c9caf0e2-1b2c-4d5e-8f90-0123456789ab"));
+        // An id Studio's link handler would refuse is never put in a link (engine/src/space/gallery_edit.rs, edit_target).
+        for bad in ["", "../x", "abc?x=1", "sim_7"] {
+            assert_eq!(Listing { is_open_source: true, ..listing(bad) }.studio_copy_link(), None, "{bad}");
+        }
+        // The Worker's gallery card names the flag `is_open_source`.
+        let wire: Listing = serde_json::from_str(r#"{"id":"ab-12","name":"A","is_open_source":true}"#).unwrap();
+        assert!(wire.is_open_source);
     }
 
     #[test]

@@ -107,10 +107,10 @@ Triggered by `v*` tag push on any branch (typically Core):
 
 1. **Build three platforms in parallel:**
    - Windows x64 → `.zip` with executable + assets
-   - macOS ARM64 (Apple Silicon) → `.dmg` with signed `.app` bundle
+   - macOS ARM64 (Apple Silicon) → `.dmg` with an unsigned, un-notarized `.app` bundle (the workflow has no macOS signing step)
    - Linux x64 → `.tar.gz` with executable + `install.sh` + desktop file
 2. **Compute SHA-256 checksums** for each artifact
-3. **Generate `latest.json`** — download manifest consumed by the in-app updater and the website download page
+3. **Generate and sign `latest.json`** — download manifest consumed by the in-app updater and the website download page
 4. **Upload to Cloudflare R2** into `eustress-downloads/v${VERSION}/` using
    `wrangler r2 object put --remote`, served at:
    - `https://downloads.eustress.dev/v0.3.7/eustress-engine-v0.3.7-windows-x64.zip`
@@ -121,6 +121,19 @@ Triggered by `v*` tag push on any branch (typically Core):
    the one built. Uploading is not the same as being reachable, and that gap is
    what hid a missing bucket through seven release attempts.
 6. **Create a GitHub Release** with auto-generated notes from commits since the last tag, artifacts attached
+
+### Signing the update manifest
+
+Studio installs an update only when `v${VERSION}/latest.json` is accompanied by
+`latest.json.sig`, an Ed25519 signature whose key is listed in
+`TRUSTED_KEYS` in `eustress/crates/engine/src/update_trust.rs`. The publish job
+signs with the GitHub Actions secret `EUSTRESS_UPDATE_SIGNING_KEY`, uploads the
+versioned manifest and signature to R2 before it replaces the root
+`latest.json`, and fails when the signing key is not listed in
+`update_trust.rs` or when keys are listed and the secret is missing. Without
+the secret and with no key listed, the release is published unsigned with a
+warning. Formats, key generation, rotation and limits are in
+[docs/architecture/SIGNED_UPDATES.md](docs/architecture/SIGNED_UPDATES.md).
 
 ### Typical wall-clock time
 

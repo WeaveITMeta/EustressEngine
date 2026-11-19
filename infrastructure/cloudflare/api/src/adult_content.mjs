@@ -14,15 +14,30 @@
 // serves a listing or its content; the site only renders what it is given.
 //
 //     viewer                                         highest band shown
-//     signed out                                     ages_10
+//     signed out, solo surface                       mature_17
+//     signed out, any other surface                  ages_10
 //     signed in, Adult content off                   mature_17
 //     on, verified age under 21 (or none on record)  adult_18
 //     on, verified age 21 or over                    adult_21
 //
-// McKale, 2026-10-16: a visitor with no session (who may be a child, and is
-// every guest) sees and plays G to PG only: `all_ages` and `ages_10`. A
-// listing above that is left out of every list for them and refused on every
-// surface that serves it (listing page, download, world, play, live), with
+// McKale, 2026-11-19: "Do not require solo simulations to need a login. Only
+// multiplayer spaces need a login." and "18+ keeps a sign-in." A visitor with
+// no session browses, opens and plays SOLO any listing up to `mature_17`
+// (SOLO_SIGNED_OUT_CAP). The solo surfaces are the Gallery and its search
+// (the list, featured, makers, tags), the listing page, the world manifest,
+// its chunks and source, the `.pak` download, and the play route's solo
+// answer; each passes SOLO to the gate. Adult content (`adult_18`, `adult_21`,
+// and a listing with no rating, which reads as `adult_21`) is always above
+// that cap: it still needs a signed-in account with Adult content on, and is
+// refused to a visitor with no session with `adult_content_off`.
+//
+// Every other surface keeps the cap of 2026-10-16 (SIGNED_OUT_CAP): a visitor
+// with no session (who may be a child, and is every guest) sees G to PG only,
+// `all_ages` and `ages_10`. That is the multiplayer path (the play route's
+// live status and join link, /live, /live/admit, the live-now strip, the
+// fleet's allocate, guest leases and tickets) and the Discord and Slack apps,
+// which post into shared channels. A gate that is not told SOLO uses it, so a
+// surface nobody classified stays closed. Above it the visitor is refused with
 // `sign_in_required`; signing in opens it up to `mature_17`.
 //
 // The age is the date of birth requireVerifiedAdult (index.js) resolves: the one
@@ -50,8 +65,9 @@
 // a signed-in viewer can have the setting on, so no cache ever holds an answer
 // with adult content in it (viewerHeaders).
 //
-// An adult listing's images (its thumbnail, its cover and its preview frames)
-// are fetched by image tags, which carry no session. So each image route asks
+// An adult listing's images (its thumbnail, its cover, its preview frames, and
+// its sim page's logo, banner, gallery and README images, src/page.mjs) are
+// fetched by image tags, which carry no session. So each image route asks
 // for a signed URL instead: an HMAC over the URL's path and an expiry, which
 // only this Worker can make and which it writes into the listing's own
 // `thumbnail_url`, `cover_url` and preview `url` fields for a viewer allowed to
@@ -83,8 +99,17 @@ export const AGE_21_RATING = 'adult_21';
 export const ADULT_RATINGS = Object.freeze([ADULT_RATING, AGE_21_RATING]);
 /// The highest rating a signed-in viewer whose Adult content is off is shown.
 export const OFF_CAP = 'mature_17';
-/// The highest rating a visitor with no session is shown: G to PG (McKale, 2026-10-16).
+/// The highest rating a visitor with no session is shown on any surface but a solo one: G to PG (McKale, 2026-10-16). The
+/// multiplayer path and the Discord and Slack apps keep it.
 export const SIGNED_OUT_CAP = 'ages_10';
+/// The highest rating a visitor with no session browses, opens and plays solo (McKale, 2026-11-19: "Do not require solo
+/// simulations to need a login. Only multiplayer spaces need a login."). Below every adult band: "18+ keeps a sign-in."
+export const SOLO_SIGNED_OUT_CAP = 'mature_17';
+/// The surface a solo route names to the gates below (viewerCap, ratingCap, mayView, refuseAdult `deps.surface`,
+/// withinSignedOutCap). Anything else, a missing value included, is not solo and keeps SIGNED_OUT_CAP.
+export const SOLO = 'solo';
+/// The cap for a visitor with no session on `surface`: SOLO_SIGNED_OUT_CAP on SOLO, SIGNED_OUT_CAP on any other.
+export const signedOutCap = (surface) => (surface === SOLO ? SOLO_SIGNED_OUT_CAP : SIGNED_OUT_CAP);
 export const SIGN_IN_REQUIRED = 'This listing is rated for older players. Sign in to see it.';
 /// The highest rating a viewer whose Adult content is on, and whose verified age is under 21 or not on record, is shown.
 export const UNDER_21_CAP = 'adult_18';
@@ -223,34 +248,36 @@ export async function viewerOf(request, env, authenticate, nowMs = Date.now()) {
   return viewerFor(env, accountId, nowMs);
 }
 
-/// The highest band this viewer is shown: `ages_10` signed out, `mature_17` signed in while Adult content is off,
-/// `adult_18` when it is on and the verified age is under 21 or not on record, and every band when it is on and the verified
-/// age is 21 or over.
-export function viewerCap(viewer) {
-  if (viewer?.signedIn !== true) return SIGNED_OUT_CAP;
+/// The highest band this viewer is shown: signed out, `mature_17` on a solo surface (`surface` SOLO) and `ages_10` on any
+/// other (signedOutCap); `mature_17` signed in while Adult content is off, `adult_18` when it is on and the verified age is
+/// under 21 or not on record, and every band when it is on and the verified age is 21 or over. `surface` changes only the
+/// signed-out answer.
+export function viewerCap(viewer, surface) {
+  if (viewer?.signedIn !== true) return signedOutCap(surface);
   if (viewer?.adult !== true) return OFF_CAP;
   return viewer.age21 === true ? AGE_21_RATING : UNDER_21_CAP;
 }
 
 /// The highest rating a list shows this viewer: `asked` (a `?rating_max=` value) when it is a rating, else every rating,
-/// and never past the viewer's own cap (viewerCap). Always one of RATINGS, so it can key a cache.
-export function ratingCap(asked, viewer) {
+/// and never past the viewer's own cap on `surface` (viewerCap). Always one of RATINGS, so it can key a cache.
+export function ratingCap(asked, viewer, surface) {
   const wanted = RATINGS.includes(asked) ? asked : AGE_21_RATING;
-  const cap = viewerCap(viewer);
+  const cap = viewerCap(viewer, surface);
   return RATINGS.indexOf(wanted) > RATINGS.indexOf(cap) ? cap : wanted;
 }
 
-/// Whether this viewer may see and play this listing: anything up to the viewer's cap (viewerCap: `ages_10` signed out,
-/// `mature_17` signed in, `adult_18` with the setting on, `adult_21` too with a verified age of 21 or over); and the
-/// author's own listing always.
+/// Whether this viewer may see and play this listing: anything up to the viewer's cap (viewerCap: signed out, `mature_17`
+/// solo and `ages_10` elsewhere; `mature_17` signed in, `adult_18` with the setting on, `adult_21` too with a verified age
+/// of 21 or over); and the author's own listing always.
 ///
-///     mayView(sim, viewer) -> boolean
-///       sim     the listing record as stored (`sim:{id}`): reads `moderation.rating` and `author_id`
-///       viewer  `{ accountId, signedIn, adult, age21 }` from viewerOf(request, env, verifyAuth); SIGNED_OUT or undefined is off
-export function mayView(sim, viewer) {
-  if (!isAdultListing(sim) && (viewer?.signedIn === true || withinSignedOutCap(sim))) return true;
+///     mayView(sim, viewer, surface?) -> boolean
+///       sim      the listing record as stored (`sim:{id}`): reads `moderation.rating` and `author_id`
+///       viewer   `{ accountId, signedIn, adult, age21 }` from viewerOf(request, env, verifyAuth); SIGNED_OUT or undefined is off
+///       surface  SOLO on a solo route; anything else keeps SIGNED_OUT_CAP for a viewer with no session
+export function mayView(sim, viewer, surface) {
+  if (!isAdultListing(sim) && (viewer?.signedIn === true || withinSignedOutCap(sim, surface))) return true;
   if (!!viewer?.accountId && viewer.accountId === sim?.author_id) return true;
-  return RATINGS.indexOf(ratingOf(sim)) <= RATINGS.indexOf(viewerCap(viewer));
+  return RATINGS.indexOf(ratingOf(sim)) <= RATINGS.indexOf(viewerCap(viewer, surface));
 }
 
 /// What a refusal says to this viewer: `adult_content_off` while the setting is off, and `age_21_required` to a viewer who
@@ -268,17 +295,18 @@ export function adultRefusal(json, cors, viewer, sim) {
 }
 
 /// The refusal when `sim` is adult content this request's viewer may not see, else null. The session, the setting and the
-/// age are read only for an adult listing, so every other listing costs nothing. `deps`: authenticate, json, cors.
-/// Also refuses a visitor with no session a listing above SIGNED_OUT_CAP (`sign_in_required`); a listing at or under it
-/// costs nothing.
+/// age are read only for an adult listing, so every other listing costs nothing. `deps`: authenticate, json, cors, and
+/// `surface` (SOLO on a solo route; absent elsewhere). Also refuses a visitor with no session a listing above the cap for
+/// that surface (signedOutCap) with `sign_in_required`; a listing at or under it costs nothing.
 export async function refuseAdult(request, env, sim, deps) {
-  if (!isAdultListing(sim) && withinSignedOutCap(sim)) return null;
+  if (!isAdultListing(sim) && withinSignedOutCap(sim, deps.surface)) return null;
   const viewer = await viewerOf(request, env, deps.authenticate);
-  return mayView(sim, viewer) ? null : adultRefusal(deps.json, deps.cors, viewer, sim);
+  return mayView(sim, viewer, deps.surface) ? null : adultRefusal(deps.json, deps.cors, viewer, sim);
 }
 
-/// Whether anyone, signed out included, may see this listing by its rating: `all_ages` or `ages_10`.
-export const withinSignedOutCap = (sim) => RATINGS.indexOf(ratingOf(sim)) <= RATINGS.indexOf(SIGNED_OUT_CAP);
+/// Whether anyone, signed out included, may see this listing by its rating on `surface`: up to `mature_17` on SOLO, and
+/// `all_ages` or `ages_10` on any other. A listing with no rating reads as `adult_21` (ratingOf), so it is never within.
+export const withinSignedOutCap = (sim, surface) => RATINGS.indexOf(ratingOf(sim)) <= RATINGS.indexOf(signedOutCap(surface));
 
 /// Headers for an answer that depends on the viewer's setting. One computed for a signed-in viewer is `private, no-store`:
 /// only a signed-in viewer can have Adult content on, so no cache, shared or the browser's own, ever keeps an answer that
@@ -304,8 +332,9 @@ export function viewerHeaders(cors, viewer, publicCache = null) {
 export const IMAGE_URL_WINDOW_SECONDS = 900;
 /// The key is derived from JWT_SECRET under its own label, never the secret itself: HMAC-SHA256(JWT_SECRET, label).
 const IMAGE_KEY_LABEL = 'adult-image-url-v1';
-/// The image routes of a listing: its thumbnail, its cover and its preview frames.
-const isImagePath = (path) => /^\/api\/simulations\/[a-f0-9-]+\/(thumbnail|cover|preview\/[0-7])$/.test(path);
+/// The image routes of a listing: its thumbnail, its cover, its preview frames, and its sim page's images (the logo, the
+/// banner, six gallery slots and eight README slots; src/page.mjs, link_review.mjs PAGE_IMAGE_SLOTS).
+const isImagePath = (path) => /^\/api\/simulations\/[a-f0-9-]+\/(thumbnail|cover|preview\/[0-7]|page\/image\/(logo|banner|gallery-[0-5]|readme-[0-7]))$/.test(path);
 
 const encoder = new TextEncoder();
 let derivedKey = { secret: null, key: null };

@@ -209,6 +209,20 @@ pub fn LearnCliPage() -> impl IntoView {
 
                 <main class="docs-content">
                     <header class="docs-hero">
+                        // The hero picture: the page's largest paint, so it loads at
+                        // once (no lazy loading, no entrance animation).
+                        <div class="docs-hero-art">
+                            <img
+                                src="/assets/learn/cli-hero-1600.webp"
+                                srcset="/assets/learn/cli-hero-800.webp 800w, /assets/learn/cli-hero-1600.webp 1600w"
+                                sizes="(max-width: 1024px) 100vw, 840px"
+                                alt="A terminal slab showing two plain bars and a block cursor is joined by three lines to three bare grid worlds; in the nearest a sphere bounces, and a small stack of result slabs glows beside it."
+                                width="1600"
+                                height="900"
+                                fetchpriority="high"
+                                decoding="async"
+                            />
+                        </div>
                         <div class="docs-breadcrumb">
                             <a href="/learn">"Learn"</a>
                             <span class="separator">"/"</span>

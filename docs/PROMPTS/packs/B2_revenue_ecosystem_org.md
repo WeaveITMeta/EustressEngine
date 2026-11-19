@@ -68,7 +68,7 @@ member (`eustress/Cargo.toml:12`) and CI never builds the workspace, so this has
 | ID | Title | Tier | Workload | depends_on |
 |---|---|---|---|---|
 | **G1.40** | Revenue-rail truth ledger **(ITEM ZERO)** | M | W2/W3 | G1.01 |
-| G1.41 | Vertical selection and kill list | S | W4 | G1.40 |
+| G1.41 | Vertical selection and sequence | S | W4 | G1.40 |
 | G1.42 | Chargeable-today SKU sheet | S | W2 | G1.40, G1.41 |
 | G1.43 | Unit economics of simulation compute | M | W2 | G1.40 |
 | G1.44 | Pricing architecture: licence, usage, marketplace | S | W2 | G1.42, G1.43 |
@@ -355,7 +355,7 @@ This file is the W2 evidence for the item and the input to `G1.41`, `G1.42`, `G1
 
 ---
 id: G1.41
-title: Vertical selection with an evidence-scored kill list
+title: Vertical selection with an evidence-scored sequence
 workload: W4
 workload_secondary: [W2]
 phase: G1
@@ -380,9 +380,10 @@ notes: >
 
 ## 1. Objective
 
-Exactly one vertical is selected as the sold surface for the next two quarters, chosen by a scored
-matrix in which every cell cites a repository path or a measured count. The verticals not selected
-carry an explicit kill or freeze decision, so no downstream item spends a build slot on them.
+Exactly one vertical is selected as the lead, the sold surface for the next two quarters, chosen by a
+scored matrix in which every cell cites a repository path or a measured count. The verticals not
+selected keep advancing: each carries its next milestone and what brings it to full speed, so every
+downstream item knows what each surface gets next. No vertical is killed or frozen.
 
 ## 2. Context you need (self-contained)
 
@@ -471,7 +472,8 @@ on a capability that ledger marks `absent` or `spec_only` cannot score above 2 o
 `vertical_selection.json` scores all **4** verticals against all **5** fixed criteria, every one of
 the 20 cells carries non-empty `evidence`, exactly **1** vertical has `selected: true`, its
 weighted total is the strict maximum, the margin over the runner-up is **> 2.0**, and every
-non-selected vertical carries a `disposition` of `kill` or `freeze` with a `revisit_trigger`.
+non-selected vertical carries a `disposition` of `advance` with a `next_milestone` and a
+`full_speed_when`.
 
 The five criteria and weights are fixed:
 
@@ -513,10 +515,12 @@ Command:
             t += s * w
         totals[v["key"]] = t
         if not v.get("selected"):
-            if v.get("disposition") not in ("kill", "freeze"):
-                fail.append("%s: disposition must be kill or freeze" % v["key"])
-            if not str(v.get("revisit_trigger", "")).strip():
-                fail.append("%s: missing revisit_trigger" % v["key"])
+            if v.get("disposition") != "advance":
+                fail.append("%s: disposition must be advance" % v["key"])
+            if not str(v.get("next_milestone", "")).strip():
+                fail.append("%s: missing next_milestone" % v["key"])
+            if not str(v.get("full_speed_when", "")).strip():
+                fail.append("%s: missing full_speed_when" % v["key"])
     sel = [v["key"] for v in vs if v.get("selected")]
     if len(sel) != 1:
         fail.append("expected exactly 1 selected, got %r" % sel)
@@ -577,10 +581,9 @@ Early STALL triggers:
 
 A reader finds: `generated_at`, `ledger_path` (pointing at the `G1.40` artifact actually read),
 and `verticals` — four objects, each with `key`, `name`, `scores` (five criteria, each with
-`score` and `evidence`), `selected`, and for the non-selected ones `disposition` and
-`revisit_trigger`. Alongside it, `docs/PROMPTS/artifacts/B2/G1.41/kill_list.md` — one paragraph per
-frozen or killed vertical stating what stops immediately and what would have to become true to
-restart it.
+`score` and `evidence`), `selected`, and for the non-selected ones `disposition`, `next_milestone`
+and `full_speed_when`. Alongside it, `docs/PROMPTS/artifacts/B2/G1.41/vertical_sequence.md`: one
+paragraph per vertical stating what it gets next and what brings it to full speed.
 
 ## 9. Definition of NOT done
 
@@ -598,8 +601,8 @@ restart it.
   a measurement change and fails the item outright.
 - Every cell is scored but the `evidence` strings restate the score ("strong", "weak") rather than
   giving a path or a count.
-- The kill list is written as "deprioritised for now" with no `revisit_trigger`, so nothing is
-  actually stopped and `G6.40` still has four surfaces to sweep.
+- A non-selected vertical is written as "advancing" with no `next_milestone`, so nothing says what
+  it gets next and `G6.40` cannot tell which surface to sweep first.
 
 ---
 

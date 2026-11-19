@@ -48,7 +48,6 @@ colored = "2.1"
 indicatif = "0.17"
 
 # Human-readable duration display
-humantime = "2.1"
 
 # Error handling
 anyhow = "1.0"

@@ -71,6 +71,10 @@ const PERSIST_INTERVAL_SECS: f64 = 30.0;
 const HEARTBEAT_INTERVAL_SECS: f64 = 90.0;
 /// Consecutive non-auth cosign failures before the badge says "not syncing".
 const SYNC_FAILURE_VISIBLE_AFTER: u32 = 3;
+/// Least time between two sign-ins Studio starts on its own after Eustress
+/// refuses the session's token, so an identity Eustress keeps refusing is not
+/// retried every frame.
+const RENEW_GAP_SECS: f64 = 600.0;
 
 /// Contribution buckets tracked by the engine. Indexes into
 /// [`BlissTracker::buckets`]. Weights shown are applied witness-side.
@@ -151,6 +155,16 @@ enum NetEvent {
         bliss_balance: f64,
         pending_score: f64,
     },
+    /// A heartbeat that carried a token was refused (401/403): the token
+    /// expired or was ended. Without this, an expired token went unnoticed
+    /// by every beat and only a cosign could latch it.
+    HeartbeatRefused,
+}
+
+/// Whether a witness error means the session's token is no longer accepted
+/// (as opposed to a network fault or a refused claim).
+fn is_auth_refusal(error: &str) -> bool {
+    error.contains("401") || error.contains("403") || error.to_ascii_lowercase().contains("unauthorized")
 }
 
 /// Channel handles to the network worker thread.
@@ -228,6 +242,7 @@ impl BlissNet {
                             uptime_secs,
                             token,
                         } => {
+                            let had_token = token.is_some();
                             client.set_auth_token(token);
                             let result = rt.block_on(client.heartbeat(
                                 &node_id,
@@ -236,6 +251,13 @@ impl BlissNet {
                                 uptime_secs,
                                 user_id.as_deref(),
                             ));
+                            if let Err(e) = &result {
+                                if had_token && is_auth_refusal(&e.to_string()) {
+                                    if let Ok(mut inbox) = inbox_thread.lock() {
+                                        inbox.push(NetEvent::HeartbeatRefused);
+                                    }
+                                }
+                            }
                             // Balance only means something for a known user.
                             if let (Ok(reply), Some(_)) = (result, user_id) {
                                 if let Ok(mut inbox) = inbox_thread.lock() {
@@ -284,8 +306,8 @@ impl EarnState {
         match self {
             EarnState::Earning => None,
             EarnState::SignedOut => Some("Sign in to earn BLS"),
-            EarnState::NotAuthenticated => Some("Identity not verified — cannot earn"),
-            EarnState::NotSyncing => Some("Not syncing — saved locally, retrying"),
+            EarnState::NotAuthenticated => Some("Identity not verified: cannot earn"),
+            EarnState::NotSyncing => Some("Not syncing: saved locally, retrying"),
             EarnState::Disabled => Some("Bliss disabled"),
         }
     }
@@ -332,9 +354,16 @@ pub struct BlissTracker {
     /// Why earning is (or isn't) happening — rendered on the badge.
     earn_state: EarnState,
     /// Set when the witness returns 401. Stops the flush/refund/retry loop
-    /// until the user re-authenticates (cleared on a successful AUTHENTICATED
-    /// heartbeat balance read, which proves credentials work again).
+    /// until the user re-authenticates: cleared by a new token (any sign-in)
+    /// or by a successful AUTHENTICATED heartbeat balance read, which proves
+    /// credentials work again.
     auth_rejected: bool,
+    /// The token the witness refused. A session holding any other token
+    /// signed in again since, so the refusal no longer applies to it.
+    rejected_token: Option<String>,
+    /// `now` when Studio last signed in again on its own (see
+    /// [`RENEW_GAP_SECS`]).
+    last_renewal: f64,
     /// Consecutive non-auth cosign failures; drives the NotSyncing hint.
     consecutive_failures: u32,
 }
@@ -382,6 +411,8 @@ impl Default for BlissTracker {
             display_dirty: true,
             earn_state: EarnState::SignedOut,
             auth_rejected: false,
+            rejected_token: None,
+            last_renewal: -RENEW_GAP_SECS,
             consecutive_failures: 0,
         }
     }
@@ -638,6 +669,7 @@ fn drain_net_events(
     mut display: ResMut<BlissNodeState>,
     mut auth: Option<ResMut<AuthState>>,
     output: Option<ResMut<crate::ui::slint_ui::OutputConsole>>,
+    settings: Option<Res<crate::editor_settings::EditorSettings>>,
 ) {
     let events: Vec<NetEvent> = match net.inbox.lock() {
         Ok(mut inbox) => inbox.drain(..).collect(),
@@ -680,21 +712,9 @@ fn drain_net_events(
                 // A 401/403 is not transient: the credentials are wrong and
                 // every retry burns rate limit while looking like progress.
                 // Latch it, surface it, and stop until re-auth.
-                let unauthorized = error.contains("401")
-                    || error.contains("403")
-                    || error.to_ascii_lowercase().contains("unauthorized");
-                if unauthorized {
-                    if !tracker.auth_rejected {
-                        tracker.auth_rejected = true;
-                        tracker.set_earn_state(EarnState::NotAuthenticated);
-                        if let Some(ref mut out) = output {
-                            out.warn(
-                                "Bliss: witness rejected this identity — work is being saved \
-                                 locally but not credited. Re-open your identity to fix."
-                                    .to_string(),
-                            );
-                        }
-                    }
+                if is_auth_refusal(&error) {
+                    let token = auth.as_ref().and_then(|a| a.get_token().map(str::to_string));
+                    latch_refusal(&mut tracker, token, &mut output);
                 } else {
                     // Non-auth failures were invisible: the badge kept saying
                     // "Earning" while every submission failed forever (e.g. a
@@ -714,6 +734,10 @@ fn drain_net_events(
                     debug!("Bliss cosign failed (kept locally, will retry): {error}");
                 }
             }
+            NetEvent::HeartbeatRefused => {
+                let token = auth.as_ref().and_then(|a| a.get_token().map(str::to_string));
+                latch_refusal(&mut tracker, token, &mut output);
+            }
             NetEvent::Balance {
                 bliss_balance,
                 pending_score,
@@ -725,11 +749,40 @@ fn drain_net_events(
                 // an earlier 401 is resolved — allow flushing again.
                 if tracker.auth_rejected {
                     tracker.auth_rejected = false;
+                    tracker.rejected_token = None;
                 }
                 if let Some(ref mut auth) = auth {
                     if let Some(ref mut user) = auth.user {
                         user.bliss_balance = bliss_balance;
                     }
+                }
+            }
+        }
+    }
+
+    // -- Refused token ------------------------------------------------------
+    // A sign-in since the refusal holds a new token, which the refusal says
+    // nothing about: clear the latch now rather than wait for a heartbeat.
+    // While the refused token is still the session's, sign in again with the
+    // identity file, so a token that expired after its 72 hours renews itself
+    // instead of leaving Studio unable to earn until someone notices.
+    if tracker.auth_rejected {
+        let current = auth.as_ref().and_then(|a| a.get_token().map(str::to_string));
+        if latch_outlived(tracker.rejected_token.as_deref(), current.as_deref()) {
+            tracker.auth_rejected = false;
+            tracker.rejected_token = None;
+        } else if current.is_some() && tracker.now - tracker.last_renewal >= RENEW_GAP_SECS {
+            let identity = auth.as_ref().and_then(|a| a.identity.clone()).or_else(|| {
+                settings
+                    .as_ref()
+                    .and_then(|s| s.saved_identities.first())
+                    .map(|i| std::path::PathBuf::from(&i.path))
+            });
+            if let (Some(path), Some(auth)) = (identity, auth.as_mut()) {
+                tracker.last_renewal = tracker.now;
+                auth.sign_in_with_identity(path, crate::auth::SignInSource::Renew);
+                if let Some(ref mut out) = output {
+                    out.info("Bliss: signing in again with your identity file".to_string());
                 }
             }
         }
@@ -782,6 +835,34 @@ fn drain_net_events(
     }
 }
 
+/// Latch a refusal of `token` (the session's token when it was refused):
+/// flushing stops, the badge says why, and the Output says so once.
+fn latch_refusal(
+    tracker: &mut BlissTracker,
+    token: Option<String>,
+    output: &mut Option<ResMut<crate::ui::slint_ui::OutputConsole>>,
+) {
+    if tracker.auth_rejected {
+        return;
+    }
+    tracker.auth_rejected = true;
+    tracker.rejected_token = token;
+    tracker.set_earn_state(EarnState::NotAuthenticated);
+    if let Some(out) = output.as_mut() {
+        out.warn(
+            "Bliss: Eustress no longer accepts this sign-in (it expires after 72 hours). \
+             Work is saved locally and is credited once Studio signs in again."
+                .to_string(),
+        );
+    }
+}
+
+/// Whether a refusal latched on `rejected` no longer applies to the session,
+/// which now holds `current`: it signed in again (a new token) or signed out.
+fn latch_outlived(rejected: Option<&str>, current: Option<&str>) -> bool {
+    rejected != current
+}
+
 /// Persist tracker state periodically and on exit.
 fn persist_tracker(
     time: Res<Time>,
@@ -832,5 +913,43 @@ impl Plugin for BlissTrackerPlugin {
                 )
                     .chain(),
             );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_refused_token_is_told_from_other_failures() {
+        assert!(is_auth_refusal("Unauthorized"));
+        assert!(is_auth_refusal("heartbeat HTTP 401 Unauthorized"));
+        assert!(is_auth_refusal("heartbeat HTTP 403 Forbidden"));
+        assert!(!is_auth_refusal("Duplicate contribution hash"));
+        assert!(!is_auth_refusal("Rate limit: 120 cosigns/hour"));
+    }
+
+    #[test]
+    fn a_new_sign_in_outlives_the_refusal() {
+        // The refused token is still the session's: the latch holds.
+        assert!(!latch_outlived(Some("old"), Some("old")));
+        // Signed in again: a new token the refusal says nothing about.
+        assert!(latch_outlived(Some("old"), Some("new")));
+        // Signed out: the badge says "Sign in to earn BLS" instead.
+        assert!(latch_outlived(Some("old"), None));
+    }
+
+    #[test]
+    fn the_badge_hints_carry_no_em_dash() {
+        for state in [
+            EarnState::SignedOut,
+            EarnState::NotAuthenticated,
+            EarnState::NotSyncing,
+            EarnState::Disabled,
+        ] {
+            let hint = state.hint().unwrap();
+            assert!(!hint.contains('\u{2014}'), "{hint}");
+        }
+        assert_eq!(EarnState::NotAuthenticated.hint(), Some("Identity not verified: cannot earn"));
     }
 }

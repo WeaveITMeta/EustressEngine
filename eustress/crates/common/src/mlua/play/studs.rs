@@ -314,6 +314,8 @@ mod tests {
             distance: (d * t).magnitude(),
             terrain: false,
             material: None,
+            owner: None,
+            surface: None,
         })
     }
 

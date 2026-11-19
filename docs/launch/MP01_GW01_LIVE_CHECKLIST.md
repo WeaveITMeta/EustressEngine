@@ -39,7 +39,8 @@ Without `EUSTRESS_HOST_LAN=1` a host listens on this computer only and its link 
 never reach it. Open Box Head (`Documents\Eustress\Games`, Space "Box Head Zombie Defense Tycoon") and press
 F9 (or Start Server).
 
-**You should see:** the toast "Hosting on your local network on port 7777", and in the Output panel
+**You should see:** the toast "Server running for this computer and your local network on port 7777", with
+Studio as the server alone (no character for A; press Play before F9 to host with A's character), and in the Output panel
 `Join link: eustress-player://join/<address>:7777?key=...&pin=...`. Copy that whole line.
 
 **Check the address:** `<address>` must be `<LAN>`. Studio guesses it from the route to the internet, which

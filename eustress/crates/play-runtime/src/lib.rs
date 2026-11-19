@@ -16,6 +16,10 @@ pub mod billboards;
 pub mod body_easing;
 pub mod camera;
 pub mod crash_report;
+/// A lost graphics device, survived and recovered: Studio and the Player.
+/// Desktop only; the browser Player keeps Bevy's own handling.
+#[cfg(not(target_arch = "wasm32"))]
+pub mod gpu_recovery;
 pub mod gui_images;
 pub mod hud;
 pub mod hud_input;
@@ -32,6 +36,9 @@ pub mod pull;
 pub mod screen_menu;
 pub mod screen_notice;
 pub mod seats;
+/// Simulation LOD applied to Avian: Full, Reduced and Dormant bodies, on the
+/// machine that simulates the session.
+pub mod sim_lod;
 pub mod sound_bridge;
 pub mod sound_player;
 pub mod space_paths;
@@ -115,6 +122,8 @@ impl Plugin for PlayRuntimePlugin {
             )
             .add_systems(Update, apply::end_frame.in_set(PlayScriptSet::End));
         add_simulated_characters(app);
+        // Simulation LOD: acts only while this app is the Authority.
+        app.add_plugins(sim_lod::SimLodPlugin);
         // Joints act only on bodies simulated here; a replica draws the poses
         // it is sent. The plugin brings part mass, body easing and weld groups
         // with it, and needs Avian's schedules, which the app added first.

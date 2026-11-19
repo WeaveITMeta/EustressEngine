@@ -20,7 +20,6 @@ eustress-play-runtime = { path = "../play-runtime" }
 eustress-echk = { path = "../echk" }
 # Reading a downloaded world's SpawnLocation.
 toml = "0.8"
-bevy-camera-controller = { path = "../common/bevy-camera-controller" }
 
 # Workspace dependencies (Bevy 0.19)
 bevy = { workspace = true, features = [
@@ -144,10 +143,24 @@ ico = "0.3"
 [target.'cfg(windows)'.dependencies]
 windows-registry = "0.6.1"
 
+# Hardware ray-traced lighting, the crate Studio runs (systems::raytracing).
+# Desktop only: the web, Android and iOS keep Bevy's own renderer creation.
+# The same predicate gates `systems::raytracing`.
+[target.'cfg(not(any(target_arch = "wasm32", target_os = "android", target_os = "ios")))'.dependencies]
+eustress-raytracing = { path = "../raytracing" }
+
 [target.'cfg(windows)'.build-dependencies]
 winresource = "0.1"
 
 [features]
-default = []
+# Ray tracing is Auto by default, as in Studio: on where the GPU, the driver
+# and DLSS Ray Reconstruction can run it well, raster everywhere else.
+default = ["raytracing"]
+# Hardware ray-traced lighting (Bevy Solari 0.19); see eustress-raytracing.
+raytracing = ["eustress-raytracing/raytracing"]
+# DLSS Ray Reconstruction (DLSS_SDK, VULKAN_SDK and libclang to build;
+# nvngx_dlss.dll and nvngx_dlssd.dll beside the exe to run). Never default.
+dlss = ["raytracing", "eustress-raytracing/dlss"]
+force_disable_dlss = ["dlss", "eustress-raytracing/force_disable_dlss"]
 dev = ["bevy/dynamic_linking"]
 hotpatch = ["bevy/hotpatching"]

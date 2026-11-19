@@ -1,0 +1,171 @@
+{
+  "item": "G1.41",
+  "title": "Vertical selection with an evidence-scored sequence",
+  "generated_at": "2026-11-15",
+  "approach": "A",
+  "iteration": 1,
+  "ledger_path": "docs/PROMPTS/artifacts/B2/G1.40/revenue_rail_ledger.json",
+  "ledger_generated_at": "2026-08-13T16:55:00Z",
+  "weights": {
+    "chargeable_today": 3,
+    "wired_ratio": 2,
+    "proof_cost_in_builds": 2,
+    "buyer_reachable_solo": 2,
+    "compliance_floor": 1
+  },
+  "measurement": {
+    "join_script": "Same regex join as the G6.40 section 5 verifier (docs/PROMPTS/packs/B2_revenue_ecosystem_org.md:4367-4371), run over every eustress/crates/engine/modes/*.toml against eustress/crates/engine/src/tool_metadata.rs on 2026-11-15. Script kept in the session scratchpad as g141_join.py; nothing in the tree was edited to produce it.",
+    "results_2026_11_15": {
+      "tool_metadata_ids": 2422,
+      "tool_metadata_wired": 52,
+      "government": "563 / 1",
+      "engineering": "174 / 22",
+      "business": "175 / 19",
+      "student": "238 / 11",
+      "civil": "247 / 1",
+      "health": "159 / 13",
+      "justice": "92 / 5",
+      "legal": "240 / 6",
+      "military": "169 / 7",
+      "gaming": "22 / 4",
+      "publicsector": "232 / 21",
+      "si": "181 / 10"
+    },
+    "wired_ratio_mapping": "score = min(10, round(40 * wired / ids)) over the manifest that hosts the vertical, fixed before any total was computed. A 25 percent wired manifest would score 10."
+  },
+  "context_drift": [
+    "Brief section 2 quotes 1999 metadata ids / 30 wired (2026-08-06). Today: 2422 / 52 (grep -cE '^\\s*\"[a-z0-9_:.-]+\" =>' tool_metadata.rs = 2422; grep -oE 'true\\),$' ... | wc -l = 52). Two manifests exist that the brief does not list: publicsector.toml (232 / 21) and si.toml (181 / 10).",
+    "government 563 / 1 and engineering 174 / 22 are unchanged. business is now 175 / 19 (brief: 155 / 19); civil 247 / 1 (brief: 246 / 1).",
+    "GOVERNMENT_MODE.md line numbers hold (section 9 at :692, the one-handler sentence at :713) but the doc's own count is 562 ids; the join measures 563.",
+    "Manufacturing registry no longer declares docs/manufacturing/ as its data root. eustress/crates/engine/src/manufacturing/mod.rs:18-23 and :518-523 now make vendors and investors Space-local (DataService/Vendors, DataService/Investors, consts at :536 and :538), created on demand. docs/manufacturing/ still does not exist and git ls-files finds zero DataService/Vendors or DataService/Investors entries, so the brief's 'zero investors, zero manufacturers, zero deals' still holds. purchase.rs and purchase_store.rs are new in that module.",
+    "The UofA pilot asset no longer says 'MIT-friendly' or 'open source' (grep -c -i 'MIT-friendly\\|open source' = 0); :592 now reads source-available. It is still 100 percent free (:625-627).",
+    "G1.40 recorded the CAD Tier-1 read tools as compiled but unreachable on the live MCP server. Today they are registered at eustress/crates/tools/src/lib.rs:149-151 (20 cad_tools registrations in lib.rs) and the eustress MCP server attached to this scoring session lists cad_describe_part, cad_validate_part and cad_measure among 20 cad_* tools. Not invoked here; the ledger row itself was not re-verified.",
+    "docs/AUDIT/12_INFRASTRUCTURE.md Feature 1 still says the desktop engine is not built in CI. .github/workflows/linux-engine.yml:48 now runs cargo check on eustress-engine, but only on workflow_dispatch and pushes to ci/linux-build (:5-9), so the founder remains the regression surface for PRs."
+  ],
+  "verticals": [
+    {
+      "key": "engineering_cad",
+      "name": "Engineering / CAD",
+      "selected": true,
+      "scores": {
+        "chargeable_today": {
+          "score": 6,
+          "evidence": "docs/PROMPTS/artifacts/B2/G1.40/revenue_rail_ledger.json chargeable_today_set = [commercial_licence, desktop_studio, mcp_tool_surface], all three of which a CAD sale rests on; desktop_studio and mcp_tool_surface verified by run. Held to 6 because nevada_llc is unknown and LICENSE-COMMERCIAL.md:3 names a grantor not yet formed, no price is published (ledger commercial_licence note), and windows_code_signing is absent, so delivery is a hand-off build."
+        },
+        "wired_ratio": {
+          "score": 5,
+          "evidence": "eustress/crates/engine/modes/engineering.toml: 174 ids, 22 wired in tool_metadata.rs (join script, 2026-11-15) = 0.126; round(40 x 0.126) = 5. Highest wired count of the four verticals."
+        },
+        "proof_cost_in_builds": {
+          "score": 8,
+          "evidence": "Ledger builds: eustress-tools exit 0 (9m 00s) and eustress-cad exit 0 (1m 17s). Tier-1 tools registered at eustress/crates/tools/src/lib.rs:149-151 (20 cad_tools registrations) and listed live by the MCP server attached to this session; eustress/crates/cad/tests/ holds 5 files with 42 #[test] (grep -c '#\\[test\\]'). An end-to-end demo needs zero to one build."
+        },
+        "buyer_reachable_solo": {
+          "score": 6,
+          "evidence": "LICENSE-COMMERCIAL.md is a negotiated instrument with a single contact channel (ledger commercial_licence row); desktop_studio can be handed to a buyer directly (ledger desktop_studio revenue_blocker). A small engineering firm buys software without procurement; no sales team is named anywhere as a prerequisite."
+        },
+        "compliance_floor": {
+          "score": 7,
+          "evidence": "No WCAG, SOC 2 or SLA requirement attaches to a private engineering buyer: docs/AUDIT/06_WEBSITE.md:328 scopes the WCAG block to government and enterprise. Docked for unsigned Windows and un-notarised macOS artefacts (ledger windows_code_signing and macos_notarisation, both absent)."
+        }
+      }
+    },
+    {
+      "key": "government_civic",
+      "name": "Government / civic (Tucson)",
+      "selected": false,
+      "disposition": "advance",
+      "next_milestone": "government.toml reaches 12 wired ids by the G6.40 join, with one of the sixteen simulations in docs/architecture/GOVERNMENT_MODE.md section 5 implemented and shown running.",
+      "full_speed_when": "A first paying Engineering licence funds it, and docs/AUDIT/06_WEBSITE.md Feature 15 (WCAG AA) is green.",
+      "scores": {
+        "chargeable_today": {
+          "score": 1,
+          "evidence": "docs/architecture/GOVERNMENT_MODE.md:713-716: of 562 declared ids exactly one (data:import) has a handler and the mode 'must never be described as working software'; :717 'Sixteen designs, zero implementations'. No government row exists in the G1.40 ledger, and a public buyer contracts through nevada_llc (unknown)."
+        },
+        "wired_ratio": {
+          "score": 0,
+          "evidence": "eustress/crates/engine/modes/government.toml: 563 ids, 1 wired (join script, 2026-11-15) = 0.0018; round(40 x 0.0018) = 0."
+        },
+        "proof_cost_in_builds": {
+          "score": 1,
+          "evidence": "562 unwired ids plus sixteen unimplemented simulations (docs/architecture/GOVERNMENT_MODE.md:713-717) and three dormant blockers U1-U3 (:718-720). Every one is engine Rust, so each step is a serialized engine build."
+        },
+        "buyer_reachable_solo": {
+          "score": 1,
+          "evidence": "docs/AUDIT/06_WEBSITE.md:328 'Section 508 / WCAG AA non-compliance blocks government / enterprise sales'; Feature 15 state red (:325), line 328. Public procurement needs the corporate rail the ledger marks unknown (nevada_llc) and absent (ein, business_banking)."
+        },
+        "compliance_floor": {
+          "score": 1,
+          "evidence": "docs/AUDIT/06_WEBSITE.md:323-332 Feature 15 WCAG AA red with effort L; docs/AUDIT/12_INFRASTRUCTURE.md:236-241 desktop engine not built in CI for PRs (linux-engine.yml:5-9 runs only on dispatch or ci/linux-build)."
+        }
+      }
+    },
+    {
+      "key": "manufacturing",
+      "name": "Manufacturing",
+      "selected": false,
+      "disposition": "advance",
+      "next_milestone": "One part carried end to end on the tools the lead already wires: designed with the CAD tools (8 of 8 on the Manufacturing ribbon tab are wired), exported to STEP, and recorded against a named vendor in the Space registry (eustress/crates/engine/src/manufacturing/).",
+      "full_speed_when": "A named manufacturer and a named investor agree in writing to a first deal, business_banking in the G1.40 ledger is live, and counsel signs off on the equity distribution in docs/development/MANUFACTURING_DEAL_STRUCTURE.md:43.",
+      "scores": {
+        "chargeable_today": {
+          "score": 1,
+          "evidence": "docs/development/MANUFACTURING_DEAL_STRUCTURE.md:3 and :43 make the revenue an equity and royalty split, which settles through the money rail; ledger business_banking = absent, payout_ledger = partial with deposit_count 0, bliss_ledger_debit = absent. Capped at 2 by the brief's ledger rule; scored 1."
+        },
+        "wired_ratio": {
+          "score": 4,
+          "evidence": "No manufacturing mode manifest exists; its ribbon tab lives in eustress/crates/engine/modes/business.toml:80 and :324. business.toml: 175 ids, 19 wired = 0.109; round(40 x 0.109) = 4. The tab itself is 8 / 8 wired, but all 8 are CAD ids (insert:cad_*, csg:*, cad:mate_*), and grep -cE '\"manufacturing:' tool_metadata.rs = 0, so no manufacturing-native tool id exists."
+        },
+        "proof_cost_in_builds": {
+          "score": 4,
+          "evidence": "Registry plugin exists (eustress/crates/engine/src/manufacturing/mod.rs, purchase.rs, purchase_store.rs) but its data is Space-local and created on demand (mod.rs:518-523, :536, :538); git ls-files finds 0 DataService/Vendors or DataService/Investors entries and docs/manufacturing/ does not exist. A demo needs seeded counterparties plus engine changes to surface the registry on the ribbon."
+        },
+        "buyer_reachable_solo": {
+          "score": 3,
+          "evidence": "Every deal is three-sided (inventor, manufacturer, investor; docs/development/MANUFACTURING_DEAL_STRUCTURE.md:43-105) and the counterparty count in the tree is 0 (docs/manufacturing/ absent, 0 tracked DataService/Vendors entries)."
+        },
+        "compliance_floor": {
+          "score": 4,
+          "evidence": "docs/development/MANUFACTURING_DEAL_STRUCTURE.md:43-105 distributes equity and royalties to investors, which pulls in securities and contract review; ledger nevada_llc unknown and tax_vat absent."
+        }
+      }
+    },
+    {
+      "key": "research_vcell",
+      "name": "Research / university pilot (V-Cell battery science)",
+      "selected": false,
+      "disposition": "advance",
+      "next_milestone": "The V-Cell model couples its thermal and reaction states, so docs/AUDIT/19_REALISM_PHYSICS.md:11 no longer records ElectrochemicalState and ThermodynamicState as decoupled.",
+      "full_speed_when": "A university counterparty agrees to a priced statement of work (G1.40 paid_pilot moves off spec_only).",
+      "scores": {
+        "chargeable_today": {
+          "score": 1,
+          "evidence": "Ledger paid_pilot state spec_only, chargeable_today false (cap 2 per brief). docs/marketing/UofA_Center_For_Innovation_Pilot.html:625-627 '100% Free' for the alpha window; LAUNCH_PLAN.md:113-115 Stream 4 'Not started'."
+        },
+        "wired_ratio": {
+          "score": 2,
+          "evidence": "No research or V-Cell mode manifest: grep -i 'vcell|electrochem' over eustress/crates/engine/modes/ = 0 files. Nearest university surface is eustress/crates/engine/modes/student.toml: 238 ids, 11 wired = 0.046; round(40 x 0.046) = 2."
+        },
+        "proof_cost_in_builds": {
+          "score": 4,
+          "evidence": "Code exists (eustress/crates/engine/src/simulation/electrochemistry.rs, plugin.rs), but docs/AUDIT/19_REALISM_PHYSICS.md:11 records a lumped 0-D Nernst plus Butler-Volmer model with decoupled thermal state; a result a lab would accept needs new physics in the engine, several serialized builds. docs/architecture/VCELL_CASE_STUDY.md:3-4 is an internal verification walkthrough, not a customer proof."
+        },
+        "buyer_reachable_solo": {
+          "score": 5,
+          "evidence": "A single named counterparty and channel exist (docs/marketing/UofA_Center_For_Innovation_Pilot.html:5; LAUNCH_PLAN.md:113-120 checklist a founder can run alone), but the close is a free pilot (:625-627), so reaching the buyer produces no contract revenue."
+        },
+        "compliance_floor": {
+          "score": 5,
+          "evidence": "A public university is the institutional buyer class docs/AUDIT/06_WEBSITE.md:328 names for Section 508 / WCAG AA, held at 5 because a free alpha cohort (UofA_Center_For_Innovation_Pilot.html:627) buys nothing that triggers procurement terms."
+        }
+      }
+    }
+  ],
+  "weighted_totals": {
+    "engineering_cad": 63,
+    "research_vcell": 30,
+    "manufacturing": 29,
+    "government_civic": 8
+  },
+  "margin_over_runner_up": 33
+}

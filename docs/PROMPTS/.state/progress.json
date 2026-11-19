@@ -1,7 +1,12 @@
 {
   "schema": "eustress.gauntlet.progress/1",
-  "updated_utc": "2026-08-08T01:55:00Z",
-  "build_slot": { "held_by": null, "item_id": null, "since_utc": null, "command": null },
+  "updated_utc": "2026-11-18T03:55:00Z",
+  "build_slot": {
+    "held_by": null,
+    "item_id": null,
+    "since_utc": null,
+    "command": null
+  },
   "items": {
     "G1.01": {
       "status": "PASSED",
@@ -149,8 +154,428 @@
       "builds_consumed": 5,
       "envelope_builds": 6,
       "artifact_path": "docs/PROMPTS/artifacts/B2/G1.40/revenue_rail_ledger.json",
-      "last_measurement": { "value": "EXIT=0, RESULT: PASS, rows=22, hard_verified=10, jurisdictions=46", "pass": true },
+      "last_measurement": {
+        "value": "EXIT=0, RESULT: PASS, rows=22, hard_verified=10, jurisdictions=46",
+        "pass": true
+      },
       "headline": "The money rail has never carried a payment: the deployed Worker reports deposit_count 0 and treasury_usd 0. The Worker and its Stripe code are live; what is missing is money, not code. Chargeable today: desktop_studio, mcp_tool_surface, commercial_licence."
+    },
+    "G1.31": {
+      "status": "PASSED",
+      "approach": "A",
+      "iteration": 1,
+      "builds_consumed": 0,
+      "envelope_builds": 0,
+      "artifact_path": "docs/validation/PROOF_STANDARD.md",
+      "artifact_sha256": "sha256:86504e14ad963f83b46d20fb5d84621044a8dfc6c798beb1e4f62c6dc0c8efb5",
+      "last_measurement": {
+        "command": "python docs/PROMPTS/harness/checkers/report_lint.py --standard docs/validation/PROOF_STANDARD.md --report <EXAMPLE_conforming.md | fixtures/report_nonconforming.md>; --list-required-fields | wc -l",
+        "value": "GOOD_EXIT=0 violations=0; BAD_EXIT=2 violations=7; required_fields=13",
+        "l1_reran": true,
+        "l1_mutation": "L1 removed the environment.toolchain line from a scratch copy of the conforming example: violations=1, exit 2. The linter can fail.",
+        "pass": true
+      },
+      "critic_gate": [],
+      "tokens_consumed": 102953,
+      "token_envelope": 60000,
+      "envelope_note": "172% of the tier S token envelope. The criterion passed on iteration 1, so no ladder step was taken; the overrun is recorded, not hidden.",
+      "open_debt": "docs/validation/reports/EXAMPLE_conforming.md labels its result TARGET because this item compiles nothing. It becomes MEASURED once the build runner executes: cd eustress && cargo test -p eustress-common --features physics --test determinism, and the CPU line is filled from that machine.",
+      "found_on_the_way": "The G1.30 ledger header records rustc 1.95.0; eustress/rust-toolchain.toml pins 1.100.0. The standard follows the toolchain file.",
+      "updated_utc": "2026-11-16T04:10:00Z"
+    },
+    "G1.41": {
+      "status": "PASSED",
+      "approach": "A",
+      "iteration": 1,
+      "builds_consumed": 0,
+      "envelope_builds": 0,
+      "artifact_path": "docs/PROMPTS/artifacts/B2/G1.41/vertical_selection.json",
+      "artifact_sha256": "sha256:dfda69f331d6949307ece87848d2fa4f6087a16f948e42818e9c6c54d4f6ed9c",
+      "last_measurement": {
+        "command": "the verifier in the item's section 5, extracted from the block by L1 with awk and run with python",
+        "value": "totals engineering_cad=63 research_vcell=30 manufacturing=29 government_civic=8; selected=engineering_cad; RESULT: PASS; EXIT=0; margin 33",
+        "l1_reran": true,
+        "l1_spot_checks": "docs/architecture/GOVERNMENT_MODE.md:713-717, docs/marketing/UofA_Center_For_Innovation_Pilot.html:625-627, docs/manufacturing absent, eustress/crates/tools/src/lib.rs:149-151 all match the cited evidence. L1 ran the worker's id join: tool_metadata.rs 2422 ids, 52 wired; engineering 174 ids, 22 wired; government 563 ids, 1 wired.",
+        "pass": true
+      },
+      "critic_gate": [],
+      "tokens_consumed": 132571,
+      "token_envelope": 60000,
+      "envelope_note": "221% of the tier S token envelope. The criterion passed on iteration 1, so no ladder step was taken; the overrun is recorded, not hidden.",
+      "judgement_calls": "No research or V-Cell mode manifest exists, so research_vcell wired_ratio was scored against student.toml (238 ids, 11 wired). With any score from 0 to 10 in that cell the margin stays above 2.",
+      "founder_note": "The four verticals are fixed by the item and date from August. None of them is the creator platform (Spaces, the Player, listings, hosted play) that most work since October serves. The selection is valid for the item as written; whether the list of verticals is still the right one is the founder's call.",
+      "updated_utc": "2026-11-16T19:04:20Z",
+      "founder_amendment": {
+        "utc": "2026-11-16T19:04:20Z",
+        "founder_words": "No I hate the kill list. Do not kill the dream. Do not be a doomer, ever. No slowing down on any innovations, I called on you to make improvements.",
+        "change": "The kill or freeze requirement is retired. Every non-selected vertical is `advance` with a `next_milestone` and a `full_speed_when`; kill_list.md is replaced by vertical_sequence.md. Scores, weights, the selection and the margin are untouched.",
+        "criterion_edit": "Made on the founder's instruction, not to pass the item (it had passed). Changed in docs/PROMPTS/packs/B2_revenue_ecosystem_org.md, G1.41 block: the title, the objective, the criterion's last clause, the verifier's disposition check, the artifact description, one Definition of NOT done bullet, and the pack's index row; plus the two title rows in 02_QUEUE.md.",
+        "l1_reran": true,
+        "measurement": "totals={\"engineering_cad\": 63, \"government_civic\": 8, \"manufacturing\": 29, \"research_vcell\": 30} ; selected=engineering_cad ; RESULT: PASS EXIT=0",
+        "mutation": "one disposition set back to kill: EXIT=1"
+      }
+    },
+    "G7.33": {
+      "status": "DRAFT",
+      "iteration": 0,
+      "builds_consumed": 0,
+      "envelope_builds": 0,
+      "artifact_path": "docs/PROMPTS/artifacts/G7.33/ci_truth_ledger.json",
+      "not_started": "EXIT_CRITERION_UNMEASURABLE, found by L1 before dispatch on 2026-11-15. The criterion requires rows cargo_test and client_binary_build with present_today false. The tree contradicts both: .github/workflows/linux-engine.yml:89 runs cargo test --workspace --locked --no-fail-fast, and .github/workflows/player-release.yml:295, :481 and :755 build eustress-client on three platforms. The block also states the workflow directory holds exactly three files; player-release.yml is a fourth. Writing the ledger as specified would record two false rows. The item needs L0 to re-author it against the current workflows; G7.34 and G7.35 look largely delivered outside the program and need the same review.",
+      "updated_utc": "2026-11-16T03:55:00Z"
+    },
+    "G1.48": {
+      "status": "DRAFT",
+      "iteration": 0,
+      "builds_consumed": 0,
+      "envelope_builds": 0,
+      "artifact_path": "docs/PROMPTS/artifacts/B2/G1.48/licence_decision_memo.json",
+      "not_started": "The artifact path already holds the founder's decision record (decision POLYFORM_SHIELD_UNCHANGED, decided_utc 2026-08-10T21:30:00Z, PROGRAM-LICENCE-GATE cleared). The item's exit criterion requires decision null and four option keys, so running it would overwrite a human decision and close the gate again. L1 did not run it on 2026-11-15. The eleven items that depend on G1.48 stay ineligible until L0 or the founder records how G1.48 closes.",
+      "updated_utc": "2026-11-16T03:55:00Z"
+    },
+    "G6.30": {
+      "status": "PASSED",
+      "approach": "A",
+      "iteration": 1,
+      "builds_consumed": 0,
+      "envelope_builds": 6,
+      "artifact_path": "docs/PROMPTS/artifacts/G6.30/capability_register.json",
+      "artifact_sha256": "sha256:623376e901e8db41b4657016524efede391e0e928bf96ca1941bf954e4d79567",
+      "last_measurement": {
+        "command": "the four commands in the block's section 5, run literally by L1 from the repository root, plus the all-SHIPPED gate run the block asks for",
+        "value": "manifests=12 total_ids=2421 shipped=51 declared=2368 undecidable=2 (0.08%) ; coverage=100.00% ; GEN_EXIT=0 DETERMINISM_EXIT=0 GROUNDTRUTH_EXIT=0 GATE_BAD_EXIT=2 GATE_GOOD_EXIT=0",
+        "pass": true
+      },
+      "critic_gate": [],
+      "l1_reran": true,
+      "l1_mutation": "--assert-class data:import=DECLARED exits 1 (must be non-zero); the worker's SHIPPED-to-DECLARED copy made --compare exit 1",
+      "l1_spot_check": "An independent regex census of the 12 manifests finds 2,423 colon-ids; the 2 extra are panel layout references (toolset:corpus, toolset:water-pipe-gen), so the register's 2,421 is every tool id.",
+      "tokens_consumed": 152773,
+      "token_envelope": 200000,
+      "premise_drift": "The block expects 10 manifests and 1,412 ids. The tree has 12 manifests (publicsector.toml and si.toml are new) and 2,421 ids; the generator derives every count from the tree.",
+      "judgement_calls": "data:grid and data:timeline are handled in main.slint, not Rust, so the rule leaves them UNDECIDABLE (0.08%, ceiling 5%). Counting Slint handlers as SHIPPED is a rule change for the founder.",
+      "found_on_the_way": "tool_metadata.rs marks sc:rfq_builder and sc:purchase_order_tracker unwired, but handlers exist in slint_ui.rs; scripts/gen_tool_metadata.py is where that flag is produced.",
+      "updated_utc": "2026-11-16T19:45:40Z"
+    },
+    "G1.05": {
+      "status": "PASSED",
+      "approach": "B",
+      "iteration": 4,
+      "builds_consumed": 4,
+      "envelope_builds": 6,
+      "artifact_sha256": "sha256:9415293eda9b852a8721e5bb4493de6537ecad00927e73e102c4968b63663342",
+      "last_measurement": {
+        "command": "eustress-engine --space spaces/harness/RH1_sphere_grid, then harness-scenes capture-selftest --universe spaces/harness --pose-position 6.0 3.5 9.0 --pose-look-at 0.0 1.0 0.0 --sizes 3840x2160,1920x1080,3840x2160,2560x1440 --out ../docs/PROMPTS/artifacts/G1.05/capture_parameterisation.json",
+        "value": "CAP_EXIT=0 captures=4 dimension_mismatches=0 repeat_4k_identical=true; the two 3840x2160 PNGs are byte-identical (sha256 835b557906939fc2...)",
+        "pass": true,
+        "how_run": "Run with the built programs (C:\\EustressBuild\\target\\release\\eustress-engine.exe and harness-scenes.exe) and the block's exact arguments, from eustress/. `cargo run --release` was not used: it would only check freshness and start the same programs. Studio's window was kept off-screen so desktop input cannot reach the run."
+      },
+      "critic_gate": [],
+      "artifact_path": "docs/PROMPTS/artifacts/G1.05/capture_parameterisation.json",
+      "tokens_consumed": 125518,
+      "token_envelope": 200000,
+      "files": [
+        "eustress/crates/engine/src/ai_camera.rs",
+        "eustress/crates/engine/src/engine_bridge/protocol.rs",
+        "eustress/crates/tools/src/ai_camera_tools.rs"
+      ],
+      "ownership_ruling": "The MCP input schema moved from mcp-server/src/bridge_tools.rs to tools/src/ai_camera_tools.rs; L0 ruled the block's scope entry follows the tool.",
+      "updated_utc": "2026-11-18T03:45:00Z",
+      "build": "third release build of 2026-11-17 on C:\\EustressBuild\\target: cargo build --release of eustress-engine and eustress-forge, 18:48 to 19:34 Arizona, exit 0, 0 errors; source = commit bb910190620076e4073a727a5ea20d49afa83e26 plus the uncommitted working tree",
+      "fixed_this_iteration": [
+        "The literal --universe spaces/harness now connects: Studio writes its bridge port file into the opened Space's Universe.",
+        "The frames are lit (mean 103 of 255)."
+      ],
+      "approach_change_note": {
+        "utc": "2026-11-18T01:50:00Z",
+        "approach_a": "Parameterise the capture (sizes, paths), connect through the opened Space's Universe, light the scene, keep editor overlays off the capture camera.",
+        "failure_signature": "Sizes exact; the two 3840x2160 captures differ in a handful of pixels by 1 unit (4 px in the exit run). Control on the same build, five self-tests in one session on a copy of RH1: 7, 6, 3, 4 and 4 px differ; 1 px differs in every run and 12 in at least one; the first 4K capture of runs 2 to 5 differs from run 1's by 3 to 7 px. So the image of a static scene varies from frame to frame.",
+        "approach_b": "Remove the frame-to-frame variation at its source instead of at the capture: Bevy 0.19 clusters lights on the GPU and fills each cluster's light list through atomics, so overlapping lights are summed in a different order each frame. Lights are clustered on the CPU (GlobalClusterSettings.gpu_clustering = None at Startup, ai_camera.rs cpu_light_clustering; EUSTRESS_GPU_CLUSTERING=1 keeps the GPU path). This is a different mechanism, not a parameter of approach A.",
+        "evidence": "engine log of the control run: \"bevy_pbr::cluster: GPU clustering is supported on this device.\"; bevy_pbr cluster_raster.wgsl (atomicAdd slot) and pbr_functions.wgsl (direct_light summed in list order); scene RH1 has three overlapping shadow-casting point lights.",
+        "cost_to_measure": "CPU clustering costs time per view per frame and grows with the number of lights; to be measured on a light-heavy Space with and without EUSTRESS_GPU_CLUSTERING=1 after the next build."
+      },
+      "l1_reran": true,
+      "definition_of_not_done": "All seven conditions checked, none holds: docs/PROMPTS/artifacts/G1.05/not_done_checks.json",
+      "not_done_checks_sha256": "sha256:5c5b3a3837e1404d89d59aa8a2460fe168a8eafa73bc5a25cdc247de7ec766e3",
+      "controls": "CPU clustering, five self-tests in one session on a copy of RH1: 5 of 5 pass, ten 4K captures byte-identical. EUSTRESS_GPU_CLUSTERING=1 on the same build: 5 of 5 fail (4, 5, 2, 7, 5 px differ).",
+      "pass_rests_on": "CPU light clustering as the engine-wide default; switching the default back to GPU clustering makes this item fail again.",
+      "found_on_the_way": [
+        "A clean close of Studio logs one ERROR from the file watcher: 'Failed to send file event: sending on a disconnected channel'. Not fixed.",
+        "viewport.capture wrote the window's alpha channel, in which the 3D view is partly transparent (49% of it opaque); viewers that honour alpha showed it washed out. Fixed in engine_bridge/protocol.rs (written opaque); not compiled yet."
+      ],
+      "clustering_cost": "MEASURED 2026-11-17, docs/PROMPTS/artifacts/G1.05/clustering_cost.json: at 303 lights no frame-time difference outside the spread, +2.3 ms main-thread work with CPU clustering; at 1,503 lights GPU clustering loses the GPU device and Studio goes down (0 of 2 starts), CPU clustering runs (3 of 3)."
+    },
+    "G1.07": {
+      "status": "PASSED",
+      "approach": "A",
+      "iteration": 2,
+      "builds_consumed": 3,
+      "envelope_builds": 6,
+      "artifact_sha256": "sha256:bef5d6c4244c5c61f6b189b29fcb46718dc2ea27e751744de524c8d3d8857801",
+      "last_measurement": {
+        "command": "the block's two eustress-headless runs and its python comparison line, run literally",
+        "value": "BASE_EXIT=0 SAT_EXIT=0 base_dropped=0 sat_dropped=2100 sat_steps=300 sat_implied=2400 CMP_EXIT=0 (baseline: 600 steps executed, clock 600, 1 step before the clock's first advance reported on its own)",
+        "pass": true,
+        "how_run": "Run with the built program (C:\\EustressBuild\\target\\release\\harness-scenes.exe or eustress-headless.exe) and the block's exact arguments, from eustress/. `cargo run --release` was not used: it would only check freshness and start the same program, and no source is newer than the build. Studio windows were moved off-screen so desktop input cannot reach a run."
+      },
+      "critic_gate": [],
+      "artifact_path": "docs/PROMPTS/artifacts/G1.07/step_counter.json",
+      "tokens_consumed": 185862,
+      "token_envelope": 200000,
+      "files": [
+        "eustress/crates/common/src/simulation/clock.rs",
+        "eustress/crates/common/src/simulation/recorder.rs",
+        "eustress/crates/engine/src/simulation/plugin.rs",
+        "eustress/crates/engine/src/bin/headless.rs"
+      ],
+      "ownership_ruling": "headless.rs is EXCLUSIVE to G7.03; L0 granted G1.07 a narrow additive licence for three optional flags, recorded in 04_FILE_OWNERSHIP.md.",
+      "updated_utc": "2026-11-18T01:25:00Z",
+      "build": "second release build of 2026-11-17 on C:\\EustressBuild\\target: Finished release in 42m 45s at 15:53 Arizona, exit 0 (the first, cold build with Slint 1.19.0: 70m 23s at 13:09, exit 0); source = commit bb910190620076e4073a727a5ea20d49afa83e26 plus the uncommitted working tree",
+      "l1_mutation": "counter.record_step() replaced by a no-op: 6 of 6 simulation::plugin tests failed (exit 101); restored byte for byte, 109 of 109 pass",
+      "unit_tests": "engine simulation::plugin 6 of 6, common simulation:: 9 of 9",
+      "l1_reran": true
+    },
+    "G1.08": {
+      "status": "PASSED",
+      "approach": "A",
+      "iteration": 2,
+      "builds_consumed": 3,
+      "envelope_builds": 6,
+      "artifact_sha256": "sha256:923418c36d2321e859064d71bba164f236d458defa32c6f1e3c5e500a61522bc",
+      "last_measurement": {
+        "command": "EUSTRESS_PROFILE=1 EUSTRESS_PROFILE_FRAMES=600 harness-scenes frametime --space spaces/harness/RH3_exterior --path CP-B --width 3840 --height 2160 --csv ... --summary ... ; then the block's python recomputation",
+        "value": "FT_EXIT=0 rows=600 recomputed_p99=102.5954 reported_p99=102.5954 CHK_EXIT=0; 3840x2160; p50 20.7 ms, p95 34.0 ms, max 5292.9 ms; tick index takes 504 distinct values",
+        "pass": true,
+        "how_run": "Run with the built program (C:\\EustressBuild\\target\\release\\harness-scenes.exe or eustress-headless.exe) and the block's exact arguments, from eustress/. `cargo run --release` was not used: it would only check freshness and start the same program, and no source is newer than the build. Studio windows were moved off-screen so desktop input cannot reach a run."
+      },
+      "critic_gate": [],
+      "artifact_path": "docs/PROMPTS/artifacts/G1.08/frametime_series.json",
+      "tokens_consumed": 133611,
+      "token_envelope": 200000,
+      "files": [
+        "eustress/crates/engine/src/profiler.rs"
+      ],
+      "updated_utc": "2026-11-18T01:25:00Z",
+      "build": "second release build of 2026-11-17 on C:\\EustressBuild\\target: Finished release in 42m 45s at 15:53 Arizona, exit 0 (the first, cold build with Slint 1.19.0: 70m 23s at 13:09, exit 0); source = commit bb910190620076e4073a727a5ea20d49afa83e26 plus the uncommitted working tree",
+      "measured_with": "the window off-screen, on a machine running 17 to 23 compilers from other sessions; the absolute frame times are this run's, not a quiet-machine reading",
+      "l1_reran": true
+    },
+    "G1.03": {
+      "status": "PASSED",
+      "approach": "A",
+      "iteration": 3,
+      "builds_consumed": 3,
+      "artifact_sha256": "sha256:cecb3f34cb5a89e9f21e2f18b7185571aedd4f118a293300163adbbd4aaec159",
+      "last_measurement": {
+        "command": "harness-scenes --seed 42 --out spaces/harness --all ; then the same with --verify-freeze --record ../docs/PROMPTS/artifacts/G1.03/scene_freeze.json",
+        "value": "GEN_A_EXIT=0 GEN_B_EXIT=0 scenes=6 identical=6 differing=0 readback_mismatches=0; an independent Python recomputation of the tree hash matches all six recorded hashes",
+        "pass": true,
+        "how_run": "Run with the built program (C:\\EustressBuild\\target\\release\\harness-scenes.exe or eustress-headless.exe) and the block's exact arguments, from eustress/. `cargo run --release` was not used: it would only check freshness and start the same program, and no source is newer than the build. Studio windows were moved off-screen so desktop input cannot reach a run."
+      },
+      "critic_gate": [],
+      "envelope_builds": 12,
+      "artifact_path": "docs/PROMPTS/artifacts/G1.03/scene_freeze.json",
+      "tokens_consumed": 311303,
+      "token_envelope": 500000,
+      "files": [
+        "eustress/crates/engine/src/bin/harness_scenes.rs",
+        "eustress/crates/engine/Cargo.toml ([[bin]] harness-scenes)",
+        "docs/PROMPTS/artifacts/G1.03/scene_freeze.json (scaffold)",
+        ".gitattributes (harness Spaces keep their bytes; added by L0)"
+      ],
+      "also_carries": "The capture-selftest (G1.05) and frametime (G1.08) subcommands, added at L0's request because those items' exit commands run this binary.",
+      "open": "S4_studio_ui needs Studio to load <space>/.eustress/harness/layout.json and a selection pin when it opens a Space; no item in this wave owns that Studio code.",
+      "measurement_order": "Run this item's two commands before any engine opens a harness Space in place: opening writes world.fjalldb and logs into the Space and changes its hash.",
+      "updated_utc": "2026-11-18T01:25:00Z",
+      "build": "second release build of 2026-11-17 on C:\\EustressBuild\\target: Finished release in 42m 45s at 15:53 Arizona, exit 0 (the first, cold build with Slint 1.19.0: 70m 23s at 13:09, exit 0); source = commit bb910190620076e4073a727a5ea20d49afa83e26 plus the uncommitted working tree",
+      "definition_of_not_done": "S4: two opens of S4_studio_ui with the window off-screen are pixel-identical except the Output panel's wall-clock timestamp (101 of 2,073,600 px); the log of each open shows the pinned layout applied and the pinned instance selected. RH1 and RH2 are lit (4K capture mean 103 of 255, min 2, max 246).",
+      "freeze_ruling": "The generator refused to overwrite the 2026-11-16 freeze record because the hashes of S1 and S2 changed (their lights moved into child folders so the engine loads them; the scenes rendered black before). L0 ruling: 02_CAPTURE_HARNESS.md freezes a scene once it is authored and committed; nothing was committed and no bundle had used the unlit scenes, so the old record is kept beside the artifact as scene_freeze.draft_2026-11-16_unlit.json and the record was written again. The founder may overrule this to S1b and S2b.",
+      "found_on_the_way": [
+        "In 2 of 6 opens of S4 the bottom 31 px of Studio's 1920x1080 window were left unpainted after the start-up resize (once on-screen on the first build, once off-screen on the second). The pinned layout above it was identical. Not fixed.",
+        "studio_pins.toml carries a [camera] table that nothing reads."
+      ],
+      "l1_reran": true,
+      "reverified_utc": "2026-11-18T03:45:00Z",
+      "reverified": "After the G1.05 exit run opened RH1 in place: S1 regenerated with --replace (exit 0), GEN_A_EXIT=0 GEN_B_EXIT=0 scenes=6 identical=6 differing=0 readback_mismatches=0."
+    },
+    "G6.03": {
+      "status": "PASSED",
+      "approach": "A",
+      "iteration": 1,
+      "builds_consumed": 2,
+      "artifact_sha256": "sha256:910951d12848995d9580dd59f7d065668dcb5a2256baafda76a5382298b1f847",
+      "last_measurement": {
+        "command": "pwsh -NoProfile -File docs/PROMPTS/harness/checkers/G6.03_check_1.ps1 ; G6.03_check_2.ps1 ; the two negative runs through check_1 with -Out",
+        "value": "step 1 EXITCODE=0, 4 tests passed; step 2 refs=0 DEADCODE_OK exit 0; negative run LabelEditState EXITCODE=101; negative run TerrainVisibility EXITCODE=101; after the byte-exact restore EXITCODE=0",
+        "pass": true
+      },
+      "critic_gate": [],
+      "envelope_builds": 6,
+      "artifact_path": "docs/PROMPTS/artifacts/G6.03/drain_contract_report.json",
+      "tokens_consumed": 199858,
+      "token_envelope": 200000,
+      "files": [
+        "eustress/crates/engine/src/ui/drain_contract.rs",
+        "eustress/crates/engine/src/ui/mod.rs",
+        "eustress/crates/engine/src/ui/slint_ui.rs",
+        "eustress/crates/engine/src/ui/slint_main.rs (deleted, 607 lines, proven unreferenced)",
+        "two comment lines in ui/viewport_context_menu.rs and ui/slint_bridge.rs (L0)"
+      ],
+      "found_on_the_way": "OVERLAY_INPUT_FOCUSED (slint_ui.rs) had its only writer in the deleted file; its readers never see it true. Not fixed.",
+      "updated_utc": "2026-11-18T01:25:00Z",
+      "build": "second release build of 2026-11-17 on C:\\EustressBuild\\target: Finished release in 42m 45s at 15:53 Arizona, exit 0 (the first, cold build with Slint 1.19.0: 70m 23s at 13:09, exit 0); source = commit bb910190620076e4073a727a5ea20d49afa83e26 plus the uncommitted working tree",
+      "l1_reran": true
+    },
+    "G7.01": {
+      "status": "IN_PROGRESS",
+      "approach": "A",
+      "iteration": 1,
+      "builds_consumed": 0,
+      "artifact_sha256": null,
+      "last_measurement": null,
+      "critic_gate": [],
+      "awaiting": "Code written with no cargo run (the founder's order, 2026-11-16: one batched build for the wave). L1 runs the exit command after that build.",
+      "envelope_builds": 12,
+      "artifact_path": "docs/PROMPTS/artifacts/G7.01/tool_conformance.json",
+      "tokens_consumed": 312232,
+      "token_envelope": 500000,
+      "files": [
+        "eustress/crates/agent-eval/ (new crate eustress-agent-eval, binary eustress-agent-census)",
+        "eustress/Cargo.toml (one members line)",
+        "scripts/agent_eval/"
+      ],
+      "criterion_question": "The block's criterion names 104 tools and 208 outcomes. The surface has grown (an October build lists 172; the source declares about 191). The census counts what the servers list at run time. Replacing 104 with the counted number is the founder's amendment to make; until then the item cannot pass as written.",
+      "needs_founder_ok": "The census refuses (exit 3) when Studio's last-opened Space is outside the fixture. --swap-studio-last-space points that setting at the fixture and restores it byte for byte; using it on the founder's machine needs his okay.",
+      "updated_utc": "2026-11-16T19:56:19Z",
+      "status_note": "Not measured yet: the census needs a rebuilt eustress-mcp.exe, and 20 open sessions hold the current one open; it also waits on the founder's amendment of the tool count and his okay for --swap-studio-last-space."
+    },
+    "G1.04": {
+      "status": "PASSED",
+      "approach": "A",
+      "iteration": 1,
+      "builds_consumed": 1,
+      "envelope_builds": 6,
+      "artifact_path": "docs/PROMPTS/artifacts/G1.04/path_replay.json",
+      "artifact_sha256": "sha256:b1103b39e26f6b0639304a7c6d8b0ed19e4f21c161530850986f6613cfc7a6e4",
+      "last_measurement": {
+        "command": "harness-scenes paths --verify --out ../docs/PROMPTS/artifacts/G1.04/path_replay.json --space spaces/harness/RH3_exterior --paths CP-A,CP-B,CP-S",
+        "value": "CP-A 180/180 identical; CP-B 600/600 identical; CP-S 24/24 identical; paths=3 identical=3 tick_mismatches=0; PATH_EXIT=0",
+        "pass": true,
+        "how_run": "Run with the built binary (eustress/target/release/harness-scenes.exe or eustress-headless.exe) and the block's exact arguments. `cargo run --release` was not used because another session's web build held cargo's lock; cargo run would only have checked freshness and started this same binary, and no source had changed since it linked."
+      },
+      "critic_gate": [],
+      "tokens_consumed": 227381,
+      "token_envelope": 200000,
+      "envelope_note": "114% of the tier M token envelope, no builds spent.",
+      "files": [
+        "eustress/crates/engine/src/camera_path.rs",
+        "eustress/crates/engine/src/lib.rs (one mod line)",
+        "eustress/crates/engine/src/main.rs (one plugin line, by L0)",
+        "eustress/crates/engine/src/bin/harness_scenes.rs (paths subcommand)",
+        "eustress/spaces/harness/paths/CP-A.json, CP-B.json, CP-S.json, CP-U.json"
+      ],
+      "pulled_forward": "A W2 item, written in this batch because G1.08's exit command plays camera path CP-B.",
+      "risks": "The four path files came from a Python mirror of the Rust generator; run `harness-scenes paths --emit` before `--verify` so the files are the Rust output. Poses exist for RH3_exterior only.",
+      "updated_utc": "2026-11-17T03:48:02Z",
+      "l1_reran": true,
+      "l1_mutation": "One pose value changed in CP-S.json: the replayed pose-log hash changed (the camera was re-driven) and the verify exited 1. Restored; the file's hash matches the generator's again.",
+      "l1_checks": "`paths --emit` from the Rust generator reproduced all four files byte for byte; CP-U declares panel_open 4, entity_select 4, property_edit 5 (ends with reread_after_reload), error_surface 3; six Studio launches each closed normally.",
+      "build": "release build finished 2026-11-16 18:40 Arizona (pass 2, 190m 54s, exit 0); pass 1 failed on 2 errors with one cause (ai_camera.rs: images.get_mut needs `mut img` in Bevy 0.19)"
+    },
+    "G1.06": {
+      "status": "PASSED",
+      "approach": "A",
+      "iteration": 3,
+      "builds_consumed": 3,
+      "envelope_builds": 6,
+      "artifact_path": "docs/PROMPTS/artifacts/G1.06/tick_trigger.json",
+      "artifact_sha256": "sha256:d951b5472f89347ebad7b2d774a5288e82ea2800a83ddc423c6582a81377cd25",
+      "last_measurement": {
+        "command": "harness-scenes tick-selftest --space spaces/harness/S5_physics_stress --ticks 0,60,300,600 --width 1920 --height 1080 --slow-run-frame-cap 30 --compression-refusal-check 2.0 --out ../docs/PROMPTS/artifacts/G1.06/tick_trigger.json",
+        "value": "TICK_EXIT=0; normal ticks_emitted=[0,60,300,600] frames=4; slowed (cap 30, 25.8 fps against 67.3) ticks_emitted=[0,60,300,600] frames=4; tick_sets_equal=true; readback_offset_steps 0 on all eight captures; time-scale 2.0 run exit=1, 0 frames, exact refusal text",
+        "pass": true,
+        "how_run": "Run with the built program (C:\\EustressBuild\\target\\release\\harness-scenes.exe or eustress-headless.exe) and the block's exact arguments, from eustress/. `cargo run --release` was not used: it would only check freshness and start the same program, and no source is newer than the build. Studio windows were moved off-screen so desktop input cannot reach a run."
+      },
+      "critic_gate": [],
+      "tokens_consumed": 219221,
+      "token_envelope": 200000,
+      "envelope_note": "110% of the tier M token envelope, no builds spent.",
+      "files": [
+        "eustress/crates/engine/src/ai_camera.rs (tick-indexed captures)",
+        "eustress/crates/engine/src/engine_bridge/protocol.rs (optional `ticks` on ai_camera_capture)",
+        "eustress/crates/engine/src/bin/harness_scenes.rs (tick-selftest subcommand, narrow licence from L0)"
+      ],
+      "pulled_forward": "A W2 item on the critical path to G1.09, written in this batch because its build is the same build.",
+      "decision": "A tick is a physics step executed since the Play run began (PhysicsStepCounter minus the run's start). SimulationClock.tick_count advances from the wall delta once per frame and can skip an index, so it is logged beside the step, never used as the trigger.",
+      "updated_utc": "2026-11-18T01:25:00Z",
+      "build": "second release build of 2026-11-17 on C:\\EustressBuild\\target: Finished release in 42m 45s at 15:53 Arizona, exit 0 (the first, cold build with Slint 1.19.0: 70m 23s at 13:09, exit 0); source = commit bb910190620076e4073a727a5ea20d49afa83e26 plus the uncommitted working tree",
+      "iteration_2_failure": "TICK_EXIT=1 on the first build of 2026-11-17: readback_offset_steps was 1 at ticks 60, 300 and 600 in both runs. Cause: Avian runs one more physics step after pause(). The exit code had been discarded by Studio's main until that build, which hid it.",
+      "fix": "simulation::plugin::hold_physics (pause plus a zeroed physics delta), used at every engine pause site: play_mode.rs 5, ai_camera.rs 2, engine_bridge/protocol.rs 1",
+      "l1_reran": true
     }
+  },
+  "server_measurements_2026_11_16": {
+    "build": "release build finished 2026-11-16 18:40 Arizona (pass 2, 190m 54s, exit 0); pass 1 failed on 2 errors with one cause (ai_camera.rs: images.get_mut needs `mut img` in Bevy 0.19)",
+    "setup": "eustress-engine.exe --server on a temp copy of Pong, loopback only, nobody joined, PongServer running; i9-10980XE; CPU is the process's own CPU time (100% is one logical core)",
+    "script_race": "MEASURED: 'Luau Play VM ready: 1 server and 0 client script(s) queued' (the installed 0.3.8 queued 0 server scripts); status players 0",
+    "cpu_60hz_empty_pct_of_core": 63.4,
+    "cpu_5hz_idle_pct_of_core": [
+      20.6,
+      20.7
+    ],
+    "idle_reached_after_s": 39,
+    "private_memory_mb": 64,
+    "phase_profile_60hz": "600 frames: mean frame 19.9 ms (50.4 Hz, not 60); main world 8.0 ms (Update 4.9, PreUpdate 2.4, PostUpdate 0.5); main-thread CPU 3.0 ms; script apply stage mean 2.94 ms with one 1,378.75 ms frame",
+    "findings": [
+      "60 Hz ran at 50 Hz: the runner slept for what was left of the period and each sleep ran about 3 ms long. Fixed in server_mode.rs (frames are due at fixed deadlines); needs the rebuild.",
+      "The 5 Hz idle rate cuts CPU 3.1 times, not 12: physics still runs 60 steps a second while empty. EUSTRESS_SERVER_IDLE_PAUSE=1 (written, opt-in, set by the fleet host) pauses simulated time on an empty server; needs the rebuild and a measurement.",
+      "A clean stop leaves the status phase at 'hosting'; the fleet host frees the slot when the process exits, so this is cosmetic.",
+      "bevy_asset logs 'Could not find an asset loader' for parts/block.glb under --server (no glTF loader without the renderer)."
+    ]
+  },
+  "server_measurements_2026_11_17": {
+    "build": "second release build of 2026-11-17 on C:\\EustressBuild\\target: Finished release in 42m 45s at 15:53 Arizona, exit 0 (the first, cold build with Slint 1.19.0: 70m 23s at 13:09, exit 0); source = commit bb910190620076e4073a727a5ea20d49afa83e26 plus the uncommitted working tree",
+    "setup": "eustress-engine.exe --server on a temp copy of Pong on C:, loopback only (EUSTRESS_HOST_LAN=0), nobody joined, PongServer running; i9-10980XE; CPU is the process's own CPU time (100% is one logical core); 17 to 23 rustc processes from other sessions were running",
+    "script_race": "MEASURED on all runs: 'Luau Play VM ready: 1 server and 0 client script(s) queued'; status players 0",
+    "cpu_60hz_empty_pct_of_core": [
+      64.2,
+      48.8
+    ],
+    "cpu_5hz_idle_pct_of_core": 24.6,
+    "cpu_5hz_idle_paused_pct_of_core": 6.2,
+    "private_memory_mb": [
+      58,
+      66
+    ],
+    "frame_times_60hz_profiled": "1,800 frames with EUSTRESS_PROFILE=1 (profiler overhead: 98.3% of a core): after the first 300 frames median 16.737 ms (59.7 Hz), mean 19.271 ms (51.9 Hz), 14.2% of frames over 20 ms, p99 77.8 ms, max 237.7 ms; main world 8.0 to 9.8 ms a frame, main-thread CPU 3.9 ms",
+    "findings": [
+      "The steady oversleep is gone: the median frame is 16.7 ms where it was 19.9 ms on 2026-11-16. Late frames remain (14% over 20 ms) in a run that had the phase profiler on and a busy machine, so the 60 Hz floor is not proven by this reading. The frame-time file is only written with EUSTRESS_PROFILE=1, so there is no unprofiled series.",
+      "EUSTRESS_SERVER_IDLE_PAUSE=1 cuts an empty server from 24.6% to 6.2% of a core. The fleet's empty-server budget in forge/src/fleet.rs and fleet_policy.mjs is not yet set from this number.",
+      "A --server whose stdout and stderr are pipes that nobody reads stops simulating (tick 277 after nine minutes): it blocks on its log writes. forge/src/local_launch.rs gives its servers Stdio::null, so the fleet host is not affected.",
+      "With EUSTRESS_PROFILE=1 the server writes eustress_profile_phases.txt into its working directory every report; with that directory on drive E: each frame waited seconds (main_world 5,393 ms a frame).",
+      "A clean stop still leaves the status phase at 'hosting'."
+    ]
+  },
+  "unit_tests_2026_11_17": {
+    "forge": "51 passed, 0 failed (fleet, fleet_host heartbeat client, local_launch)",
+    "agent_eval": "25 passed",
+    "common_simulation": "9 passed",
+    "engine_filtered": "109 passed, 0 failed (server_mode, dedicated, multiplayer, window_placement, ai_camera, camera_path, profiler::frametime_series, simulation::plugin, ui::harness_pins, engine_bridge::port_file, startup, editor_overlay)",
+    "engine_before_the_hold_fix": "100 passed, 4 failed, all in simulation::plugin (a pause let one more physics step through)",
+    "ui_drain_contract": "4 passed",
+    "ui_display_text": "3 passed on stock Slint 1.19.0 (the Eustress renderer patch is removed)",
+    "other_sessions": "eustress-roblox-import --lib 256 passed, 3 ignored; eustress-common --lib tree_read 24 passed"
+  },
+  "unit_tests_2026_11_17_third_build": {
+    "build": "cargo test --no-run -p eustress-engine -p eustress-forge -p eustress-raytracing, debug profile, 19:55 to 20:16 Arizona, exit 0",
+    "engine_filtered": "110 passed, 0 failed",
+    "ui_drain_contract": "4 passed",
+    "ui_display_text": "3 passed",
+    "updater_and_update_trust": "27 passed",
+    "raytracing_crate": "145 passed, 1 ignored",
+    "forge": "51 passed",
+    "engine_raytracing_host": "3 passed",
+    "client_raytracing": "4 passed (cargo test -p eustress-client --bin eustress-client raytracing, exit 0, 20:33)",
+    "raytracing_crate_alone": "cargo test -p eustress-raytracing --lib --features raytracing: 20:18 exit 101 (bevy_image asked for a zstd backend); 20:58 compiled, 143 passed, 2 failed (both needed the multi-threaded task pool); 21:09 exit 0, 145 passed, 1 ignored, after the owning session added bevy/zstd_rust to the feature and a multi_threaded dev-dependency. cargo metadata --locked exit 0 at 21:01."
   }
 }

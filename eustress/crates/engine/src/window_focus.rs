@@ -483,23 +483,44 @@ fn apply_power_settings(
     // and silently produced a result that took fifteen times longer to reach
     // than an identical run whose window happened to stay focused.
     //
-    // Unfocused now stays Continuous while Playing. Idle and Minimized are
-    // still honoured for the focused/visible cases below, but never at the cost
-    // of a run in progress.
+    // A running simulation (and a session Studio hosts, which runs in Play)
+    // therefore keeps a steady rate regardless of focus, but never an
+    // uncapped one. It used to be `Continuous` both ways, and with the
+    // window's `AutoNoVsync` that meant as fast as the GPU allowed: on 11-18
+    // Studio, hosting, drew about 110 frames a second, as fast as it could,
+    // a Player on this computer joined on the same GPU, and the driver reset
+    // two seconds later. Focused, the Active cap (`active_update_ms`, about
+    // 120 a second; `EUSTRESS_MAX_FPS=0` lifts it). Unfocused, 60 a second
+    // (`gpu_recovery::simulating_update_interval`): the hosted-session floor,
+    // one tick of the 60 Hz simulation clock per frame, far above the rate the
+    // tick's sub-step ceiling needs to keep real time. Idle and Minimized are
+    // still honoured for the focused/visible cases below, but never at the
+    // cost of a run in progress.
     let simulating = play_state
         .map(|s| *s.get() == crate::play_mode::PlayModeState::Playing)
         .unwrap_or(false);
     if simulating {
-        if winit_settings.unfocused_mode != UpdateMode::Continuous {
-            winit_settings.focused_mode = UpdateMode::Continuous;
-            winit_settings.unfocused_mode = UpdateMode::Continuous;
-            info!("⚡ Simulation running — holding Continuous updates regardless of focus");
+        use eustress_play_runtime::gpu_recovery::simulating_update_interval;
+        let focused = match simulating_update_interval(true, settings.active_update_ms) {
+            Some(wait) => UpdateMode::reactive(wait),
+            None => UpdateMode::Continuous,
+        };
+        // Unfocused: the timer and window events wake it, not raw mouse
+        // motion over another app's window.
+        let unfocused = match simulating_update_interval(false, settings.active_update_ms) {
+            Some(wait) => UpdateMode::reactive_low_power(wait),
+            None => UpdateMode::Continuous,
+        };
+        if winit_settings.focused_mode != focused || winit_settings.unfocused_mode != unfocused {
+            winit_settings.focused_mode = focused;
+            winit_settings.unfocused_mode = unfocused;
+            info!("⚡ Simulation running: holding a steady, capped update rate regardless of focus");
         }
         return;
     }
 
     // Reassert every frame rather than only on change. The simulation override
-    // above leaves the settings forced to Continuous, and a `is_changed()` guard
+    // above leaves the settings at its own rates, and a `is_changed()` guard
     // on the focus state would then never fire to put them back once the run
     // ended, so the editor would stay at full power indefinitely after a single
     // simulation. Writing two enum fields is free; missing the restore is not.

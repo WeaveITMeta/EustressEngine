@@ -1,0 +1,52 @@
+[asset]
+mesh = "parts/block.glb"
+scene = "Scene0"
+
+[attributes]
+albedo_srgb = [
+    56,
+    61,
+    150,
+]
+
+[metadata]
+archivable = true
+class_name = "Part"
+created = "2026-11-16T00:00:00Z"
+last_modified = "2026-11-16T00:00:00Z"
+name = "Patch_13_blue"
+unit = "m"
+uuid = "f24c682e19c4526d82943be359570d50"
+
+[properties]
+anchored = true
+can_collide = true
+cast_shadow = true
+color = [
+    56,
+    61,
+    150,
+]
+destructible = false
+locked = false
+material = "H_Matte"
+reflectance = 0.0
+transparency = 0.0
+
+[transform]
+position = [
+    -0.75,
+    0.85,
+    -3.97,
+]
+rotation = [
+    0.0,
+    0.0,
+    0.0,
+    1.0,
+]
+scale = [
+    0.26,
+    0.26,
+    0.01,
+]

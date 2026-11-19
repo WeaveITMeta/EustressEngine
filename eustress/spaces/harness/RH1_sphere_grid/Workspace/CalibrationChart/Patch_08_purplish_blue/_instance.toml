@@ -1,0 +1,52 @@
+[asset]
+mesh = "parts/block.glb"
+scene = "Scene0"
+
+[attributes]
+albedo_srgb = [
+    80,
+    91,
+    166,
+]
+
+[metadata]
+archivable = true
+class_name = "Part"
+created = "2026-11-16T00:00:00Z"
+last_modified = "2026-11-16T00:00:00Z"
+name = "Patch_08_purplish_blue"
+unit = "m"
+uuid = "5edadb44ab1eb51e1b34aaec7c313847"
+
+[properties]
+anchored = true
+can_collide = true
+cast_shadow = true
+color = [
+    80,
+    91,
+    166,
+]
+destructible = false
+locked = false
+material = "H_Matte"
+reflectance = 0.0
+transparency = 0.0
+
+[transform]
+position = [
+    -0.45,
+    1.15,
+    -3.97,
+]
+rotation = [
+    0.0,
+    0.0,
+    0.0,
+    1.0,
+]
+scale = [
+    0.26,
+    0.26,
+    0.01,
+]

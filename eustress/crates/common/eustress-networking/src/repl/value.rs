@@ -10,9 +10,59 @@
 
 use eustress_common::datamodel::{DmValue, EnumItem, InstanceId};
 use eustress_common::scripting::{CFrame, Color3, NumberRange, UDim, UDim2, Vector2, Vector3};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 
 use super::id::NetId;
+
+/// The deepest arrays and maps may nest in a value read off the wire. Deeper
+/// than anything a script is allowed to send ([`ValueLimits::max_depth`]),
+/// and shallow enough that decoding never comes near the end of a stack:
+/// decoding recurses once per level, and without a bound a frame of nothing
+/// but array headers (twelve bytes a level, hundreds of thousands of levels
+/// in one frame) overflows the stack before [`WireValue::check`] ever runs.
+pub const MAX_DECODE_DEPTH: usize = 128;
+
+thread_local! {
+    /// How many arrays and maps the value being decoded on this thread is
+    /// inside. Decoding is one synchronous call, so this is 0 again when it
+    /// returns, on an error too.
+    static DECODE_DEPTH: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// One level of nesting while a value is decoded. Dropping it gives the
+/// level back.
+struct Nested;
+
+impl Nested {
+    fn enter<E: serde::de::Error>() -> Result<Self, E> {
+        DECODE_DEPTH.with(|depth| {
+            if depth.get() >= MAX_DECODE_DEPTH {
+                return Err(E::custom(format_args!("tables nested deeper than {MAX_DECODE_DEPTH}")));
+            }
+            depth.set(depth.get() + 1);
+            Ok(Nested)
+        })
+    }
+}
+
+impl Drop for Nested {
+    fn drop(&mut self) {
+        DECODE_DEPTH.with(|depth| depth.set(depth.get().saturating_sub(1)));
+    }
+}
+
+/// Decode an array's items one level deeper. The bytes are the plain
+/// sequence serde would read: the wire format is unchanged.
+fn nested_array<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Vec<WireValue>, D::Error> {
+    let _level = Nested::enter::<D::Error>()?;
+    Vec::<WireValue>::deserialize(deserializer)
+}
+
+/// Decode a map's entries one level deeper. See [`nested_array`].
+fn nested_map<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Vec<(String, WireValue)>, D::Error> {
+    let _level = Nested::enter::<D::Error>()?;
+    Vec::<(String, WireValue)>::deserialize(deserializer)
+}
 
 /// A value as it crosses the wire.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -40,9 +90,9 @@ pub enum WireValue {
     /// Keypoints as (time, colour).
     ColorSequence(Vec<(f64, [f64; 3])>),
     /// A Luau array. Remote arguments only.
-    Array(Vec<WireValue>),
+    Array(#[serde(deserialize_with = "nested_array")] Vec<WireValue>),
     /// A Luau table with string keys. Remote arguments only.
-    Map(Vec<(String, WireValue)>),
+    Map(#[serde(deserialize_with = "nested_map")] Vec<(String, WireValue)>),
 }
 
 /// Bounds a value from a player must fit before a host script sees it.
@@ -291,6 +341,41 @@ mod tests {
         // A reference the receiver may not see goes as nil.
         let hidden = WireValue::from_dm(&DmValue::Instance(host_part), &|_| None);
         assert_eq!(hidden.to_dm(&|_| None), Ok(DmValue::Nil));
+    }
+
+    /// Depth is bounded while a value is decoded, not only when it is
+    /// checked afterwards: a peer chooses the bytes, and the check runs on a
+    /// value that has already been built.
+    #[test]
+    fn nesting_is_bounded_while_decoding() {
+        use crate::wire::{decode_body, encode_frame};
+        let arrays = |levels: usize| {
+            let mut v = WireValue::Nil;
+            for _ in 0..levels {
+                v = WireValue::Array(vec![v]);
+            }
+            v
+        };
+        let maps = |levels: usize| {
+            let mut v = WireValue::Nil;
+            for _ in 0..levels {
+                v = WireValue::Map(vec![("k".to_string(), v)]);
+            }
+            v
+        };
+        let decoded = |v: &WireValue| decode_body::<WireValue>(&encode_frame(v).unwrap()[4..]);
+
+        assert_eq!(decoded(&arrays(MAX_DECODE_DEPTH)).unwrap(), arrays(MAX_DECODE_DEPTH), "the deepest value allowed changed on the way through");
+        assert!(decoded(&arrays(MAX_DECODE_DEPTH + 1)).is_err(), "arrays nested one level too deep were decoded");
+        assert!(decoded(&maps(MAX_DECODE_DEPTH + 1)).is_err(), "maps nested one level too deep were decoded");
+        assert_eq!(decoded(&maps(MAX_DECODE_DEPTH)).unwrap(), maps(MAX_DECODE_DEPTH));
+        // A refused value leaves no depth behind: the next one starts at 0.
+        assert!(decoded(&arrays(MAX_DECODE_DEPTH)).is_ok(), "a refused value left the decoder deeper");
+        // Everything a script may send is well inside the bound.
+        assert!(ValueLimits::default().max_depth < MAX_DECODE_DEPTH);
+        // Wide is not deep: siblings do not add up.
+        let wide = WireValue::Array(vec![arrays(MAX_DECODE_DEPTH - 1); 8]);
+        assert_eq!(decoded(&wide).unwrap(), wide);
     }
 
     #[test]

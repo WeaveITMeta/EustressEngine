@@ -1322,6 +1322,10 @@ const PHASES = {
               next.cashout_plan = next.connect ? await planAllowsCashout(env, userId) : false;
               if (user.banned) {
                 next.banned = true;
+              } else if (user.account_type === 'agent') {
+                // An agent account earns nothing (src/agents.mjs, D4): its share is not minted, as a banned account's is
+                // not. Its routes refuse effort and sales already; this holds if one ever gets through.
+                next.agent = true;
               } else {
                 await ledgerMigrateUser(env, userId, user);
                 const share = job.total_score > 0 ? Math.floor(job.pool_minor * (score / job.total_score)) : 0;

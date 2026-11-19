@@ -684,8 +684,8 @@ component ChatBubble inherits VerticalLayout {
                     y: 8px;
                     width: parent.width - 16px;
                     height: parent.height - 16px;
-                    viewport-width: self.width;
-                    viewport-height: max(self.height, input-view.preferred-height);
+                    content-width: self.width;
+                    content-height: max(self.height, input-view.preferred-height);
 
                     input-view := TextInput {
                         width: parent.width;
@@ -1296,10 +1296,10 @@ export component WorkshopPanel inherits Rectangle {
                     // We want: scroll-up → shift tabs left (increase viewport-x toward 0).
                     //          scroll-down → shift tabs right (decrease viewport-x).
                     // Multiply delta-y by a large factor for fast movement.
-                    let new-x = tab-flick.viewport-x + event.delta-y * 4;
+                    let new-x = tab-flick.content-x + event.delta-y * 4;
                     // Clamp: viewport-x is <= 0 (leftmost), and >= -(content - visible)
-                    let min-x = min(0px, -(tab-flick.viewport-width - tab-flick.width));
-                    tab-flick.viewport-x = max(min-x, min(0px, new-x));
+                    let min-x = min(0px, -(tab-flick.content-width - tab-flick.width));
+                    tab-flick.content-x = max(min-x, min(0px, new-x));
                     accept
                 }
             }
@@ -1308,8 +1308,8 @@ export component WorkshopPanel inherits Rectangle {
                 x: 0px; y: 0px;
                 width: 100%;
                 height: 31px; // leave 1px for divider
-                viewport-width: tab-row.preferred-width;
-                viewport-height: self.height;
+                content-width: tab-row.preferred-width;
+                content-height: self.height;
 
                 tab-row := HorizontalLayout {
                     padding-left: 6px;
@@ -1467,17 +1467,17 @@ export component WorkshopPanel inherits Rectangle {
 
             // Thin horizontal scrollbar indicator — only visible when
             // tabs overflow the visible width. Sits on the 1px divider line.
-            if tab-flick.viewport-width > tab-flick.width: Rectangle {
+            if tab-flick.content-width > tab-flick.width: Rectangle {
                 x: {
                     // scroll-ratio: how far we've scrolled (0..1)
-                    let scroll-range = tab-flick.viewport-width - tab-flick.width;
-                    let ratio = scroll-range > 0px ? (-tab-flick.viewport-x / scroll-range) : 0;
+                    let scroll-range = tab-flick.content-width - tab-flick.width;
+                    let ratio = scroll-range > 0px ? (-tab-flick.content-x / scroll-range) : 0;
                     let track-w = parent.width;
-                    let thumb-w = max(30px, track-w * tab-flick.width / tab-flick.viewport-width);
+                    let thumb-w = max(30px, track-w * tab-flick.width / tab-flick.content-width);
                     ratio * (track-w - thumb-w)
                 };
                 y: parent.height - 3px;
-                width: max(30px, parent.width * tab-flick.width / tab-flick.viewport-width);
+                width: max(30px, parent.width * tab-flick.width / tab-flick.content-width);
                 height: 2px;
                 border-radius: 1px;
                 background: #ffffff30;  // theme-exempt: translucent white scrollbar thumb, no matching neutral token
@@ -1809,7 +1809,7 @@ export component WorkshopPanel inherits Rectangle {
                 // held in here (and in the ScrollView's own viewport-y) is gone
                 // on return. The host keys the saved value by session id, so
                 // each conversation comes back where you left it.
-                viewport-y <=> root.chat-scroll-y;
+                content-y <=> root.chat-scroll-y;
 
                 // Follow new output while you are at the bottom. Nothing used
                 // to, so every reply landed below the fold and had to be
@@ -1817,7 +1817,7 @@ export component WorkshopPanel inherits Rectangle {
                 // grown, so this lands exactly on the new bottom.
                 changed viewport-height => {
                     if root.chat-stick-bottom {
-                        self.viewport-y = min(0px, -(self.viewport-height - self.visible-height));
+                        self.content-y = min(0px, -(self.content-height - self.visible-height));
                     }
                 }
 
@@ -1825,8 +1825,8 @@ export component WorkshopPanel inherits Rectangle {
                 // re-decides whether we are following. Within 24px of the
                 // bottom counts as at the bottom.
                 changed viewport-y => {
-                    root.chat-stick-bottom = self.viewport-y
-                        <= min(0px, -(self.viewport-height - self.visible-height)) + 24px;
+                    root.chat-stick-bottom = self.content-y
+                        <= min(0px, -(self.content-height - self.visible-height)) + 24px;
                 }
 
                 // Forwards wheel events so scrolling still works while a
@@ -1844,9 +1844,9 @@ export component WorkshopPanel inherits Rectangle {
                     width: parent.width;
                     height: parent.height;
                     scroll-event(ev) => {
-                        let max-vp = max(0px, chat-scroll.viewport-height - chat-scroll.visible-height);
-                        chat-scroll.viewport-y = clamp(
-                            chat-scroll.viewport-y + ev.delta-y,
+                        let max-vp = max(0px, chat-scroll.content-height - chat-scroll.visible-height);
+                        chat-scroll.content-y = clamp(
+                            chat-scroll.content-y + ev.delta-y,
                             -max-vp,
                             0px
                         );
@@ -1909,7 +1909,7 @@ export component WorkshopPanel inherits Rectangle {
                     mouse-cursor: pointer;
                     clicked => {
                         root.chat-stick-bottom = true;
-                        chat-scroll.viewport-y = min(0px, -(chat-scroll.viewport-height - chat-scroll.visible-height));
+                        chat-scroll.content-y = min(0px, -(chat-scroll.content-height - chat-scroll.visible-height));
                     }
                 }
 
@@ -2623,8 +2623,8 @@ export component WorkshopPanel inherits Rectangle {
                             // so its scrollbar + wheel handler activate at the
                             // right threshold. When preferred-height ≤ viewport,
                             // ScrollView hides the bar and behaves as a plain wrap.
-                            viewport-width: self.width;
-                            viewport-height: max(self.height, input-area.preferred-height);
+                            content-width: self.width;
+                            content-height: max(self.height, input-area.preferred-height);
 
                             input-area := TextInput {
                                 width: parent.width;

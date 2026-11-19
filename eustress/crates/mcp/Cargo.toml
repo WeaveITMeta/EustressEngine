@@ -9,8 +9,6 @@ readme = "README.md"
 
 [dependencies]
 # Core Eustress
-eustress-common = { path = "../common" }
-eustress-forge = { path = "../forge" }
 eustress-embedvec = { path = "../embedvec", optional = true }
 # EustressStream — embedded in-process pub/sub for fan-out dispatch
 eustress-stream = { path = "../stream" }
@@ -45,7 +43,6 @@ uuid = { workspace = true }
 chrono = { workspace = true }
 
 # Authentication
-jsonwebtoken = "9.0"
 base64 = "0.22"
 
 # HTTP client
@@ -58,7 +55,6 @@ toml = "0.8"
 async-channel = "2.0"
 
 # WebSocket
-tokio-tungstenite = "0.26"
 
 # async-trait removed — export targets are now synchronous stream subscribers
 # (async work like HTTP POST is spawned internally via tokio::spawn)

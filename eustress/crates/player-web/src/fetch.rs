@@ -121,13 +121,8 @@ async fn download(
 /// The site's sign-in token, when this browser has one. Never logged.
 fn stored_token() -> Option<String> {
     let storage = web_sys::window()?.local_storage().ok()??;
-    let token = storage.get_item("auth_token").ok()??;
-    let token = token.trim();
-    if token.is_empty() {
-        None
-    } else {
-        Some(token.to_string())
-    }
+    let stored = storage.get_item("auth_token").ok()??;
+    crate::solo::token_from_storage(&stored)
 }
 
 /// A public world answers without a token. Only a refusal is retried with

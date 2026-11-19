@@ -3,12 +3,14 @@
 //! Core Bevy plugin for tick-based simulation with time compression.
 //! Integrates with PlayModeState for proper play/pause/stop behavior.
 
+use avian3d::prelude::{Physics, PhysicsSchedule, PhysicsStepSystems, PhysicsTime};
 use bevy::prelude::*;
 use tracing::warn;
 use eustress_common::simulation::{
     SimulationClock, SimulationState, SimulationMode,
     WatchPointRegistry, BreakPointRegistry,
     SimulationRecording, TimeSeries, WatchPoint, BreakPoint, Comparison,
+    PhysicsStepCounter, StepCountReport, StepWindowSample,
 };
 
 use crate::play_mode::{PlayModeState, StopPlayEvent, TogglePauseEvent};
@@ -49,13 +51,127 @@ pub struct SimAutoStop {
     pub stop_at_sim_s: Option<f64>,
 }
 
+/// The current run's window on [`PhysicsStepCounter`], and where else its
+/// step-count report goes.
+///
+/// `start` is the counter's value when the run entered Play; a resume from
+/// Pause keeps it, and the stop takes it. The counter itself is never reset.
+/// The report's counts cover [`StepCountWindow`], which opens one frame
+/// later; `start` gives the steps executed between the two.
+#[derive(Resource, Default, Debug)]
+pub struct StepCountRun {
+    /// The counter at the run's start; `None` between runs.
+    pub start: Option<u64>,
+    /// An extra path the report is written to on every stop, besides the
+    /// `stepcount_*.json` next to the recording (a headless batch run's
+    /// `--export-stepcount`).
+    pub export_path: Option<std::path::PathBuf>,
+}
+
+/// The current run's step-count window: the frames the clock advanced in
+/// whose physics also ran in Play.
+///
+/// Within a frame the clock advances in `PreUpdate`, before the state
+/// transition and before the fixed loop that steps physics. So the frame
+/// that enters Play steps physics with no clock advance (the state was not
+/// Playing yet in its `PreUpdate`), and the frame that leaves Play advances
+/// the clock with no physics step (the state has changed by its fixed loop).
+/// `sample_step_window` samples every Playing frame just before the
+/// advance: the first sample opens the window, the latest one is its end,
+/// and neither edge frame is inside it. A resume from Pause keeps the start.
+#[derive(Resource, Default, Debug)]
+pub struct StepCountWindow {
+    /// The sample at the clock's first advance of the run; `None` between
+    /// runs.
+    pub start: Option<StepWindowSample>,
+    /// The latest sample of the run.
+    pub end: Option<StepWindowSample>,
+}
+
+/// Open the run's step-count accounting on entering Play. A resume from
+/// Pause enters Playing again and keeps the value the run opened with.
+fn open_step_count_run(step_counter: Res<PhysicsStepCounter>, mut step_run: ResMut<StepCountRun>) {
+    if step_run.start.is_none() {
+        step_run.start = Some(step_counter.executed());
+    }
+}
+
+/// Sample the counter, the clock and the fixed loop's overstep just before
+/// the clock advances. Runs every Playing frame, whether or not the clock
+/// then ticks, so a frame whose clock holds still while physics steps is
+/// inside the window and shows.
+fn sample_step_window(
+    step_counter: Res<PhysicsStepCounter>,
+    clock: Res<SimulationClock>,
+    fixed: Option<Res<Time<Fixed>>>,
+    mut window: ResMut<StepCountWindow>,
+) {
+    let overstep_s = fixed.map(|t| t.overstep().as_secs_f64()).unwrap_or(0.0);
+    let sample = StepWindowSample::new(step_counter.executed(), &*clock, overstep_s);
+    if window.start.is_none() {
+        window.start = Some(sample);
+    }
+    window.end = Some(sample);
+}
+
+/// Close the run's step-count accounting and build its report. `now` is
+/// read at the stop; it stands in for an edge only when the run never
+/// reached a clock advance (then the window is empty).
+pub(crate) fn close_step_count_run(
+    step_run: &mut StepCountRun,
+    window: &mut StepCountWindow,
+    now: StepWindowSample,
+    clock_at_stop: &SimulationClock,
+) -> StepCountReport {
+    let start = window.start.take().unwrap_or(now);
+    let end = window.end.take().unwrap_or(start);
+    let play_enter = step_run.start.take().unwrap_or(start.physics_step_counter);
+    StepCountReport::new(play_enter, &start, &end, clock_at_stop)
+}
+
+/// Count every executed physics step into [`PhysicsStepCounter`].
+///
+/// The system sits inside Avian's `PhysicsSchedule`, which Avian's
+/// `run_physics_schedule` runs once per fixed tick of `FixedPostUpdate`, and
+/// only when the physics clock has a non-zero delta (not paused) and the
+/// Kinematics domain allows the step. A frame that catches up several fixed
+/// ticks runs the schedule, and so this system, once per tick. The clock's
+/// `advance` loop is in a different schedule (`PreUpdate`) driven by a
+/// different accumulator, so nothing here reads or follows the clock.
+pub(crate) fn add_physics_step_counter(app: &mut App) {
+    app.init_resource::<PhysicsStepCounter>()
+        .add_systems(PhysicsSchedule, count_physics_step.in_set(PhysicsStepSystems::Last));
+}
+
+/// One run of `PhysicsSchedule` reached its last set: one step executed.
+fn count_physics_step(mut counter: ResMut<PhysicsStepCounter>) {
+    counter.record_step();
+}
+
+/// Stop Avian at the step it is on.
+///
+/// `pause()` alone lets one more step through. Avian's `run_physics_schedule`
+/// runs the schedule whenever the physics clock's delta is non-zero; a paused
+/// clock is not advanced, and it still carries the delta of its last step
+/// until the run after the pause clears it. Clearing the delta here makes the
+/// pause take effect before the next run, so a Pause, a Stop, the end of a
+/// stepped run and a capture's hold all leave the world at the step they
+/// were asked at.
+pub fn hold_physics(physics: &mut Time<Physics>) {
+    physics.pause();
+    physics.advance_by(std::time::Duration::ZERO);
+}
+
 /// Core simulation plugin providing tick-based time compression
 #[derive(Default)]
 pub struct SimulationPlugin;
 
 impl Plugin for SimulationPlugin {
     fn build(&self, app: &mut App) {
+        add_physics_step_counter(app);
         app.init_resource::<SimulationClock>()
+            .init_resource::<StepCountRun>()
+            .init_resource::<StepCountWindow>()
             .init_resource::<SimulationState>()
             .init_resource::<SimValuesResource>()
             .init_resource::<ScriptSimWrites>()
@@ -72,6 +188,7 @@ impl Plugin for SimulationPlugin {
             .register_type::<SimulationState>()
             // Sync simulation state with play mode transitions
             .add_systems(OnEnter(PlayModeState::Playing), on_play_start)
+            .add_systems(OnEnter(PlayModeState::Playing), open_step_count_run)
             .add_systems(OnEnter(PlayModeState::Playing), register_battery_watchpoints)
             .add_systems(OnEnter(PlayModeState::Paused), on_play_pause)
             .add_systems(OnEnter(PlayModeState::Editing), on_play_stop)
@@ -81,6 +198,15 @@ impl Plugin for SimulationPlugin {
             // `stop` that waited for its slot would let the run go on for up to
             // three more frames.
             .add_systems(PreUpdate, (sync_sim_ipc, drain_sim_command_queues).chain())
+            // Sample the step-count window just before the clock advances
+            // (see `StepCountWindow` for why at this point).
+            .add_systems(
+                PreUpdate,
+                sample_step_window
+                    .run_if(in_state(PlayModeState::Playing))
+                    .after(drain_sim_command_queues)
+                    .before(advance_simulation_clock),
+            )
             // Advance simulation clock when playing
             .add_systems(
                 PreUpdate,
@@ -164,6 +290,10 @@ fn on_play_stop(
     ipc: Res<SimIpc>,
     mut output: Option<ResMut<crate::ui::slint_ui::OutputConsole>>,
     space_root: Option<Res<crate::space::SpaceRoot>>,
+    step_counter: Res<PhysicsStepCounter>,
+    mut step_run: ResMut<StepCountRun>,
+    mut step_window: ResMut<StepCountWindow>,
+    fixed_time: Option<Res<Time<Fixed>>>,
 ) {
     // Capture the run's outcome FIRST: everything below resets it. This is
     // the only moment the final values still exist, so a client waiting on
@@ -175,6 +305,31 @@ fn on_play_stop(
     let run_id = ledger.active_run_id();
     let mut exported_recording = None;
 
+    // Close the run's window on the physics step counter and compare it with
+    // the clock BEFORE the clock resets. The counter is only read here; it
+    // keeps counting across runs.
+    let now = StepWindowSample::new(
+        step_counter.executed(),
+        &*sim_clock,
+        fixed_time.map(|t| t.overstep().as_secs_f64()).unwrap_or(0.0),
+    );
+    let step_report = close_step_count_run(&mut *step_run, &mut *step_window, now, &*sim_clock);
+    info!(
+        "🔢 Physics steps executed: {} (clock drained {}, clock time implies {}, dropped {}; not counted: {} steps before the clock's first advance, {} clock ticks after the last physics frame)",
+        step_report.physics_steps_executed,
+        step_report.clock_tick_count,
+        step_report.clock_tick_count_implied_by_time,
+        step_report.dropped_steps,
+        step_report.physics_steps_before_clock_start,
+        step_report.clock_ticks_after_physics_end,
+    );
+    if let Some(path) = step_run.export_path.clone() {
+        match step_report.export_json(&path) {
+            Ok(()) => info!("💾 Step count exported to {}", path.display()),
+            Err(e) => warn!("Failed to export step count to {}: {}", path.display(), e),
+        }
+    }
+
     // Stop and auto-export recording BEFORE resetting clock (clock.reset() zeros tick_count)
     if recording.enabled {
         // Write final clock state into recording metadata before stopping
@@ -182,6 +337,7 @@ fn on_play_stop(
             rec.metadata.total_ticks = sim_clock.tick_count;
             rec.metadata.simulation_duration_s = sim_clock.simulation_time_s;
             rec.metadata.wall_duration_s = sim_clock.wall_time_s;
+            rec.metadata.step_count = Some(step_report.clone());
         }
         if let Some(rec) = recording.stop() {
             let ticks = rec.metadata.total_ticks;
@@ -226,6 +382,18 @@ fn on_play_stop(
                                 out.error(format!("Failed to export recording: {}", e));
                             }
                         }
+                    }
+                    // The same step-count report as a standalone file beside
+                    // the recording, named to match it, for a capture
+                    // manifest to cite without parsing the recording.
+                    let stepcount_path = recordings_dir.join(format!(
+                        "stepcount_{}{}_pid{}.json",
+                        timestamp,
+                        run_tag,
+                        SimIpc::pid()
+                    ));
+                    if let Err(e) = step_report.export_json(&stepcount_path) {
+                        warn!("Failed to export step count: {}", e);
                     }
                     // Print summary to output panel
                     let summary = rec.summary();
@@ -591,4 +759,276 @@ fn write_telemetry_log(
         warn!("Failed to write telemetry log: {}", e);
     }
     state.last_write = std::time::Instant::now();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use avian3d::prelude::{Physics, PhysicsPlugins, PhysicsTime};
+    use std::time::Duration;
+
+    /// Real Avian on a manual clock: every `update` advances time by `frame`.
+    fn physics_app(frame: Duration) -> App {
+        let mut app = App::new();
+        bevy::tasks::IoTaskPool::get_or_init(Default::default);
+        bevy::tasks::AsyncComputeTaskPool::get_or_init(Default::default);
+        bevy::tasks::ComputeTaskPool::get_or_init(Default::default);
+        app.add_plugins((
+            bevy::time::TimePlugin,
+            bevy::transform::TransformPlugin,
+            bevy::asset::AssetPlugin::default(),
+            bevy::diagnostic::DiagnosticsPlugin,
+        ));
+        app.init_resource::<avian3d::spatial_query::SpatialQueryDiagnostics>();
+        app.init_resource::<avian3d::collider_tree::ColliderTreeDiagnostics>();
+        app.init_resource::<avian3d::collision::CollisionDiagnostics>();
+        app.init_resource::<avian3d::dynamics::solver::SolverDiagnostics>();
+        app.init_asset::<Mesh>();
+        app.insert_resource(Time::<Fixed>::from_hz(60.0));
+        app.insert_resource(bevy::time::TimeUpdateStrategy::ManualDuration(frame));
+        app.add_plugins(PhysicsPlugins::default());
+        add_physics_step_counter(&mut app);
+        app
+    }
+
+    fn executed(app: &App) -> u64 {
+        app.world().resource::<PhysicsStepCounter>().executed()
+    }
+
+    /// A frame that owes two fixed ticks runs the physics schedule twice, and
+    /// the counter counts both; a held physics clock steps nothing and
+    /// counts nothing, and unpausing picks up from where it stopped.
+    #[test]
+    fn counts_every_step_of_a_catch_up_frame_and_none_while_paused() {
+        let step = Time::<Fixed>::from_hz(60.0).timestep();
+        let mut app = physics_app(step * 2);
+        // Warm-up: the first frames settle the clocks.
+        app.update();
+        app.update();
+
+        let before = executed(&app);
+        for _ in 0..5 {
+            app.update();
+        }
+        assert_eq!(executed(&app) - before, 10, "two steps a frame for five frames");
+
+        hold_physics(&mut app.world_mut().resource_mut::<Time<Physics>>());
+        let paused_at = executed(&app);
+        for _ in 0..5 {
+            app.update();
+        }
+        assert_eq!(executed(&app), paused_at, "a held physics clock executes no step");
+
+        app.world_mut().resource_mut::<Time<Physics>>().unpause();
+        for _ in 0..3 {
+            app.update();
+        }
+        assert_eq!(executed(&app), paused_at + 6, "the counter resumes from its value, never reset");
+    }
+
+    /// Why the engine holds physics with `hold_physics`: Avian's bare
+    /// `pause()` lets exactly one more step through, and the hold lets none.
+    #[test]
+    fn a_bare_pause_lets_one_more_step_through_and_a_hold_does_not() {
+        let step = Time::<Fixed>::from_hz(60.0).timestep();
+        let mut app = physics_app(step);
+        app.update();
+        app.update();
+        for _ in 0..5 {
+            app.update();
+        }
+
+        app.world_mut().resource_mut::<Time<Physics>>().pause();
+        let paused_at = executed(&app);
+        for _ in 0..5 {
+            app.update();
+        }
+        assert_eq!(executed(&app), paused_at + 1, "Avian steps once more after a bare pause");
+
+        app.world_mut().resource_mut::<Time<Physics>>().unpause();
+        for _ in 0..5 {
+            app.update();
+        }
+        hold_physics(&mut app.world_mut().resource_mut::<Time<Physics>>());
+        let held_at = executed(&app);
+        for _ in 0..5 {
+            app.update();
+        }
+        assert_eq!(executed(&app), held_at, "a held physics clock executes no step");
+    }
+
+    /// The counter does not follow the simulation clock: compressing and
+    /// capping the clock changes its tick count, not the steps physics ran.
+    #[test]
+    fn counter_disagrees_with_a_saturated_clock() {
+        let step = Time::<Fixed>::from_hz(60.0).timestep();
+        let mut app = physics_app(step);
+        app.update();
+        app.update();
+
+        let mut clock = SimulationClock::new(8.0);
+        clock.max_ticks_per_frame = 2;
+        let start = StepWindowSample::new(executed(&app), &clock, 0.0);
+        for _ in 0..30 {
+            app.update();
+            clock.advance(step.as_secs_f64());
+        }
+        let end = StepWindowSample::new(executed(&app), &clock, 0.0);
+        let report = StepCountReport::new(start.physics_step_counter, &start, &end, &clock);
+        assert_eq!(report.physics_steps_executed, 30);
+        assert_eq!(report.clock_tick_count, 60);
+        assert_eq!(report.clock_tick_count_implied_by_time, 240);
+        assert_eq!(report.dropped_steps, 210);
+    }
+
+    /// Reports from the test's stops, in order.
+    #[derive(Resource, Default)]
+    struct StopReports(Vec<StepCountReport>);
+
+    /// What play mode does to physics on entering Play.
+    fn unpause_physics(mut physics: ResMut<Time<Physics>>) {
+        physics.unpause();
+    }
+
+    /// What `handle_stop_play` and `on_play_stop` do to physics, the window
+    /// and the clock on the stop.
+    fn stop_run(
+        mut physics: ResMut<Time<Physics>>,
+        counter: Res<PhysicsStepCounter>,
+        fixed: Res<Time<Fixed>>,
+        mut clock: ResMut<SimulationClock>,
+        mut step_run: ResMut<StepCountRun>,
+        mut window: ResMut<StepCountWindow>,
+        mut reports: ResMut<StopReports>,
+    ) {
+        hold_physics(&mut physics);
+        let now = StepWindowSample::new(counter.executed(), &*clock, fixed.overstep().as_secs_f64());
+        reports.0.push(close_step_count_run(&mut *step_run, &mut *window, now, &*clock));
+        clock.reset();
+    }
+
+    /// Real Avian and the real play-state schedules, with this plugin's
+    /// window systems (`open_step_count_run`, `sample_step_window`,
+    /// `advance_simulation_clock`, `close_step_count_run`) in their
+    /// production places. Physics is paused in Edit, as play mode leaves it.
+    fn play_app(frame: Duration) -> App {
+        let mut app = physics_app(frame);
+        app.add_plugins(bevy::state::app::StatesPlugin);
+        app.init_state::<PlayModeState>();
+        app.init_resource::<SimulationClock>()
+            .init_resource::<SimulationState>()
+            .init_resource::<StepCountRun>()
+            .init_resource::<StepCountWindow>()
+            .init_resource::<StopReports>();
+        app.add_systems(OnEnter(PlayModeState::Playing), (unpause_physics, open_step_count_run));
+        app.add_systems(OnEnter(PlayModeState::Editing), stop_run);
+        app.add_systems(
+            PreUpdate,
+            (sample_step_window, advance_simulation_clock)
+                .chain()
+                .run_if(in_state(PlayModeState::Playing)),
+        );
+        // Warm-up in Edit: the first frames settle the clocks.
+        app.update();
+        app.update();
+        hold_physics(&mut app.world_mut().resource_mut::<Time<Physics>>());
+        app.world_mut().resource_mut::<StopReports>().0.clear();
+        app
+    }
+
+    fn set_state(app: &mut App, state: PlayModeState) {
+        app.world_mut().resource_mut::<NextState<PlayModeState>>().set(state);
+    }
+
+    /// Enter Play, run `frames` frames, stop; return the stop's report.
+    fn play_for(app: &mut App, frames: u32) -> StepCountReport {
+        let counter_before = executed(app);
+        set_state(app, PlayModeState::Playing);
+        app.update();
+        for _ in 0..frames {
+            app.update();
+        }
+        set_state(app, PlayModeState::Editing);
+        app.update();
+        let report = app.world_mut().resource_mut::<StopReports>().0.pop().expect("the stop wrote a report");
+        assert_eq!(
+            report.physics_steps_before_clock_start + report.physics_steps_executed,
+            executed(app) - counter_before,
+            "every step of the run is either before the window or in it",
+        );
+        report
+    }
+
+    /// One fixed step per frame at scale 1: the frame that enters Play steps
+    /// physics before the clock first advances, and the frame that leaves
+    /// Play advances the clock after physics last stepped. Both are reported
+    /// on their own and neither is in the window, so the window drops
+    /// exactly nothing. Opening the window at `OnEnter(Playing)` again
+    /// counts the first and makes `dropped_steps` -1; closing it after the
+    /// last advance counts the second and makes it +1.
+    #[test]
+    fn window_opens_at_the_first_clock_advance_and_closes_before_the_last() {
+        let step = Time::<Fixed>::from_hz(60.0).timestep();
+        let mut app = play_app(step);
+        let report = play_for(&mut app, 600);
+        assert_eq!(report.physics_steps_before_clock_start, 1);
+        assert_eq!(report.physics_steps_executed, 600);
+        assert_eq!(report.clock_ticks_after_physics_end, 1);
+        assert_eq!(report.clock_tick_count_implied_by_time, 600);
+        assert_eq!(report.dropped_steps, 0);
+        assert_eq!(report.fixed_overstep_at_start_s, report.fixed_overstep_at_end_s);
+    }
+
+    /// A pause in the middle of a run keeps the window's start, and the pair
+    /// of edge frames it adds (the clock advance of the frame that pauses,
+    /// the physics step of the frame that resumes) cancel at one step per
+    /// frame.
+    #[test]
+    fn a_resume_keeps_the_runs_window() {
+        let step = Time::<Fixed>::from_hz(60.0).timestep();
+        let mut app = play_app(step);
+        let counter_before = executed(&app);
+        set_state(&mut app, PlayModeState::Playing);
+        app.update();
+        for _ in 0..100 {
+            app.update();
+        }
+        let start = app.world().resource::<StepCountWindow>().start.expect("the window opened");
+        set_state(&mut app, PlayModeState::Paused);
+        hold_physics(&mut app.world_mut().resource_mut::<Time<Physics>>());
+        for _ in 0..10 {
+            app.update();
+        }
+        set_state(&mut app, PlayModeState::Playing);
+        for _ in 0..100 {
+            app.update();
+        }
+        assert_eq!(app.world().resource::<StepCountWindow>().start, Some(start), "a resume keeps the start");
+        set_state(&mut app, PlayModeState::Editing);
+        app.update();
+        let report = app.world_mut().resource_mut::<StopReports>().0.pop().expect("the stop wrote a report");
+        assert_eq!(report.physics_step_counter_at_start, start.physics_step_counter);
+        assert_eq!(report.physics_steps_before_clock_start, 1);
+        assert_eq!(report.physics_step_counter_at_start, counter_before + 1);
+        assert_eq!(report.dropped_steps, 0);
+    }
+
+    /// Frames of 4/3 of a step: the fixed loop steps one or two times a
+    /// frame and carries a remainder, so the window's edges fall mid-step.
+    /// The exported oversteps account for `dropped_steps` exactly: it is
+    /// the rounded difference between them, and zero only when they are
+    /// within half a step of each other.
+    #[test]
+    fn oversteps_account_for_the_phase_at_the_windows_edges() {
+        let step = Time::<Fixed>::from_hz(60.0).timestep();
+        let mut app = play_app(step * 4 / 3);
+        for frames in 1..=9 {
+            let report = play_for(&mut app, frames);
+            let phase = (report.fixed_overstep_at_end_s - report.fixed_overstep_at_start_s) / report.fixed_timestep_s;
+            assert_eq!(report.dropped_steps, phase.round() as i64, "{frames} frames: {report:?}");
+            for _ in 0..3 {
+                app.update();
+            }
+        }
+    }
 }

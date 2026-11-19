@@ -13,11 +13,20 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import { pathToFileURL } from 'node:url';
 
-export async function loadWorker() {
+/// `patch`: `[[file, from, to], ...]` applied to the copy only (never the source tree), for a test that must take one
+/// layer away to show the next one holds on its own (an agent's session sent straight to a handler, the gate removed).
+/// Each `from` must appear exactly once, so a patch that no longer matches fails loudly instead of testing nothing.
+export async function loadWorker({ patch = [] } = {}) {
   const src = path.resolve(import.meta.dirname, '..', '..', 'src');
   const tmp = fs.mkdtempSync(path.join(path.resolve(src, '..'), '.test-worker-'));
   process.on('exit', () => fs.rmSync(tmp, { recursive: true, force: true }));
   fs.cpSync(src, tmp, { recursive: true });
+  for (const [file, from, to] of patch) {
+    const p = path.join(tmp, file);
+    const text = fs.readFileSync(p, 'utf8');
+    if (text.split(from).length !== 2) throw new Error(`loadWorker patch: ${file} does not hold exactly one ${JSON.stringify(from.slice(0, 60))}`);
+    fs.writeFileSync(p, text.replace(from, () => to));
+  }
   fs.writeFileSync(path.join(tmp, 'package.json'), '{"type":"module"}');
   // `cloudflare:email` exists only inside the Workers runtime. A stand-in with
   // the same shape lets a test hand the Worker an `env.EMAIL` and read back the

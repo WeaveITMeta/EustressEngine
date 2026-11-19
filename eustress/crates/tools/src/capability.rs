@@ -64,15 +64,26 @@ impl Capability {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Permissions {
     allowed: BTreeSet<Capability>,
+    /// Network tools allowed by name without the whole Network class (see
+    /// [`Permissions::allow_network_tool`]).
+    network_tools: BTreeSet<String>,
     /// Recorded on denial so the audit trail names who was refused.
     pub principal: Option<String>,
 }
+
+/// Network tools any caller may be allowed by name: each reaches only the
+/// Eustress API (`eustress_common::api_base`), carries no credential, and
+/// sends only what the caller wrote. `judge_verdict` posts a listing and the
+/// caller's own judge answer to the stateless judge emulator
+/// (`POST /api/moderation/emulate`), so an agent can check a Space is
+/// compliant before it publishes.
+pub const FIRST_PARTY_NETWORK_TOOLS: &[&str] = &["judge_verdict"];
 
 impl Permissions {
     /// Observation only. The right level for an untrusted or unauthenticated
     /// peer.
     pub fn read_only() -> Self {
-        Self { allowed: [Capability::Read].into(), principal: None }
+        Self { allowed: [Capability::Read].into(), network_tools: BTreeSet::new(), principal: None }
     }
 
     /// Read and Write, but not Execute, Destructive, or Network. The default
@@ -81,6 +92,7 @@ impl Permissions {
     pub fn standard() -> Self {
         Self {
             allowed: [Capability::Read, Capability::Write].into(),
+            network_tools: BTreeSet::new(),
             principal: None,
         }
     }
@@ -98,6 +110,7 @@ impl Permissions {
                 Capability::Network,
             ]
             .into(),
+            network_tools: BTreeSet::new(),
             principal: None,
         }
     }
@@ -122,6 +135,21 @@ impl Permissions {
 
     pub fn allows(&self, capability: Capability) -> bool {
         self.allowed.contains(&capability)
+    }
+
+    /// Allow one Network tool by name without granting the Network class.
+    /// Only a name in [`FIRST_PARTY_NETWORK_TOOLS`] is accepted; any other is
+    /// ignored, so this can never open `http_request` or a moderator tool.
+    pub fn allow_network_tool(mut self, tool_name: &str) -> Self {
+        if FIRST_PARTY_NETWORK_TOOLS.contains(&tool_name) {
+            self.network_tools.insert(tool_name.to_string());
+        }
+        self
+    }
+
+    /// Whether this Network tool was allowed by name.
+    pub fn allows_network_tool(&self, tool_name: &str) -> bool {
+        self.network_tools.contains(tool_name)
     }
 
     pub fn granted(&self) -> impl Iterator<Item = &Capability> {
@@ -195,6 +223,10 @@ pub fn capability_of(tool_name: &str) -> Option<Capability> {
         // Moderation acts on api.eustress.dev as an admin; the reads are Network
         // too, since a case record leaves the machine to be read.
         "moderation_queue" | "moderation_case" | "moderation_act" | "moderation_backfill" => Network,
+        // The listing review's verdict rules run on api.eustress.dev: the listing and
+        // the agent's judge answer leave the machine, same class as `http_request`.
+        // (The other two judge tools are offline reads, in the Read bucket below.)
+        "judge_verdict" => Network,
 
         // --- Write: creates or modifies inside the Space ----------------
         "create_entity"
@@ -252,6 +284,8 @@ pub fn capability_of(tool_name: &str) -> Option<Capability> {
         // Website service authoring writes TOML inside the Space.
         | "website_setup"
         | "website_add_reference"
+        | "website_theme_set"
+        | "website_link_add"
         | "demote_entity"
         // MCP-server bridge tools (mcp-server/src/shared_registry.rs) that
         // change state. Selection and the active tool are the USER's live
@@ -317,7 +351,8 @@ pub fn capability_of(tool_name: &str) -> Option<Capability> {
         "open_space" => Destructive,
 
         // Removing a Reference deletes an instance folder.
-        "website_remove_reference" => Destructive,
+        // Removing a PageLink deletes an instance folder the same way.
+        "website_remove_reference" | "website_link_remove" => Destructive,
 
         // --- Read: observation only -------------------------------------
         "query_entities"
@@ -386,8 +421,16 @@ pub fn capability_of(tool_name: &str) -> Option<Capability> {
         | "inspect_scene"
         | "website_status"
         | "website_manifest_url"
+        | "website_theme_get"
+        | "website_links_list"
+        // The Guardian Code guide and the deterministic listing checks: embedded
+        // text and the saved listing, read-only, offline.
+        | "judge_guide"
+        | "judge_check_listing"
         | "sim_bindings"
         | "oplog_tail"
+        // Prefetch, simulation LOD and the frame timeline: a bridge read.
+        | "inspect_world_sim"
         | "get_editor_state"
         | "read_output"
         | "get_conversation"
@@ -734,6 +777,10 @@ fn decide(
 ) -> Result<Capability, Denial> {
     match class {
         Some(cap) if permissions.allows(cap) => Ok(cap),
+        // A first-party Network tool allowed by name (allow_network_tool): only
+        // ever a Network tool, so a name allowance never reaches Write,
+        // Destructive or Execute.
+        Some(Capability::Network) if permissions.allows_network_tool(tool_name) => Ok(Capability::Network),
         Some(cap) => Err(Denial {
             tool_name: tool_name.to_string(),
             required: Some(cap),
@@ -794,6 +841,24 @@ mod tests {
         assert_eq!(authorize("delete_entity", &p), Ok(Capability::Destructive));
         assert_eq!(authorize("http_request", &p), Ok(Capability::Network));
         assert_eq!(authorize("read_file", &p), Ok(Capability::Read));
+    }
+
+    #[test]
+    fn a_first_party_network_tool_allowed_by_name_opens_only_itself() {
+        let p = Permissions::standard().allow_network_tool("judge_verdict");
+        assert_eq!(authorize("judge_verdict", &p), Ok(Capability::Network));
+        // The rest of the Network class stays closed.
+        assert!(authorize("http_request", &p).is_err());
+        assert!(authorize("moderation_queue", &p).is_err());
+        assert!(!p.allows(Capability::Network));
+        // Only a listed first-party tool can be allowed by name.
+        let q = Permissions::standard().allow_network_tool("http_request");
+        assert!(authorize("http_request", &q).is_err());
+        // A name allowance never reaches another class.
+        let r = Permissions::read_only().allow_network_tool("judge_verdict");
+        assert!(authorize("write_file", &r).is_err());
+        // Without the allowance, standard permissions refuse it.
+        assert!(authorize("judge_verdict", &Permissions::standard()).is_err());
     }
 
     #[test]

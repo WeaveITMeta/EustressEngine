@@ -1,0 +1,48 @@
+[asset]
+mesh = "parts/ball.glb"
+scene = "Scene0"
+
+[attributes]
+surface = "metal"
+
+[metadata]
+archivable = true
+class_name = "Part"
+created = "2026-11-16T00:00:00Z"
+last_modified = "2026-11-16T00:00:00Z"
+name = "MetalSphere"
+unit = "m"
+uuid = "56e6fa1dd3ef933750ce56f1bf57e396"
+
+[properties]
+anchored = true
+can_collide = true
+cast_shadow = true
+color = [
+    230,
+    230,
+    230,
+]
+destructible = false
+locked = false
+material = "H_Metal"
+reflectance = 0.0
+transparency = 0.0
+
+[transform]
+position = [
+    -1.207691,
+    0.4,
+    -1.386475,
+]
+rotation = [
+    0.0,
+    0.0,
+    0.0,
+    1.0,
+]
+scale = [
+    0.8,
+    0.8,
+    0.8,
+]

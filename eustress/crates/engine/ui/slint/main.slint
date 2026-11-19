@@ -72,6 +72,9 @@ import { SettingsDialog, ThemeEntry } from "settings.slint";
 // callbacks (engine/src/preferences.rs).
 export { Preferences } from "settings.slint";
 import { NetworkPanel } from "network_panel.slint";
+// Hosting now (state, port, players, join link) and Add Player / Copy Link:
+// Rust pushes and answers them (engine/src/preferences.rs).
+export { HostingUi } from "network_panel.slint";
 import { FindDialog, SearchResultData } from "find_dialog.slint";
 import { ServiceProperties } from "service_properties.slint";
 // Modal dialogs
@@ -1170,6 +1173,8 @@ export component StudioWindow inherits Window {
     in-out property <bool> notifications-enabled: true;
     // Privacy — anonymous usage counting toggle (Settings ▸ Notifications).
     in-out property <bool> usage-telemetry-enabled: true;
+    // Automatic updates toggle (Settings ▸ Notifications ▸ Updates).
+    in-out property <bool> automatic-updates-enabled: true;
     in-out property <bool> notifications-show-dismiss: true;
     in-out property <bool> notifications-mute-file: false;
     in-out property <bool> notifications-mute-script: false;
@@ -2047,7 +2052,7 @@ export component StudioWindow inherits Window {
             on-start-server => { root.start-server(); }
             on-stop-server => { root.stop-server(); }
             on-show-forge-connect => { root.show-forge-connect-dialog = true; }
-            on-show-network-panel => { root.unbuilt-feature("network-panel"); }
+            on-show-network-panel => { root.show-network-panel = true; }
             on-unbuilt-feature(id) => { root.unbuilt-feature(id); }
             on-find => {
                 root.show-find-dialog = true;
@@ -2673,21 +2678,21 @@ export component StudioWindow inherits Window {
                         // the wheel, Shift+wheel, a touchpad, or the thin bar
                         // along the strip's bottom edge. `tab-scroll.viewport-x`
                         // runs from 0 (the start) down to `scroll-min`.
-                        property <length> scroll-min: min(0px, tab-scroll.width - tab-scroll.viewport-width);
+                        property <length> scroll-min: min(0px, tab-scroll.width - tab-scroll.content-width);
                         // The drag pointer in the tab run's own (content)
                         // space. `root.tab-drag-x` is strip space; the tabs
                         // and `tabs-filler` are laid out in content space.
-                        property <length> drag-content-x: root.tab-drag-x - tab-wheel.x - tab-scroll.viewport-x;
+                        property <length> drag-content-x: root.tab-drag-x - tab-wheel.x - tab-scroll.content-x;
                         // Near either end of the visible run while dragging,
                         // the run scrolls, so an off-screen slot can be reached.
                         property <length> edge-zone: 24px;
 
                         // Scroll the least needed to show [left, right] (content space).
                         function reveal(left: length, right: length) {
-                            if left + tab-scroll.viewport-x < 0px {
-                                tab-scroll.viewport-x = min(0px, max(tab-strip.scroll-min, 0px - left));
-                            } else if right + tab-scroll.viewport-x > tab-scroll.width {
-                                tab-scroll.viewport-x = min(0px, max(tab-strip.scroll-min, tab-scroll.width - right));
+                            if left + tab-scroll.content-x < 0px {
+                                tab-scroll.content-x = min(0px, max(tab-strip.scroll-min, 0px - left));
+                            } else if right + tab-scroll.content-x > tab-scroll.width {
+                                tab-scroll.content-x = min(0px, max(tab-strip.scroll-min, tab-scroll.width - right));
                             }
                         }
                         // Show the active tab, however it became active: a
@@ -2710,8 +2715,8 @@ export component StudioWindow inherits Window {
 
                         // A tab closed or the window widened: no blank gap at the end.
                         changed scroll-min => {
-                            if tab-scroll.viewport-x < self.scroll-min {
-                                tab-scroll.viewport-x = self.scroll-min;
+                            if tab-scroll.content-x < self.scroll-min {
+                                tab-scroll.content-x = self.scroll-min;
                             }
                         }
 
@@ -2722,9 +2727,9 @@ export component StudioWindow inherits Window {
                                     || root.tab-drag-x > tab-wheel.x + tab-wheel.width - tab-strip.edge-zone);
                             triggered => {
                                 if root.tab-drag-x < tab-wheel.x + tab-strip.edge-zone {
-                                    tab-scroll.viewport-x = min(0px, tab-scroll.viewport-x + 12px);
+                                    tab-scroll.content-x = min(0px, tab-scroll.content-x + 12px);
                                 } else {
-                                    tab-scroll.viewport-x = max(tab-strip.scroll-min, tab-scroll.viewport-x - 12px);
+                                    tab-scroll.content-x = max(tab-strip.scroll-min, tab-scroll.content-x - 12px);
                                 }
                             }
                         }
@@ -2803,7 +2808,7 @@ export component StudioWindow inherits Window {
                                 if tab-strip.scroll-min >= 0px || event.delta-y == 0px {
                                     return reject;
                                 }
-                                tab-scroll.viewport-x = min(0px, max(tab-strip.scroll-min, tab-scroll.viewport-x + event.delta-y));
+                                tab-scroll.content-x = min(0px, max(tab-strip.scroll-min, tab-scroll.content-x + event.delta-y));
                                 return accept;
                             }
 
@@ -2811,11 +2816,11 @@ export component StudioWindow inherits Window {
                                 width: 100%;
                                 height: 100%;
                                 interactive: false;
-                                viewport-width: max(self.width, tab-run.preferred-width);
-                                viewport-height: self.height;
+                                content-width: max(self.width, tab-run.preferred-width);
+                                content-height: self.height;
 
                                 tab-run := HorizontalLayout {
-                                    width: tab-scroll.viewport-width;
+                                    width: tab-scroll.content-width;
                                     height: tab-scroll.height;
                                     spacing: 0px;
 
@@ -2909,7 +2914,7 @@ export component StudioWindow inherits Window {
                                                     // tab's own drag-slot binding decides.
                                                     if px < space1-tab.x + space1-tab.width {
                                                         root.tab-drag-target = 0;
-                                                    } else if px - tab-wheel.x - tab-scroll.viewport-x >= tabs-filler.x {
+                                                    } else if px - tab-wheel.x - tab-scroll.content-x >= tabs-filler.x {
                                                         root.tab-drag-target = root.center-tabs.length;
                                                     }
                                                 }
@@ -3097,11 +3102,11 @@ export component StudioWindow inherits Window {
                         y: parent.height - self.height;
                         width: tab-wheel.width;
                         height: 4px;
-                        property <length> thumb-width: max(28px, self.width * tab-scroll.width / tab-scroll.viewport-width);
+                        property <length> thumb-width: max(28px, self.width * tab-scroll.width / tab-scroll.content-width);
                         property <length> travel: self.width - self.thumb-width;
 
                         tab-thumb := Rectangle {
-                            x: parent.travel * (tab-scroll.viewport-x / tab-strip.scroll-min);
+                            x: parent.travel * (tab-scroll.content-x / tab-strip.scroll-min);
                             width: parent.thumb-width;
                             height: 100%;
                             border-radius: 2px;
@@ -3111,7 +3116,7 @@ export component StudioWindow inherits Window {
                                 mouse-cursor: pointer;
                                 moved => {
                                     if self.pressed && tab-scrollbar.travel > 0px {
-                                        tab-scroll.viewport-x = min(0px, max(tab-strip.scroll-min,
+                                        tab-scroll.content-x = min(0px, max(tab-strip.scroll-min,
                                             tab-strip.scroll-min * ((tab-thumb.x + self.mouse-x - self.pressed-x) / tab-scrollbar.travel)));
                                     }
                                 }
@@ -3231,7 +3236,7 @@ export component StudioWindow inherits Window {
                                 y: 4px;
                                 width: parent.width - 8px;
                                 height: parent.height - 8px;
-                                viewport-height: root.center-tabs.length * 28px;
+                                content-height: root.center-tabs.length * 28px;
 
                                 for tab[i] in root.center-tabs: Rectangle {
                                     y: i * 28px;
@@ -5139,6 +5144,7 @@ export component StudioWindow inherits Window {
         on-soul-key-remove-cancel => { root.soul-key-remove-cancel(); }
         notifications-enabled <=> root.notifications-enabled;
         usage-telemetry-enabled <=> root.usage-telemetry-enabled;
+        automatic-updates-enabled <=> root.automatic-updates-enabled;
         notifications-show-dismiss <=> root.notifications-show-dismiss;
         notifications-mute-file <=> root.notifications-mute-file;
         notifications-mute-script <=> root.notifications-mute-script;
@@ -5278,6 +5284,20 @@ export component StudioWindow inherits Window {
         on-close => { root.show-forge-connect-dialog = false; }
     }
     
+    // Network panel: Host, Players, Share, Monitor (network_panel.slint)
+    if root.show-network-panel: NetworkPanel {
+        on-start-server => { root.start-server(); }
+        on-stop-server => { root.stop-server(); }
+        on-show-stress-test => { root.show-network-panel = false; root.show-stress-test-dialog = true; }
+        on-show-output => { root.show-output = true; }
+        on-show-hosting-settings => {
+            root.show-network-panel = false;
+            root.settings-active-tab = 6;
+            root.show-settings-dialog = true;
+        }
+        on-close => { root.show-network-panel = false; }
+    }
+
     // Stress test dialog
     if root.show-stress-test-dialog: StressTestDialog {
         running: root.stress-running;

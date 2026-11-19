@@ -1,0 +1,1582 @@
+{
+ "about": "Exact input and output pairs of the fleet placement policy. Written from src/fleet_policy.mjs and checked against the assertions of the Rust tests named in rust_test (eustress/crates/forge/src/fleet.rs). Field names are the serde names of fleet.rs; config is FleetConfig::default() unless a case overrides it.",
+ "cases": [
+  {
+   "name": "an empty 4-thread machine",
+   "rust_test": "four_threads_hold_exactly_four_occupied_60_hz_sessions",
+   "fn": "capacity",
+   "machine": {
+    "id": "m",
+    "threads": 4,
+    "memory_mb": 16384,
+    "region": "us-east-1",
+    "draining": false,
+    "sessions": []
+   },
+   "expect": {
+    "committed_cap_millis": 3200,
+    "committed_millis": 0,
+    "activation_cap_millis": 3600,
+    "activation_millis": 0,
+    "memory_cap_mb": 13107,
+    "memory_used_mb": 0,
+    "sessions": 0,
+    "occupied_room": 4,
+    "warm_room": 4
+   }
+  },
+  {
+   "name": "a 4-thread machine with 4 occupied sessions",
+   "rust_test": "four_threads_hold_exactly_four_occupied_60_hz_sessions",
+   "fn": "capacity",
+   "machine": {
+    "id": "m",
+    "threads": 4,
+    "memory_mb": 16384,
+    "region": "us-east-1",
+    "draining": false,
+    "sessions": [
+     {
+      "id": "s0",
+      "listing_id": "pong",
+      "phase": "hosting",
+      "players": 2,
+      "reserved": 0,
+      "max_players": 2,
+      "started_at": 0,
+      "empty_since": null
+     },
+     {
+      "id": "s1",
+      "listing_id": "pong",
+      "phase": "hosting",
+      "players": 2,
+      "reserved": 0,
+      "max_players": 2,
+      "started_at": 0,
+      "empty_since": null
+     },
+     {
+      "id": "s2",
+      "listing_id": "pong",
+      "phase": "hosting",
+      "players": 2,
+      "reserved": 0,
+      "max_players": 2,
+      "started_at": 0,
+      "empty_since": null
+     },
+     {
+      "id": "s3",
+      "listing_id": "pong",
+      "phase": "hosting",
+      "players": 2,
+      "reserved": 0,
+      "max_players": 2,
+      "started_at": 0,
+      "empty_since": null
+     }
+    ]
+   },
+   "expect": {
+    "committed_cap_millis": 3200,
+    "committed_millis": 3200,
+    "activation_cap_millis": 3600,
+    "activation_millis": 3200,
+    "memory_cap_mb": 13107,
+    "memory_used_mb": 240,
+    "sessions": 4,
+    "occupied_room": 0,
+    "warm_room": 0
+   }
+  },
+  {
+   "name": "the fifth occupied session on 4 threads",
+   "rust_test": "four_threads_hold_exactly_four_occupied_60_hz_sessions",
+   "fn": "can_place",
+   "kind": "occupied",
+   "machine": {
+    "id": "m",
+    "threads": 4,
+    "memory_mb": 16384,
+    "region": "us-east-1",
+    "draining": false,
+    "sessions": [
+     {
+      "id": "s0",
+      "listing_id": "pong",
+      "phase": "hosting",
+      "players": 2,
+      "reserved": 0,
+      "max_players": 2,
+      "started_at": 0,
+      "empty_since": null
+     },
+     {
+      "id": "s1",
+      "listing_id": "pong",
+      "phase": "hosting",
+      "players": 2,
+      "reserved": 0,
+      "max_players": 2,
+      "started_at": 0,
+      "empty_since": null
+     },
+     {
+      "id": "s2",
+      "listing_id": "pong",
+      "phase": "hosting",
+      "players": 2,
+      "reserved": 0,
+      "max_players": 2,
+      "started_at": 0,
+      "empty_since": null
+     },
+     {
+      "id": "s3",
+      "listing_id": "pong",
+      "phase": "hosting",
+      "players": 2,
+      "reserved": 0,
+      "max_players": 2,
+      "started_at": 0,
+      "empty_since": null
+     }
+    ]
+   },
+   "expect": false
+  },
+  {
+   "name": "a fifth warm server on 4 threads is past the 90% line (5 x 800 > 3600)",
+   "rust_test": "activating_every_warm_server_at_once_never_passes_the_threads",
+   "fn": "can_place",
+   "kind": "warm",
+   "machine": {
+    "id": "m",
+    "threads": 4,
+    "memory_mb": 16384,
+    "region": "us-east-1",
+    "draining": false,
+    "sessions": [
+     {
+      "id": "w0",
+      "listing_id": "l",
+      "phase": "hosting",
+      "players": 0,
+      "reserved": 0,
+      "max_players": 2,
+      "started_at": 0,
+      "empty_since": 0
+     },
+     {
+      "id": "w1",
+      "listing_id": "l",
+      "phase": "hosting",
+      "players": 0,
+      "reserved": 0,
+      "max_players": 2,
+      "started_at": 0,
+      "empty_since": 0
+     },
+     {
+      "id": "w2",
+      "listing_id": "l",
+      "phase": "hosting",
+      "players": 0,
+      "reserved": 0,
+      "max_players": 2,
+      "started_at": 0,
+      "empty_since": 0
+     },
+     {
+      "id": "w3",
+      "listing_id": "l",
+      "phase": "hosting",
+      "players": 0,
+      "reserved": 0,
+      "max_players": 2,
+      "started_at": 0,
+      "empty_since": 0
+     }
+    ]
+   },
+   "expect": false
+  },
+  {
+   "name": "a sixth warm server on 4 threads",
+   "rust_test": "activating_every_warm_server_at_once_never_passes_the_threads",
+   "fn": "can_place",
+   "kind": "warm",
+   "machine": {
+    "id": "m",
+    "threads": 4,
+    "memory_mb": 16384,
+    "region": "us-east-1",
+    "draining": false,
+    "sessions": [
+     {
+      "id": "w0",
+      "listing_id": "l",
+      "phase": "hosting",
+      "players": 0,
+      "reserved": 0,
+      "max_players": 2,
+      "started_at": 0,
+      "empty_since": 0
+     },
+     {
+      "id": "w1",
+      "listing_id": "l",
+      "phase": "hosting",
+      "players": 0,
+      "reserved": 0,
+      "max_players": 2,
+      "started_at": 0,
+      "empty_since": 0
+     },
+     {
+      "id": "w2",
+      "listing_id": "l",
+      "phase": "hosting",
+      "players": 0,
+      "reserved": 0,
+      "max_players": 2,
+      "started_at": 0,
+      "empty_since": 0
+     },
+     {
+      "id": "w3",
+      "listing_id": "l",
+      "phase": "hosting",
+      "players": 0,
+      "reserved": 0,
+      "max_players": 2,
+      "started_at": 0,
+      "empty_since": 0
+     },
+     {
+      "id": "w4",
+      "listing_id": "l",
+      "phase": "hosting",
+      "players": 0,
+      "reserved": 0,
+      "max_players": 2,
+      "started_at": 0,
+      "empty_since": 0
+     }
+    ]
+   },
+   "expect": false
+  },
+  {
+   "name": "a draining machine",
+   "rust_test": "capacity_agrees_with_placing_one_at_a_time",
+   "fn": "capacity",
+   "machine": {
+    "id": "d",
+    "threads": 8,
+    "memory_mb": 16384,
+    "region": "us-east-1",
+    "draining": true,
+    "sessions": []
+   },
+   "expect": {
+    "committed_cap_millis": 6400,
+    "committed_millis": 0,
+    "activation_cap_millis": 7200,
+    "activation_millis": 0,
+    "memory_cap_mb": 13107,
+    "memory_used_mb": 0,
+    "sessions": 0,
+    "occupied_room": 0,
+    "warm_room": 0
+   }
+  },
+  {
+   "name": "12 threads with one occupied session",
+   "rust_test": "capacity_agrees_with_placing_one_at_a_time",
+   "fn": "capacity",
+   "machine": {
+    "id": "m",
+    "threads": 12,
+    "memory_mb": 16384,
+    "region": "us-east-1",
+    "draining": false,
+    "sessions": [
+     {
+      "id": "seed",
+      "listing_id": "l",
+      "phase": "hosting",
+      "players": 1,
+      "reserved": 0,
+      "max_players": 2,
+      "started_at": 0,
+      "empty_since": null
+     }
+    ]
+   },
+   "expect": {
+    "committed_cap_millis": 9600,
+    "committed_millis": 800,
+    "activation_cap_millis": 10800,
+    "activation_millis": 800,
+    "memory_cap_mb": 13107,
+    "memory_used_mb": 60,
+    "sessions": 1,
+    "occupied_room": 11,
+    "warm_room": 12
+   }
+  },
+  {
+   "name": "the fuller machine",
+   "rust_test": "packing_prefers_the_fuller_machine_that_still_fits",
+   "fn": "choose_machine",
+   "kind": "occupied",
+   "machines": [
+    {
+     "id": "b",
+     "threads": 8,
+     "memory_mb": 16384,
+     "region": "us-east-1",
+     "draining": false,
+     "sessions": [
+      {
+       "id": "b0",
+       "listing_id": "l",
+       "phase": "hosting",
+       "players": 1,
+       "reserved": 0,
+       "max_players": 2,
+       "started_at": 0,
+       "empty_since": null
+      }
+     ]
+    },
+    {
+     "id": "a",
+     "threads": 8,
+     "memory_mb": 16384,
+     "region": "us-east-1",
+     "draining": false,
+     "sessions": [
+      {
+       "id": "a0",
+       "listing_id": "l",
+       "phase": "hosting",
+       "players": 1,
+       "reserved": 0,
+       "max_players": 2,
+       "started_at": 0,
+       "empty_since": null
+      },
+      {
+       "id": "a1",
+       "listing_id": "l",
+       "phase": "hosting",
+       "players": 1,
+       "reserved": 0,
+       "max_players": 2,
+       "started_at": 0,
+       "empty_since": null
+      },
+      {
+       "id": "a2",
+       "listing_id": "l",
+       "phase": "hosting",
+       "players": 1,
+       "reserved": 0,
+       "max_players": 2,
+       "started_at": 0,
+       "empty_since": null
+      }
+     ]
+    }
+   ],
+   "expect": 1
+  },
+  {
+   "name": "a tie goes to the lower id",
+   "rust_test": "packing_prefers_the_fuller_machine_that_still_fits",
+   "fn": "choose_machine",
+   "kind": "occupied",
+   "machines": [
+    {
+     "id": "z",
+     "threads": 8,
+     "memory_mb": 16384,
+     "region": "us-east-1",
+     "draining": false,
+     "sessions": []
+    },
+    {
+     "id": "y",
+     "threads": 8,
+     "memory_mb": 16384,
+     "region": "us-east-1",
+     "draining": false,
+     "sessions": []
+    }
+   ],
+   "expect": 1
+  },
+  {
+   "name": "no machine in the region",
+   "rust_test": "packing_prefers_the_fuller_machine_that_still_fits",
+   "fn": "choose_machine",
+   "kind": "occupied",
+   "region": "eu-west-1",
+   "machines": [
+    {
+     "id": "a",
+     "threads": 8,
+     "memory_mb": 16384,
+     "region": "us-east-1",
+     "draining": false,
+     "sessions": [
+      {
+       "id": "a0",
+       "listing_id": "l",
+       "phase": "hosting",
+       "players": 1,
+       "reserved": 0,
+       "max_players": 2,
+       "started_at": 0,
+       "empty_since": null
+      },
+      {
+       "id": "a1",
+       "listing_id": "l",
+       "phase": "hosting",
+       "players": 1,
+       "reserved": 0,
+       "max_players": 2,
+       "started_at": 0,
+       "empty_since": null
+      },
+      {
+       "id": "a2",
+       "listing_id": "l",
+       "phase": "hosting",
+       "players": 1,
+       "reserved": 0,
+       "max_players": 2,
+       "started_at": 0,
+       "empty_since": null
+      }
+     ]
+    },
+    {
+     "id": "w",
+     "threads": 8,
+     "memory_mb": 16384,
+     "region": "us-west-2",
+     "draining": false,
+     "sessions": []
+    }
+   ],
+   "expect": null
+  },
+  {
+   "name": "a start goes to the fuller machine",
+   "rust_test": "packing_prefers_the_fuller_machine_that_still_fits",
+   "fn": "plan",
+   "now": 10,
+   "state": {
+    "machines": [
+     {
+      "id": "b",
+      "threads": 8,
+      "memory_mb": 16384,
+      "region": "us-east-1",
+      "draining": false,
+      "sessions": [
+       {
+        "id": "b0",
+        "listing_id": "l",
+        "phase": "hosting",
+        "players": 1,
+        "reserved": 0,
+        "max_players": 2,
+        "started_at": 0,
+        "empty_since": null
+       }
+      ]
+     },
+     {
+      "id": "a",
+      "threads": 8,
+      "memory_mb": 16384,
+      "region": "us-east-1",
+      "draining": false,
+      "sessions": [
+       {
+        "id": "a0",
+        "listing_id": "l",
+        "phase": "hosting",
+        "players": 1,
+        "reserved": 0,
+        "max_players": 2,
+        "started_at": 0,
+        "empty_since": null
+       },
+       {
+        "id": "a1",
+        "listing_id": "l",
+        "phase": "hosting",
+        "players": 1,
+        "reserved": 0,
+        "max_players": 2,
+        "started_at": 0,
+        "empty_since": null
+       },
+       {
+        "id": "a2",
+        "listing_id": "l",
+        "phase": "hosting",
+        "players": 1,
+        "reserved": 0,
+        "max_players": 2,
+        "started_at": 0,
+        "empty_since": null
+       }
+      ]
+     }
+    ],
+    "last_machine_change_at": null
+   },
+   "demand": {
+    "pending": [
+     {
+      "request_id": "r1",
+      "listing_id": "new",
+      "max_players": 2,
+      "region": null,
+      "at": 10
+     }
+    ],
+    "recent": []
+   },
+   "expect": [
+    {
+     "action": "start_for_player",
+     "request_id": "r1",
+     "listing_id": "new",
+     "machine_id": "a",
+     "session_id": "planned-0",
+     "max_players": 2,
+     "retry_after_secs": 5
+    },
+    {
+     "action": "start_warm",
+     "listing_id": "new",
+     "machine_id": "a",
+     "session_id": "planned-1",
+     "max_players": 2
+    }
+   ]
+  },
+  {
+   "name": "W for 0 occupied, floors 5, desired 9",
+   "rust_test": "the_warm_pool_formula",
+   "fn": "warm_pool_size",
+   "occupied": 0,
+   "floor_total": 5,
+   "desired_total": 9,
+   "expect": 2
+  },
+  {
+   "name": "W for 4 occupied, floors 1, desired 9",
+   "rust_test": "the_warm_pool_formula",
+   "fn": "warm_pool_size",
+   "occupied": 4,
+   "floor_total": 1,
+   "desired_total": 9,
+   "expect": 1
+  },
+  {
+   "name": "W for 8 occupied, floors 9, desired 9",
+   "rust_test": "the_warm_pool_formula",
+   "fn": "warm_pool_size",
+   "occupied": 8,
+   "floor_total": 9,
+   "desired_total": 9,
+   "expect": 2
+  },
+  {
+   "name": "W for 40 occupied, floors 0, desired 30",
+   "rust_test": "the_warm_pool_formula",
+   "fn": "warm_pool_size",
+   "occupied": 40,
+   "floor_total": 0,
+   "desired_total": 30,
+   "expect": 10
+  },
+  {
+   "name": "W for 40 occupied, floors 0, desired 3",
+   "rust_test": "the_warm_pool_formula",
+   "fn": "warm_pool_size",
+   "occupied": 40,
+   "floor_total": 0,
+   "desired_total": 3,
+   "expect": 3
+  },
+  {
+   "name": "W for 40 occupied, floors 0, desired 0",
+   "rust_test": "the_warm_pool_formula",
+   "fn": "warm_pool_size",
+   "occupied": 40,
+   "floor_total": 0,
+   "desired_total": 0,
+   "expect": 0
+  },
+  {
+   "name": "W for 100 occupied, floors 100, desired 100",
+   "rust_test": "the_warm_pool_formula",
+   "fn": "warm_pool_size",
+   "occupied": 100,
+   "floor_total": 100,
+   "desired_total": 100,
+   "expect": 25
+  },
+  {
+   "name": "a click takes the busiest free seat",
+   "rust_test": "a_click_takes_a_seat_before_anything_starts",
+   "fn": "plan",
+   "now": 50,
+   "state": {
+    "machines": [
+     {
+      "id": "m",
+      "threads": 8,
+      "memory_mb": 16384,
+      "region": "us-east-1",
+      "draining": false,
+      "sessions": [
+       {
+        "id": "busy",
+        "listing_id": "pong",
+        "phase": "hosting",
+        "players": 3,
+        "reserved": 0,
+        "max_players": 4,
+        "started_at": 0,
+        "empty_since": null
+       },
+       {
+        "id": "quiet",
+        "listing_id": "pong",
+        "phase": "hosting",
+        "players": 1,
+        "reserved": 0,
+        "max_players": 4,
+        "started_at": 0,
+        "empty_since": null
+       },
+       {
+        "id": "full",
+        "listing_id": "pong",
+        "phase": "hosting",
+        "players": 4,
+        "reserved": 0,
+        "max_players": 4,
+        "started_at": 0,
+        "empty_since": null
+       },
+       {
+        "id": "spare",
+        "listing_id": "pong",
+        "phase": "hosting",
+        "players": 0,
+        "reserved": 0,
+        "max_players": 2,
+        "started_at": 0,
+        "empty_since": 0
+       }
+      ]
+     }
+    ],
+    "last_machine_change_at": null
+   },
+   "demand": {
+    "pending": [
+     {
+      "request_id": "r1",
+      "listing_id": "pong",
+      "max_players": 2,
+      "region": null,
+      "at": 50
+     }
+    ],
+    "recent": []
+   },
+   "expect": [
+    {
+     "action": "route",
+     "request_id": "r1",
+     "listing_id": "pong",
+     "machine_id": "m",
+     "session_id": "busy",
+     "warm": false
+    }
+   ]
+  },
+  {
+   "name": "two clicks share the warm server",
+   "rust_test": "a_click_takes_a_seat_before_anything_starts",
+   "fn": "plan",
+   "now": 50,
+   "state": {
+    "machines": [
+     {
+      "id": "m",
+      "threads": 8,
+      "memory_mb": 16384,
+      "region": "us-east-1",
+      "draining": false,
+      "sessions": [
+       {
+        "id": "full",
+        "listing_id": "pong",
+        "phase": "hosting",
+        "players": 4,
+        "reserved": 0,
+        "max_players": 4,
+        "started_at": 0,
+        "empty_since": null
+       },
+       {
+        "id": "spare",
+        "listing_id": "pong",
+        "phase": "hosting",
+        "players": 0,
+        "reserved": 0,
+        "max_players": 2,
+        "started_at": 0,
+        "empty_since": 0
+       }
+      ]
+     }
+    ],
+    "last_machine_change_at": null
+   },
+   "demand": {
+    "pending": [
+     {
+      "request_id": "r1",
+      "listing_id": "pong",
+      "max_players": 2,
+      "region": null,
+      "at": 50
+     },
+     {
+      "request_id": "r2",
+      "listing_id": "pong",
+      "max_players": 2,
+      "region": null,
+      "at": 51
+     }
+    ],
+    "recent": []
+   },
+   "expect": [
+    {
+     "action": "route",
+     "request_id": "r1",
+     "listing_id": "pong",
+     "machine_id": "m",
+     "session_id": "spare",
+     "warm": true
+    },
+    {
+     "action": "route",
+     "request_id": "r2",
+     "listing_id": "pong",
+     "machine_id": "m",
+     "session_id": "spare",
+     "warm": false
+    },
+    {
+     "action": "start_warm",
+     "listing_id": "pong",
+     "machine_id": "m",
+     "session_id": "planned-0",
+     "max_players": 2
+    }
+   ]
+  },
+  {
+   "name": "a full fleet refuses",
+   "rust_test": "a_full_fleet_refuses_and_recommends_a_machine_instead_of_slowing_anyone",
+   "fn": "plan",
+   "now": 10,
+   "state": {
+    "machines": [
+     {
+      "id": "m",
+      "threads": 4,
+      "memory_mb": 16384,
+      "region": "us-east-1",
+      "draining": false,
+      "sessions": [
+       {
+        "id": "s0",
+        "listing_id": "other",
+        "phase": "hosting",
+        "players": 2,
+        "reserved": 0,
+        "max_players": 2,
+        "started_at": 0,
+        "empty_since": null
+       },
+       {
+        "id": "s1",
+        "listing_id": "other",
+        "phase": "hosting",
+        "players": 2,
+        "reserved": 0,
+        "max_players": 2,
+        "started_at": 0,
+        "empty_since": null
+       },
+       {
+        "id": "s2",
+        "listing_id": "other",
+        "phase": "hosting",
+        "players": 2,
+        "reserved": 0,
+        "max_players": 2,
+        "started_at": 0,
+        "empty_since": null
+       },
+       {
+        "id": "s3",
+        "listing_id": "other",
+        "phase": "hosting",
+        "players": 2,
+        "reserved": 0,
+        "max_players": 2,
+        "started_at": 0,
+        "empty_since": null
+       }
+      ]
+     }
+    ],
+    "last_machine_change_at": null
+   },
+   "demand": {
+    "pending": [
+     {
+      "request_id": "r1",
+      "listing_id": "pong",
+      "max_players": 2,
+      "region": null,
+      "at": 10
+     }
+    ],
+    "recent": []
+   },
+   "expect": [
+    {
+     "action": "refuse",
+     "request_id": "r1",
+     "listing_id": "pong",
+     "reason": "no_capacity"
+    },
+    {
+     "action": "recommend_add_machine",
+     "region": "",
+     "reason": "a player was refused: no machine had room for another 60 Hz session"
+    }
+   ]
+  },
+  {
+   "name": "no machines at all",
+   "rust_test": "a_full_fleet_refuses_and_recommends_a_machine_instead_of_slowing_anyone",
+   "fn": "plan",
+   "now": 10,
+   "state": {
+    "machines": [],
+    "last_machine_change_at": null
+   },
+   "demand": {
+    "pending": [
+     {
+      "request_id": "r1",
+      "listing_id": "pong",
+      "max_players": 2,
+      "region": null,
+      "at": 10
+     }
+    ],
+    "recent": []
+   },
+   "expect": [
+    {
+     "action": "refuse",
+     "request_id": "r1",
+     "listing_id": "pong",
+     "reason": "no_capacity"
+    },
+    {
+     "action": "recommend_add_machine",
+     "region": "",
+     "reason": "a player was refused: no machine had room for another 60 Hz session"
+    }
+   ]
+  },
+  {
+   "name": "the warm server is the floor",
+   "rust_test": "hysteresis_holds_across_a_join_and_a_leave",
+   "fn": "plan",
+   "now": 10,
+   "state": {
+    "machines": [
+     {
+      "id": "m",
+      "threads": 8,
+      "memory_mb": 16384,
+      "region": "us-east-1",
+      "draining": false,
+      "sessions": [
+       {
+        "id": "s1",
+        "listing_id": "pong",
+        "phase": "hosting",
+        "players": 2,
+        "reserved": 0,
+        "max_players": 2,
+        "started_at": 0,
+        "empty_since": null
+       },
+       {
+        "id": "w1",
+        "listing_id": "pong",
+        "phase": "hosting",
+        "players": 0,
+        "reserved": 0,
+        "max_players": 2,
+        "started_at": 0,
+        "empty_since": 0
+       }
+      ]
+     }
+    ],
+    "last_machine_change_at": null
+   },
+   "demand": {
+    "pending": [],
+    "recent": [
+     {
+      "listing_id": "pong",
+      "at": 5,
+      "max_players": 2,
+      "region": null,
+      "needed_new_session": true
+     }
+    ]
+   },
+   "expect": []
+  },
+  {
+   "name": "aged out and held: stopped",
+   "rust_test": "hysteresis_holds_across_a_join_and_a_leave",
+   "fn": "plan",
+   "now": 1000,
+   "state": {
+    "machines": [
+     {
+      "id": "m",
+      "threads": 8,
+      "memory_mb": 16384,
+      "region": "us-east-1",
+      "draining": false,
+      "sessions": [
+       {
+        "id": "s1",
+        "listing_id": "pong",
+        "phase": "hosting",
+        "players": 2,
+        "reserved": 0,
+        "max_players": 2,
+        "started_at": 0,
+        "empty_since": null
+       },
+       {
+        "id": "w1",
+        "listing_id": "pong",
+        "phase": "hosting",
+        "players": 0,
+        "reserved": 0,
+        "max_players": 2,
+        "started_at": 0,
+        "empty_since": 30
+       }
+      ]
+     }
+    ],
+    "last_machine_change_at": null
+   },
+   "demand": {
+    "pending": [],
+    "recent": [
+     {
+      "listing_id": "pong",
+      "at": 5,
+      "max_players": 2,
+      "region": null,
+      "needed_new_session": true
+     },
+     {
+      "listing_id": "pong",
+      "at": 20,
+      "max_players": 2,
+      "region": null,
+      "needed_new_session": true
+     }
+    ]
+   },
+   "expect": [
+    {
+     "action": "stop",
+     "machine_id": "m",
+     "session_id": "w1",
+     "listing_id": "pong",
+     "reason": "surplus_empty"
+    }
+   ]
+  },
+  {
+   "name": "a machine with no players is released",
+   "rust_test": "a_machine_with_no_players_is_recommended_for_release_outside_the_hysteresis",
+   "fn": "plan",
+   "now": 10000,
+   "state": {
+    "machines": [
+     {
+      "id": "a",
+      "threads": 8,
+      "memory_mb": 16384,
+      "region": "us-east-1",
+      "draining": false,
+      "sessions": [
+       {
+        "id": "o1",
+        "listing_id": "pong",
+        "phase": "hosting",
+        "players": 2,
+        "reserved": 0,
+        "max_players": 2,
+        "started_at": 0,
+        "empty_since": null
+       }
+      ]
+     },
+     {
+      "id": "b",
+      "threads": 8,
+      "memory_mb": 16384,
+      "region": "us-east-1",
+      "draining": false,
+      "sessions": []
+     }
+    ],
+    "last_machine_change_at": null
+   },
+   "demand": {
+    "pending": [],
+    "recent": []
+   },
+   "expect": [
+    {
+     "action": "recommend_release_machine",
+     "machine_id": "b",
+     "reason": "no session with players; the rest of the fleet stays at or under 30% of its lines without it; drain it first (0 warm server(s) stop with it)"
+    }
+   ]
+  },
+  {
+   "name": "ten idle servers, one with a recent click",
+   "rust_test": "empty_servers_beyond_the_pool_stop_once_held",
+   "fn": "plan",
+   "now": 5000,
+   "state": {
+    "machines": [
+     {
+      "id": "m",
+      "threads": 32,
+      "memory_mb": 16384,
+      "region": "us-east-1",
+      "draining": false,
+      "sessions": [
+       {
+        "id": "o0",
+        "listing_id": "busy0",
+        "phase": "hosting",
+        "players": 2,
+        "reserved": 0,
+        "max_players": 2,
+        "started_at": 0,
+        "empty_since": null
+       },
+       {
+        "id": "o1",
+        "listing_id": "busy1",
+        "phase": "hosting",
+        "players": 2,
+        "reserved": 0,
+        "max_players": 2,
+        "started_at": 0,
+        "empty_since": null
+       },
+       {
+        "id": "o2",
+        "listing_id": "busy2",
+        "phase": "hosting",
+        "players": 2,
+        "reserved": 0,
+        "max_players": 2,
+        "started_at": 0,
+        "empty_since": null
+       },
+       {
+        "id": "o3",
+        "listing_id": "busy3",
+        "phase": "hosting",
+        "players": 2,
+        "reserved": 0,
+        "max_players": 2,
+        "started_at": 0,
+        "empty_since": null
+       },
+       {
+        "id": "o4",
+        "listing_id": "busy4",
+        "phase": "hosting",
+        "players": 2,
+        "reserved": 0,
+        "max_players": 2,
+        "started_at": 0,
+        "empty_since": null
+       },
+       {
+        "id": "o5",
+        "listing_id": "busy5",
+        "phase": "hosting",
+        "players": 2,
+        "reserved": 0,
+        "max_players": 2,
+        "started_at": 0,
+        "empty_since": null
+       },
+       {
+        "id": "o6",
+        "listing_id": "busy6",
+        "phase": "hosting",
+        "players": 2,
+        "reserved": 0,
+        "max_players": 2,
+        "started_at": 0,
+        "empty_since": null
+       },
+       {
+        "id": "o7",
+        "listing_id": "busy7",
+        "phase": "hosting",
+        "players": 2,
+        "reserved": 0,
+        "max_players": 2,
+        "started_at": 0,
+        "empty_since": null
+       },
+       {
+        "id": "w0",
+        "listing_id": "idle0",
+        "phase": "hosting",
+        "players": 0,
+        "reserved": 0,
+        "max_players": 2,
+        "started_at": 0,
+        "empty_since": 0
+       },
+       {
+        "id": "w1",
+        "listing_id": "idle1",
+        "phase": "hosting",
+        "players": 0,
+        "reserved": 0,
+        "max_players": 2,
+        "started_at": 0,
+        "empty_since": 0
+       },
+       {
+        "id": "w2",
+        "listing_id": "idle2",
+        "phase": "hosting",
+        "players": 0,
+        "reserved": 0,
+        "max_players": 2,
+        "started_at": 0,
+        "empty_since": 0
+       },
+       {
+        "id": "w3",
+        "listing_id": "idle3",
+        "phase": "hosting",
+        "players": 0,
+        "reserved": 0,
+        "max_players": 2,
+        "started_at": 0,
+        "empty_since": 0
+       },
+       {
+        "id": "w4",
+        "listing_id": "idle4",
+        "phase": "hosting",
+        "players": 0,
+        "reserved": 0,
+        "max_players": 2,
+        "started_at": 0,
+        "empty_since": 0
+       },
+       {
+        "id": "w5",
+        "listing_id": "idle5",
+        "phase": "hosting",
+        "players": 0,
+        "reserved": 0,
+        "max_players": 2,
+        "started_at": 0,
+        "empty_since": 0
+       },
+       {
+        "id": "w6",
+        "listing_id": "idle6",
+        "phase": "hosting",
+        "players": 0,
+        "reserved": 0,
+        "max_players": 2,
+        "started_at": 0,
+        "empty_since": 0
+       },
+       {
+        "id": "w7",
+        "listing_id": "idle7",
+        "phase": "hosting",
+        "players": 0,
+        "reserved": 0,
+        "max_players": 2,
+        "started_at": 0,
+        "empty_since": 0
+       },
+       {
+        "id": "w8",
+        "listing_id": "idle8",
+        "phase": "hosting",
+        "players": 0,
+        "reserved": 0,
+        "max_players": 2,
+        "started_at": 0,
+        "empty_since": 0
+       },
+       {
+        "id": "w9",
+        "listing_id": "idle9",
+        "phase": "hosting",
+        "players": 0,
+        "reserved": 0,
+        "max_players": 2,
+        "started_at": 0,
+        "empty_since": 0
+       }
+      ]
+     }
+    ],
+    "last_machine_change_at": null
+   },
+   "demand": {
+    "pending": [],
+    "recent": [
+     {
+      "listing_id": "idle3",
+      "at": 4990,
+      "max_players": 2,
+      "region": null,
+      "needed_new_session": true
+     }
+    ]
+   },
+   "expect": [
+    {
+     "action": "stop",
+     "machine_id": "m",
+     "session_id": "w0",
+     "listing_id": "idle0",
+     "reason": "surplus_empty"
+    },
+    {
+     "action": "stop",
+     "machine_id": "m",
+     "session_id": "w1",
+     "listing_id": "idle1",
+     "reason": "surplus_empty"
+    },
+    {
+     "action": "stop",
+     "machine_id": "m",
+     "session_id": "w2",
+     "listing_id": "idle2",
+     "reason": "surplus_empty"
+    },
+    {
+     "action": "stop",
+     "machine_id": "m",
+     "session_id": "w4",
+     "listing_id": "idle4",
+     "reason": "surplus_empty"
+    },
+    {
+     "action": "stop",
+     "machine_id": "m",
+     "session_id": "w5",
+     "listing_id": "idle5",
+     "reason": "surplus_empty"
+    },
+    {
+     "action": "stop",
+     "machine_id": "m",
+     "session_id": "w6",
+     "listing_id": "idle6",
+     "reason": "surplus_empty"
+    },
+    {
+     "action": "stop",
+     "machine_id": "m",
+     "session_id": "w7",
+     "listing_id": "idle7",
+     "reason": "surplus_empty"
+    },
+    {
+     "action": "stop",
+     "machine_id": "m",
+     "session_id": "w8",
+     "listing_id": "idle8",
+     "reason": "surplus_empty"
+    },
+    {
+     "action": "stop",
+     "machine_id": "m",
+     "session_id": "w9",
+     "listing_id": "idle9",
+     "reason": "surplus_empty"
+    }
+   ]
+  },
+  {
+   "name": "GPU: a listing that requires 8 GB starts on the GPU host with 8 GB free",
+   "rust_test": "a_gpu_listing_starts_only_on_a_gpu_host_with_the_vram_free",
+   "fn": "plan",
+   "now": 10,
+   "state": {
+    "machines": [
+     {
+      "id": "a-cpu",
+      "threads": 16,
+      "memory_mb": 16384,
+      "region": "us-east-1",
+      "draining": false,
+      "sessions": []
+     },
+     {
+      "id": "b-small",
+      "threads": 16,
+      "memory_mb": 16384,
+      "region": "us-east-1",
+      "draining": false,
+      "gpu_available": true,
+      "gpu_vram_mb": 4096,
+      "sessions": []
+     },
+     {
+      "id": "c-big",
+      "threads": 16,
+      "memory_mb": 16384,
+      "region": "us-east-1",
+      "draining": false,
+      "gpu_available": true,
+      "gpu_vram_mb": 12288,
+      "sessions": []
+     }
+    ],
+    "last_machine_change_at": null
+   },
+   "demand": {
+    "pending": [
+     {
+      "request_id": "r1",
+      "listing_id": "city",
+      "max_players": 2,
+      "region": null,
+      "at": 10,
+      "gpu": "required",
+      "gpu_min_vram_mb": 8192
+     }
+    ],
+    "recent": []
+   },
+   "expect": [
+    {
+     "action": "start_for_player",
+     "request_id": "r1",
+     "listing_id": "city",
+     "machine_id": "c-big",
+     "session_id": "planned-0",
+     "max_players": 2,
+     "retry_after_secs": 5,
+     "gpu_vram_mb": 8192
+    },
+    {
+     "action": "recommend_release_machine",
+     "machine_id": "a-cpu",
+     "reason": "no session with players; the rest of the fleet stays at or under 30% of its lines without it; drain it first (0 warm server(s) stop with it)"
+    }
+   ]
+  },
+  {
+   "name": "GPU: no GPU host has 8 GB free: refused, never sent to the CPU machine",
+   "rust_test": "a_gpu_listing_starts_only_on_a_gpu_host_with_the_vram_free",
+   "fn": "plan",
+   "now": 20,
+   "state": {
+    "machines": [
+     {
+      "id": "a-cpu",
+      "threads": 16,
+      "memory_mb": 16384,
+      "region": "us-east-1",
+      "draining": false,
+      "sessions": []
+     },
+     {
+      "id": "b-small",
+      "threads": 16,
+      "memory_mb": 16384,
+      "region": "us-east-1",
+      "draining": false,
+      "gpu_available": true,
+      "gpu_vram_mb": 4096,
+      "sessions": []
+     },
+     {
+      "id": "c-big",
+      "threads": 16,
+      "memory_mb": 16384,
+      "region": "us-east-1",
+      "draining": false,
+      "gpu_available": true,
+      "gpu_vram_mb": 12288,
+      "sessions": [
+       {
+        "id": "s1",
+        "listing_id": "other",
+        "phase": "hosting",
+        "players": 2,
+        "reserved": 0,
+        "max_players": 2,
+        "started_at": 0,
+        "empty_since": null,
+        "gpu_vram_mb": 8192
+       }
+      ]
+     }
+    ],
+    "last_machine_change_at": null
+   },
+   "demand": {
+    "pending": [
+     {
+      "request_id": "r2",
+      "listing_id": "city",
+      "max_players": 2,
+      "region": null,
+      "at": 20,
+      "gpu": "required",
+      "gpu_min_vram_mb": 8192
+     }
+    ],
+    "recent": []
+   },
+   "expect": [
+    {
+     "action": "refuse",
+     "request_id": "r2",
+     "listing_id": "city",
+     "reason": "no_gpu_capacity"
+    },
+    {
+     "action": "recommend_add_machine",
+     "region": "",
+     "reason": "a player was refused: no machine with a GPU of at least 8192 MB of VRAM free had room for another 60 Hz session",
+     "gpu_vram_mb": 8192
+    }
+   ]
+  },
+  {
+   "name": "GPU: the warm server of a listing that requires a GPU goes to the GPU host",
+   "rust_test": "a_gpu_listing_keeps_its_warm_server_on_a_gpu_host",
+   "fn": "plan",
+   "now": 1000,
+   "state": {
+    "machines": [
+     {
+      "id": "a-cpu",
+      "threads": 16,
+      "memory_mb": 16384,
+      "region": "us-east-1",
+      "draining": false,
+      "sessions": []
+     },
+     {
+      "id": "b-gpu",
+      "threads": 4,
+      "memory_mb": 16384,
+      "region": "us-east-1",
+      "draining": false,
+      "gpu_available": true,
+      "gpu_vram_mb": 8192,
+      "sessions": []
+     }
+    ],
+    "last_machine_change_at": null
+   },
+   "demand": {
+    "pending": [],
+    "recent": [
+     {
+      "listing_id": "city",
+      "at": 990,
+      "max_players": 2,
+      "region": null,
+      "needed_new_session": true,
+      "gpu": "required",
+      "gpu_min_vram_mb": 6144
+     }
+    ]
+   },
+   "expect": [
+    {
+     "action": "start_warm",
+     "listing_id": "city",
+     "machine_id": "b-gpu",
+     "session_id": "planned-0",
+     "max_players": 2,
+     "gpu_vram_mb": 6144
+    },
+    {
+     "action": "recommend_release_machine",
+     "machine_id": "a-cpu",
+     "reason": "no session with players; the rest of the fleet stays at or under 30% of its lines without it; drain it first (0 warm server(s) stop with it)"
+    }
+   ]
+  }
+ ]
+}

@@ -1,0 +1,55 @@
+[asset]
+mesh = "parts/block.glb"
+scene = "Scene0"
+
+[attachment]
+axis = [
+    1.0,
+    0.0,
+    0.0,
+]
+secondary_axis = [
+    0.0,
+    1.0,
+    0.0,
+]
+visible = false
+
+[metadata]
+archivable = true
+class_name = "Attachment"
+name = "A0"
+uuid = "9b61162ec1a4810bfba2a22e86382500"
+
+[properties]
+anchored = true
+can_collide = false
+cast_shadow = false
+color = [
+    1.0,
+    0.6,
+    0.0,
+    1.0,
+]
+locked = false
+material = "Neon"
+reflectance = 0.0
+transparency = 1.0
+
+[transform]
+position = [
+    -0.2,
+    0.0,
+    0.0,
+]
+rotation = [
+    0.0,
+    0.0,
+    0.0,
+    1.0,
+]
+scale = [
+    0.1,
+    0.1,
+    0.1,
+]

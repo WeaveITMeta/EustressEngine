@@ -1,0 +1,33 @@
+[light]
+brightness = 1.0
+color = [
+    255,
+    244,
+    229,
+]
+enabled = true
+shadows = true
+
+[metadata]
+archivable = true
+class_name = "DirectionalLight"
+name = "WindowSun"
+uuid = "3bf37c1155df3d3006bfcb480c6d67ef"
+
+[transform]
+position = [
+    0.0,
+    50.0,
+    0.0,
+]
+rotation = [
+    -0.183013,
+    0.683013,
+    0.183013,
+    0.683013,
+]
+scale = [
+    1.0,
+    1.0,
+    1.0,
+]

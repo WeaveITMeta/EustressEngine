@@ -21,6 +21,7 @@
 // =============================================================================
 
 import { accountState } from './account_auth.mjs';
+import { bearerToken } from './bearer.mjs';
 import { routePolicy, isMutating, FRESH, VALUE } from './route_policy.mjs';
 
 const when = (ms) => new Date(ms).toISOString().slice(0, 16).replace('T', ' ') + ' UTC';
@@ -32,10 +33,10 @@ export async function freshGate(request, env, cors, deps) {
   const policy = routePolicy(request.method, new URL(request.url).pathname);
   if (policy.class !== FRESH && policy.class !== VALUE) return null;
 
-  const auth = request.headers.get('Authorization');
-  if (!auth || !auth.startsWith('Bearer ')) return null;
+  const token = bearerToken(request);
+  if (!token) return null;
   if (!env.ACCOUNT_AUTH) return null;
-  const claims = await deps.verifyJwt(auth.slice(7), env.JWT_SECRET);
+  const claims = await deps.verifyJwt(token, env.JWT_SECRET);
   if (!claims || typeof claims.sub !== 'string' || !claims.sub) return null;
 
   const held = await accountState(env, claims.sub);
@@ -60,9 +61,9 @@ export async function freshGate(request, env, cors, deps) {
 /// the account from the session itself and wants the strict check whatever
 /// class the table gives it. Null when there is no valid, current session.
 export async function verifyFreshAuth(request, env, deps) {
-  const auth = request.headers.get('Authorization');
-  if (!auth || !auth.startsWith('Bearer ')) return null;
-  const claims = await deps.verifyJwt(auth.slice(7), env.JWT_SECRET);
+  const token = bearerToken(request);
+  if (!token) return null;
+  const claims = await deps.verifyJwt(token, env.JWT_SECRET);
   if (!claims || typeof claims.sub !== 'string' || !claims.sub) return null;
   if (!env.ACCOUNT_AUTH) return deps.verifyAuth(request, env);
   const held = await accountState(env, claims.sub);

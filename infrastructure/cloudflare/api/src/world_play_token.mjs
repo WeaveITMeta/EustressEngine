@@ -11,17 +11,20 @@
 // docs/architecture/WORLD_PLAY_TOKEN.md is the threat model. In short:
 //
 //   - A token is minted only where the manifest would have been served to ANYONE signed out: a listable (approved, public)
-//     listing whose rating is within the signed-out cap and is not adult content, whose world is current, and whose approval
-//     binding exists and is not revoked. Holding a token therefore grants nothing a signed-out stranger could not already
+//     listing whose rating is within the solo signed-out cap (mature_17) and is not adult content, whose world is current,
+//     and whose approval binding exists and is not revoked. Holding a token therefore grants nothing a signed-out stranger could not already
 //     read, so a token that leaks, is shared or is replayed by another person exposes nothing more.
 //   - It names one listing, one manifest (its SHA-256), the approval it was minted under (the binding's content identity) and
 //     an expiry 15 minutes out. It is HMAC-SHA256 under a key derived from JWT_SECRET with its own label, never the secret.
-//   - Redeeming it still reads, fresh from R2 (strongly consistent): the legal lock, the deletion mark and the approval
-//     binding. A lock, a deletion, a revoked approval or a new approval (a republish that was reviewed) all make the token
-//     worth nothing, and the request falls through to the full gate, which gives the right refusal.
-//   - What a token does NOT see until it expires: changes that live only in the KV listing record (the author makes the
-//     listing private or archives it, a rating change without a new approval). Those reach chunk GETs within 15 minutes and
-//     reach every manifest GET at once, so no new download starts after them.
+//   - Redeeming it still reads, fresh from R2 (strongly consistent): the legal lock, the deletion mark, the approval
+//     binding and the listing's play-token floor. A lock, a deletion, a revoked approval, a new approval (a republish that
+//     was reviewed) or a rating written since the mint all make the token worth nothing, and the request falls through to
+//     the full gate, which gives the right refusal. Every rating write (moderation.mjs applyToSim: a decision, or
+//     moderation_set_rating) moves the floor (retirePlayTokens), so a token minted at mature_17 never serves a chunk after
+//     a re-rate to adult_18.
+//   - What a token does NOT see until it expires: changes that live only in the KV listing record and are not a rating (the
+//     author makes the listing private or archives it). Those reach chunk GETs within 15 minutes and reach every manifest
+//     GET at once, so no new download starts after them.
 //
 // A token that fails any check is never an error: the chunk GET simply runs the full gate.
 // =============================================================================
@@ -114,3 +117,43 @@ export async function readPlayToken(env, token, simId, now = nowSeconds()) {
   if (claims.exp > now + PLAY_TOKEN_TTL_SECONDS) return null;
   return { sim: claims.sim, sha: claims.sha, ident: claims.ident, exp: claims.exp };
 }
+
+// -----------------------------------------------------------------------------
+// The play-token floor: a rating write retires every token minted before it
+// -----------------------------------------------------------------------------
+
+/// Where a listing's play-token floor is kept (R2, strongly consistent): a token minted at or before the floor is not
+/// honoured. Its own object, never a field of the approval binding, so writing it can never race a write or a revocation of
+/// the binding and bring an old approval back.
+export const playTokenFloorKey = (simId) => `locks/play-token-floor/${simId}.json`;
+
+/// Retire every play token of `simId` minted up to now. Called on every rating write (moderation.mjs applyToSim). The floor is
+/// one second past now, so a mint that read the old rating and finished in the next second is retired too; a token minted
+/// in that second for a rating that still allows one only sends its chunks through the full gate. False when there is no
+/// R2 binding to write to.
+export async function retirePlayTokens(env, simId, now = nowSeconds()) {
+  if (!env?.SCENES?.put || typeof simId !== 'string' || !simId) return false;
+  await env.SCENES.put(playTokenFloorKey(simId), JSON.stringify({ v: 1, floor: now + 1 }), { httpMetadata: { contentType: 'application/json' } });
+  return true;
+}
+
+/// The listing's play-token floor in Unix seconds: 0 when none was ever written, and Infinity when the object cannot be read
+/// or does not hold a whole number, so a token is never honoured on a floor this code cannot read.
+export async function playTokenFloor(env, simId) {
+  let obj;
+  try {
+    obj = await env?.SCENES?.get(playTokenFloorKey(simId));
+  } catch {
+    return Infinity;
+  }
+  if (!obj) return 0;
+  try {
+    const floor = JSON.parse(await obj.text())?.floor;
+    return Number.isSafeInteger(floor) ? floor : Infinity;
+  } catch {
+    return Infinity;
+  }
+}
+
+/// Whether a token (readPlayToken's claims) was minted after the floor. Its mint time is its expiry less one lifetime.
+export const mintedAfterFloor = (claims, floor) => Number.isSafeInteger(claims?.exp) && claims.exp - PLAY_TOKEN_TTL_SECONDS > floor;

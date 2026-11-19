@@ -24,6 +24,14 @@ path = "src/main.rs"
 name = "generate-benchmark-map"
 path = "src/bin/generate_benchmark_map.rs"
 
+# Capture-harness scenes S1-S6 (G1.03): emits eustress/spaces/harness/ from a
+# seed and verifies a re-emission is byte-identical. Also drives the G1.05
+# capture self-test and the G1.08 frame-time run. Uses no engine library code.
+# Run: cargo run --release --bin harness-scenes -- --seed 42 --out spaces/harness --all
+[[bin]]
+name = "harness-scenes"
+path = "src/bin/harness_scenes.rs"
+
 # One-shot: finish the disk→Fjall pivot for a Space so its directory is
 # the canonical `.eustress` container (verified import + reversible
 # relocation of the loose service trees). Safe by default — only the
@@ -77,6 +85,10 @@ arboard = { version = "3", optional = true }
 # Workspace members
 eustress-common = { path = "../common", features = ["physics", "realism", "realism-scripting", "mlua", "gui", "avatar-profile", "view-look"] }
 eustress-bliss = { path = "../bliss" }
+# Hardware ray-traced lighting, shared with the Player; `crate::raytracing`
+# re-exports it. Its own features are switched by this crate's `raytracing`,
+# `dlss` and `force_disable_dlss`.
+eustress-raytracing = { path = "../raytracing" }
 eustress-stream-node = { path = "../stream-node", optional = true }
 # Parametric BRep + Studio Boolean (Drafting tab CSG)
 eustress-cad = { path = "../cad" }
@@ -93,7 +105,6 @@ eustress-tools = { path = "../tools", features = ["bevy"] }
 # the bridge writes to `<workspace>/.eustress/instances/<pid>.json` and the
 # CLI / MCP server read back. One definition, no drift.
 eustress-bridge-client = { path = "../bridge-client" }
-bevy-camera-controller = { path = "../common/bevy-camera-controller" }
 eustress-geo = { path = "../geo" }
 # World-model generative spine (Phases 4-6): candidate schema, closed-form
 # fitness, generate->score->optimize loop, 1D linear FEA verifier. Pure logic
@@ -216,7 +227,6 @@ bitflags = "2"
 tiny-skia = "0.11"
 cosmic-text = "0.12"
 zstd = "0.13"
-tar = "0.4"
 # Already resolved at 8.6.0 in Cargo.lock (pulled in via candle-core, an
 # optional dep behind common/spatial-llm's generation-candle/local features
 # engine doesn't enable) — pinning "8" reuses that exact locked version
@@ -334,7 +344,6 @@ syntect = { version = "5.2", default-features = false, features = ["default-synt
 # The script editor's Luau parser: every syntax error with its span, and a
 # tree to read scopes from. Confined to the Luau service.
 full_moon = { version = "=2.2.0", default-features = false, features = ["luau", "serde"] }
-sentry = { version = "0.34", default-features = false, features = ["backtrace", "contexts", "panic", "reqwest", "rustls"] }
 # Window icon (must match bevy's versions)
 image = "0.25"
 # PNG encoding for staged chat attachments (`ui::slint_ui::stage_attachment_png`).
@@ -360,7 +369,6 @@ dashmap = "6"
 # Bytes for EustressStream payload publishing
 bytes = "1"
 # Async channels for Slint+Bevy integration
-smol = "2"
 # Non-blocking filesystem for the runtime-swappable `space://` asset reader
 # (src/space/space_asset_source.rs). Same crate Bevy's own FileAssetReader
 # uses; already in Cargo.lock transitively via bevy_asset, so this direct
@@ -369,7 +377,6 @@ async-fs = "2"
 # LSP server (feature-gated — pulled in only by the `eustress-lsp` bin).
 # Deliberately optional so the main engine binary doesn't link tower-lsp.
 tower-lsp = { version = "0.20", optional = true }
-spin_on = "0.1"
 # Byte casting for GPU buffer operations
 bytemuck = { version = "1.16", features = ["derive"] }
 # Mesh optimization (vertex cache, overdraw, vertex fetch, far-LOD
@@ -390,7 +397,7 @@ resvg = "0.44"
 ico = "0.3"
 icns = "0.3"
 png = "0.17"
-slint-build = { git = "https://github.com/slint-ui/slint", branch = "master" }
+slint-build = { git = "https://github.com/slint-ui/slint", tag = "v1.19.0" }
 
 [features]
 # ── Build tiers ───────────────────────────────────────────────────────────────
@@ -458,21 +465,22 @@ realism-scripting = []
 # even though mlua was linked and ready.
 mlua = ["eustress-common/mlua"]
 # Hardware ray-traced lighting (Bevy Solari 0.19). Decided per launch and per
-# GPU by crates/engine/src/raytracing/ (Auto by default, guarded); a GPU
-# without ray queries draws exactly as before. Adds bevy_solari (pure Rust and
-# WGSL, no native SDK) and turns on bevy_pbr's `dfg_lut` (bevy_solari asks
-# for it), which every raster frame then uses too.
-raytracing = ["bevy/bevy_solari"]
+# GPU by the eustress-raytracing crate (Auto by default, guarded), which the
+# Player links too; a GPU without ray queries draws exactly as before. Adds
+# bevy_solari (pure Rust and WGSL, no native SDK) and turns on bevy_pbr's
+# `dfg_lut` (bevy_solari asks for it), which every raster frame then uses too.
+raytracing = ["eustress-raytracing/raytracing"]
 # NVIDIA DLSS Ray Reconstruction on Solari cameras. Build-time: DLSS_SDK,
 # VULKAN_SDK, libclang and the MSVC C compiler. Run time: nvngx_dlss.dll and
 # nvngx_dlssd.dll beside the exe. Makes the renderer Vulkan-only wherever a
 # Vulkan driver exists (Bevy's raw_vulkan_init). Release builds only, after
-# NVIDIA's trademark approval; never in `default`.
-dlss = ["raytracing", "bevy/dlss"]
+# NVIDIA's trademark approval; never in `default`. The Player links the same
+# crate, so a build that compiles both gives both DLSS.
+dlss = ["raytracing", "eustress-raytracing/dlss"]
 # For CI and machines without the DLSS SDK: compiles every `dlss` code path
 # with DLSS itself compiled out (dlss_wgpu's `mock`; Bevy's dlss module
 # absent; raw_vulkan_init still on), so `--all-features` builds anywhere.
-force_disable_dlss = ["dlss", "bevy/force_disable_dlss"]
+force_disable_dlss = ["dlss", "eustress-raytracing/force_disable_dlss"]
 # Wry webview support (Windows/macOS/Linux)
 webview = ["wry"]
 # EustressStream streaming: scene deltas, simulation results, iteration history, Rune audit trail.
@@ -614,3 +622,6 @@ windows-sys = { version = "0.61", features = [
     "Win32_Security_Authorization",
     "Win32_System_Threading",
 ] }
+# The Linux updater unpacks a .tar.gz (updater.rs, cfg(target_os = "linux")).
+[target.'cfg(target_os = "linux")'.dependencies]
+tar = "0.4"

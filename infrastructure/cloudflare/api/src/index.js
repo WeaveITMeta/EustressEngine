@@ -51,11 +51,14 @@ export { GuestAllowance } from './guest.mjs';
 export { AccountAuth } from './account_auth.mjs';
 export { PasskeyIndex } from './passkey_index.mjs';
 export { HolderLedger } from './holder_ledger.mjs';
+export { Fleet } from './fleet.mjs';
 import { accountCall, accountState, keyReplaceTerms } from './account_auth.mjs';
 import { handleKeyRotationRoute, handleAdminReplaceKeyRoute, handleKeyRestoreRoute } from './identity_routes.mjs';
 import { handlePasskeyRoute, identityFileRequired } from './passkeys.mjs';
 import { handleDiscordRoute, currentDiscordLink, deleteDiscordLink } from './discord_link.mjs';
+import { handleSlackRoute, currentSlackLink, deleteSlackLink } from './slack_link.mjs';
 import { handleDiscordInteraction, discordTick } from './discord_interactions.mjs';
+import { handleSlackBotRoute, slackTick } from './slack_bot.mjs';
 import { handleEmailRoute } from './email_routes.mjs';
 import { handleReleaseNotify } from './release_notify.mjs';
 import { handleReviewLatencyRoute } from './review_latency.mjs';
@@ -64,8 +67,9 @@ import { readAccountEmail } from './email_ops.mjs';
 import { freshGate, verifyFreshAuth, payoutPinnedUntil } from './fresh_auth.mjs';
 import { handleSpaceDeleteRoute, spaceDeleteWriteGate, sweepSpaceDeletions } from './space_delete.mjs';
 import { addressKey, guestPlayOn, handleGuest, isGuestRating } from './guest.mjs';
-import { END_ALL_GUESTS, guestSession, handleLive, handleServerCredential, holdGuestTicket, isLiveHeartbeat, livePin, livePlayInfo } from './live.mjs';
+import { END_ALL_GUESTS, guestSession, handleLive, handleServerCredential, holdGuestTicket, isLiveHeartbeat, livePin, livePins, livePlayInfo } from './live.mjs';
 import { GUEST_LIVE_INDEX_NAME, handleLiveNow } from './live_index.mjs';
+import { handleAllocate, handleFleetAdmin, handleFleetHeartbeat } from './fleet.mjs';
 import { handleCoverRoute, coverFields } from './cover.mjs';
 import { handleChangelogRoute } from './changelogs.mjs';
 import { handleMakers } from './makers.mjs';
@@ -73,7 +77,7 @@ import { handleTimeZoneRoute, accountTimeZone, timeZoneKey } from './account_tim
 import { handleProfileRoute, publicProfileOf, ownerPendingOf, cleanAvatarUrl } from './account_profile.mjs';
 import {
   handleAdultContentRoute, viewerOf, ratingCap, ratingOf, isAdultListing, refuseAdult, viewerHeaders,
-  refuseUnsignedImage, imageCacheControl, withSignedImages, resolveDob, ageAt,
+  refuseUnsignedImage, imageCacheControl, withSignedImages, resolveDob, ageAt, SOLO, withinSignedOutCap,
 } from './adult_content.mjs';
 import { countVisit, guestVisitKey, viewerKey, playCountOf } from './visits.mjs';
 import { leaseIsLive } from './guest.mjs';
@@ -89,6 +93,18 @@ import {
 import { handleWorldRoute, WORLD_FORMAT, PAK_FORMAT, DEFAULT_MAX_PLAYERS, checkMaxPlayers } from './world.mjs';
 import { checkTags, listingTags, tagFilter, queryMatchesTag, genreTag, listingTagFields, setAuthorTags, withTagsWrittenBack, genreAliasValues } from './tags.mjs';
 import { handleEditListing } from './listing_edit.mjs';
+import {
+  handleAgentRoute, humanNameProblem, refuseAgent, agentSignInRefusal, endAgentSessionsOf, writeAgentStanding, nameTaken,
+  claimNameFold, indexNameFolds, releaseNameFolds,
+} from './agents.mjs';
+import { bearerToken, presentsBearer, JWT_SEGMENT } from './bearer.mjs';
+
+/// A line in an agent sponsor's notification feed (the feed src/moderation.mjs writes for review decisions).
+async function agentNotice(env, accountId, item) {
+  const at = new Date().toISOString();
+  const id = `${at}:agent:${item.case_id || 'x'}`;
+  await env.SOCIAL.put(`notif:${accountId}:${id}`, JSON.stringify({ id, kind: item.kind || 'agent', headline: item.headline, case_id: item.case_id || null, at, read: false, expires_at: new Date(Date.now() + 90 * 24 * 3600 * 1000).toISOString() }), { expirationTtl: 90 * 24 * 3600 });
+}
 import { handleIdentityRoute } from './identity.mjs';
 import { handlePlayPassRoute, withPlayPass } from './play_pass.mjs';
 import { handleEconomicsRoute } from './economics.mjs';
@@ -395,6 +411,7 @@ import { ICON_GEAR_PNG_B64 } from './icon-gear.js';
 // /api/auth/register's auto-send and /api/identity/email-backup share one
 // output; its header gear is the asset served at `/assets/eustress-gear.png`.
 import { buildIdentityEmail } from './identity_email.mjs';
+import { marketingDefault, requestCountry, marketingPrechecked, recordMarketingChoice } from './marketing_consent.mjs';
 
 // ─── Hand-built MIME helpers ────────────────────────────────────────────────
 // Workers' `EmailMessage(from, to, raw)` constructor takes a full RFC 5322
@@ -672,6 +689,9 @@ export default {
         // post to followed channels, and update Linked Roles of creators whose listed Spaces changed. Never throws.
         try { await discordTick(env, discordDeps(env), { now: new Date(event?.scheduledTime || Date.now()).getTime() }); }
         catch (e) { console.error('discord five-minute tick failed:', e?.message || e); }
+        // The Slack app (src/slack_bot.mjs): post to followed Slack channels at ages_10. Never throws.
+        try { await slackTick(env, discordDeps(env), { now: new Date(event?.scheduledTime || Date.now()).getTime() }); }
+        catch (e) { console.error('slack five-minute tick failed:', e?.message || e); }
         return;
       }
       const at = new Date(event?.scheduledTime || Date.now());
@@ -803,6 +823,13 @@ export default {
         if (handled) return handled;
       }
 
+      // Agent accounts (src/agents.mjs, docs/architecture/AGENT_ACCOUNTS.md): the agreement, invites, an agent's own
+      // registration, the sponsor's controls, and the staff review of agent cases.
+      if (url.pathname === '/api/agents' || url.pathname.startsWith('/api/agents/') || url.pathname.startsWith('/api/admin/agents/')) {
+        const handled = await handleAgentRoute(request, url, env, cors, { json, verifyAuth, requireAdmin, endSessions, auditLog, notify: agentNotice });
+        if (handled) return handled;
+      }
+
       // The guest-only sessions live now, for a guest's Play chooser (src/live.mjs, src/live_index.mjs). Read signed out,
       // whoever asks: a guest's cap (G to PG) is the signed-out one, and no adult or account session is ever in this index.
       if (url.pathname === '/api/guest/live' && request.method === 'GET') {
@@ -812,7 +839,7 @@ export default {
       }
       // Guest play: the Gallery without an account (src/guest.mjs). Awaited, so a failure inside is this try's 500.
       if (url.pathname.startsWith('/api/guest/'))
-        return await handleGuest(request, env, cors, { verifyAuth, json, isListable, livePin, holdGuestTicket, bannedBearer, guestSession });
+        return await handleGuest(request, env, cors, { verifyAuth, json, isListable, livePin, livePins, holdGuestTicket, bannedBearer, guestSession });
 
       // Auth
       if (url.pathname === '/api/auth/register' && request.method === 'POST')
@@ -830,12 +857,27 @@ export default {
 
       // Linking a Discord account (src/discord_link.mjs)
       if (url.pathname.startsWith('/api/auth/discord/')) {
+        // An agent never links an outside account (src/agents.mjs, F2): asked here as well as at the gate.
+        const agentNo = await refuseAgentSession(request, env, cors);
+        if (agentNo) return agentNo;
         const handled = await handleDiscordRoute(request, url, env, { verifyAuth, authMethod, json, cors, publicUser, accountCall, listViews: discordDeps(env).listViews });
+        if (handled) return handled;
+      }
+      // Linking a Slack account (src/slack_link.mjs)
+      if (url.pathname.startsWith('/api/auth/slack/')) {
+        const agentNo = await refuseAgentSession(request, env, cors);
+        if (agentNo) return agentNo;
+        const handled = await handleSlackRoute(request, url, env, { verifyAuth, authMethod, json, cors, publicUser });
         if (handled) return handled;
       }
       // The Discord app's interactions endpoint (src/discord_interactions.mjs): public, the Ed25519 signature is the gate.
       if (url.pathname === '/api/discord/interactions')
         return await handleDiscordInteraction(request, env, ctx, discordDeps(env));
+      // The Eustress Slack app (src/slack_bot.mjs): public. Slack's request signature, or the install's one-time state, is the gate.
+      if (url.pathname.startsWith('/api/slack/')) {
+        const handled = await handleSlackBotRoute(request, url, env, ctx, discordDeps(env));
+        if (handled) return handled;
+      }
 
       // Replacing the identity key (src/identity_routes.mjs)
       if (url.pathname.startsWith('/api/identity/rotate')) {
@@ -845,6 +887,9 @@ export default {
 
       // Passkeys: second keys that sign in to the website (src/passkeys.mjs)
       if (url.pathname === '/api/passkeys' || url.pathname.startsWith('/api/passkeys/')) {
+        // An agent signs in with its key alone: it never adds a passkey (F2). A passkey sign-in carries no session.
+        const agentNo = await refuseAgentSession(request, env, cors);
+        if (agentNo) return agentNo;
         const handled = await handlePasskeyRoute(request, url, env, { verifyAuth, authMethod, json, cors, loginOrigins, createJwt, publicUser });
         if (handled) return handled;
       }
@@ -880,6 +925,9 @@ export default {
 
       // The account's email: verify it, change it (src/email_routes.mjs)
       if (url.pathname.startsWith('/api/account/email')) {
+        // An agent has no email address (F2).
+        const agentNo = await refuseAgentSession(request, env, cors);
+        if (agentNo) return agentNo;
         const handled = await handleEmailRoute(request, url, env, { authenticate: (req, e) => verifyFreshAuth(req, e, { verifyJwt, verifyAuth }), requireIdentityFileSession, json, cors, loginOrigins, siteOrigin });
         if (handled) return handled;
       }
@@ -1034,8 +1082,11 @@ export default {
       if (url.pathname === '/api/stripe/webhook' && request.method === 'POST')
         return handleStripeWebhook(request, env);
       // Engine sponsorships: money for building the engine, once or monthly. See src/sponsor.mjs.
-      if (url.pathname === '/api/sponsor/checkout' && request.method === 'POST')
+      if (url.pathname === '/api/sponsor/checkout' && request.method === 'POST') {
+        const agentNo = await refuseAgentSession(request, env, cors);
+        if (agentNo) return agentNo;
         return handleSponsorCheckout(request, env, cors, { verifyAuth, json, stripeRequest, siteOrigin });
+      }
       if (url.pathname === '/api/sponsors' && request.method === 'GET')
         return handleSponsorList(env, { json, publicCors });
       if (url.pathname === '/api/sponsor/listing' && request.method === 'PUT')
@@ -1096,6 +1147,11 @@ export default {
       // Delta: balances, packs, the tool catalog, checkout and charges, plus
       // subscription checkout. See src/delta.mjs.
       if (url.pathname.startsWith('/api/delta/') || url.pathname === '/api/subscriptions/checkout') {
+        // Delta and subscriptions are money: an agent buys and spends none (D4, F2). Reads stay open.
+        if (request.method !== 'GET') {
+          const agentNo = await refuseAgentSession(request, env, cors);
+          if (agentNo) return agentNo;
+        }
         const delta = await handleDeltaRoute(request, url, env, cors, {
           verifyAuth, json, stripeRequest, siteOrigin, isVerified: accountIsVerified,
         });
@@ -1230,11 +1286,27 @@ export default {
       }
       if (url.pathname.match(/^\/api\/simulations\/[a-f0-9-]+\/play$/) && request.method === 'POST')
         return handlePlaySimulation(request, url.pathname.split('/')[3], env, cors);
+      // Eustress-hosted sessions (src/fleet.mjs, docs/architecture/HOSTED_FLEET.md): a host agent's heartbeat with its
+      // ehost_ credential, a player's Play click asking for a seat, and the administrator's credential and fleet routes.
+      if (/^\/api\/fleet\/hosts\/[^/]+\/heartbeat$/.test(url.pathname))
+        return handleFleetHeartbeat(request, env, cors, url.pathname.split('/')[4], { json });
+      if (url.pathname.match(/^\/api\/simulations\/[a-f0-9-]+\/allocate$/))
+        return handleAllocate(request, env, cors, url.pathname.split('/')[3], { verifyAuth, requireAdmin, json, isListable });
+      if (url.pathname === '/api/admin/fleet' || /^\/api\/admin\/fleet\/hosts\/[^/]+\/credential$/.test(url.pathname))
+        return handleFleetAdmin(request, env, cors, url.pathname, { requireAdmin, json });
       // Live hosts: Studio's heartbeat while it hosts a simulation, and the
       // listing's Live indicator and join link. See src/live.mjs.
-      if (url.pathname.match(/^\/api\/simulations\/[a-f0-9-]+\/server-credential$/) && ['POST', 'DELETE'].includes(request.method))
+      if (url.pathname.match(/^\/api\/simulations\/[a-f0-9-]+\/server-credential$/) && ['POST', 'DELETE'].includes(request.method)) {
+        // Hosting is the author's, and an agent hosts nothing (F2).
+        const agentNo = await refuseAgentSession(request, env, cors);
+        if (agentNo) return agentNo;
         return handleServerCredential(request, env, cors, url.pathname.split('/')[3], { verifyAuth, json });
-      if (url.pathname.match(/^\/api\/simulations\/[a-f0-9-]+\/live(\/admit)?$/) && ['GET', 'POST', 'DELETE'].includes(request.method))
+      }
+      if (url.pathname.match(/^\/api\/simulations\/[a-f0-9-]+\/live(\/admit)?$/) && ['GET', 'POST', 'DELETE'].includes(request.method)) {
+        if (request.method !== 'GET') {
+          const agentNo = await refuseAgentSession(request, env, cors);
+          if (agentNo) return agentNo;
+        }
         return handleLive(request, env, cors, url.pathname.split('/')[3], {
           verifyAuth, requireAdmin, json, isListable,
           // The host admitting a joining player is a visit by that player: an account once a day, a guest once a day per
@@ -1246,9 +1318,10 @@ export default {
             await countVisit(env, sim, key);
           },
         });
+      }
       // The sim page: its theme, images and off-site links, each served only once the review approves it (src/page.mjs).
       if (url.pathname.startsWith('/api/simulations/') && /^[a-f0-9-]+\/page(?:\/|$)/.test(url.pathname.slice('/api/simulations/'.length))) {
-        const handled = await handlePageRoute(request, url, env, ctx, { verifyAuth, json, cors, sniffFileType, policyText: GUARDIAN_POLICY_TEXT });
+        const handled = await handlePageRoute(request, url, env, ctx, { verifyAuth, requireAdmin, json, cors, sniffFileType, policyText: GUARDIAN_POLICY_TEXT });
         if (handled) return handled;
       }
       // Website manifest upload. Its own object and its own route, so a publish
@@ -1276,8 +1349,8 @@ export default {
       // Gallery (frontend-facing aliases for simulations)
       // Featured is the judge's optional upside flag on an approved listing;
       // it never gates listing, it only feeds this shelf.
-      // The shelf never carries adult content. Below that it is at the viewer's own cap: G to PG signed out, the
-      // account's own (mature_17 with Adult content off) signed in.
+      // The shelf never carries adult content. Below that it is at the viewer's own solo cap: up to mature_17 signed out
+      // (src/adult_content.mjs SOLO_SIGNED_OUT_CAP), the account's own (mature_17 with Adult content off) signed in.
       if (url.pathname === '/api/gallery/featured' && request.method === 'GET')
         return handleListSimulations(url, env, cors, { featuredOnly: true, viewer: await viewerOf(request, env, verifyAuth) });
       if (url.pathname === '/api/gallery' && request.method === 'GET')
@@ -1286,6 +1359,11 @@ export default {
       // Commerce (microtransactions in published simulations) and the
       // account's API keys. See src/commerce.mjs.
       if (url.pathname.startsWith('/api/commerce/') || url.pathname === '/api/keys' || url.pathname.startsWith('/api/keys/')) {
+        // An agent holds no API key and sells, buys or refunds nothing (D4, F2). Catalog and receipt reads stay open.
+        if (url.pathname === '/api/keys' || url.pathname.startsWith('/api/keys/') || request.method !== 'GET') {
+          const agentNo = await refuseAgentSession(request, env, cors);
+          if (agentNo) return agentNo;
+        }
         const commerce = await handleCommerceRoute(request, url, env, ctx, cors, {
           verifyAuth, json, isListable, resolveAttribution, requireIdentityFileSession,
         });
@@ -1361,15 +1439,18 @@ async function handleRegister(request, env, cors) {
     return json({ error: 'Username must be 3-32 characters' }, 400, cors);
   if (!/^[a-zA-Z0-9_]+$/.test(username))
     return json({ error: 'Username: letters, numbers, and _ only' }, 400, cors);
+  // "bot" is kept for agent accounts (src/agents.mjs, McKale 2026-11-15).
+  const reservedPart = humanNameProblem(username);
+  if (reservedPart) return json({ error: reservedPart, code: 'name_reserved_for_agents' }, 400, cors);
   // A public key is an Ed25519 key in hex: 64 characters, which is all that
   // can ever sign in. Anything else is not a key, and it would still be stored
   // and compared as if it were one.
   if (!public_key)
     return json({ error: 'Invalid public key' }, 400, cors);
 
-  // Check username taken
-  const existingByName = await env.USERS.get(`username:${username}`);
-  if (existingByName) return json({ error: 'Username already taken' }, 409, cors);
+  // Check username taken: the name itself, and every spelling that differs only in case (src/agents.mjs nameTaken reads
+  // the name, its lower case, and the case fold every name since 2026-11-15 files). Claimed for good below.
+  if (await nameTaken(env, username)) return json({ error: 'Username already taken' }, 409, cors);
 
   // Check public key already registered
   // In the one spelling kept now, and in all upper case, which is how an older
@@ -1427,8 +1508,14 @@ async function handleRegister(request, env, cors) {
   // id_hash is claimed in R2 (create-if-absent), then the session is consumed,
   // both before the account exists; the person is released if the session is
   // not had. A second sign-up for either, in parallel or later, is refused here.
+  // One new account per name case fold (R2 create-if-absent), before the person is claimed: a name lost to another
+  // sign-up in the same moment leaves the verification unspent.
+  if (!(await claimNameFold(env, username, user_id))) return json({ error: 'Username already taken' }, 409, cors);
   const claimed = await claimPersonAndSession(env, id_hash, kyc_session_id, user_id);
-  if (!claimed.ok) return json(claimed.body, claimed.status, cors);
+  if (!claimed.ok) {
+    await releaseNameFolds(env, username, user_id);
+    return json(claimed.body, claimed.status, cors);
+  }
   if (screening)
     await env.SCREENING.put(`screen:${id_hash}`, JSON.stringify(screening), { expirationTtl: 86400 * 365 * 7 });
 
@@ -1479,14 +1566,30 @@ async function handleRegister(request, env, cors) {
     await env.USERS.put(`username:${username}`, user_id);
     await env.USERS.put(`pubkey:${public_key}`, user_id);
     await env.USERS.put(`idhash:${id_hash}`, user_id);
+    await indexNameFolds(env, username, user_id);
   } catch (e) {
     console.error('register: the account was not written; the person is released:', e?.message || e);
     await undoAccountWrites(env, { user_id, username, public_key, id_hash });
+    await releaseNameFolds(env, username, user_id);
     return json({ error: 'Sign-up could not be completed. Verify your ID again, then try again.', code: 'signup_failed' }, 503, cors);
   }
 
   // Link KYC uploads from registration session to this user, as `linked`.
   await linkKycRecords(env, kyc_session_id, user_id);
+
+  // The Marketing Emails box, when the page sent it. Whether it started ticked
+  // is worked out again here from the request's country, never taken from the
+  // page, so a "yes" from a country that needs consent is always recorded as the
+  // person's own tick. A sign-up that sends no choice (Studio, an older page)
+  // records none and stays off. Best effort: the account exists either way.
+  if (typeof body.marketing_email === 'boolean') {
+    const country = requestCountry(request);
+    try {
+      await recordMarketingChoice(env, user_id, { on: body.marketing_email, country, prechecked: marketingPrechecked(country), source: 'signup' });
+    } catch (e) {
+      console.error('register: the marketing email choice was not recorded:', e?.message || e);
+    }
+  }
 
   const token = await createJwt(user_id, env.JWT_SECRET);
 
@@ -1663,6 +1766,18 @@ async function handleVerify(request, env, cors) {
   // Check if user is banned
   if (user.banned) {
     return json({ error: 'Account suspended', reason: user.ban_reason || 'Contact support@eustress.dev' }, 403, cors);
+  }
+  // An agent account signs in only while it stands: not revoked or suspended (read after write, src/agents.mjs), and its
+  // sponsor present, not banned and not under a value freeze. Security review 2026-11-15, F4.
+  if (user.account_type === 'agent') {
+    let refusal;
+    try {
+      refusal = await agentSignInRefusal(env, user);
+    } catch (e) {
+      console.error('sign-in: the agent\'s standing could not be read:', e?.name || 'Error');
+      return json({ error: 'Sign-in is temporarily unavailable. Try again in a minute.', code: 'account_unavailable' }, 503, cors);
+    }
+    if (refusal) return json(refusal, 403, cors);
   }
 
   // Not stamped before the account's session floor: a sign-in straight after a
@@ -1896,6 +2011,9 @@ function handleJurisdiction(request, env, cors) {
       accepted_ids: jurisdiction.natural_ids,
       notes: jurisdiction.notes,
       minors: jurisdiction.minors || null,
+      // The sign-up page's Marketing Emails box: ticked only where the law
+      // lets it start ticked (src/marketing_consent.mjs).
+      marketing: marketingDefault(request),
     }, 200, cors);
   }
 
@@ -1903,6 +2021,7 @@ function handleJurisdiction(request, env, cors) {
     detected: false, iso2: country, name: `Unknown (${country})`, colo,
     accepted_ids: JURISDICTIONS.fallback.require,
     notes: 'Fallback: enhanced due diligence', flag: 'manual_review',
+    marketing: marketingDefault(request),
   }, 200, cors);
 }
 
@@ -2712,6 +2831,9 @@ Screening rules:
 async function handleCosign(request, env, cors) {
   const userId = await verifyAuth(request, env);
   if (!userId) return json({ error: 'Unauthorized' }, 401, cors);
+  // Effort becomes Bliss at the nightly settlement: an agent earns nothing (D4), refused here as well as at the gate.
+  const agentNo = await refuseAgent(env, userId, json, cors);
+  if (agentNo) return agentNo;
 
   const body = await request.json();
   const { contribution_type, contribution_hash, duration_secs } = body;
@@ -2930,7 +3052,7 @@ async function handleHealth(env, cors) {
 /// "no token" (anonymous) from "a token we could not verify" (reject), which a
 /// null `verifyAuth` result alone cannot.
 function presentedBearer(request) {
-  return /^Bearer\s+\S+/i.test(request.headers.get('Authorization') || '');
+  return presentsBearer(request);
 }
 
 /// `notBefore` is the account's session floor (see endSessions). A token is
@@ -2966,8 +3088,11 @@ async function verifyJwt(token, secret) {
   // A malformed token is a refused token, never an error: anything that is not
   // a well-formed, correctly signed, unexpired token returns null.
   try {
-    const [headerB64, payloadB64, sigB64] = String(token).split('.');
-    if (!headerB64 || !payloadB64 || !sigB64) return null;
+    const parts = String(token).split('.');
+    // Three base64url segments and nothing else: atob would drop a space or a tab inside one, so a token split by
+    // whitespace would still verify (security review 2026-11-15, F1).
+    if (parts.length !== 3 || !parts.every((s) => JWT_SEGMENT.test(s))) return null;
+    const [headerB64, payloadB64, sigB64] = parts;
 
     const enc = new TextEncoder();
     const key = await crypto.subtle.importKey(
@@ -2991,9 +3116,9 @@ async function verifyJwt(token, secret) {
 /// (the ban moves the account's floor), so a route that treats "not signed in" as anonymous asks this first: a banned
 /// account sending its own token is not turned into a guest.
 async function bannedBearer(request, env) {
-  const auth = request.headers.get('Authorization');
-  if (!auth || !auth.startsWith('Bearer ') || !env.USERS) return false;
-  const claims = await verifyJwt(auth.slice(7), env.JWT_SECRET);
+  const token = bearerToken(request);
+  if (!token || !env.USERS) return false;
+  const claims = await verifyJwt(token, env.JWT_SECRET);
   if (!claims?.sub) return false;
   try {
     const raw = await env.USERS.get(`user:${claims.sub}`);
@@ -3003,10 +3128,18 @@ async function bannedBearer(request, env) {
   }
 }
 
+/// 403 agent_not_allowed when the request's session is an agent account's, else null (src/agents.mjs refuseAgent). Asked by
+/// the routes another module handles that move money or act as the account's credentials, at the hand-off to that module,
+/// so the gate (src/kyc_identity.mjs) is never the only check (security review 2026-11-15, F2).
+async function refuseAgentSession(request, env, cors) {
+  const userId = await verifyAuth(request, env);
+  return userId ? refuseAgent(env, userId, json, cors) : null;
+}
+
 async function verifyAuth(request, env) {
-  const auth = request.headers.get('Authorization');
-  if (!auth || !auth.startsWith('Bearer ')) return null;
-  const claims = await verifyJwt(auth.slice(7), env.JWT_SECRET);
+  const token = bearerToken(request);
+  if (!token) return null;
+  const claims = await verifyJwt(token, env.JWT_SECRET);
   const userId = claims?.sub;
   if (!userId) return null;
   // Signing out and a ban both end the tokens the account already holds, not
@@ -3025,9 +3158,9 @@ async function verifyAuth(request, env) {
 /// token. Any other value is returned as it is, so a key-change route, which
 /// asks for "key", refuses it.
 async function authMethod(request, env) {
-  const auth = request.headers.get('Authorization');
-  if (!auth || !auth.startsWith('Bearer ')) return null;
-  const claims = await verifyJwt(auth.slice(7), env.JWT_SECRET);
+  const token = bearerToken(request);
+  if (!token) return null;
+  const claims = await verifyJwt(token, env.JWT_SECRET);
   if (!claims?.sub) return null;
   if (claims.amr === undefined || claims.amr === 'key') return 'key';
   return typeof claims.amr === 'string' ? claims.amr : 'unknown';
@@ -3273,9 +3406,17 @@ async function handleUserProfile(username, request, env, cors) {
   // waiting for review is shown to the owner alone, and that answer is never cached.
   const shown = await publicProfileOf(env, userId, user);
   const own = !!viewerUserId && viewerUserId === userId;
+  // An agent account (src/agents.mjs) is always shown as one, with its sponsor (D1: an agent is never anonymous).
+  const isAgent = user.account_type === 'agent';
+  let sponsoredBy = null;
+  if (isAgent && typeof user.sponsor_id === 'string' && user.sponsor_id) {
+    try { sponsoredBy = JSON.parse(await env.USERS.get(`user:${user.sponsor_id}`) || 'null')?.username || null; } catch { sponsoredBy = null; }
+  }
 
   return json({
     username: user.username,
+    account_type: isAgent ? 'agent' : 'human',
+    ...(isAgent ? { sponsored_by: sponsoredBy, agent_model: user.agent?.model || null } : {}),
     display_name: shown.display_name,
     bio: shown.bio,
     avatar_url: shown.avatar_url,
@@ -4002,6 +4143,10 @@ async function handleAdminBan(request, env, cors) {
   // Every token the account holds ends now; the login check on `user.banned`
   // is what holds after that.
   await endSessions(env, userId, 'ban');
+  // A banned sponsor's agents stop at once (src/agents.mjs): their sessions end, and sign-in and the gate refuse them
+  // while the sponsor stays banned. An agent banned by name is stopped by its own record (and its sessions above).
+  if (user.account_type !== 'agent') await endAgentSessionsOf(env, userId, endSessions);
+  else await writeAgentStanding(env, user);
   await auditLog(env, 'BAN', adminId, username, { reason: user.ban_reason });
 
   return json({ success: true, username, banned: true, reason: user.ban_reason }, 200, cors);
@@ -4164,6 +4309,8 @@ async function handleAdminDeleteUser(request, env, cors) {
   // Delete all KV entries for this user
   await env.USERS.delete(`user:${userId}`);
   await env.USERS.delete(`username:${username}`);
+  // The name's folds go with it, so the name can be taken again (only those that name this account).
+  await releaseNameFolds(env, username, userId);
   if (user.public_key) await env.USERS.delete(`pubkey:${user.public_key}`);
   // A replaced key's entry went when it was replaced; the current key's is the
   // account object's to name (the user record keeps the key the account joined with).
@@ -4174,6 +4321,8 @@ async function handleAdminDeleteUser(request, env, cors) {
   if (user.id_hash) await env.USERS.delete(`idhash:${user.id_hash}`);
   // The Discord link and its claim on the Discord id (src/discord_link.mjs).
   await deleteDiscordLink(env, userId);
+  // The Slack link and its claim on the Slack identity (src/slack_link.mjs).
+  await deleteSlackLink(env, userId);
   // The account's claim on its person (src/kyc_identity.mjs) goes with it.
   if (user.id_hash) await releaseIdHash(env, user.id_hash, userId);
   // What the account object kept in KV for it goes with the account.
@@ -4285,6 +4434,11 @@ async function handleStripeCheckout(request, env, cors) {
   if (!env.STRIPE_SECRET_KEY) return json({ error: 'Stripe not configured' }, 503, cors);
 
   const userId = await verifyAuth(request, env);
+  // An agent's session never pays (D4); signed out, the page is anyone's card.
+  if (userId) {
+    const agentNo = await refuseAgent(env, userId, json, cors);
+    if (agentNo) return agentNo;
+  }
   const { tier, mode, custom_amount } = await request.json().catch(() => ({}));
   // tier: 'seed'|'growth'|'sustainer'|'patron' or null for custom
   // mode: 'one_time' or 'recurring'
@@ -4844,6 +4998,9 @@ async function handleStripeConnectOnboard(request, env, cors) {
 
   const userId = await verifyAuth(request, env);
   if (!userId) return json({ error: 'Unauthorized' }, 401, cors);
+  // An agent holds no money and so has no payout destination (D4).
+  const agentNo = await refuseAgent(env, userId, json, cors);
+  if (agentNo) return agentNo;
   // Where the account's money goes is set with the identity file: a passkey session
   // neither creates the payout account nor opens the page that edits its bank details.
   const refusedSession = await requireIdentityFileSession(request, env, cors);
@@ -5214,6 +5371,8 @@ async function handleTicketCheckout(request, env, cors) {
 
   const userId = await verifyAuth(request, env);
   if (!userId) return json({ error: 'Sign in to purchase tickets' }, 401, cors);
+  const agentNo = await refuseAgent(env, userId, json, cors);
+  if (agentNo) return agentNo;
 
   const body = await request.json().catch(() => null);
   const pkgKey = body && typeof body === 'object' ? body.package : undefined;
@@ -5992,13 +6151,16 @@ function discordDeps(env) {
 // the viewer's own setting (src/adult_content.mjs): `opts.viewer` is who asked,
 // signed out when absent. A viewer whose setting is off is shown nothing above
 // mature_17, one with it on and a verified age under 21 nothing above adult_18,
-// whatever `?rating_max=` says (ratingCap). `opts.cap` is the highest rating,
+// whatever `?rating_max=` says (ratingCap). A visitor with no session is shown
+// up to mature_17: the Gallery is a solo surface (SOLO_SIGNED_OUT_CAP), and it
+// never shows them adult content. `opts.cap` is the highest rating,
 // for a caller that has already worked the slice out (makers, tags).
 async function handleListSimulations(url, env, cors, opts = {}) {
   // Every list depends on who asked, the featured shelf included (its cap is the viewer's).
   const headers = viewerHeaders(cors, opts.viewer, null);
   try {
-    const cap = RATINGS.includes(opts.cap) ? opts.cap : ratingCap(url?.searchParams?.get('rating_max'), opts.viewer);
+    // The Gallery is a solo surface: signed out, it lists up to mature_17 (src/adult_content.mjs SOLO).
+    const cap = RATINGS.includes(opts.cap) ? opts.cap : ratingCap(url?.searchParams?.get('rating_max'), opts.viewer, SOLO);
     const maxIdx = RATINGS.indexOf(cap);
     // `?tag=` (repeatable): a listing must carry every tag asked for. A value that is not a valid tag matches nothing and is
     // no error. `?genre=` is a deprecated alias of `?tag=` for one release ("all" and an empty value ask nothing). `?q=`:
@@ -6059,7 +6221,7 @@ function galleryTextMatches(view, query) {
 const POPULAR_TAGS_LIMIT = 30;
 async function handlePopularTags(url, env, cors, viewer) {
   const scope = new URL('https://api.eustress.dev/api/simulations');
-  const cap = ratingCap(url?.searchParams?.get('rating_max'), viewer);
+  const cap = ratingCap(url?.searchParams?.get('rating_max'), viewer, SOLO);
   const views = await handleListSimulations(scope, env, cors, { viewsOnly: true, cap });
   const counts = new Map();
   for (const view of views) for (const tag of new Set(view.tags)) counts.set(tag, (counts.get(tag) || 0) + 1);
@@ -6080,8 +6242,9 @@ async function handleGetSimulation(request, simId, env, cors) {
   if (isListable(sim)) {
     // Adult content: shown to a viewer who turned it on, and to its author; anyone else is told why (src/adult_content.mjs).
     // An adult listing is only ever served to a signed-in viewer, so its answer is never cached, and its images are
-    // signed URLs, the only ones its image routes serve.
-    const refused = await refuseAdult(request, env, sim, { authenticate, json, cors });
+    // signed URLs, the only ones its image routes serve. The listing page is a solo surface: signed out, it opens up to
+    // mature_17 (src/adult_content.mjs SOLO).
+    const refused = await refuseAdult(request, env, sim, { authenticate, json, cors, surface: SOLO });
     if (refused) return refused;
     const adult = isAdultListing(sim);
     const headers = adult ? { ...cors, 'Cache-Control': 'private, no-store' } : cors;
@@ -6127,7 +6290,8 @@ async function handleDownloadPak(request, simId, env, cors) {
   } else {
     // Adult content is served to a viewer who turned it on, and to its author (src/adult_content.mjs). The Player sends its
     // session or its play pass with the download (crates/client space_fetch.rs), so it is judged by that account's setting.
-    const refused = await refuseAdult(request, env, sim, { authenticate, json, cors });
+    // The download is solo play: signed out, it serves up to mature_17 (SOLO).
+    const refused = await refuseAdult(request, env, sim, { authenticate, json, cors, surface: SOLO });
     if (refused) return refused;
   }
 
@@ -6183,8 +6347,9 @@ async function handlePlaySimulation(request, simId, env, cors) {
     if (!canServe(sim, auth, !!admin))
       return json({ error: 'Simulation not available' }, auth ? 403 : 401, cors);
   } else {
-    // Adult content plays for a viewer who turned it on, and for its author (src/adult_content.mjs).
-    const refused = await refuseAdult(request, env, sim, { authenticate: verifyAuth, json, cors });
+    // Adult content plays for a viewer who turned it on, and for its author (src/adult_content.mjs). Solo play is open
+    // signed out up to mature_17 (SOLO); the live part of the answer below keeps the multiplayer cap.
+    const refused = await refuseAdult(request, env, sim, { authenticate: verifyAuth, json, cors, surface: SOLO });
     if (refused) return refused;
   }
 
@@ -6205,7 +6370,10 @@ async function handlePlaySimulation(request, simId, env, cors) {
   // A guest's lease must be on this listing: a lease on one listing never hands out another's host link.
   // With hosted guest play off, a lease reads nothing about the guest-only session (GUEST_PLAY.md section 13).
   const lease = viewer || !guestPlayOn(env) ? false : await leaseIsLive(env, request.headers.get('X-Eustress-Lease'), now, simId);
-  const host = await livePlayInfo(env, simId, { signedIn: !!viewer, lease, now });
+  // Multiplayer keeps a sign-in (McKale, 2026-11-19): a visitor with no session hears about a live session, and a guest is
+  // given its link, only for a listing within the multiplayer signed-out cap (ages_10), exactly as /live answers them. Above
+  // it they get the solo answer alone, as if nobody hosted.
+  const host = viewer || withinSignedOutCap(sim) ? await livePlayInfo(env, simId, { signedIn: !!viewer, lease, now }) : null;
   const solo = `eustress-player://play/${simId}`;
   const launch = {
     // Opens the Player, which registers the eustress-player:// scheme.
@@ -7108,6 +7276,8 @@ const PRESENCE_MAX_STEP = 150;
 async function handleLedgerSpend(request, env, cors) {
   const userId = await verifyAuth(request, env);
   if (!userId) return json({ error: 'Unauthorized' }, 401, cors);
+  const agentNo = await refuseAgent(env, userId, json, cors);
+  if (agentNo) return agentNo;
 
   const body = await request.json().catch(() => ({}));
   const { amount, purpose, ref, simulation_id, creator_id, product_id, title, icon } = body;
@@ -7506,6 +7676,8 @@ async function publicUser(user, env) {
     // The link this account shows (src/discord_link.mjs); keyFields below hides
     // one a key replacement or an unlink revoked.
     ...(await discordFields(env, user, null)),
+    // The Slack link, the same way (src/slack_link.mjs). The public profile carries neither.
+    ...(await slackFields(env, user, null)),
     bliss_balance: fromMinor(minor),
     bliss_balance_minor: minor,
     // The web app deserializes this into User.ticket_balance, so it is always
@@ -7533,6 +7705,7 @@ async function keyFields(env, user) {
     key_epoch: held.key_epoch,
     key_prompt_seen_at: held.prompt_seen_at || null,
     ...(held.discord_unlinked_at ? await discordFields(env, user, held.discord_unlinked_at) : {}),
+    ...(held.slack_unlinked_at ? await slackFields(env, user, held.slack_unlinked_at) : {}),
     email_verified_at: held.email_verified_at || null,
     email_change_pending: held.email_change_pending || null,
     key_replace_terms: keyReplaceTerms(),
@@ -7544,6 +7717,13 @@ async function keyFields(env, user) {
 async function discordFields(env, user, unlinkedAt) {
   const link = env ? await currentDiscordLink(env, user, unlinkedAt).catch(() => null) : (user?.discord_id ? { id: user.discord_id } : null);
   return { discord_id: link ? link.id : null, discord_username: link ? link.username || null : null };
+}
+
+/// `slack_linked`, `slack_name` and `slack_team_name` for the account's view: the
+/// link made after `unlinkedAt`, or false and nulls. The Slack ids stay on the server.
+async function slackFields(env, user, unlinkedAt) {
+  const link = env ? await currentSlackLink(env, user, unlinkedAt).catch(() => null) : null;
+  return { slack_linked: !!link, slack_name: link ? link.name : null, slack_team_name: link ? link.team_name : null };
 }
 
 async function ticketBalanceMirror(env, user) {

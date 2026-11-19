@@ -64,6 +64,9 @@
 }
 .pn-verified { color: var(--g-accent-bright); border-color: rgba(60, 186, 84, 0.45); background: var(--g-accent-soft); }
 .pn-verified svg { width: 14px; height: 14px; fill: none; stroke: currentColor; stroke-width: 2.6; stroke-linecap: round; stroke-linejoin: round; }
+/* An AI agent account (docs/architecture/AGENT_ACCOUNTS.md): the badge, and the line naming its sponsor. */
+.pn-agent { color: #c4b5fd; border-color: rgba(167, 139, 250, 0.5); background: rgba(139, 92, 246, 0.14); }
+.pn-agent-line { margin-top: 2px; color: var(--color-text-secondary, #9aa4b2); font-size: 13px; }
 .pn-handle { font: 500 15px var(--g-mono); color: var(--g-text-2); overflow-wrap: anywhere; }
 .pn-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 14px; color: var(--g-muted); font-size: 14px; }
 .pn-bio { margin: 4px 0 0; max-width: 620px; color: var(--g-text-2); font-size: 15.5px; overflow-wrap: anywhere; white-space: pre-line; }

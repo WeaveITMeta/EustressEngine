@@ -186,6 +186,20 @@ pub fn DocsPerspectivePage() -> impl IntoView {
 
                 <main class="docs-content">
                     <header class="docs-hero">
+                        // The hero picture: the page's largest paint, so it loads at
+                        // once (no lazy loading, no entrance animation).
+                        <div class="docs-hero-art">
+                            <img
+                                src="/assets/learn/perspective-hero-1600.webp"
+                                srcset="/assets/learn/perspective-hero-800.webp 800w, /assets/learn/perspective-hero-1600.webp 1600w"
+                                sizes="(max-width: 1024px) 100vw, 840px"
+                                alt="A cube, a cylinder and a wedge stand as 3D solids on a grid platform and appear again as a flat square, circle and triangle on an upright plane, joined by thin lines that start at a small wireframe camera."
+                                width="1600"
+                                height="900"
+                                fetchpriority="high"
+                                decoding="async"
+                            />
+                        </div>
                         <div class="docs-breadcrumb">
                             <a href="/learn">"Learn"</a>
                             <span class="separator">"/"</span>

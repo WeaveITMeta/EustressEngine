@@ -24,6 +24,19 @@
         started = true;
     }
 
+    // The prerender inlines the CSS the static copy needs and parks the full stylesheets, their address in data-href,
+    // so nothing competes with the page's first paint (src/critical_css.rs). The live app needs all of them: they are
+    // put back before it mounts, and at once when the static copy is another page's, which the indicator covers anyway.
+    function enableStylesheets() {
+        var sheets = document.querySelectorAll('link[data-defer-css]');
+        for (var i = 0; i < sheets.length; i++) {
+            var href = sheets[i].getAttribute('data-href');
+            if (href && !sheets[i].getAttribute('href')) sheets[i].setAttribute('href', href);
+            sheets[i].media = 'all';
+        }
+    }
+    if (!prerendered) enableStylesheets();
+
     // The live app replaces a prerendered page only once the window has loaded and the browser has measured the
     // page's largest paint. Replacing it sooner throws the static copy's paints away, so the largest paint is timed
     // from the live app, behind the whole WebAssembly download. The prerender makes Trunk's start-up script wait on
@@ -37,6 +50,7 @@
         function go() {
             if (done) return;
             done = true;
+            enableStylesheets();
             // The hero's entrance has played on the static copy; the live copy does not play it again (main.css).
             document.documentElement.classList.add('app-live');
             resolve();

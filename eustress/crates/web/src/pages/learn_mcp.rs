@@ -212,6 +212,20 @@ pub fn LearnMcpPage() -> impl IntoView {
 
                 <main class="docs-content">
                     <header class="docs-hero">
+                        // The hero picture: the page's largest paint, so it loads at
+                        // once (no lazy loading, no entrance animation).
+                        <div class="docs-hero-art">
+                            <img
+                                src="/assets/learn/mcp-hero-1600.webp"
+                                srcset="/assets/learn/mcp-hero-800.webp 800w, /assets/learn/mcp-hero-1600.webp 1600w"
+                                sizes="(max-width: 1024px) 100vw, 840px"
+                                alt="A loose cluster of glowing nodes, standing for an AI client, joined by a single light bridge between two gates to a 3D grid workspace holding a cube with a selection outline, a cylinder, a sphere and a slab."
+                                width="1600"
+                                height="900"
+                                fetchpriority="high"
+                                decoding="async"
+                            />
+                        </div>
                         <div class="docs-breadcrumb">
                             <a href="/learn">"Learn"</a>
                             <span class="separator">"/"</span>
@@ -273,6 +287,19 @@ pub fn LearnMcpPage() -> impl IntoView {
 
                         <div id="overview-paths" class="subsection">
                             <h3>"Disk and Live"</h3>
+                            <figure class="learn-figure">
+                                <img
+                                    src="/assets/learn/mcp-fig-1-1200.webp"
+                                    srcset="/assets/learn/mcp-fig-1-600.webp 600w, /assets/learn/mcp-fig-1-1200.webp 1200w"
+                                    sizes="(max-width: 660px) 92vw, (max-width: 1099px) 600px, 500px"
+                                    alt="A small node cluster reaches a grid workspace of simple solids by two routes: a dim violet path through stacked sheets and folders, and a direct bright green path."
+                                    width="1200"
+                                    height="900"
+                                    loading="lazy"
+                                    decoding="async"
+                                />
+                                <figcaption>"Disk tools reach a Space through its files and work with Studio closed. Live tools go straight to the world the engine has loaded."</figcaption>
+                            </figure>
                             <p>
                                 "Every tool reaches a Space in one of two ways. Disk tools read and write the
                                 Universe folder, and a running engine picks the change up through its file
@@ -549,6 +576,20 @@ pub fn LearnMcpPage() -> impl IntoView {
                             <span class="section-number">"04"</span>
                             "World Tools"
                         </h2>
+
+                        <figure class="learn-figure">
+                            <img
+                                src="/assets/learn/mcp-fig-2-1200.webp"
+                                srcset="/assets/learn/mcp-fig-2-600.webp 600w, /assets/learn/mcp-fig-2-1200.webp 1200w"
+                                sizes="(max-width: 660px) 92vw, (max-width: 1099px) 600px, 500px"
+                                alt="A large green wireframe cube containing three smaller violet glass cubes, each holding simple shapes, with one green probe line touching a cube in the middle one."
+                                width="1200"
+                                height="900"
+                                loading="lazy"
+                                decoding="async"
+                            />
+                            <figcaption>"A Universe holds Spaces. The world tools list, create and inspect each Space and what is inside it."</figcaption>
+                        </figure>
 
                         <div id="world-universes" class="subsection">
                             <h3>"Universes and Spaces"</h3>

@@ -1,0 +1,123 @@
+{
+  "commit": "bb910190620076e4073a727a5ea20d49afa83e26",
+  "cp_u_sequence_steps": {
+    "entity_select": 4,
+    "error_surface": 3,
+    "panel_open": 4,
+    "property_edit": 5
+  },
+  "errors": [],
+  "item": "G1.04",
+  "path_files": {
+    "CP-A": {
+      "bytes": 18313,
+      "matches_generator": true,
+      "path": "E:\\Workspace\\EustressEngine\\eustress\\spaces/harness\\paths\\CP-A.json",
+      "sha256": "2277f2bed8806cf7785a3535f6c030269b6abf477155be3ab12dbba745beacd7"
+    },
+    "CP-B": {
+      "bytes": 74403,
+      "matches_generator": true,
+      "path": "E:\\Workspace\\EustressEngine\\eustress\\spaces/harness\\paths\\CP-B.json",
+      "sha256": "1762cd0aba8bbe438cee62987d7ee63378df5744c83531992e7bfe306d43cb85"
+    },
+    "CP-S": {
+      "bytes": 3672,
+      "matches_generator": true,
+      "path": "E:\\Workspace\\EustressEngine\\eustress\\spaces/harness\\paths\\CP-S.json",
+      "sha256": "5ded7872dde9a2bab7237bd6c81485ba86158b048ba9691010c422b5f9a1cd56"
+    },
+    "CP-U": {
+      "bytes": 2195,
+      "matches_generator": true,
+      "path": "E:\\Workspace\\EustressEngine\\eustress\\spaces/harness\\paths\\CP-U.json",
+      "sha256": "3fd1cee4b352326566560fea53ed0a32eaa48e9576dd3222f1d6270d5b5d8052"
+    }
+  },
+  "paths": [
+    {
+      "id": "CP-A",
+      "identical": true,
+      "matches_declared_poses": true,
+      "name": "first_impression",
+      "pose_count": null,
+      "readback_mismatches": [
+        0,
+        0
+      ],
+      "run_a_sha256": "afac72bcec511946a57dfb6678f3d65bd59a76eedca7b419afb6c72e3ce5f3d6",
+      "run_b_sha256": "afac72bcec511946a57dfb6678f3d65bd59a76eedca7b419afb6c72e3ce5f3d6",
+      "tick_range": [
+        0,
+        179
+      ],
+      "ticks_declared": 180,
+      "ticks_replayed": [
+        180,
+        180
+      ]
+    },
+    {
+      "id": "CP-B",
+      "identical": true,
+      "matches_declared_poses": true,
+      "name": "orbit_survey",
+      "pose_count": null,
+      "readback_mismatches": [
+        0,
+        0
+      ],
+      "run_a_sha256": "97169a797b9701ab80f1fcef41971a28b5d4a824f3b5b033bafc2b19e64f9ad4",
+      "run_b_sha256": "97169a797b9701ab80f1fcef41971a28b5d4a824f3b5b033bafc2b19e64f9ad4",
+      "tick_range": [
+        0,
+        599
+      ],
+      "ticks_declared": 600,
+      "ticks_replayed": [
+        600,
+        600
+      ]
+    },
+    {
+      "id": "CP-S",
+      "identical": true,
+      "matches_declared_poses": true,
+      "name": "static_studies",
+      "pose_count": 24,
+      "readback_mismatches": [
+        0,
+        0
+      ],
+      "run_a_sha256": "8a9cee804c54f88005552936b46693a61fa2eabe3773c9b5a8515c90b465aa2d",
+      "run_b_sha256": "8a9cee804c54f88005552936b46693a61fa2eabe3773c9b5a8515c90b465aa2d",
+      "tick_range": [
+        0,
+        23
+      ],
+      "ticks_declared": 24,
+      "ticks_replayed": [
+        24,
+        24
+      ]
+    }
+  ],
+  "reference_machine_id": "Cybermill",
+  "scene": {
+    "dir": "RH3_exterior",
+    "frozen_sha256": "6c94bdad3a88ee422535e85820e9f97857bb175aebcd6ab07b17a60a7e16e74b",
+    "matches_frozen": true,
+    "ran_from_copy": true,
+    "scene_id": "S3",
+    "tree_sha256": "6c94bdad3a88ee422535e85820e9f97857bb175aebcd6ab07b17a60a7e16e74b"
+  },
+  "seed": 42,
+  "source_matches_commit": false,
+  "summary": {
+    "identical": 3,
+    "paths": 3,
+    "tick_mismatches": 0
+  },
+  "tick_source": "FixedUpdate runs since the path started (Time<Fixed>, 60 Hz)",
+  "tool": "harness-scenes paths --verify"
+}

@@ -224,6 +224,10 @@
 .page-login .form-field { display: flex; flex-direction: column; gap: 8px; margin: 0; }
 .page-login .form-label { margin: 0; color: var(--g-muted); font: 600 11px var(--g-mono); letter-spacing: 0.12em; text-transform: uppercase; }
 .page-login .form-label .required { color: var(--g-accent-bright); }
+/* Sign-up's Marketing Emails box: a plain checkbox line with an "(Optional)" tag. */
+.page-login .form-checkbox-field .form-checkbox { color: var(--g-text); font-size: 14px; font-weight: 600; }
+.page-login .form-checkbox-field .form-checkbox input { accent-color: var(--g-accent-bright); }
+.page-login .form-optional { color: var(--g-muted); font-weight: 400; }
 .page-login .form-hint { margin: 2px 0 0; color: var(--g-muted); font-size: 13px; line-height: 1.5; }
 .page-login .form-hint a, .page-login .btn-link { color: var(--g-accent-bright); font-weight: 600; text-decoration: none; }
 .page-login .form-hint a:hover, .page-login .btn-link:hover { text-decoration: underline; }

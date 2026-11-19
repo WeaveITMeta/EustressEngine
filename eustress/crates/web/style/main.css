@@ -13507,6 +13507,10 @@ a.experience-card {
     background: rgba(88, 101, 242, 0.2);
 }
 
+.social-icon.slack {
+    background: rgba(74, 21, 75, 0.3);
+}
+
 .social-icon img {
     width: 24px;
     height: 24px;
@@ -13569,6 +13573,7 @@ a.experience-card {
     display: flex;
     align-items: center;
     justify-content: space-between;
+    gap: var(--space-lg);
     padding: var(--space-md) 0;
     border-bottom: 1px solid rgba(128, 144, 160, 0.05);
 }
@@ -13594,9 +13599,15 @@ a.experience-card {
     color: var(--color-text-muted);
 }
 
+/* A switch keeps its shape beside a long description: a flex row shrinks
+   any child that may shrink, and the Adult content text squeezed the track
+   until the knob sat outside it. */
 .toggle-switch {
+    flex: none;
+    box-sizing: border-box;
     width: 48px;
     height: 28px;
+    padding: 0;
     background: rgba(128, 144, 160, 0.2);
     border: none;
     border-radius: 14px;
@@ -13799,6 +13810,77 @@ a.experience-card {
     height: 32px;
     opacity: 0.4;
     filter: brightness(0) saturate(100%) invert(85%) sepia(5%) saturate(500%) hue-rotate(180deg);
+}
+
+/* Billing tab (pages/settings.rs BillingSection) */
+.billing-tickets-card {
+    margin-top: var(--space-md);
+}
+
+.billing-activity {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+}
+
+.billing-activity-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--space-md);
+    padding: var(--space-sm) 0;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.billing-activity-row:last-child {
+    border-bottom: none;
+}
+
+.billing-activity-what {
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+}
+
+.billing-activity-label {
+    font-size: var(--text-sm);
+    color: var(--color-text-primary);
+}
+
+.billing-activity-date {
+    font-size: var(--text-xs);
+    color: var(--color-text-muted);
+}
+
+.billing-activity-amount {
+    font-size: var(--text-sm);
+    font-weight: 600;
+    font-variant-numeric: tabular-nums;
+    color: #22c55e;
+    white-space: nowrap;
+}
+
+.billing-activity-amount.negative {
+    color: var(--color-text-muted);
+}
+
+.billing-links {
+    display: flex;
+    flex-wrap: wrap;
+    gap: var(--space-sm);
+    margin-top: var(--space-md);
+}
+
+.billing-links a {
+    text-decoration: none;
+}
+
+.billing-note {
+    font-size: var(--text-sm);
+    color: var(--color-text-muted);
+    margin: 0;
 }
 
 /* Alerts */
@@ -21791,6 +21873,78 @@ body:has(.kyc-banner) { padding-top: 60px; }
 .archive-dialog .btn-primary, .settings-dialog .btn-primary { background: linear-gradient(135deg, #2563eb 0%, #1d4ed8 100%); color: #fff; }
 .archive-dialog .btn, .settings-dialog .btn { min-height: 40px; padding: var(--space-sm) var(--space-md); font-weight: 600; text-decoration: none; }
 .settings-dialog a.btn-secondary, .settings-dialog a.btn-secondary:hover { color: var(--color-text-primary); }
+
+/* The author's "Edit listing" dialog on a listing's page (pages/listing_edit.rs). */
+.settings-dialog.listing-edit { max-width: 640px; max-height: calc(100vh - 32px); overflow-y: auto; }
+.listing-edit-label { display: block; margin: var(--space-sm) 0 4px; color: var(--color-text-primary); font-weight: 600; font-size: var(--text-sm); }
+.listing-edit-input, .listing-edit-textarea { box-sizing: border-box; width: 100%; padding: 10px 12px; border: 1px solid rgba(255, 255, 255, 0.16); border-radius: 8px; background: rgba(0, 0, 0, 0.25); color: var(--color-text-primary); font: inherit; }
+.listing-edit-textarea { min-height: 180px; resize: vertical; line-height: 1.5; }
+.listing-edit-input:focus, .listing-edit-textarea:focus { outline: 2px solid #2563eb; outline-offset: 1px; }
+.listing-edit-count { margin: 4px 0 0; text-align: right; color: var(--color-text-secondary); font-size: 12px; }
+.listing-edit-visibility { margin: var(--space-sm) 0 0; padding: 0; border: 0; }
+.listing-edit-visibility label { display: block; margin: 4px 0; color: #c9d1d9; cursor: pointer; }
+.listing-edit-note { margin: var(--space-sm) 0 0; color: var(--color-text-secondary); font-size: 13px; line-height: 1.45; }
+.listing-edit-problem { margin: var(--space-sm) 0 0; color: #ff9892; }
+.listing-edit-saved { margin: var(--space-sm) 0 0; color: #7ee2a8; }
+/* Settings, Agents (pages/agents_settings.rs). */
+.agents-section .agents-note { margin: var(--space-sm) 0 0; color: var(--color-text-secondary); font-size: 13px; line-height: 1.45; }
+.agents-problem { margin: var(--space-sm) 0 0; color: #ff9892; }
+.agents-agreement { margin: var(--space-sm) 0 0; padding: var(--space-sm) var(--space-md); max-height: 240px; overflow-y: auto; white-space: pre-wrap; border: 1px solid rgba(255, 255, 255, 0.16); border-radius: 8px; background: rgba(0, 0, 0, 0.25); color: #c9d1d9; font-size: 13px; line-height: 1.5; }
+.agents-agreement:focus-visible { outline: 2px solid #2563eb; outline-offset: 1px; }
+.agents-check { display: flex; align-items: flex-start; gap: var(--space-sm); margin: var(--space-sm) 0 0; color: var(--color-text-primary); cursor: pointer; }
+.agents-label { display: block; margin: var(--space-sm) 0 4px; color: var(--color-text-primary); font-weight: 600; font-size: var(--text-sm); }
+.agents-input { box-sizing: border-box; width: 100%; padding: 10px 12px; border: 1px solid rgba(255, 255, 255, 0.16); border-radius: 8px; background: rgba(0, 0, 0, 0.25); color: var(--color-text-primary); font: inherit; }
+.agents-input:focus { outline: 2px solid #2563eb; outline-offset: 1px; }
+.agents-actions { display: flex; justify-content: flex-end; margin-top: var(--space-md); }
+.agents-token { display: flex; flex-wrap: wrap; gap: var(--space-sm); align-items: center; margin-top: var(--space-md); }
+.agents-token .agents-input { flex: 1 1 260px; width: auto; font-family: monospace; }
+.agents-token .agents-handoff { flex: 1 1 100%; min-height: 220px; resize: vertical; white-space: pre-wrap; overflow-wrap: anywhere; font-size: 0.85rem; line-height: 1.45; }
+.agents-list { list-style: none; margin: var(--space-md) 0 0; padding: 0; }
+.agents-row { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-sm) var(--space-md); padding: var(--space-sm) 0; border-top: 1px solid rgba(255, 255, 255, 0.1); }
+.agents-who { display: flex; flex-direction: column; flex: 1 1 180px; min-width: 0; }
+.agents-name { color: var(--color-text-primary); font-weight: 600; overflow-wrap: anywhere; }
+.agents-detail { color: var(--color-text-secondary); font-size: 13px; overflow-wrap: anywhere; }
+.agents-status { font-size: 13px; font-weight: 600; color: #7ee2a8; }
+.agents-status-suspended, .agents-status-suspended-by-eustress { color: #e3b341; }
+.agents-status-revoked { color: #ff9892; }
+.agents-buttons { display: flex; flex-wrap: wrap; gap: var(--space-sm); }
+
+/* The reviewers' appeals page (pages/admin_appeals.rs). */
+.admin-links { display: flex; flex-wrap: wrap; justify-content: center; gap: var(--space-sm); margin-top: var(--space-md); }
+.appeals-layout { display: grid; grid-template-columns: minmax(240px, 320px) 1fr; gap: var(--space-lg); align-items: start; }
+@media (max-width: 860px) { .appeals-layout { grid-template-columns: 1fr; } }
+.appeals-list .section-header-industrial { display: flex; align-items: center; justify-content: space-between; gap: var(--space-sm); }
+.appeals-queue { list-style: none; margin: 0; padding: 0; display: grid; gap: 8px; }
+.appeals-item { display: grid; gap: 2px; width: 100%; text-align: left; padding: 10px 12px; border: 1px solid rgba(255, 255, 255, 0.12); border-radius: 8px; background: rgba(255, 255, 255, 0.03); color: #c9d1d9; cursor: pointer; font: inherit; }
+.appeals-item:hover, .appeals-item.on { border-color: #2563eb; background: rgba(37, 99, 235, 0.12); }
+.appeals-ref { font-weight: 600; color: var(--color-text-primary); overflow-wrap: anywhere; }
+.appeals-when { color: var(--color-text-secondary); font-size: 12px; }
+.appeals-why { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; color: #c9d1d9; overflow-wrap: anywhere; }
+.appeals-flag { justify-self: start; margin-top: 4px; padding: 2px 8px; border-radius: 999px; background: rgba(245, 158, 11, 0.18); color: #fbbf24; font-size: 12px; }
+.appeals-empty { padding: var(--space-md) 0; }
+.appeals-notice { margin-bottom: var(--space-md); }
+.appeals-detail { display: grid; gap: var(--space-md); color: #c9d1d9; min-width: 0; }
+.appeals-head h2 { margin: 0; color: var(--color-text-primary); }
+.appeals-meta { margin: 4px 0 0; color: var(--color-text-secondary); font-size: 13px; }
+.appeals-block h3 { margin: 0 0 var(--space-xs); color: var(--color-text-primary); font-size: var(--text-sm); text-transform: uppercase; letter-spacing: 0.04em; }
+.appeals-text { margin: var(--space-xs) 0 0; padding: 10px 14px; border-left: 3px solid #2563eb; background: rgba(255, 255, 255, 0.04); white-space: pre-wrap; overflow-wrap: anywhere; }
+.appeals-reasons { margin: 0; padding-left: var(--space-lg); }
+.appeals-reasons code, .appeals-history code { overflow-wrap: anywhere; }
+.appeals-tests td { vertical-align: top; }
+.appeals-tests tr.low td { color: #fbbf24; }
+.appeals-description { white-space: pre-wrap; overflow-wrap: anywhere; margin: 0; }
+.appeals-captures { display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 8px; }
+.appeals-captures img { display: block; width: 100%; border-radius: 6px; border: 1px solid rgba(255, 255, 255, 0.12); }
+.appeals-history summary { cursor: pointer; color: var(--color-text-primary); font-weight: 600; }
+.appeals-history ul { margin: var(--space-xs) 0 0; padding-left: var(--space-lg); }
+.appeals-superseded label { display: block; margin-top: 6px; cursor: pointer; }
+.appeals-label { display: block; margin: var(--space-sm) 0 4px; color: var(--color-text-primary); font-weight: 600; font-size: var(--text-sm); }
+.appeals-rationale, .appeals-select { box-sizing: border-box; width: 100%; padding: 10px 12px; border: 1px solid rgba(255, 255, 255, 0.16); border-radius: 8px; background: rgba(0, 0, 0, 0.25); color: var(--color-text-primary); font: inherit; }
+.appeals-rationale { resize: vertical; min-height: 110px; line-height: 1.5; }
+.appeals-count { margin: 4px 0 0; text-align: right; color: var(--color-text-secondary); font-size: 12px; }
+.appeals-problem { margin: var(--space-sm) 0 0; color: #ff9892; }
+.appeals-actions { display: flex; flex-wrap: wrap; gap: var(--space-sm); margin-top: var(--space-md); }
+.appeals-actions .btn { min-height: 40px; padding: var(--space-sm) var(--space-md); font-weight: 600; }
 
 /* The line under the two Sign Out buttons when "everywhere" could not be done (components/sign_out.rs). */
 .sign-out-error { margin: 4px 12px 8px; color: #ff9892; font-size: 12.5px; line-height: 1.4; max-width: 260px; }

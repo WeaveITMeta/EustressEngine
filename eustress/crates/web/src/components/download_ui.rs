@@ -446,7 +446,7 @@ mod tests {
         for k in keys {
             platforms.insert(k.to_string(), ReleaseAsset { url: format!("https://downloads.example.dev/{k}"), sha256: String::new(), size_bytes: 85_000_000 });
         }
-        ReleaseState::Released(ReleaseManifest { version: "0.1.0".to_string(), date: String::new(), changelog_url: String::new(), platforms })
+        ReleaseState::Released(ReleaseManifest { version: "0.1.0".to_string(), date: String::new(), changelog_url: String::new(), min_version: None, platforms })
     }
 
     const P: Product = Product::Player;

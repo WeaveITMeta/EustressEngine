@@ -1,0 +1,10 @@
+{
+  "title": "G6.30 positive control: every step names a tool with a live dispatch site",
+  "note": "Gate must exit 0. If a listed tool stops being SHIPPED in source, this script is refused, which is the intended behaviour.",
+  "steps": [
+    {"step": 1, "tool": "data:import", "say": "Import a CSV as a Dataset"},
+    {"step": 2, "tool": "data:stats", "say": "Descriptive statistics"},
+    {"step": 3, "tool": "insert:part", "say": "Insert a Part"},
+    {"step": 4, "tool": "cad_create_part", "say": "MCP tool: create a parametric part"}
+  ]
+}

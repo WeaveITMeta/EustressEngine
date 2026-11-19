@@ -1,0 +1,11 @@
+# Harness scene marker. Emitted by harness-scenes (eustress/crates/engine/src/bin/harness_scenes.rs); never edit by hand.
+[harness]
+scene_id = "S2"
+space_dir = "RH2_interior"
+seed = 42
+generator = "harness-scenes"
+title = "Material and coherence: 6 m x 8 m x 3 m room, one window, two lamps of differing colour temperature"
+
+[notes]
+lamp_colour_temperature_k = "2700 (Warm_2700K), 6500 (Cool_6500K)"
+window = "east wall, z -0.8..0.8 m, y 1.0..2.2 m, open aperture"

@@ -1,0 +1,16 @@
+releases = []
+
+[publish]
+version = 1
+channel = "production"
+
+[listing]
+name = ""
+genre = "All"
+
+[visibility]
+is_public = false
+open_source = false
+studio_editable = false
+discoverable = false
+max_players = 10

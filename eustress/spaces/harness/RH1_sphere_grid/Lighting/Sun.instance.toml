@@ -1,0 +1,17 @@
+[metadata]
+archivable = true
+class_name = "Star"
+
+[star]
+angular_size = 8.0
+cast_shadows = true
+color = [
+    255,
+    250,
+    242,
+]
+day_of_year = 172
+enabled = false
+god_rays = 1.0
+intensity = 130000.0
+size_version = 1

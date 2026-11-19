@@ -16,7 +16,7 @@ import { loadWorker, mintToken, fakeEnv, ctx } from './helpers/load_worker.mjs';
 import { fakeClaude, questionnaireAnswers } from './helpers/claude_fake.mjs';
 import { routePolicy, FRESH } from '../src/route_policy.mjs';
 import { checkListingEdit, applyListingEdit, handleEditListing, LISTING_EDIT_LIMITS } from '../src/listing_edit.mjs';
-import { acquireLease, releaseLease, thresholdsFrom, runModerationCase, isListable, buildJevQuestions, CODE_TESTS, POLICY_VERSION, POLICY_HASH_ANCHORED } from '../src/moderation.mjs';
+import { acquireLease, releaseLease, thresholdsFrom, runModerationCase, isListable, buildJevQuestions, CODE_TESTS, POLICY_VERSION, POLICY_HASH_ANCHORED, loadCase, authorView, handleModerationRoute } from '../src/moderation.mjs';
 import { questionnaireRecord } from '../src/rating_questionnaire.mjs';
 import { GUARDIAN_POLICY_TEXT } from '../src/generated/policy_text.mjs';
 
@@ -267,4 +267,65 @@ test('the review after a web edit reads the new description, and lists the listi
   assert.ok(seen.slice(judged).some(b => b.includes('https://tides.example.org/basin')), 'the judge read the new description');
   const after = JSON.parse(await env.SOCIAL.get(`sim:${MSIM}`));
   assert.deepEqual([after.description, isListable(after)], [linked, true]);
+});
+
+
+test('a web edit while an appeal waits withdraws it: the new text is reviewed, the queue clears, and a later ruling is refused', async () => {
+  const SIM2 = 'a1b2c3d4-0000-4000-8000-00000000a917';
+  const env = { SOCIAL: kv(), USERS: kv(), AUDIT_LOG: kv(), SCENES: r2(), JEV_API_KEY: 'jev-test', GROK_API_KEY: 'grok-test', MODERATION_THRESHOLDS: '{"audit_rate":0}', JWT_SECRET: 'test-secret' };
+  env.EMAIL = { send: async () => {} };
+  env.__EmailMessage = class { constructor(from, to, raw) { this.raw = raw; } };
+  env.USERS.m.set('user:user-1', JSON.stringify({ id: 'user-1', username: 'ann', email: 'ann@example.com' }));
+  const sim = {
+    id: SIM2, name: 'Harbour Basin', description: `A working harbour.\n${STATEMENT_TEXT}`, tags: ['harbour'], tags_source: 'author', author_id: 'user-1', is_public: true,
+    r2_key: `universes/${SIM2}/universe.pak`, published_at: new Date().toISOString(), updated_at: new Date().toISOString(),
+    moderation: { status: 'pending' }, rating_questionnaire: questionnaireRecord(questionnaireAnswers()),
+  };
+  const pak = await env.SCENES.put(sim.r2_key, new TextEncoder().encode(`PAK-${SIM2}`).buffer, { sha256: createHash('sha256').update(`PAK-${SIM2}`).digest('hex') });
+  sim.pak_etag = pak.etag; sim.scene_size_bytes = pak.size;
+  await env.SOCIAL.put(`sim:${SIM2}`, JSON.stringify(sim));
+  await env.SCENES.put(`universes/${SIM2}/moderation/dossier.json`, JSON.stringify({ dossier_version: 1, digest: { entity_count: 300, default_material_fraction: 0.2, default_name_fraction: 0.2, script_count: 1, text_string_count: 4 }, strings: ['Crane 4'], scripts: [{ path: 'Soul/tide.luau', language: 'luau', lines: 3, source: 'local depth = basin + tide' }], signals: { urls: [] } }));
+  await env.SCENES.put(`universes/${SIM2}/moderation/capture-0.png`, new Uint8Array([0x89, 0x50, 0x4e, 0x47, 1, 2, 3]).buffer, { httpMetadata: { contentType: 'image/png' } });
+  // The first review asks for a change to the Lesson (one test at 1); the second, after the edit, passes everything.
+  let lessonAt = 1;
+  const answer = () => { const a = judgeAnswer(); a.tests.lesson = { score: lessonAt, evidence: 'lesson: what the gauge shows' }; return a; };
+  const deps = {
+    json, cors: {}, auditLog: async () => {},
+    verifyAuth: async r => (r.headers.get('Authorization') || '').replace('Bearer ', '') || null,
+    requireAdmin: async r => ((r.headers.get('Authorization') || '') === 'Bearer staff-1' ? 'staff-1' : null),
+    claude: fakeClaude(() => answer()),
+    grokFetch: async () => ({ ok: true, status: 200, json: async () => ({ output: [] }), text: async () => '' }),
+    grokModel: 'grok-test', policyText: GUARDIAN_POLICY_TEXT, policyHash: POLICY_HASH_ANCHORED,
+    packageScripts: packageFrom(),
+    fetch: async () => new Response(JSON.stringify(jevAnswers()), { status: 200 }),
+  };
+  const first = await runModerationCase(SIM2, env, deps);
+  assert.equal(first.status, 'changes_requested', JSON.stringify(first.decision?.reasons));
+
+  const call = (method, path, token, body) => handleModerationRoute(new Request(`https://api.eustress.dev${path}`, { method, headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' }, body: body === undefined ? undefined : JSON.stringify(body) }), new URL(`https://api.eustress.dev${path}`), env, { waitUntil() {} }, deps);
+  const appealed = await call('POST', `/api/simulations/${SIM2}/appeal`, 'user-1', { text: 'The Lesson line names what the gauge teaches.' });
+  assert.equal(appealed.status, 202, await appealed.clone().text());
+  assert.equal((await loadCase(env, SIM2)).appeal.status, 'pending');
+  assert.ok(await env.SOCIAL.get(`wsq:appeal:${SIM2}`), 'queued for a person');
+
+  // The author fixes the Lesson on the website instead of waiting.
+  const fixed = `A working harbour.\n${STATEMENT_TEXT.replace('Lesson: How tidal range and basin shape set harbour depth.', 'Lesson: How a larger tidal range deepens the quay at high water.')}`;
+  const res = await handleEditListing(new Request(`https://api.eustress.dev/api/simulations/${SIM2}/listing`, { method: 'PATCH', headers: { Authorization: 'Bearer user-1', 'Content-Type': 'application/json' }, body: JSON.stringify({ description: fixed }) }), SIM2, env, {}, deps);
+  assert.equal((await res.json()).review, true);
+  lessonAt = 2;
+  const second = await runModerationCase(SIM2, env, deps, { trigger: 'publish' });
+  assert.equal(second.status, 'approved', JSON.stringify(second.decision?.reasons));
+  const rec = await loadCase(env, SIM2);
+  assert.equal(rec.appeal.status, 'withdrawn');
+  assert.ok(rec.history.some(h => h.event === 'appeal_withdrawn'));
+  assert.equal(await env.SOCIAL.get(`wsq:appeal:${SIM2}`), null, 'it left the Review Workspace');
+  const view = authorView(rec, JSON.parse(await env.SOCIAL.get(`sim:${SIM2}`)));
+  assert.equal(view.appeal.status, 'withdrawn');
+  assert.match(view.appeal.note, /withdrawn/);
+
+  // A person who opens the old appeal now cannot rule over the newer decision.
+  const ruling = await call('POST', '/api/admin/moderation/tool', 'staff-1', { name: 'moderation_resolve_appeal', args: { sim_id: SIM2, decision: 'upheld', rationale: 'The Lesson line did not match what the Space shows.' } });
+  assert.equal(ruling.status, 400);
+  assert.match((await ruling.json()).error, /no pending appeal/);
+  assert.equal((await loadCase(env, SIM2)).status, 'approved', 'the newer decision stands');
 });

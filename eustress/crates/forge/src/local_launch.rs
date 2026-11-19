@@ -41,8 +41,13 @@ pub const MAX_INSTANCES_PER_DEPLOYMENT: u32 = 32;
 /// Environment keys that must never appear in argv or in the control-plane job.
 pub const SECRET_ENV: &[&str] = &["EUSTRESS_SERVER_TOKEN", "EUSTRESS_AUTHOR_TOKEN"];
 
-/// One process the launcher will start.
-#[derive(Clone, Debug)]
+/// Environment keys of the launcher itself that a started server never
+/// inherits: the fleet host credential stands for the machine, not for a session.
+pub const HOST_ONLY_ENV: &[&str] = &[crate::fleet_host::HOST_TOKEN_ENV];
+
+/// One process the launcher will start. `Debug` prints the names of the
+/// [`SECRET_ENV`] keys and never their values.
+#[derive(Clone)]
 pub struct SpawnPlan {
     pub deployment_id: String,
     pub instance_id: String,
@@ -52,6 +57,24 @@ pub struct SpawnPlan {
     pub env: Vec<(String, String)>,
     /// The job recorded at `/api/v1/jobs`. Its task environment has no token.
     pub job: Job,
+}
+
+impl std::fmt::Debug for SpawnPlan {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let env: Vec<(&str, &str)> = self
+            .env
+            .iter()
+            .map(|(k, v)| (k.as_str(), if SECRET_ENV.contains(&k.as_str()) { "<redacted>" } else { v.as_str() }))
+            .collect();
+        f.debug_struct("SpawnPlan")
+            .field("deployment_id", &self.deployment_id)
+            .field("instance_id", &self.instance_id)
+            .field("port", &self.port)
+            .field("program", &self.program)
+            .field("args", &self.args)
+            .field("env", &env)
+            .finish_non_exhaustive()
+    }
 }
 
 /// Hardware class reported for this computer. The Worker stores it; it does
@@ -195,8 +218,8 @@ pub fn rank_servers(mut servers: Vec<RankServer>) -> Vec<RankServer> {
     servers
 }
 
-/// What one deployment asked to start.
-#[derive(Clone, Debug)]
+/// What one deployment asked to start. `Debug` never prints `author_token`.
+#[derive(Clone)]
 pub struct LaunchRequest {
     pub deployment_id: String,
     pub experience_id: String,
@@ -207,10 +230,28 @@ pub struct LaunchRequest {
     pub max_players: u32,
     pub public_host: Option<String>,
     pub api: String,
-    /// Author session or an `esrv_` token. Copied into the process environment
-    /// only. Never into `args` or `job`.
+    /// Author session, an `esrv_` token, or a hosted-session `eshs_` token.
+    /// Copied into the process environment only. Never into `args` or `job`.
     pub author_token: Option<String>,
     pub ports_in_use: Vec<u16>,
+}
+
+impl std::fmt::Debug for LaunchRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LaunchRequest")
+            .field("deployment_id", &self.deployment_id)
+            .field("experience_id", &self.experience_id)
+            .field("version", &self.version)
+            .field("region_variant", &self.region_variant)
+            .field("region_name", &self.region_name)
+            .field("count", &self.count)
+            .field("max_players", &self.max_players)
+            .field("public_host", &self.public_host)
+            .field("api", &self.api)
+            .field("author_token", &self.author_token.as_ref().map(|_| "<redacted>"))
+            .field("ports_in_use", &self.ports_in_use)
+            .finish()
+    }
 }
 
 /// `eustress-engine`, a sibling of this binary, or `EUSTRESS_ENGINE_BIN`.
@@ -260,56 +301,74 @@ pub fn plan(request: &LaunchRequest) -> Vec<SpawnPlan> {
     let mut used = request.ports_in_use.clone();
     let mut plans = Vec::with_capacity(count as usize);
     for _ in 0..count {
-        let port = take_port(&mut used);
         let instance_id = uuid::Uuid::new_v4().to_string();
-        let status = status_dir(&request.experience_id).join(format!("{instance_id}.json"));
-        let mut args = vec![
-            "--server".to_string(),
-            "--sim".to_string(),
-            request.experience_id.clone(),
-            "--env".to_string(),
-            if request.api.contains("api-staging.eustress.dev") { "staging" } else { "production" }.to_string(),
-            "--api-url".to_string(),
-            request.api.clone(),
-            "--port".to_string(),
-            port.to_string(),
-            "--status-file".to_string(),
-            status.display().to_string(),
-        ];
-        if let Some(public) = request.public_host.as_ref().filter(|h| !h.trim().is_empty()) {
-            args.push("--public".into());
-            args.push(public.clone());
-        }
-        let mut env = vec![
-            ("EUSTRESS_SERVER_ID".into(), instance_id.clone()),
-            ("EUSTRESS_API_URL".into(), request.api.clone()),
-            ("EUSTRESS_HOST_LAN".into(), "1".into()),
-            ("EUSTRESS_HOST_PORT".into(), port.to_string()),
-            ("EUSTRESS_HOST_ON_PLAY".into(), "1".into()),
-            ("EUSTRESS_HOST_REGION".into(), request.region_name.clone()),
-        ];
-        if let Some(public) = request.public_host.as_ref().filter(|h| !h.trim().is_empty()) {
-            env.push(("EUSTRESS_HOST_PUBLIC".into(), public.clone()));
-        }
-        if let Some(token) = request.author_token.as_ref().filter(|t| !t.is_empty()) {
-            if token.starts_with("esrv_") {
-                env.push(("EUSTRESS_SERVER_TOKEN".into(), token.clone()));
-            } else {
-                env.push(("EUSTRESS_AUTHOR_TOKEN".into(), token.clone()));
-            }
-        }
-        let job = job_for(&request.experience_id, &instance_id, &program, &args, &request.region_name);
-        plans.push(SpawnPlan {
-            deployment_id: request.deployment_id.clone(),
-            instance_id,
-            port,
-            program: program.clone(),
-            args,
-            env,
-            job,
-        });
+        plans.push(plan_instance(request, &program, &mut used, instance_id));
     }
     plans
+}
+
+/// Plans one process whose server id (`EUSTRESS_SERVER_ID`, its status
+/// directory and its job id) is `instance_id`, named by the caller. Does not
+/// start it. `request.count` is not read.
+pub fn plan_named(request: &LaunchRequest, instance_id: &str) -> SpawnPlan {
+    let mut used = request.ports_in_use.clone();
+    plan_instance(request, &engine_program(), &mut used, instance_id.to_string())
+}
+
+fn plan_instance(request: &LaunchRequest, program: &str, used: &mut Vec<u16>, instance_id: String) -> SpawnPlan {
+    let port = take_port(used);
+    // One directory per instance: the engine's stop file (`dedicated.stop`)
+    // and log sit beside the status file, so a shared directory would let
+    // one stop end every server of the Space, and a leftover stop file
+    // would end the next one at once.
+    let status = status_dir(&request.experience_id).join(&instance_id).join("status.json");
+    let mut args = vec![
+        "--server".to_string(),
+        "--sim".to_string(),
+        request.experience_id.clone(),
+        "--env".to_string(),
+        if request.api.contains("api-staging.eustress.dev") { "staging" } else { "production" }.to_string(),
+        "--api-url".to_string(),
+        request.api.clone(),
+        "--port".to_string(),
+        port.to_string(),
+        "--status-file".to_string(),
+        status.display().to_string(),
+    ];
+    if let Some(public) = request.public_host.as_ref().filter(|h| !h.trim().is_empty()) {
+        args.push("--public".into());
+        args.push(public.clone());
+    }
+    let mut env = vec![
+        ("EUSTRESS_SERVER_ID".into(), instance_id.clone()),
+        ("EUSTRESS_API_URL".into(), request.api.clone()),
+        ("EUSTRESS_HOST_LAN".into(), "1".into()),
+        ("EUSTRESS_HOST_PORT".into(), port.to_string()),
+        ("EUSTRESS_HOST_ON_PLAY".into(), "1".into()),
+        ("EUSTRESS_HOST_REGION".into(), request.region_name.clone()),
+    ];
+    if let Some(public) = request.public_host.as_ref().filter(|h| !h.trim().is_empty()) {
+        env.push(("EUSTRESS_HOST_PUBLIC".into(), public.clone()));
+    }
+    if let Some(token) = request.author_token.as_ref().filter(|t| !t.is_empty()) {
+        // A listing's server credential (esrv_) or a hosted-session credential
+        // (eshs_) is the server's own; anything else is an author session.
+        if token.starts_with("esrv_") || token.starts_with("eshs_") {
+            env.push(("EUSTRESS_SERVER_TOKEN".into(), token.clone()));
+        } else {
+            env.push(("EUSTRESS_AUTHOR_TOKEN".into(), token.clone()));
+        }
+    }
+    let job = job_for(&request.experience_id, &instance_id, program, &args, &request.region_name);
+    SpawnPlan {
+        deployment_id: request.deployment_id.clone(),
+        instance_id,
+        port,
+        program: program.to_string(),
+        args,
+        env,
+        job,
+    }
 }
 
 fn job_for(experience_id: &str, instance_id: &str, program: &str, args: &[String], region_name: &str) -> Job {
@@ -347,12 +406,21 @@ pub fn spawn(plan: &SpawnPlan) -> std::io::Result<std::process::Child> {
             let _ = std::fs::create_dir_all(dir);
         }
     }
+    command_for(plan).spawn()
+}
+
+/// The command [`spawn`] runs: the plan's program, arguments and environment,
+/// with every [`HOST_ONLY_ENV`] key removed from what the child inherits.
+pub fn command_for(plan: &SpawnPlan) -> Command {
     let mut command = Command::new(&plan.program);
     command.args(&plan.args).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
+    for key in HOST_ONLY_ENV {
+        command.env_remove(key);
+    }
     for (key, value) in &plan.env {
         command.env(key, value);
     }
-    command.spawn()
+    command
 }
 
 /// POST the job to the control plane. Failure is reported and does not stop
@@ -480,6 +548,52 @@ mod tests {
         assert_eq!(ping_score(None), 0.0);
         assert!(ping_score(Some(1)) > ping_score(Some(300)));
         assert_eq!(ping_score(Some(0)), 0.0, "0 ms is not a measurement");
+    }
+
+    #[test]
+    fn each_instance_has_its_own_stop_file() {
+        let plans = plan(&request(2));
+        let stop_of = |p: &SpawnPlan| {
+            let status = p.args.windows(2).find(|w| w[0] == "--status-file").map(|w| PathBuf::from(&w[1])).unwrap();
+            status.with_file_name("dedicated.stop")
+        };
+        assert_ne!(stop_of(&plans[0]), stop_of(&plans[1]), "one stop must not end both servers");
+        assert!(stop_of(&plans[0]).parent().unwrap().ends_with(&plans[0].instance_id));
+    }
+
+    #[test]
+    fn a_named_plan_uses_the_given_server_id_everywhere() {
+        let plan = plan_named(&request(5), "8f0d0c1e");
+        assert_eq!(plan.instance_id, "8f0d0c1e");
+        assert_eq!(plan.job.id, "8f0d0c1e");
+        assert_eq!(plan.env.iter().find(|(k, _)| k == "EUSTRESS_SERVER_ID").map(|(_, v)| v.as_str()), Some("8f0d0c1e"));
+        let status = plan.args.windows(2).find(|w| w[0] == "--status-file").map(|w| PathBuf::from(&w[1])).unwrap();
+        assert!(status.parent().unwrap().ends_with("8f0d0c1e"));
+    }
+
+    #[test]
+    fn an_eshs_credential_is_the_server_token_and_debug_never_prints_it() {
+        let mut request = request(1);
+        let token = format!("eshs_{}", "ef".repeat(32));
+        request.author_token = Some(token.clone());
+        let plan = &plan(&request)[0];
+        assert!(plan.env.iter().any(|(k, v)| k == "EUSTRESS_SERVER_TOKEN" && v == &token));
+        assert!(!plan.env.iter().any(|(k, _)| k == "EUSTRESS_AUTHOR_TOKEN"));
+        assert!(!leaks_secret(plan));
+        let printed = format!("{plan:?}");
+        assert!(!printed.contains(&token), "{printed}");
+        assert!(printed.contains("EUSTRESS_SERVER_TOKEN"));
+        let author = format!("{:?}", &super::plan(&self::request(1))[0]);
+        assert!(!author.contains("author-session-secret"), "{author}");
+    }
+
+    #[test]
+    fn a_started_server_never_inherits_the_host_credential() {
+        let plan = &plan(&request(1))[0];
+        let command = command_for(plan);
+        let removed: Vec<_> = command.get_envs().filter(|(_, v)| v.is_none()).map(|(k, _)| k.to_os_string()).collect();
+        assert!(removed.iter().any(|k| k == crate::fleet_host::HOST_TOKEN_ENV), "{removed:?}");
+        assert!(command.get_envs().any(|(k, v)| k == "EUSTRESS_SERVER_ID" && v.is_some()));
     }
 
     #[test]

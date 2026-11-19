@@ -1,0 +1,49 @@
+[asset]
+mesh = "parts/block.glb"
+scene = "Scene0"
+
+[metadata]
+archivable = true
+class_name = "Part"
+created = "2026-11-16T00:00:00Z"
+last_modified = "2026-11-16T00:00:00Z"
+name = "Ground"
+unit = "m"
+uuid = "5bbf635f8ef026effe20c7bedc039f6b"
+
+[properties]
+anchored = true
+can_collide = true
+cast_shadow = true
+color = [
+    110,
+    110,
+    110,
+]
+destructible = false
+locked = false
+material = "Concrete"
+reflectance = 0.0
+transparency = 0.0
+
+[properties.physics]
+friction_kinetic = 0.6
+friction_static = 0.6
+
+[transform]
+position = [
+    0.0,
+    -0.5,
+    0.0,
+]
+rotation = [
+    0.0,
+    0.0,
+    0.0,
+    1.0,
+]
+scale = [
+    40.0,
+    1.0,
+    40.0,
+]

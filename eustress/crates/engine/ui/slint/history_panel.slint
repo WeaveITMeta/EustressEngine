@@ -431,10 +431,10 @@ export component HistoryPanel inherits Rectangle {
                 property <int> follow: root.current-index;
                 changed follow => {
                     let top = 4px + (root.current-index + 1) * 37px;
-                    if top + self.viewport-y < 0px {
-                        self.viewport-y = 0px - top;
-                    } else if top + 36px + self.viewport-y > self.visible-height {
-                        self.viewport-y = min(0px, self.visible-height - top - 36px);
+                    if top + self.content-y < 0px {
+                        self.content-y = 0px - top;
+                    } else if top + 36px + self.content-y > self.visible-height {
+                        self.content-y = min(0px, self.visible-height - top - 36px);
                     }
                 }
 

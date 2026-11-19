@@ -1,0 +1,23 @@
+[metadata]
+archivable = true
+class_name = "Moon"
+
+[moon]
+angular_size = 2.0
+ascending_node = 0.0
+cast_shadows = true
+color = [
+    242,
+    242,
+    255,
+]
+earthshine = 0.02
+enabled = false
+follows_calendar = false
+glow = 0.2
+intensity = 0.5
+lunar_day = 14.76
+orbital_inclination = 5.145
+placement = "Realistic"
+placement_version = 1
+size_version = 1

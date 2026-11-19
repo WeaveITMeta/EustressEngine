@@ -1,0 +1,15 @@
+{
+  "show_explorer": true,
+  "show_properties": true,
+  "show_output": true,
+  "show_toolbox": false,
+  "show_assets": false,
+  "show_history": false,
+  "show_soul_panel": false,
+  "left_panel_width": 280.0,
+  "right_panel_width": 320.0,
+  "output_height": 180.0,
+  "left_tab_index": 0,
+  "right_tab_index": 0,
+  "preset": 0
+}

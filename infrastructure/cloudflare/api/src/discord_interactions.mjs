@@ -792,3 +792,6 @@ export async function discordTick(env, deps, opts = {}) {
   catch (e) { console.error('discord follow sweep failed:', e?.message || e); }
   return result;
 }
+
+// The Slack app (src/slack_bot.mjs) reads listings, matches queries and resolves creators the same way.
+export { listedViews, liveWithViews, matching, resolveCreator, safeImage, RATING_WORDS };

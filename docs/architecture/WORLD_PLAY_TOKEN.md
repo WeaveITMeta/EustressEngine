@@ -61,8 +61,10 @@ Only when all of these hold on the manifest GET (`world.mjs`
    (approved and public, after the legal lock, the deletion mark and the
    approval binding were applied by `simForServing`).
 2. The listing is **not adult content** and its rating is **within the
-   signed-out cap** (`ages_10` or lower). This is exactly the case in which
-   `refuseAdult` lets a request through with no viewer at all.
+   solo signed-out cap** (`mature_17` or lower, `SOLO_SIGNED_OUT_CAP`; it
+   was `ages_10` until McKale's 2026-11-19 decision that solo play needs no
+   sign-in). This is exactly the case in which `refuseAdult` lets a request
+   through on the world routes, which pass `SOLO`, with no viewer at all.
 3. An approval binding exists, is not revoked, and names a content identity.
 
 So a token is only ever issued for content that any signed-out stranger may
@@ -72,7 +74,8 @@ same person could not get by asking the Worker with no credential.
 
 No token for: an author or admin viewing a pending or private listing, a
 play pass on a private listing, a server credential on an unlisted listing,
-anything rated above `ages_10`, adult content, a listing without a binding.
+adult content (`adult_18`, `adult_21`, or no rating), a listing without a
+binding.
 Those chunk GETs keep the full gate on every request.
 
 ## What redeeming checks (`world.mjs` `chunkByPlayToken`)
@@ -81,9 +84,15 @@ Those chunk GETs keep the full gate on every request.
    `wpt1`, the token is at most 1024 characters, the claims parse.
 2. `sim` equals the listing in the URL.
 3. `exp` is in the future and not more than one lifetime away.
-4. Fresh from R2, in parallel: no legal lock, no deletion mark, and the
+4. Fresh from R2, in parallel: no legal lock, no deletion mark, the
    approval binding exists, is not revoked, and its `content` identity is
-   the one in the token.
+   the one in the token, and the token was minted after the listing's
+   play-token floor (`locks/play-token-floor/{id}.json`). Every rating write
+   (`moderation.mjs` `applyToSim`: a decision, or `moderation_set_rating`)
+   moves the floor to one second past now (`retirePlayTokens`). The floor is
+   its own object, never a field of the binding, so writing it cannot race a
+   write or revocation of the binding. A floor that cannot be read honours
+   no token.
 5. The chunk is named by the manifest the token names
    (`universes/{id}/manifests/{sha}.json`). A chunk only the source world
    names never takes the token path.
@@ -103,6 +112,7 @@ which gives the same answer it always gave (403, 404 and so on).
 | Legal lock (serve block or content lock) or deletion after the mint | Lock and deletion mark read fresh from R2 on every chunk | `a legal lock or a deletion after the mint ends the token at once` |
 | Republish, reviewed and approved again | The new binding's content identity differs from the token's | `a new approval (a reviewed republish) retires tokens...` |
 | Adult or above-cap content handed to a minor via a shared token | Never minted for those ratings | `no token where the manifest was not open to anyone signed out` |
+| A token minted at `mature_17` used after a re-rate to `adult_18` | The rating write moves the play-token floor; a token minted at or before it takes the full gate | `a play token minted at mature_17 is refused after moderation_set_rating re-rates the listing adult_18` (tests/adult_page_and_token_floor.test.mjs) |
 | Token leaked in a log or shared | Grants only what a signed-out stranger already has; dies in 15 minutes | by construction (minting rule) |
 
 Every test above was checked against a deliberate mutation of the code it
@@ -117,9 +127,12 @@ starts), and reach chunk GETs made on an existing token within at most 15
 minutes:
 
 - the author makes the listing private, or archives it;
-- a rating change that comes without a new approval binding;
 - a moderation status change on the KV marker that was not accompanied by a
   revoked binding, a legal lock or a deletion mark.
+
+A rating change is no longer in this list (review finding, 2026-11-19): every
+rating write moves the listing's play-token floor in R2, which the token path
+reads on every request, so a token minted before it is not honoured.
 
 The test `documented window: a change only the KV record holds...` pins this
 behaviour so it cannot change silently. Removals that matter for safety

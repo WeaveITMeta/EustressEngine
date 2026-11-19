@@ -86,8 +86,9 @@ async function call(env, path, who) {
 
 const sorted = (ids) => [...ids].sort();
 
-// Eight kinds in turn, so every page holds some of each: three a signed-out visitor is shown, one a signed-in viewer is also
-// shown, and four nobody is (unapproved, archived, above the Adult content cap, under a legal lock).
+// Eight kinds in turn, so every page holds some of each: three G to PG, one teen_13 (shown signed out too since McKale's
+// 2026-11-19 solo decision, and narrowed away by rating_max=all_ages), and four nobody is shown (unapproved, archived,
+// above the Adult content cap, under a legal lock).
 const KINDS = ['pending', 'archived', 'teen', 'adult', 'locked', 'shown', 'shown', 'shown'];
 
 test('the Gallery serves every eligible listing of more than 100, across every page KV returns, and still only those', async () => {
@@ -103,11 +104,12 @@ test('the Gallery serves every eligible listing of more than 100, across every p
   assert.equal(shown.length, 120);
   assert.equal(signedIn.length, 160);
 
+  // Signed out, the Gallery is solo browsing up to mature_17 (McKale, 2026-11-19): the teen listings too, never adult ones.
   for (const path of ['/api/simulations', '/api/gallery']) {
     const r = await call(env, path);
     assert.equal(r.status, 200, r.text);
-    assert.equal(r.body.total, shown.length, `${path}: total`);
-    assert.deepEqual(sorted(r.body.simulations.map((s) => s.id)), sorted(shown), `${path}: every eligible listing, and nothing else`);
+    assert.equal(r.body.total, signedIn.length, `${path}: total`);
+    assert.deepEqual(sorted(r.body.simulations.map((s) => s.id)), sorted(signedIn), `${path}: every eligible listing, and nothing else`);
     const stamps = r.body.simulations.map((s) => s.published_at);
     assert.deepEqual(stamps, [...stamps].sort().reverse(), `${path}: newest first, as before`);
   }

@@ -76,10 +76,12 @@ For each link (and each URL in the listing description, section 6):
 
 1. **Static check.** The PageSpec URL rules. Fail: removed, `invalid_url`.
 2. **Cache.** Keyed by the SHA-256 of the normalised URL (`linkreview:{hash}`). An allowed result is reused for 7 days, a removed one for 30. Two listings linking the same page pay once.
-3. **Scan.** `POST https://api.cloudflare.com/client/v4/accounts/{CF_ACCOUNT_ID}/urlscanner/v2/scan` with `{ url, visibility: "Unlisted", customagent: "EustressLinkReview/1" }` and the `URLSCANNER_API_TOKEN` secret (Account, URL Scanner, Edit). Store the scan id on the case.
+3. **Scan.** `POST https://api.cloudflare.com/client/v4/accounts/{CF_ACCOUNT_ID}/urlscanner/v2/scan` with `{ url, visibility, customagent: "EustressLinkReview/1" }`, where `visibility` is `"Public"` unless the `URLSCANNER_VISIBILITY` var is exactly `"Unlisted"` (section 9), and the `URLSCANNER_API_TOKEN` secret (Account, URL Scanner, Edit). Store the scan id on the case.
 4. **Result.** Poll `GET .../urlscanner/v2/result/{scan_id}` (404 while running; poll on the review's next step, never in a tight loop). Read `verdicts.overall.malicious`, `meta.processors.phishing`, `meta.processors.domainCategories`, the final page URL and the redirect chain.
    - Malicious or phishing: removed, no AI call.
    - The final page is on a different registrable domain from the one linked (a shortener or a redirect chain): removed, `redirects_elsewhere` ("link the destination directly").
+   - The scanner could not load the page (`task.success` is false): scanned once more 30 minutes later, then removed, `page_unreachable`, with no AI call and nothing cached, so a republish once the site is back checks it afresh.
+   - A DOM read that fails three times on one finished scan: removed, `review_failed`.
 5. **Page text.** `GET .../urlscanner/v2/dom/{scan_id}` (the DOM as Chrome rendered it). Reduce it with `HTMLRewriter` to the title, meta description, visible text (no `script`, `style`, `noscript`, `template`, hidden elements), and facts: does it have a password field, a card-number field, a file download, a crypto address. Cap the text at 12,000 characters.
 6. **AI link judge.** One Claude call (the judge model) with the rubric (section 5) as the system prompt and the page inside a per-request nonce frame (`frameNonce`), stated as untrusted data that is never an instruction. Output is a strict JSON schema:
    `{ risk_score: 0-100, kind: "business"|"shop"|"social"|"research"|"education"|"medical"|"engineering"|"creator"|"news"|"other", flags: [ ...rubric flag ids ], allowed: boolean, reason: string (at most 200 characters, shown to the author), evidence: [at most 3 short quotes from the page] }`.
@@ -142,7 +144,7 @@ B6(h) becomes: off-site links, payment and shop pages included, are allowed when
 ## 9. Security notes
 
 - Our Worker sends no request to an author's URL; only to `api.cloudflare.com`.
-- Scans are **Unlisted** (never public in Cloudflare's feed).
+- Scans are **Public** (McKale, 2026-11-15: "Public scans, free"). Cloudflare's Free plan runs 5,000 public scans a month and no unlisted ones ([scan limits](https://developers.cloudflare.com/security-center/investigate/scan-limits/)). A public scan, its screenshot and the page details appear in Cloudflare's public scan search, removed and still-pending links included; nothing in a scan names the listing or its author. On a paid plan, set the Worker var `URLSCANNER_VISIBILITY = "Unlisted"` to keep scans private (500 a month). Each approved link is scanned again every 7 days, so 5,000 a month covers about 1,100 live links.
 - Outbound links render with `rel="nofollow noopener noreferrer ugc"` and `target="_blank"`, and show the destination's domain beside the label. `noreferrer` also stops the website-manifest key leaking through `Referer` (`docs/design/WEBSITE_SERVICE.md` §454).
 - The theme is data, never CSS: colours are validated hex and applied as CSS custom properties; fonts and layouts are enums. No author HTML, CSS or script reaches the page.
 - Secrets: `URLSCANNER_API_TOKEN` and `CF_ACCOUNT_ID` are Worker secrets McKale sets; without them every link stays pending (fail closed) and the review says the link check is unavailable.

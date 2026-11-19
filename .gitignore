@@ -187,3 +187,6 @@ target-lsp-check/
 # repo bloat on every redeploy.
 design/*-flow.html
 .export-demo/
+
+# Local build toolchains (wasi-sysroot for the browser Player's Luau)
+.tools/

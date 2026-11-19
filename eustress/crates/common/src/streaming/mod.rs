@@ -42,6 +42,8 @@ pub mod dirty_flusher;
 pub mod toml_watcher;
 pub mod instance_index;
 pub mod plugin;
+// Predictive prefetch from velocity for the chunk grid (RAGE phase 1).
+pub mod predictive;
 pub mod render_cascade;
 
 // Re-export primary types for ergonomic use

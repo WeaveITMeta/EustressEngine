@@ -137,6 +137,38 @@ impl SimulationClock {
     }
 }
 
+/// Physics steps actually executed, counted by the physics schedule itself.
+///
+/// [`SimulationClock::tick_count`] counts timesteps the clock's accumulator
+/// drained in [`SimulationClock::advance`]; the cap in that loop and the
+/// zeroing after it decide its value. This counter is a separate resource
+/// that `advance` never touches. The engine increments it once at the end of
+/// every run of Avian's `PhysicsSchedule` (one physics step, all its substeps
+/// included), so when the clock and the physics schedule disagree about how
+/// many steps happened, the two numbers differ and a recording shows it.
+///
+/// Monotonic: the field is private and nothing can lower it. A time-scale
+/// change, a pause, a mode transition and [`SimulationClock::reset`] all
+/// leave it alone; a run reads it at its start and at its end and exports the
+/// difference.
+#[derive(Resource, Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct PhysicsStepCounter {
+    executed: u64,
+}
+
+impl PhysicsStepCounter {
+    /// Count one executed physics step. Called only from the physics
+    /// schedule.
+    pub fn record_step(&mut self) {
+        self.executed = self.executed.saturating_add(1);
+    }
+
+    /// Physics steps executed since the app started.
+    pub fn executed(&self) -> u64 {
+        self.executed
+    }
+}
+
 /// Preset time scales for common simulation scenarios
 pub mod presets {
     /// Real-time simulation (1 second = 1 second)
@@ -189,5 +221,30 @@ mod tests {
         clock.max_ticks_per_frame = 5;
         let ticks = clock.advance(1.0);
         assert_eq!(ticks, 5);
+    }
+
+    /// The step counter is its own instrument: saturating, pausing, rescaling
+    /// and resetting the clock leave it where the physics schedule put it.
+    #[test]
+    fn step_counter_ignores_the_clock() {
+        let mut counter = PhysicsStepCounter::default();
+        let mut clock = SimulationClock::new(8.0);
+        clock.max_ticks_per_frame = 2;
+        for _ in 0..10 {
+            let drained = clock.advance(1.0 / 60.0);
+            assert_eq!(drained, 2);
+            counter.record_step();
+        }
+        assert_eq!(counter.executed(), 10);
+        assert_eq!(clock.tick_count, 20);
+
+        clock.set_time_scale(0.0);
+        clock.advance(1.0 / 60.0);
+        clock.reset();
+        assert_eq!(clock.tick_count, 0);
+        assert_eq!(counter.executed(), 10, "a clock reset must not move the step counter");
+
+        counter.record_step();
+        assert_eq!(counter.executed(), 11);
     }
 }

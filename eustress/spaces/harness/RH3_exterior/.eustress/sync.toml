@@ -1,0 +1,11 @@
+[sync]
+mode = "local_first"
+auto_sync = false
+pending_uploads = 0
+pending_downloads = 0
+offline_changes = 0
+
+[remote]
+provider = "cloudflare_r2"
+editable = false
+open_source = false

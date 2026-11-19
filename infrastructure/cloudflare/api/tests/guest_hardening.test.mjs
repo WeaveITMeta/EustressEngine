@@ -339,7 +339,7 @@ test('a guest who leaves and comes back on the same lease takes one seat again a
   });
 });
 
-// ── McKale 1: G to PG for guests, and for every signed-out visitor ──────────
+// ── McKale 1: G to PG for guests (and solo signed out up to mature_17, 2026-11-19) ──
 
 test('guests play G to PG: all_ages and ages_10 at the lease, the ticket and the admission; anything above is refused', async () => {
   assert.deepEqual([...GUEST_RATINGS], ['all_ages', 'ages_10']);
@@ -361,23 +361,28 @@ test('guests play G to PG: all_ages and ages_10 at the lease, the ticket and the
   });
 });
 
-test('a signed-out visitor sees and fetches G to PG only; signing in opens up to mature_17', async () => {
+// McKale, 2026-11-19: solo play needs no sign-in up to mature_17; multiplayer keeps the sign-in (tests/solo_signed_out.test.mjs).
+test('a signed-out visitor sees and fetches solo up to mature_17, never adult content; the live read of a teen listing still needs a sign-in', async () => {
   const env = environment();
   await seed(env);
   const TEEN = 'cccccccc-3333-4333-8333-cccccccccccc';
   const TEN = 'dddddddd-4444-4444-8444-dddddddddddd';
-  for (const [id, rating] of [[TEEN, 'teen_13'], [TEN, 'ages_10']]) {
+  const ADULT = 'eeeeeeee-5555-4555-8555-eeeeeeeeeeee';
+  for (const [id, rating] of [[TEEN, 'teen_13'], [TEN, 'ages_10'], [ADULT, 'adult_18']]) {
     await env.SOCIAL.put(`sim:${id}`, JSON.stringify(listing(id, { rating }, { r2_key: `universes/${id}/universe.pak` })));
     await env.SCENES.put(`universes/${id}/universe.pak`, 'the world');
   }
   for (const path of [`/api/simulations/${TEEN}`, `/api/simulations/${TEEN}/download`]) {
-    const out = await call(env, 'GET', path, { headers: IP });
-    assert.deepEqual([out.status, out.body?.code], [403, 'sign_in_required'], path);
+    assert.equal((await call(env, 'GET', path, { headers: IP })).status, 200, `${path} teen_13 signed out`);
     assert.equal((await call(env, 'GET', path, { token: player })).status, 200, `${path} signed in`);
     assert.equal((await call(env, 'GET', path.replace(TEEN, TEN), { headers: IP })).status, 200, `${path} ages_10 signed out`);
+    const adult = await call(env, 'GET', path.replace(TEEN, ADULT), { headers: IP });
+    assert.deepEqual([adult.status, adult.body?.code], [403, 'adult_content_off'], `${path} adult_18 signed out`);
   }
+  const live = await call(env, 'GET', `/api/simulations/${TEEN}/live`, { headers: IP });
+  assert.deepEqual([live.status, live.body?.code], [403, 'sign_in_required'], 'the live read stays signed in');
   const list = (await call(env, 'GET', '/api/simulations')).body.simulations.map((s) => s.id);
-  assert.ok(list.includes(TEN) && !list.includes(TEEN), 'the Gallery, signed out');
+  assert.ok(list.includes(TEN) && list.includes(TEEN) && !list.includes(ADULT), 'the Gallery, signed out');
   const signedIn = (await call(env, 'GET', '/api/simulations', { token: player })).body.simulations.map((s) => s.id);
   assert.ok(signedIn.includes(TEEN), 'the Gallery, signed in');
 });

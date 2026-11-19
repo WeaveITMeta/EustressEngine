@@ -88,8 +88,11 @@ impl SpaceFileWatcher {
             Duration::from_millis(300),
             None,
             move |result: DebounceEventResult| {
-                if let Err(e) = tx.send(result) {
-                    error!("Failed to send file event: {}", e);
+                // A send fails only when the receiver is gone: this watcher's
+                // Space was closed, or Studio is closing. The event has no
+                // reader left, so dropping it is the right outcome.
+                if tx.send(result).is_err() {
+                    debug!("File watcher: its Space is closed, a late file event was dropped");
                 }
             },
         ).map_err(|e| format!("Failed to create file watcher: {}", e))?;

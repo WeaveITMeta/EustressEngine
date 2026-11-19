@@ -1,0 +1,13 @@
+[metadata]
+archivable = true
+class_name = "Sky"
+
+[sky]
+celestial_bodies_shown = false
+skybox_back = ""
+skybox_bottom = ""
+skybox_front = ""
+skybox_left = ""
+skybox_right = ""
+skybox_top = ""
+star_count = 5000

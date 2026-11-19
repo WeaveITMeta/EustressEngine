@@ -1,0 +1,63 @@
+{
+  "schema": "eustress.measurement.light_clustering_cost/1",
+  "utc": "2026-11-18T03:55:00Z",
+  "status": "MEASURED",
+  "build": "third release build of 2026-11-17 (C:/EustressBuild/target/release/eustress-engine.exe, 19:34 Arizona)",
+  "machine": "Intel Core i9-10980XE; Studio window 1920x1080 kept off-screen; one rustc from another session was running",
+  "method": "A copy of RH1_sphere_grid on C: with extra unshadowed point lights (range 10 m, on a grid over 40 m, so every ground pixel is lit by dozens to hundreds of them). Same build and scene; the only difference between runs is EUSTRESS_GPU_CLUSTERING. EUSTRESS_PROFILE=1; the phase profiler's reports after a 10 s settle are averaged, the first of each run left out. The engine's own count of PointLight instances was read over the bridge.",
+  "lights_303": {
+    "cpu_clustering": {
+      "frame_ms": 37.88,
+      "post_update_ms": 4.8,
+      "render_wall_ms": 35.3,
+      "render_cpu_ms": 7.83,
+      "main_world_ms": 11.2,
+      "main_cpu_ms": 6.8,
+      "runs": 2,
+      "frame_ms_min": 35.05,
+      "frame_ms_max": 40.7
+    },
+    "gpu_clustering": {
+      "frame_ms": 39.33,
+      "post_update_ms": 2.55,
+      "render_wall_ms": 37.65,
+      "render_cpu_ms": 8.95,
+      "main_world_ms": 9.65,
+      "main_cpu_ms": 7.15,
+      "runs": 2,
+      "frame_ms_min": 38.6,
+      "frame_ms_max": 40.05
+    },
+    "reading": "No frame-time difference outside the run-to-run spread (CPU 35.0 and 40.7 ms; GPU 40.0 and 38.6 ms): the scene is bound by the GPU's shading. CPU clustering adds about 2.3 ms of main-thread work a frame (PostUpdate 4.8 ms against 2.5 ms)."
+  },
+  "lights_1503": {
+    "cpu_clustering": {
+      "frame_ms": [
+        224.3,
+        220.1
+      ],
+      "post_update_ms": [
+        11.0,
+        10.4
+      ],
+      "render_thread_wall_ms": [
+        217.0,
+        213.2
+      ],
+      "runs_loaded": "3 of 3",
+      "note": "about 285 lights reach each ground pixel; the frame is the GPU's shading time"
+    },
+    "gpu_clustering": {
+      "runs_loaded": "0 of 2",
+      "failure": "The GPU device is lost about 3 s after start ('Caught DeviceLost error: Unknown Unexpected error variant (driver implementation is at fault)'), then bevy_pbr::cluster::gpu::prepare_clusters_for_gpu_clustering panics on its invalid buffer and Studio goes down (bevy_pbr-0.19.0 cluster/gpu.rs:1156)."
+    },
+    "reading": "With Bevy's GPU clustering this scene takes Studio down, twice in two starts; with CPU clustering it opens and runs."
+  },
+  "determinism": "CPU clustering: two captures of a still scene are byte-identical (5 of 5 self-tests). GPU clustering: 5 of 5 differ, by 2 to 7 pixels of 8,294,400.",
+  "not_measured": [
+    "a scene bound by the main thread, where the added CPU work would show in the frame time",
+    "another GPU or driver",
+    "the Player"
+  ],
+  "logs": "C:/EustressBuild/gauntlet_w1/lights_ab (run_*/report_*.txt, engine.log.err), lights_ab.status, lights_one_cpu30.status"
+}

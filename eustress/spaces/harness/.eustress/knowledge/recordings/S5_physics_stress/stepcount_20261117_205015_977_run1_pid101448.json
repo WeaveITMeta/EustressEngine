@@ -1,0 +1,18 @@
+{
+  "schema": "eustress.stepcount.v2",
+  "physics_steps_executed": 600,
+  "physics_step_counter_at_start": 1,
+  "physics_step_counter_at_end": 601,
+  "physics_steps_before_clock_start": 1,
+  "clock_tick_count": 600,
+  "clock_ticks_after_physics_end": 1,
+  "clock_tick_count_implied_by_time": 600,
+  "dropped_steps": 0,
+  "simulation_time_s": 10.00000020000009,
+  "wall_time_s": 10.00000020000009,
+  "fixed_timestep_s": 0.016666666666666666,
+  "time_scale": 1.0,
+  "max_ticks_per_frame": 10,
+  "fixed_overstep_at_start_s": 0.0,
+  "fixed_overstep_at_end_s": 0.0
+}

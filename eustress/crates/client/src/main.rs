@@ -135,7 +135,8 @@ pub enum Launch {
     /// Join a Studio host. `extras`: the ticket and API an
     /// `eustress-player://` link carries; none for `--connect`.
     Join { link: JoinLink, name: String, extras: LinkExtras },
-    /// Play a published simulation. `extras`: the API its link names.
+    /// Play a published simulation. `extras`: the API its link names, and the
+    /// one-time ticket the website's Play button put in it.
     Published { sim_id: String, extras: LinkExtras },
 }
 
@@ -300,9 +301,17 @@ struct ClientArgs {
     scene_path: Option<PathBuf>,
 }
 
-/// The published simulation to play, when launched with `--sim`.
+/// The published simulation to play, when launched with `--sim` or a
+/// `play/<id>` link.
 #[derive(Resource)]
-struct PublishedTarget(String);
+struct PublishedTarget {
+    sim_id: String,
+    /// The gallery's one-time ticket from the link: the website's sign-in
+    /// for this one simulation. Its `Debug` prints nothing.
+    ticket: Option<systems::space_fetch::PlayTicket>,
+    /// The API the link named, if any.
+    link_api: Option<&'static str>,
+}
 
 /// Player logs kept, newest first; older ones are deleted at launch.
 const PLAYER_LOG_RETAIN: usize = 8;
@@ -370,8 +379,9 @@ fn player_log_fmt_layer(_app: &mut App) -> Option<bevy::log::BoxedFmtLayer> {
 /// Extracted so the golden parity test can construct both shells as *values*
 /// and diff their registered systems, resources and component sets. Two
 /// binaries that can only be launched cannot be compared; two `App`s can.
-pub fn build_app(launch: Launch) -> App {
+pub fn build_app(launch: Launch, render: systems::raytracing::PlayerRender) -> App {
     let mut app = App::new();
+    let systems::raytracing::PlayerRender { creation: render_creation, plugin: raytracing } = render;
     let network = launch.is_network();
     // Joined to a host, this Player draws the host's session (a replica);
     // played alone, nobody else will run it, so it runs it itself, as
@@ -444,6 +454,10 @@ pub fn build_app(launch: Launch) -> App {
         );
     }
 
+    // DLSS (the `dlss` feature): Bevy's DlssInitPlugin, inside DefaultPlugins,
+    // reads the project id while it builds. Nothing in a build without DLSS.
+    systems::raytracing::before_default_plugins(&mut app);
+
     app
         // Core Bevy plugins
         .add_plugins(DefaultPlugins
@@ -468,8 +482,22 @@ pub fn build_app(launch: Launch) -> App {
             .set(eustress_common::avatar::boot::permissive_asset_plugin(
                 eustress_common::assets_dir().to_string_lossy(),
             ))
-            .set(bevy::log::LogPlugin { fmt_layer: player_log_fmt_layer, ..default() })
+            // `custom_layer`: notices a lost GPU device inside the frame, so the
+            // rest of that frame draws nothing (`systems::gpu_recovery`).
+            .set(bevy::log::LogPlugin {
+                custom_layer: eustress_play_runtime::gpu_recovery::log_layer,
+                fmt_layer: player_log_fmt_layer,
+                ..default()
+            })
+            // Made by `systems::raytracing::decide` before the app: Bevy's
+            // automatic creation with the Player's settings, or, with ray
+            // tracing Auto or On, the device the GPU gate read.
+            .set(bevy::render::RenderPlugin { render_creation, ..default() })
         )
+        // Hardware ray tracing (Auto by default) and what it reads from the
+        // Player. After DefaultPlugins: Solari builds on RenderPlugin and
+        // PbrPlugin.
+        .add_plugins(raytracing)
 
         // Physics (Avian3D) - Realistic Earth gravity: 9.80665 m/s²
         .add_plugins(PhysicsPlugins::default())
@@ -503,6 +531,11 @@ pub fn build_app(launch: Launch) -> App {
         // Window / taskbar icon. The .ico in the PE resource table only
         // reaches Explorer; winit's window class ships with no icon at all.
         .add_plugins(systems::window_icon::WindowIconPlugin)
+        // A lost GPU device (the display turning off, a driver reset) rebuilds
+        // the renderer instead of crashing, and while the window has focus the
+        // display is kept on so Windows' idle timer does not cause one.
+        .add_plugins(systems::gpu_recovery::GpuRecoveryPlugin)
+        .add_plugins(systems::keep_awake::KeepAwakePlugin)
         // Frame-burst capture so an agent can SEE the running client.
         .add_plugins(systems::frame_capture::FrameCapturePlugin)
         // Agent control surface (opt-in via EUSTRESS_AGENT_PORT).
@@ -598,8 +631,11 @@ pub fn build_app(launch: Launch) -> App {
                 systems::commerce::join_ticket,
             ));
         }
-        Launch::Published { sim_id, .. } => {
-            app.insert_resource(PublishedTarget(sim_id));
+        Launch::Published { sim_id, mut extras } => {
+            // A solo link from the website's Play button carries a one-time
+            // ticket: the website's account plays it, not Studio's sign-in.
+            let ticket = extras.ticket.take().map(systems::space_fetch::PlayTicket::new);
+            app.insert_resource(PublishedTarget { sim_id, ticket, link_api: extras.api });
             app.add_systems(Startup, request_published_world);
         }
         Launch::Local { .. } => {}
@@ -726,14 +762,29 @@ fn main() {
     // A panic is written to this run's log and shown once, instead of ending
     // the window silently: a release Player has no console to show it.
     eustress_play_runtime::crash_report::install(player_log_path, show_message);
-    let mut app = build_app(launch);
+    // A Player joining a host on this computer shares the host's GPU, so it
+    // draws without ray tracing (`EUSTRESS_RAYTRACING=off`, unless that was
+    // set by hand). Studio's Add Player opens exactly this kind of link.
+    let same_machine = matches!(&launch, Launch::Join { link, .. } if link.is_loopback());
+    let lightened = eustress_play_runtime::gpu_recovery::lighten_same_machine_player(same_machine);
+    // Hardware ray tracing (Auto by default; see `systems::raytracing`): the
+    // switch, and with Auto or On the renderer itself, made now so the GPU
+    // gate reads the device the Player renders with.
+    let render = systems::raytracing::decide(systems::raytracing::space_for(&launch));
+    let mut app = build_app(launch, render);
     // The API was first read above, before this run's log existed, so the
     // line `api_base` writes for an API other than production is lost; this
     // one takes its place.
     if !eustress_common::api_base::is_production() {
         warn!("Eustress API: {}, NOT production", eustress_common::api_base::api_base());
     }
+    if lightened {
+        info!("Joining a host on this computer: drawing without ray tracing, so the two share the GPU lightly");
+    }
     app.run();
+    // A normal close takes the ray-tracing crash guard's launch marker down,
+    // unless a render error ended the session.
+    systems::raytracing::note_clean_exit();
 }
 
 /// Register this exe for `eustress-player://` links, for the current user
@@ -772,8 +823,14 @@ fn register_link_handler() {
 
 /// `--sim <id>`: download the published world; it opens on arrival.
 fn request_published_world(target: Res<PublishedTarget>, mut fetch: MessageWriter<systems::space_fetch::FetchSpace>) {
-    let token = systems::commerce::auth_token();
-    fetch.write(systems::space_fetch::FetchSpace { simulation_id: target.0.clone(), token });
+    // With the website's ticket, Studio's sign-in is not sent at all.
+    let credential = if target.ticket.is_some() { None } else { systems::credential::studio_login() };
+    fetch.write(systems::space_fetch::FetchSpace {
+        simulation_id: target.sim_id.clone(),
+        credential,
+        ticket: target.ticket.clone(),
+        link_api: target.link_api,
+    });
 }
 
 /// Where the avatar starts when a Space gives no SpawnLocation.
@@ -936,6 +993,43 @@ mod launch_link_tests {
         match launch {
             Launch::Published { sim_id, .. } => assert_eq!(sim_id, SIM),
             other => panic!("expected a published simulation, got {other:?}"),
+        }
+    }
+
+    /// The website's Play button adds a one-time ticket to a solo link, with
+    /// `api` and maybe `min`, in any order. The launch keeps the ticket for
+    /// the one fetch that redeems it, and nothing prints it.
+    #[test]
+    fn a_solo_link_keeps_its_ticket_in_any_order_and_never_prints_it() {
+        for query in [
+            format!("api=staging&ticket={TICKET}"),
+            format!("ticket={TICKET}&api=staging"),
+            format!("min=0.1.0&ticket={TICKET}&api=staging"),
+            format!("api=staging&min=0.1.0&ticket={TICKET}"),
+        ] {
+            let launch = from_link(&format!("eustress-player://play/{SIM}?{query}")).expect(&query);
+            assert!(!format!("{launch:?}").contains(TICKET), "Debug printed the ticket for {query}");
+            match launch {
+                Launch::Published { sim_id, extras } => {
+                    assert_eq!((sim_id.as_str(), extras.api), (SIM, Some(STAGING)), "{query}");
+                    assert_eq!(extras.ticket.map(|t| t.into_secret()).as_deref(), Some(TICKET), "{query}");
+                }
+                other => panic!("expected a published simulation, got {other:?}"),
+            }
+        }
+        // No ticket: as before.
+        let bare = from_link(&format!("eustress-player://play/{SIM}?api=staging")).expect("no ticket");
+        assert!(matches!(bare, Launch::Published { extras: LinkExtras { ticket: None, .. }, .. }));
+        // A malformed solo link that carries a ticket fails with a message without the ticket text.
+        for bad in [
+            format!("eustress-player://play/not-hex!?ticket={TICKET}&api=staging"),
+            format!("eustress-player://play/{SIM}?ticket={TICKET}&ticket={TICKET}"),
+            format!("eustress-player://play/{SIM}?ticket={TICKET}&api=nightly"),
+            format!("eustress-player://play/{SIM}?ticket={TICKET}&min=1"),
+            format!("eustress-player://play/{SIM}&ticket={TICKET}"),
+        ] {
+            let e = from_link(&bad).expect_err(&bad.replace(TICKET, "<ticket>"));
+            assert!(!e.contains(TICKET) && !e.contains("c2VjcmV0"), "{e}");
         }
     }
 

@@ -3083,7 +3083,9 @@ Enum = setmetatable({}, {
             .map_err(|error| format!("Failed to create HttpService table: {}", error))?;
 
         // HttpService:GetAsync(url) -> string?
-        let http_get = lua.create_function(|lua, args: mlua::MultiValue| {
+        // The return types are written out: on wasm32 each body only refuses,
+        // and nothing else names the value a call returns.
+        let http_get = lua.create_function(|lua, args: mlua::MultiValue| -> mlua::Result<Option<String>> {
             if !network_allowed(lua) {
                 return Err(refuse_http("HttpService:GetAsync"));
             }
@@ -3109,7 +3111,7 @@ Enum = setmetatable({}, {
             .map_err(|error| format!("Failed to set HttpService.GetAsync: {}", error))?;
 
         // HttpService:PostAsync(url, body) -> string?
-        let http_post = lua.create_function(|lua, args: mlua::MultiValue| {
+        let http_post = lua.create_function(|lua, args: mlua::MultiValue| -> mlua::Result<Option<String>> {
             if !network_allowed(lua) {
                 return Err(refuse_http("HttpService:PostAsync"));
             }
@@ -3136,7 +3138,7 @@ Enum = setmetatable({}, {
             .map_err(|error| format!("Failed to set HttpService.PostAsync: {}", error))?;
 
         // HttpService:RequestAsync(options) -> {Success, StatusCode, StatusMessage, Headers, Body}
-        let http_request = lua.create_function(|lua, args: mlua::MultiValue| {
+        let http_request = lua.create_function(|lua, args: mlua::MultiValue| -> mlua::Result<mlua::Table> {
             if !network_allowed(lua) {
                 return Err(refuse_http("HttpService:RequestAsync"));
             }

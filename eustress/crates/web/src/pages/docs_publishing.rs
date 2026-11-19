@@ -201,6 +201,20 @@ pub fn DocsPublishingPage() -> impl IntoView {
 
                 <main class="docs-content">
                     <header class="docs-hero">
+                        // The hero picture: the page's largest paint, so it loads at
+                        // once (no lazy loading, no entrance animation).
+                        <div class="docs-hero-art">
+                            <img
+                                src="/assets/learn/publishing-hero-1600.webp"
+                                srcset="/assets/learn/publishing-hero-800.webp 800w, /assets/learn/publishing-hero-1600.webp 1600w"
+                                sizes="(max-width: 1024px) 100vw, 840px"
+                                alt="A world inside a wireframe frame divides into small uniform cubes that travel along a beam through a ring gate to a wall of blank display tiles, where one tile is lit with a miniature of the world."
+                                width="1600"
+                                height="900"
+                                fetchpriority="high"
+                                decoding="async"
+                            />
+                        </div>
                         <div class="docs-breadcrumb">
                             <a href="/learn">"Learn"</a>
                             <span class="separator">"/"</span>
@@ -431,6 +445,19 @@ pub fn DocsPublishingPage() -> impl IntoView {
 
                         <div id="upload-steps" class="subsection">
                             <h3>"Upload and Storage"</h3>
+                            <figure class="learn-figure">
+                                <img
+                                    src="/assets/learn/publishing-fig-1-1200.webp"
+                                    srcset="/assets/learn/publishing-fig-1-600.webp 600w, /assets/learn/publishing-fig-1-1200.webp 1200w"
+                                    sizes="(max-width: 660px) 92vw, (max-width: 1099px) 600px, 500px"
+                                    alt="Two matching three by three grids of cubes face each other, and one glowing cube travels along a thin line from the left grid to the one empty socket in the right grid."
+                                    width="1200"
+                                    height="900"
+                                    loading="lazy"
+                                    decoding="async"
+                                />
+                                <figcaption>"Studio sends the manifest, and the API answers with the chunks it does not hold yet. A republish that changed one building uploads one chunk."</figcaption>
+                            </figure>
                             <ol class="numbered-list">
                                 <li>
                                     <strong>"Find or create the listing."</strong>

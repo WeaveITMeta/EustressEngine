@@ -211,10 +211,25 @@ fn engine_log_fmt_layer(_app: &mut App) -> Option<bevy::log::BoxedFmtLayer> {
     Some(both)
 }
 
+/// The `LogPlugin::custom_layer` hook: the profiler's layer (see
+/// `profiler::custom_layer`) and the one that notices a lost GPU device while
+/// the frame is still running (`eustress_play_runtime::gpu_recovery`), which
+/// stops that frame's render sets before they panic on the dead device.
+fn engine_log_layers(app: &mut App) -> Option<bevy::log::BoxedLayer> {
+    let layers: Vec<bevy::log::BoxedLayer> = [
+        profiler::custom_layer(app),
+        eustress_play_runtime::gpu_recovery::log_layer(app),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+    Some(Box::new(layers))
+}
+
 fn main() {
     // Before any println. A release build is a GUI subsystem, so writing to
     // a missing console panics (exit 1) and `--help` never gets to exit 0.
-    let args = StartupArgs::parse();
+    let mut args = StartupArgs::parse();
     if args.show_help {
         startup::attach_parent_console();
         startup::write_help(&mut std::io::stdout());
@@ -226,7 +241,14 @@ fn main() {
     }
 
     println!("Starting Eustress Engine...");
-    
+
+    // Edit on one of the user's own Spaces opens the Universe it was
+    // published from, when it is on this computer, before the launch Space
+    // is chosen below.
+    if args.gallery_edit.is_some() {
+        args.open_local_gallery_edit(&space::workspace_root());
+    }
+
     // Generate window title - include scene name if opening a file
     let instance_id = std::process::id();
     let window_title = if let Some(ref scene_path) = args.scene_file {
@@ -283,15 +305,17 @@ fn main() {
     // always used, with these same settings. With Auto or On the renderer is
     // created here, so the GPU gate reads the device Bevy renders with, and a
     // launch Space recorded as over Solari's texture limit opens in raster.
-    // See `raytracing::render_creation`.
+    // See `raytracing::render_creation`. The same settings rebuild the
+    // renderer after a graphics driver reset (`GpuRecoveryPlugin` below).
+    let wgpu_settings = bevy::render::settings::WgpuSettings {
+        // Request discrete GPU (NVIDIA/AMD) over integrated
+        power_preference: bevy::render::settings::PowerPreference::HighPerformance,
+        // Use all available backends (Vulkan/DX12/Metal)
+        backends: Some(bevy::render::settings::Backends::all()),
+        ..default()
+    };
     let (render_creation, raytracing_launch) =
-        eustress_engine::raytracing::render_creation(bevy::render::settings::WgpuSettings {
-            // Request discrete GPU (NVIDIA/AMD) over integrated
-            power_preference: bevy::render::settings::PowerPreference::HighPerformance,
-            // Use all available backends (Vulkan/DX12/Metal)
-            backends: Some(bevy::render::settings::Backends::all()),
-            ..default()
-        }, &space_root);
+        eustress_engine::raytracing::render_creation(wgpu_settings.clone(), &space_root);
     // DLSS (the `dlss` feature): Bevy's DlssInitPlugin, inside DefaultPlugins,
     // reads the project id while it builds, so it must be in the App first.
     // Does nothing in a build without DLSS.
@@ -358,6 +382,7 @@ fn main() {
             // that times each Bevy `"system"` span. With the feature off it is
             // `|_| None`, so it changes nothing about logging. With the feature
             // on it still does nothing until `EUSTRESS_PROFILE` is set.
+            // `engine_log_layers` adds it beside the lost-GPU watcher.
             //
             // `engine_log_fmt_layer` is the FORMATTING side: it emits Bevy's
             // usual stderr layer plus a second one over a log file, so the
@@ -366,7 +391,7 @@ fn main() {
             // `level` stays at its default; `filter` is Bevy's default plus
             // one directive (see `log_filter`).
             .set(bevy::log::LogPlugin {
-                custom_layer: profiler::custom_layer,
+                custom_layer: engine_log_layers,
                 fmt_layer: engine_log_fmt_layer,
                 filter: log_filter(),
                 ..default()
@@ -386,17 +411,28 @@ fn main() {
             ..default()
         });
 
-    // A lost GPU device stops drawing and leaves the simulation up. Bevy's
-    // default handler quits the process, which takes a hosted session with it.
-    app.insert_resource(bevy::render::error_handler::RenderErrorHandler(
-        eustress_engine::crash::on_render_error,
+    // A lost GPU device (a graphics driver reset) no longer takes Studio down,
+    // or a session it hosts: the frame that notices it draws nothing more, the
+    // renderer is rebuilt with the settings above once the driver is back, and
+    // the simulation, scripts and networking keep running. Shared with the
+    // Player (`eustress_play_runtime::gpu_recovery`). Studio stays open when
+    // recovery gives up: drawing stops, and the simulation keeps running.
+    app.add_plugins(eustress_play_runtime::gpu_recovery::GpuRecoveryPlugin {
+        rebuild_with: wgpu_settings,
+        close_when_given_up: None,
+    });
+    app.add_systems(Update, (
+        eustress_engine::crash::show_renderer_health,
+        eustress_engine::crash::prefer_cpu_clustering_in_play,
     ));
-    app.add_systems(Update, eustress_engine::crash::prefer_cpu_clustering_in_play);
 
     // The GPU's capabilities, logged once; the guards and Bevy Solari when
     // ray tracing is on; the AI camera's sky either way. After
     // DefaultPlugins, because Solari builds on RenderPlugin and PbrPlugin.
     app.add_plugins(eustress_engine::raytracing::RaytracingPlugin::new(raytracing_launch));
+    // What ray tracing reads from Studio (the frame, the Space, the Studio
+    // cameras) and its notices as notifications.
+    app.add_plugins(eustress_engine::raytracing_host::RaytracingHostPlugin);
 
     // ── Core simulation tier ────────────────────────────────────────────
     // Everything headless-safe — space loading, WorldDb, Avian + the
@@ -442,6 +478,9 @@ fn main() {
         // Independent off-screen AI camera — the AI's own eyes (renders to an
         // image, never the window, so it can't displace the editor camera).
         .add_plugins(ai_camera::AiCameraPlugin)
+        // Tick-driven camera path for measurement runs; does nothing unless
+        // `EUSTRESS_CAMERA_PATH` is set.
+        .add_plugins(eustress_engine::camera_path::CameraPathPlugin)
         // Publish-time capture orbit for the moderation judge; steps the AI
         // camera through its poses over frames after do_publish queues it.
         .add_plugins(eustress_engine::moderation_dossier::PublishCapturePlugin)
@@ -827,12 +866,10 @@ fn main() {
         }));
     }
 
-    let run_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        app.run();
-    }));
+    let run_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| app.run()));
 
     match run_result {
-        Ok(()) => {
+        Ok(exit) => {
             println!("✅ Eustress Engine closed gracefully");
             // A normal close: the ray-tracing crash guard takes its launch
             // marker down, unless a render error ended the session (Bevy's
@@ -842,6 +879,12 @@ fn main() {
             // next build. Then apply an update the user asked for, if one is pending.
             drop(app);
             updater::finish_pending_update();
+            // A run that asked to end with an error code (a measurement run
+            // that refused, a self-test that failed) hands that code to
+            // whatever started it.
+            if let AppExit::Error(code) = exit {
+                std::process::exit(i32::from(code.get()));
+            }
         }
         Err(payload) => {
             let msg = panic_payload_str(&*payload);

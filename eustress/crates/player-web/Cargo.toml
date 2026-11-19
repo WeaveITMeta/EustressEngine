@@ -47,13 +47,17 @@ serde_json = { workspace = true }
 # Player's tree holds authored studs where the host's holds metres, every
 # replicated write lands in a different world, and nothing fails to compile.
 # `model-import` arrives through play-runtime, which the avatar's clip retarget
-# needs. `mlua` stays off: its Luau is C++ (mlua-sys / luau0-src) and clang has
-# no C++ standard library for wasm32-unknown-unknown, so the VM cannot be
-# built for this target. `avatar-profile` stays off too: it fetches an account
-# body with ureq on a thread, and a public gallery page has no token, so the
-# desktop's no-token path (the default descriptor, dressed by the Space) is
-# the one this page runs.
-eustress-common = { path = "../common", default-features = false, features = ["physics", "units_v1"] }
+# needs. `mlua` is the desktop Player's Luau VM and binding layer, the same
+# code: its C++ is compiled against wasi-sysroot (scripts/wasm-luau-env.sh,
+# build.rs, src/libc_shim.rs). `realism-scripting` is Rune, as the desktop
+# Player runs a Space's SoulScripts (common::soul::rune_play).
+# `avatar-profile` stays off: it fetches an account body with ureq on a
+# thread, and a public gallery page has no token, so the desktop's no-token
+# path (the default descriptor, dressed by the Space) is the one this page
+# runs.
+eustress-common = { path = "../common", default-features = false, features = ["physics", "units_v1", "mlua", "realism-scripting"] }
+# The real clocks behind the libc shim (src/libc_shim.rs).
+web-time = "1.1"
 eustress-play-runtime = { path = "../play-runtime" }
 avian3d = { workspace = true }
 bevy = { workspace = true, features = [
@@ -92,7 +96,13 @@ bevy = { workspace = true, features = [
 ] }
 # Bevy's Resource/Component derives emit `bevy_ecs::` paths. Those resolve
 # only when this crate names bevy_ecs itself (see the engine crate's note).
-bevy_ecs = { version = "0.19", default-features = false, features = ["trace"] }
+#
+# NEVER `trace` here. In a browser bevy_log's tracing layer turns every span
+# into a `performance.mark` and a `performance.measure`, and `trace` wraps
+# every system, run condition and schedule in one: about 2,600 calls into
+# JavaScript a frame for Pong, each formatting a name, and a timing buffer
+# that grows without limit (3.9 million entries after 25 s).
+bevy_ecs = { version = "0.19", default-features = false }
 # The render crates the graphics features name; bevy already brings each (its
 # bevy_pbr feature), so these add no crate, only the features' names.
 bevy_render = { version = "0.19", default-features = false }

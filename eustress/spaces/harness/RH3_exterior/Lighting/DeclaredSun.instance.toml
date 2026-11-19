@@ -1,0 +1,33 @@
+[light]
+brightness = 1.0
+color = [
+    255,
+    250,
+    242,
+]
+enabled = true
+shadows = true
+
+[metadata]
+archivable = true
+class_name = "DirectionalLight"
+name = "DeclaredSun"
+uuid = "3771a48e5b8376ba39a0eefedcbcad20"
+
+[transform]
+position = [
+    0.0,
+    50.0,
+    0.0,
+]
+rotation = [
+    -0.290459,
+    0.24684,
+    0.077828,
+    0.92122,
+]
+scale = [
+    1.0,
+    1.0,
+    1.0,
+]

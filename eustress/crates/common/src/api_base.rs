@@ -11,7 +11,8 @@
 //! A login belongs to the API that issued it. [`credential_scope`] names the
 //! API in use, and [`login_file`] the saved login's file for it, so Studio
 //! saves one login per API, the Player reads the one for its API, and neither
-//! offers a production token to a test API.
+//! offers a production token to a test API. Beside each login Studio records
+//! the origin of the API that issued it ([`login_origin_file`]).
 
 use std::sync::OnceLock;
 
@@ -183,6 +184,20 @@ pub fn login_file_for(base: &str) -> String {
     }
 }
 
+/// The record beside the API in use's saved login ([`login_origin_file_for`]).
+pub fn login_origin_file() -> String {
+    login_origin_file_for(api_base())
+}
+
+/// The record Studio writes beside a saved login: `<login file>.origin`,
+/// holding the web origin ([`origin_of`]) of the API that issued the login.
+/// The Player sends a borrowed login only to that origin, and a login with no
+/// record only where its file proves its API (production's `auth_token`).
+/// The name never matches a login file, so nothing reads it as a token.
+pub fn login_origin_file_for(base: &str) -> String {
+    format!("{}.origin", login_file_for(base))
+}
+
 fn scope_of(base: &str) -> String {
     let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
     for byte in base.bytes() {
@@ -339,6 +354,8 @@ mod tests {
         assert_eq!(login_file_for("https://api-staging.eustress.dev/"), staging);
         assert_ne!(login_file_for("http://127.0.0.1:8787"), staging);
         assert_ne!(login_file_for("http://10.0.0.1"), "auth_token", "a refused base never reads production's login");
+        assert_eq!(login_origin_file_for(PRODUCTION_API), "auth_token.origin");
+        assert_eq!(login_origin_file_for(STAGING_API), format!("{staging}.origin"));
     }
 
     /// The shared login-v1 vectors, read by the Worker's tests too.

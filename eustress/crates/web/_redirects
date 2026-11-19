@@ -22,10 +22,15 @@
 /login / 200
 /delta/thanks / 200
 /economics / 200
+/invest / 200
+/sponsor / 200
 /verify-email / 200
 /cancel-email-change / 200
 /replacement-key / 200
 /undo-key-replacement / 200
+/auth/discord/callback / 200
+/auth/slack/callback / 200
+/discord/roles / 200
 /profile / 200
 /purchases / 200
 /account/cases / 200
@@ -36,6 +41,7 @@
 /tickets / 200
 /admin / 200
 /admin/telemetry / 200
+/admin/appeals / 200
 /kyc / 200
 /verify / 200
 /verify-account / 200

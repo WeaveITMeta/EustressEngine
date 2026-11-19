@@ -1,0 +1,9 @@
+[material]
+name = "H_Metal"
+description = "Harness: polished metal"
+
+[pbr]
+base_color = [1.0, 1.0, 1.0, 1.0]
+metallic = 1.0
+roughness = 0.15
+reflectance = 0.5

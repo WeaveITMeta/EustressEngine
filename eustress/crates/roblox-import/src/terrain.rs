@@ -101,6 +101,20 @@ pub const CHUNK_HEADER_LEN: usize = 12;
 /// The Eustress voxel-chunk file format version (spec §6.6).
 pub const EUSTRESS_CHUNK_VERSION: u8 = 1;
 
+/// The record version that carries a water plane. Written only for a chunk
+/// that holds Shorelines water (a voxel with solid material and water at
+/// once), so every other chunk's record is byte for byte what it was.
+/// Mirrors `eustress_common::terrain::voxel_extract`, whose decoder reads
+/// versions 1 and 2.
+pub const WATER_PLANE_CHUNK_VERSION: u8 = 2;
+
+/// Record flags bit: the chunk holds water.
+pub const CHUNK_FLAG_WATER: u8 = 0b01;
+
+/// Record flags bit: a water-occupancy plane, one byte per cell in the cells'
+/// order, follows the cells (`voxel_extract::CHUNK_FLAG_WATER_PLANE`).
+pub const CHUNK_FLAG_WATER_PLANE: u8 = 0b10;
+
 /// Roblox terrain cell edge in studs. Like every imported length it is in the
 /// Eustress stud (0.28 m); the Terrain instance carries `metadata.unit =
 /// "stud"`, and whatever lays the voxels out in the world converts from it,
@@ -294,6 +308,10 @@ pub struct VoxelChunk {
     pub material: Vec<u8>,
     /// Per-cell quantised occupancy (0..=255), linear YZX order.
     pub occupancy: Vec<u8>,
+    /// Per-cell Shorelines water occupancy (0..=255), linear YZX order: the
+    /// water a voxel holds beside its solid material. Empty when the chunk
+    /// has none, else one byte per cell.
+    pub shoreline_water: Vec<u8>,
 }
 
 impl VoxelChunk {
@@ -461,15 +479,26 @@ pub fn decode_smooth_grid(buf: &[u8]) -> DecodeResult {
         // chunk, so a raster run along +Z is a repeated `(0,0,1)` — which is
         // exactly why scanning for an ABSOLUTE coordinate field never found one.
         let (dx, dy, dz) = read_chunk_delta(hdr);
-        cx += dx;
-        cy += dy;
-        cz += dz;
+        // A delta is any i32 the stream holds: the sum is checked, never
+        // wrapped (and never a panic in a build with overflow checks).
+        let (Some(nx), Some(ny), Some(nz)) = (cx.checked_add(dx), cy.checked_add(dy), cz.checked_add(dz)) else {
+            result.errors.push(TerrainDecodeError {
+                cx,
+                cy,
+                cz,
+                reason: "chunk coordinate overflows: decode framing lost".to_string(),
+            });
+            break;
+        };
+        (cx, cy, cz) = (nx, ny, nz);
 
         // Sanity-bound the coordinates — a wildly out-of-range coord is a
         // sign we've lost framing. ±2^20 chunks = ±4 million studs, well
         // beyond any real place.
         const COORD_LIMIT: i32 = 1 << 20;
-        if cx.abs() > COORD_LIMIT || cy.abs() > COORD_LIMIT || cz.abs() > COORD_LIMIT {
+        // `unsigned_abs`: `i32::MIN.abs()` panics with overflow checks on and
+        // stays negative without them, which let it past this bound.
+        if [cx, cy, cz].iter().any(|c| c.unsigned_abs() > COORD_LIMIT as u32) {
             result.errors.push(TerrainDecodeError {
                 cx,
                 cy,
@@ -481,13 +510,14 @@ pub fn decode_smooth_grid(buf: &[u8]) -> DecodeResult {
 
         // ── Decode the RLE cell stream for this chunk. ──
         match decode_chunk_cells(&mut cur) {
-            Ok((material, occupancy)) => {
+            Ok((material, occupancy, shoreline_water)) => {
                 let chunk = VoxelChunk {
                     cx,
                     cy,
                     cz,
                     material,
                     occupancy,
+                    shoreline_water,
                 };
                 if !chunk.is_empty() {
                     result.chunks.push(chunk);
@@ -535,9 +565,11 @@ fn read_chunk_delta(hdr: &[u8]) -> (i32, i32, i32) {
 /// **Shorelines water escape**: a count of `0` does not mean a run — it means
 /// a single voxel that also holds water, and one more byte (the water
 /// occupancy) follows. A non-zero count `c` is a run of `c + 1` voxels.
-fn decode_chunk_cells(cur: &mut Cursor) -> Result<(Vec<u8>, Vec<u8>), String> {
+fn decode_chunk_cells(cur: &mut Cursor) -> Result<(Vec<u8>, Vec<u8>, Vec<u8>), String> {
     let mut material = Vec::with_capacity(CELLS_PER_CHUNK);
     let mut occupancy = Vec::with_capacity(CELLS_PER_CHUNK);
+    // Shorelines water per cell: empty until the first voxel that holds any.
+    let mut shoreline_water: Vec<u8> = Vec::new();
 
     while material.len() < CELLS_PER_CHUNK {
         let lead = cur
@@ -567,13 +599,20 @@ fn decode_chunk_cells(cur: &mut Cursor) -> Result<(Vec<u8>, Vec<u8>), String> {
                 .ok_or_else(|| "ran out of bytes reading count".to_string())?;
             if count == 0 {
                 // Water escape: this voxel carries a separate water occupancy
-                // (Roblox Shorelines). Consume that byte to hold framing. The
-                // solid material + occupancy above stay authoritative for the
-                // surface; the water overlay is not yet a separate channel in
-                // the Eustress voxel record, so it is read and dropped here.
-                let _water_occupancy = cur.read_u8().ok_or_else(|| {
+                // (Roblox Shorelines). The solid material and occupancy above
+                // stay authoritative for the surface; the water goes to the
+                // record's water plane (`encode_eustress_chunk`), which the
+                // engine reads as the cell's water.
+                let water_occupancy = cur.read_u8().ok_or_else(|| {
                     "ran out of bytes reading water occupancy (count-0 escape)".to_string()
                 })?;
+                if water_occupancy > 0 {
+                    if shoreline_water.is_empty() {
+                        shoreline_water = vec![0; CELLS_PER_CHUNK];
+                    }
+                    // In range: the loop runs only while a cell is still owed.
+                    shoreline_water[material.len()] = water_occupancy;
+                }
                 1
             } else {
                 count as usize + 1
@@ -594,7 +633,7 @@ fn decode_chunk_cells(cur: &mut Cursor) -> Result<(Vec<u8>, Vec<u8>), String> {
         }
     }
 
-    Ok((material, occupancy))
+    Ok((material, occupancy, shoreline_water))
 }
 
 // ---------------------------------------------------------------------------
@@ -621,6 +660,10 @@ fn encode_eustress_chunk(
     let mut out = Vec::with_capacity(3 + CELLS_PER_CHUNK * 2);
     let mut distinct: std::collections::HashSet<u8> = std::collections::HashSet::new();
     let mut has_water = false;
+    // The water plane: a Water cell's own occupancy, or the Shorelines water
+    // a solid voxel holds. Written only when the chunk has Shorelines water.
+    let has_shoreline = chunk.shoreline_water.iter().any(|&w| w > 0);
+    let mut water_plane = Vec::with_capacity(if has_shoreline { CELLS_PER_CHUNK } else { 0 });
 
     // Build the cell payload first so we can compute material_count.
     let mut cells = Vec::with_capacity(CELLS_PER_CHUNK * 2);
@@ -630,6 +673,16 @@ fn encode_eustress_chunk(
         let mapped = map_roblox_material(rbx_mat);
         if mapped.eustress_id == WATER_MARKER {
             has_water = true;
+        }
+        if has_shoreline {
+            let shore = chunk.shoreline_water.get(i).copied().unwrap_or(0);
+            water_plane.push(if shore > 0 {
+                shore
+            } else if mapped.eustress_id == WATER_MARKER {
+                occ
+            } else {
+                0
+            });
         }
         if mapped.eustress_id != AIR_MARKER {
             distinct.insert(mapped.eustress_id);
@@ -644,10 +697,17 @@ fn encode_eustress_chunk(
         cells.push(occ);
     }
 
-    out.push(EUSTRESS_CHUNK_VERSION);
+    out.push(if has_shoreline { WATER_PLANE_CHUNK_VERSION } else { EUSTRESS_CHUNK_VERSION });
     out.push(distinct.len().min(255) as u8);
-    out.push(if has_water { 0b0000_0001 } else { 0 });
+    let mut flags = if has_water || has_shoreline { CHUNK_FLAG_WATER } else { 0 };
+    if has_shoreline {
+        flags |= CHUNK_FLAG_WATER_PLANE;
+    }
+    out.push(flags);
     out.extend_from_slice(&cells);
+    if has_shoreline {
+        out.extend_from_slice(&water_plane);
+    }
     out
 }
 
@@ -1032,6 +1092,66 @@ mod tests {
     /// The 2-byte file header every SmoothGrid opens with.
     fn grid_header() -> Vec<u8> {
         vec![SMOOTH_GRID_VERSION, 0x05]
+    }
+
+    /// A Shorelines voxel (solid material and water at once) keeps its water:
+    /// the record carries a water plane, which the engine's own decoder reads.
+    #[test]
+    fn shoreline_water_reaches_the_record_the_engine_reads() {
+        let mut grid = grid_header();
+        push_chunk_header(&mut grid, 0, 0, 0);
+        // One Grass voxel, occupancy 200, holding water 90: the count-0 escape.
+        grid.extend_from_slice(&[2 | 0b0100_0000 | 0b1000_0000, 200, 0, 90]);
+        // The rest of the chunk is air, in runs of up to 256 cells. 32767
+        // cells leave a last run of 255, never a run of 1 (a count byte of 0
+        // would be the escape again).
+        let mut left = CELLS_PER_CHUNK - 1;
+        while left > 0 {
+            let run = left.min(256);
+            grid.extend_from_slice(&[0b1000_0000, (run - 1) as u8]);
+            left -= run;
+        }
+        let decoded = decode_smooth_grid(&grid);
+        assert!(decoded.errors.is_empty(), "{:?}", decoded.errors);
+        let chunk = &decoded.chunks[0];
+        assert_eq!(chunk.shoreline_water.len(), CELLS_PER_CHUNK);
+        assert_eq!(chunk.shoreline_water[0], 90);
+
+        let raw = encode_eustress_chunk(chunk, &mut std::collections::HashMap::new());
+        assert_eq!(raw[0], WATER_PLANE_CHUNK_VERSION);
+        assert_eq!(raw[2] & CHUNK_FLAG_WATER_PLANE, CHUNK_FLAG_WATER_PLANE);
+        assert_eq!(raw.len(), 3 + CELLS_PER_CHUNK * 3);
+        let engine = eustress_common::terrain::voxel_extract::decode_voxel_chunk_raw(&raw)
+            .expect("the engine reads the record");
+        assert_eq!(engine.water[0], 90, "the shoreline voxel's water");
+        assert_eq!(engine.occupancy[0], 200, "its solid occupancy is unchanged");
+        assert_eq!(engine.water.iter().filter(|&&w| w > 0).count(), 1);
+
+        // A chunk with no Shorelines water keeps the version 1 record.
+        let dry = decode_smooth_grid(&single_run_chunk(0, 0, 0, 2, 255));
+        let raw = encode_eustress_chunk(&dry.chunks[0], &mut std::collections::HashMap::new());
+        assert_eq!((raw[0], raw.len()), (EUSTRESS_CHUNK_VERSION, 3 + CELLS_PER_CHUNK * 2));
+    }
+
+    /// A chunk delta is any i32 the stream holds. An extreme one is a decode
+    /// error, never an overflow panic and never a chunk at a wrapped place.
+    #[test]
+    fn an_extreme_chunk_delta_is_an_error_and_never_a_panic() {
+        for delta in [i32::MIN, i32::MAX] {
+            let mut grid = grid_header();
+            push_chunk_header(&mut grid, delta, 0, 0);
+            let decoded = decode_smooth_grid(&grid);
+            assert!(decoded.chunks.is_empty());
+            assert_eq!(decoded.errors.len(), 1, "{:?}", decoded.errors);
+        }
+        // Two deltas whose sum leaves i32.
+        let mut grid = grid_header();
+        push_chunk_header(&mut grid, 1 << 20, 0, 0);
+        push_solid_cells(&mut grid, 2, 255);
+        push_chunk_header(&mut grid, i32::MAX, 0, 0);
+        let decoded = decode_smooth_grid(&grid);
+        assert_eq!(decoded.chunks.len(), 1);
+        assert_eq!(decoded.errors.len(), 1, "{:?}", decoded.errors);
     }
 
     /// Append a chunk header: three `i32` coordinate deltas, byte-plane

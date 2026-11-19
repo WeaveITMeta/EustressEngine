@@ -1,0 +1,112 @@
+{
+  "captures": [
+    {
+      "bridge_reply": {
+        "height": 2160,
+        "note": "AI camera capture queued; the PNG lands within about 10 frames, so read the path after a moment",
+        "path": "E:\\Workspace\\EustressEngine\\eustress\\../docs/PROMPTS/artifacts/G1.05\\captures\\capture_01_3840x2160.png",
+        "width": 3840
+      },
+      "bytes": 9409850,
+      "dimensions_match": true,
+      "emitted": {
+        "height": 2160,
+        "width": 3840
+      },
+      "index": 1,
+      "path": "E:\\Workspace\\EustressEngine\\eustress\\../docs/PROMPTS/artifacts/G1.05\\captures\\capture_01_3840x2160.png",
+      "requested": {
+        "height": 2160,
+        "width": 3840
+      },
+      "sha256": "835b557906939fc2964bbba4107d304a59f02eaf6ad517078488397d17685403"
+    },
+    {
+      "bridge_reply": {
+        "height": 1080,
+        "note": "AI camera capture queued; the PNG lands within about 10 frames, so read the path after a moment",
+        "path": "E:\\Workspace\\EustressEngine\\eustress\\../docs/PROMPTS/artifacts/G1.05\\captures\\capture_02_1920x1080.png",
+        "width": 1920
+      },
+      "bytes": 2382800,
+      "dimensions_match": true,
+      "emitted": {
+        "height": 1080,
+        "width": 1920
+      },
+      "index": 2,
+      "path": "E:\\Workspace\\EustressEngine\\eustress\\../docs/PROMPTS/artifacts/G1.05\\captures\\capture_02_1920x1080.png",
+      "requested": {
+        "height": 1080,
+        "width": 1920
+      },
+      "sha256": "173ed71ac003693298b2b8c0f1e120218c0999b2ae60c05f5607c3a55aaaf40e"
+    },
+    {
+      "bridge_reply": {
+        "height": 2160,
+        "note": "AI camera capture queued; the PNG lands within about 10 frames, so read the path after a moment",
+        "path": "E:\\Workspace\\EustressEngine\\eustress\\../docs/PROMPTS/artifacts/G1.05\\captures\\capture_03_3840x2160.png",
+        "width": 3840
+      },
+      "bytes": 9409850,
+      "dimensions_match": true,
+      "emitted": {
+        "height": 2160,
+        "width": 3840
+      },
+      "index": 3,
+      "path": "E:\\Workspace\\EustressEngine\\eustress\\../docs/PROMPTS/artifacts/G1.05\\captures\\capture_03_3840x2160.png",
+      "requested": {
+        "height": 2160,
+        "width": 3840
+      },
+      "sha256": "835b557906939fc2964bbba4107d304a59f02eaf6ad517078488397d17685403"
+    },
+    {
+      "bridge_reply": {
+        "height": 1440,
+        "note": "AI camera capture queued; the PNG lands within about 10 frames, so read the path after a moment",
+        "path": "E:\\Workspace\\EustressEngine\\eustress\\../docs/PROMPTS/artifacts/G1.05\\captures\\capture_04_2560x1440.png",
+        "width": 2560
+      },
+      "bytes": 4212034,
+      "dimensions_match": true,
+      "emitted": {
+        "height": 1440,
+        "width": 2560
+      },
+      "index": 4,
+      "path": "E:\\Workspace\\EustressEngine\\eustress\\../docs/PROMPTS/artifacts/G1.05\\captures\\capture_04_2560x1440.png",
+      "requested": {
+        "height": 1440,
+        "width": 2560
+      },
+      "sha256": "bfe91fd796ba2df3c08ddd63cdcc65793820d4b0cd900ff7eed6cd2aceba6111"
+    }
+  ],
+  "engine_port": "62496",
+  "engine_port_file": "E:\\Workspace\\EustressEngine\\eustress\\spaces/harness\\.eustress\\engine.port",
+  "errors": [],
+  "item": "G1.05",
+  "pose": {
+    "look_at": [
+      0.0,
+      1.0,
+      0.0
+    ],
+    "position": [
+      6.0,
+      3.5,
+      9.0
+    ]
+  },
+  "summary": {
+    "captures": 4,
+    "dimension_mismatches": 0,
+    "repeat_4k_count": 2,
+    "repeat_4k_identical": true
+  },
+  "tool": "harness-scenes capture-selftest",
+  "universe": "E:\\Workspace\\EustressEngine\\eustress\\spaces/harness"
+}

@@ -20,8 +20,8 @@
 //! each waiting on a records-reading twin of its desktop reader. The local
 //! character is: when `Players.CharacterAutoLoads` is on, its feet go on the
 //! Space's SpawnLocation and the avatar runtime follows it. A joined session
-//! uses the place the host sent. A Space that loads no character keeps the
-//! fly camera.
+//! uses the place the host sent. A Space that loads no character shows its
+//! own scripted camera.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;

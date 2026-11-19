@@ -19,6 +19,29 @@ const DEFAULT_NAME: &str = "Player";
 thread_local! {
     /// Whether this page has started its one session.
     static STARTED: Cell<bool> = const { Cell::new(false) };
+    /// Whether the module's static constructors have run.
+    static CONSTRUCTED: Cell<bool> = const { Cell::new(false) };
+}
+
+extern "C" {
+    /// The linker's list of the module's static constructors: the Luau VM's
+    /// C++ globals (its allocator's size-class table, its flags) and Rust
+    /// `ctor` registrations (eustress-networking's). Because the module
+    /// names this function, the linker does not call it from each export;
+    /// the module calls it, once, before anything else runs.
+    fn __wasm_call_ctors();
+}
+
+/// Run the static constructors once. Without them the first Luau state
+/// traps dividing by zero in its allocator, whose size classes are a C++
+/// global filled by a constructor.
+fn run_static_constructors() {
+    if CONSTRUCTED.with(|done| done.replace(true)) {
+        return;
+    }
+    // SAFETY: called once per module instance, before any code that reads
+    // the constructed globals, on the page's one thread.
+    unsafe { __wasm_call_ctors() };
 }
 
 /// The page's handle on the session.
@@ -51,6 +74,7 @@ pub fn start_player(args: JsValue) -> Result<PlayerHandle, JsValue> {
     if STARTED.with(Cell::get) {
         return Err(fail("already-started"));
     }
+    run_static_constructors();
     let field = |name: &str| {
         js_sys::Reflect::get(&args, &JsValue::from_str(name)).unwrap_or(JsValue::UNDEFINED)
     };

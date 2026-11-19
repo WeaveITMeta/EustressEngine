@@ -209,6 +209,20 @@ pub fn DocsRealismPage() -> impl IntoView {
 
                 <main class="docs-content">
                     <header class="docs-hero">
+                        // The hero picture: the page's largest paint, so it loads at
+                        // once (no lazy loading, no entrance animation).
+                        <div class="docs-hero-art">
+                            <img
+                                src="/assets/learn/realism-hero-1600.webp"
+                                srcset="/assets/learn/realism-hero-800.webp 800w, /assets/learn/realism-hero-1600.webp 1600w"
+                                sizes="(max-width: 1024px) 100vw, 840px"
+                                alt="Four specimens on a test bench: a block splitting along a fracture, a bar whose glow shifts from violet to green along its length, a cylinder cell cut away to show stacked layers, and a small truss sagging under a cube."
+                                width="1600"
+                                height="900"
+                                fetchpriority="high"
+                                decoding="async"
+                            />
+                        </div>
                         <div class="docs-breadcrumb">
                             <a href="/learn">"Learn"</a>
                             <span class="separator">"/"</span>
@@ -572,6 +586,19 @@ class_name = "Part""#}</code></pre>
 
                         <div id="heat-conduction" class="subsection">
                             <h3>"Conduction Between Parts"</h3>
+                            <figure class="learn-figure">
+                                <img
+                                    src="/assets/learn/realism-fig-1-1200.webp"
+                                    srcset="/assets/learn/realism-fig-1-600.webp 600w, /assets/learn/realism-fig-1-1200.webp 1200w"
+                                    sizes="(max-width: 660px) 92vw, (max-width: 1099px) 600px, 500px"
+                                    alt="Two cubes close together joined by a short glowing line, one glowing brightly and the other dim, and a third dim cube standing far apart with no line."
+                                    width="1200"
+                                    height="900"
+                                    loading="lazy"
+                                    decoding="async"
+                                />
+                                <figcaption>"Parts that carry both a material and a thermodynamic section exchange heat by conduction. The engine pairs any two such parts whose centers are within 0.5 m."</figcaption>
+                            </figure>
                             <p>
                                 "Parts that carry both "<code>"[material]"</code>" and "
                                 <code>"[thermodynamic]"</code>" exchange heat by conduction. Every 0.5 s the

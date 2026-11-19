@@ -18,8 +18,8 @@ The code lives in three places:
 ## 1. Host from Studio
 
 1. Open the Space you want to share.
-2. Press **F9**, or choose **Network > Start Local Server**, or **Start** in
-   the Test tab's Server group.
+2. Press **F9**, or choose **Network > Start Server**, or **Start Server** in
+   the Test tab's Host group.
 
 Studio then:
 
@@ -33,7 +33,12 @@ Studio then:
    chunks go to `.eustress/host/` in the workspace folder, never into the
    Space;
 3. starts listening on port 7777;
-4. enters Play with a character, when you were not already playing.
+4. from Edit, enters Play as the server alone: the simulation runs, you have
+   no character and take no player slot, Studio adds no Player of its own,
+   and the free camera is your view. Started while already playing, the
+   session keeps what Play has, and the notice says which. To test as a
+   player, press **Add Player** (Test tab or Network menu): Studio opens the
+   Player on this computer joined to the server.
 
 The Output panel prints the join link and the command for this computer:
 
@@ -43,6 +48,7 @@ On this computer: eustress-client --connect 127.0.0.1:7777
 ```
 
 **Stop Server**, or returning to Edit, ends the session. Pausing does not.
+Stopping a server that entered Play for itself also returns to Edit.
 
 ## 2. Join with the Player
 

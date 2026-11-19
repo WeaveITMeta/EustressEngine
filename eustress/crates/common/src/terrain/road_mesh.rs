@@ -3,7 +3,9 @@
 //!
 //! Pure math over a [`road_design`](super::road_design) design, no ECS:
 //! - [`build_road`] lays one mesh per surface (carriageway, shoulders, kerbs,
-//!   sidewalks) along the stations, UVs in metres (u across, v along), and
+//!   sidewalks) along the stations, UVs in world metres (u east along X, v
+//!   along Z: the frame every road and junction shares, so textures run on
+//!   across a junction's mouth), and
 //!   the markings as thin strips just above the carriageway: a yellow centre
 //!   line, dashed where the passing sight distance is there and doubled
 //!   where it is not, white lane lines between same-direction lanes, white
@@ -15,7 +17,7 @@
 
 use super::road_design::{
     cross_slope, Alignment, CrossSection, EdgeTreatment, ProfileMode, RoadSpec, RoadStandard, SectionPoint,
-    Station, VerticalProfile, Vpi, Zone, P2,
+    Station, VerticalProfile, Violation, Vpi, Zone, P2,
 };
 
 /// Triangle-list mesh data, `f32` for the GPU.
@@ -496,7 +498,15 @@ pub fn build_road_zoned(
                         .iter()
                         .map(|(st, x)| {
                             let p = half(x)[k];
-                            (world(st, profile, p.offset, p.elevation + lift), [p.offset, st.s])
+                            let w = world(st, profile, p.offset, p.elevation + lift);
+                            // World X and Z: one texture frame for every road and junction.
+                            #[cfg(test)]
+                            {
+                                if super::mutant("g01") {
+                                    return (w, [p.offset, st.s]);
+                                }
+                            }
+                            (w, [w[0], w[2]])
                         })
                         .collect()
                 };
@@ -1642,6 +1652,10 @@ pub struct DesignedRoad {
     pub sides: Vec<[Side; 2]>,
     /// Its bridges and tunnels, in order along it ([`find_structures`]).
     pub structures: Vec<Structure>,
+    /// Where its alignment and profile break its standard
+    /// ([`audit`](super::road_design::audit)): curves under the minimum
+    /// radius, grades over the maximum, fills and cuts past their limits.
+    pub violations: Vec<Violation>,
 }
 
 impl DesignedRoad {
@@ -1759,6 +1773,7 @@ pub fn design_spline(
         profile = auto(&through);
         structures = find_structures(&stations, &profile, &ground_line, &standard);
     }
+    let violations = super::road_design::audit(&alignment, &profile, &ground_line, spacing, &standard);
     let sections = sections(&stations, &standard);
     // How far each station stands out from the nearest tunnel portal, along
     // the road, where it lies in that portal's approach cut.
@@ -1812,6 +1827,7 @@ pub fn design_spline(
         ground: ground_line,
         sides,
         structures,
+        violations,
     })
 }
 

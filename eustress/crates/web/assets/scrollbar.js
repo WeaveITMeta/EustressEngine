@@ -21,8 +21,15 @@
     root.style.setProperty('--scrollbar-w', width + 'px');
   }
 
+  // In <head> there is no body yet, so this first read costs nothing.
   measure();
-  if (window.ResizeObserver) new ResizeObserver(measure).observe(root);
-  else window.addEventListener('load', measure);
-  window.addEventListener('resize', measure);
+  if (window.ResizeObserver) {
+    // A resized window resizes <html> too, so this one observer covers both.
+    // A 'resize' listener would read the width while the page's layout is
+    // still dirty, which forced a full layout (over half a second on a phone).
+    new ResizeObserver(measure).observe(root);
+  } else {
+    window.addEventListener('load', measure);
+    window.addEventListener('resize', measure);
+  }
 })();

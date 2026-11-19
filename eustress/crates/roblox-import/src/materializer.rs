@@ -245,6 +245,15 @@ pub struct Materializer<'dom> {
     /// to be patched after the walk completes.
     pending_refs: Vec<(PathBuf, String, Ref)>,
 
+    /// Each folded `ObjectValue` with a target: `(host_path, attribute key,
+    /// target_ref)`. After the walk a target the import did not write is
+    /// reported as an unresolved reference.
+    pending_object_values: Vec<(String, String, Ref)>,
+
+    /// Every instance's uuid, the same on each import of the same file
+    /// (`stable_uuids`).
+    uuids: HashMap<Ref, Uuid>,
+
     /// Pending `[properties.extras]` / `[references]` / root `tags` /
     /// root `[attributes]` / `[properties.physics]` / `[asset]` patches
     /// keyed by absolute TOML path. Applied at the end of the walk so we
@@ -361,6 +370,8 @@ impl<'dom> Materializer<'dom> {
             None
         };
 
+        let uuids = stable_uuids(dom, &salt);
+
         Ok(Self {
             dom,
             space_root: space_root.to_path_buf(),
@@ -374,6 +385,8 @@ impl<'dom> Materializer<'dom> {
             celestial_sizes: (None, None),
             referent_to_path: HashMap::new(),
             pending_refs: Vec::new(),
+            pending_object_values: Vec::new(),
+            uuids,
             pending_patches: HashMap::new(),
             storage,
             toml_sink,
@@ -427,7 +440,23 @@ impl<'dom> Materializer<'dom> {
         // still makes sense.
         if root.class == "DataModel" {
             for child_ref in root.children().iter() {
-                self.handle_service(*child_ref, report)?;
+                // A model file (.rbxm, .rbxmx) parses to a DataModel root as
+                // well: rbx_binary and rbx_xml hang the file's own instances
+                // straight under it. Those are content, not services, and
+                // land whole under Workspace. Routed as services, each lost
+                // its own instance and left only its children, under
+                // `_imported/<ClassName>/`.
+                let is_content = self
+                    .dom
+                    .get_by_ref(*child_ref)
+                    .is_some_and(|child| is_content_class(child.class.as_str()));
+                if is_content {
+                    let dest = self.space_root.join("Workspace");
+                    std::fs::create_dir_all(&dest).map_err(|e| ImportError::Io(dest.clone(), e))?;
+                    self.walk_subtree(*child_ref, &dest, "Workspace", None, report)?;
+                } else {
+                    self.handle_service(*child_ref, report)?;
+                }
             }
         } else {
             let dest = self.space_root.join("Workspace");
@@ -436,8 +465,8 @@ impl<'dom> Materializer<'dom> {
             self.walk_subtree(root_ref, &dest, "Workspace", None, report)?;
         }
 
-        self.finalise_pending_patches()?;
-        self.finalise_refs(report)?;
+        self.finalise_pending_patches(report);
+        self.finalise_refs(report);
 
         // ── A clip for each Roblox animation id the place uses ──
         self.write_animation_clips(report);
@@ -480,6 +509,12 @@ impl<'dom> Materializer<'dom> {
         let outcome = self.router.route(&service_class)?;
         match outcome {
             RouteOutcome::Routed { dest, cognate } => {
+                // A service with no Eustress cognate and nothing in it (most
+                // of the sixty-odd services a place lists) leaves nothing to
+                // route: no empty `_imported/<Service>` folder, no report line.
+                if !cognate && service.children().is_empty() {
+                    return Ok(());
+                }
                 if !cognate {
                     report.record_skipped_service(
                         &service.class,
@@ -527,10 +562,29 @@ impl<'dom> Materializer<'dom> {
                 // `Workspace/<PlaceName>/` container. The Space directory is
                 // already named after the place, so the extra nesting was a
                 // redundant second layer the user doesn't want.
+                // Value objects directly under the service fold into the
+                // service's own attributes, as they do under any instance. A
+                // script's `ReplicatedStorage.RoundTime.Value` is rewritten to
+                // `ReplicatedStorage:GetAttribute("RoundTime")` whatever holds
+                // the value object, so the value has to be on the service:
+                // its `_service.toml` `[attributes]`, which both loaders
+                // read. Only a service that lands in its own folder has one.
+                let mut folded_children = std::collections::HashSet::new();
+                if cognate && dest.as_path() == Path::new(service_class.as_str()) {
+                    let mut attributes = HashMap::new();
+                    folded_children =
+                        self.fold_value_objects(service, &dest_str, &service_class, &dest_str, &mut attributes, report);
+                    if !attributes.is_empty() {
+                        self.write_service_attributes(&service_class, &absolute_dest, &attributes, report)?;
+                    }
+                }
                 let _ = (cognate, service_class);
                 let (child_dir, child_relpath) = (absolute_dest.clone(), dest_str.clone());
 
                 for child_ref in service.children().iter() {
+                    if folded_children.contains(child_ref) {
+                        continue;
+                    }
                     // A service child's parent is the service-cognate folder
                     // (or the synthetic `Workspace/<PlaceName>` container) —
                     // neither carries a Roblox referent → no parent UUID.
@@ -538,7 +592,15 @@ impl<'dom> Materializer<'dom> {
                 }
             }
             RouteOutcome::SkipSilent => {
-                // Runtime-only — silently skip subtree.
+                // Runtime-only. A place rarely stores anything under one;
+                // what it does store is not imported, and the report says so.
+                let children = service.children().len();
+                if children > 0 {
+                    report.record_skipped_service(
+                        &service.class,
+                        &format!("runtime-only service: its {children} child instance(s) were not imported"),
+                    );
+                }
             }
         }
         Ok(())
@@ -605,10 +667,14 @@ impl<'dom> Materializer<'dom> {
         }
     }
 
-    /// Write `<dir>/_service.toml` for a Roblox service: the engine's template
-    /// for it with the place's own values laid over `[properties]`
-    /// (`service_props`). A service without a template is left alone, and an
-    /// existing file is never overwritten.
+    /// Write `<dir>/_service.toml` for a Roblox service: the place's own values
+    /// laid over `[properties]` (`service_props`) of the file the Space
+    /// already holds, or of the engine's template when it holds none. A Space
+    /// Studio scaffolds holds the template for every service before the
+    /// import runs, so skipping an existing file dropped Lighting's time of
+    /// day and fog, Workspace's gravity and StarterPlayer's movement from
+    /// every import made through Studio. A service without a template is
+    /// left alone.
     fn write_service_toml(
         &self,
         service_ref: Ref,
@@ -619,9 +685,6 @@ impl<'dom> Materializer<'dom> {
             return Ok(());
         };
         let path = dir.join("_service.toml");
-        if path.exists() {
-            return Ok(());
-        }
         let props = props_to_string_map(service);
         let Some(mapped) = crate::service_props::map_service_properties(service.class.as_str(), &props) else {
             return Ok(());
@@ -629,10 +692,53 @@ impl<'dom> Materializer<'dom> {
         for (property, ty) in &mapped.unmapped {
             report.record_unmapped_property(service.class.as_str(), property, ty);
         }
-        if let Some(body) = crate::service_props::service_toml(service.class.as_str(), &mapped) {
+        let body = match std::fs::read_to_string(&path) {
+            Ok(existing) => {
+                let body = crate::service_props::service_toml_over(&existing, service.class.as_str(), &mapped);
+                if body.is_none() {
+                    report.record_approximation(
+                        &format!("{}/_service.toml", service.class.as_str()),
+                        service.class.as_str(),
+                        service.class.as_str(),
+                        "the Space's _service.toml is not valid TOML: the place's service values were not written",
+                    );
+                }
+                body
+            }
+            Err(_) => crate::service_props::service_toml(service.class.as_str(), &mapped),
+        };
+        if let Some(body) = body {
             std::fs::write(&path, body).map_err(|e| ImportError::Io(path.clone(), e))?;
         }
         Ok(())
+    }
+
+    /// Lay a service's folded value objects over the `[attributes]` of its
+    /// `_service.toml`: the file the Space holds, else the engine's template
+    /// for the service, else a file that names the service's class alone.
+    fn write_service_attributes(
+        &self,
+        class: &str,
+        dir: &Path,
+        attributes: &HashMap<String, toml::Value>,
+        report: &mut ImportReport,
+    ) -> Result<(), ImportError> {
+        let path = dir.join("_service.toml");
+        let base = std::fs::read_to_string(&path).ok().or_else(|| {
+            std::fs::read_to_string(eustress_common::service_templates_dir().join(class).join("_service.toml")).ok()
+        });
+        match crate::service_props::service_attributes_over(base.as_deref(), class, attributes) {
+            Some(body) => std::fs::write(&path, body).map_err(|e| ImportError::Io(path.clone(), e)),
+            None => {
+                report.record_approximation(
+                    &format!("{class}/_service.toml"),
+                    class,
+                    class,
+                    "the Space's _service.toml is not valid TOML: the value objects under the service were not written as its attributes",
+                );
+                Ok(())
+            }
+        }
     }
 
     fn handle_starter_player(
@@ -648,29 +754,181 @@ impl<'dom> Materializer<'dom> {
         let starter_dir = self.router.absolute(Path::new("StarterPlayer"));
         std::fs::create_dir_all(&starter_dir).map_err(|e| ImportError::Io(starter_dir.clone(), e))?;
         self.write_service_toml(service_ref, &starter_dir, report)?;
+        // Its own value objects are its attributes, as for any service.
+        let mut attributes = HashMap::new();
+        let folded_children = self.fold_value_objects(
+            service,
+            "StarterPlayer",
+            "StarterPlayer",
+            "StarterPlayer",
+            &mut attributes,
+            report,
+        );
+        if !attributes.is_empty() {
+            self.write_service_attributes("StarterPlayer", &starter_dir, &attributes, report)?;
+        }
         for child_ref in service.children().iter() {
+            if folded_children.contains(child_ref) {
+                continue;
+            }
             let Some(child) = self.dom.get_by_ref(*child_ref) else {
                 continue;
             };
-            let dest_rel = match child.class.as_str() {
-                "StarterPlayerScripts" => "StarterPlayerScripts",
-                "StarterCharacterScripts" => "StarterCharacterScripts",
-                _ => {
-                    // Other children of StarterPlayer have nowhere
-                    // sensible to land — route to _imported.
-                    "_imported/StarterPlayer"
-                }
+            let (dest_rel, is_script_folder) = match child.class.as_str() {
+                "StarterPlayerScripts" => ("StarterPlayerScripts", true),
+                "StarterCharacterScripts" => ("StarterCharacterScripts", true),
+                // Any other child (a StarterCharacter model, a
+                // HumanoidDescription) has no folder of its own: it lands
+                // whole under `_imported/StarterPlayer`. Walking only its
+                // children dropped the instance itself.
+                _ => ("_imported/StarterPlayer", false),
             };
             let dest = self.router.absolute(Path::new(dest_rel));
             std::fs::create_dir_all(&dest).map_err(|e| ImportError::Io(dest.clone(), e))?;
-            for gc_ref in child.children().iter() {
-                // Parent is the synthetic StarterPlayerScripts /
-                // StarterCharacterScripts folder (no Roblox referent) → no
-                // parent UUID.
-                self.walk_subtree(*gc_ref, &dest, dest_rel, None, report)?;
+            if is_script_folder {
+                for gc_ref in child.children().iter() {
+                    // Parent is the synthetic StarterPlayerScripts /
+                    // StarterCharacterScripts folder (no Roblox referent):
+                    // no parent UUID.
+                    self.walk_subtree(*gc_ref, &dest, dest_rel, None, report)?;
+                }
+            } else {
+                self.walk_subtree(*child_ref, &dest, dest_rel, None, report)?;
             }
         }
         Ok(())
+    }
+
+    /// Fold `inst`'s value-object children into `attributes`, the attributes
+    /// of the node that takes `inst`'s place: an instance's `[attributes]`,
+    /// or a service's, in its `_service.toml`. Returns the children folded
+    /// out of the tree, which the walk skips. A value object that holds
+    /// children of its own stays in the tree as a Folder for them; its value
+    /// still folds here.
+    ///
+    /// `parent_relpath` and `requested_name` are the report's words for
+    /// where and on what; `host_path` is the node's own path, for an
+    /// `ObjectValue` whose target turns out not to be written.
+    fn fold_value_objects(
+        &mut self,
+        inst: &rbx_dom_weak::Instance,
+        parent_relpath: &str,
+        requested_name: &str,
+        host_path: &str,
+        attributes: &mut HashMap<String, toml::Value>,
+        report: &mut ImportReport,
+    ) -> std::collections::HashSet<Ref> {
+        let mut folded_children: std::collections::HashSet<Ref> = std::collections::HashSet::new();
+        for child_ref in inst.children().iter() {
+            let Some(child) = self.dom.get_by_ref(*child_ref) else {
+                continue;
+            };
+            if !is_value_object_class(child.class.as_str()) {
+                continue;
+            }
+            // A value object with children of its own (a car's
+            // `Handling.Torque` holding `Location`, `Suspension`, ...) stays
+            // in the tree as a Folder (see `walk_subtree`'s class mapping),
+            // so its children fold into ITS attributes. Its value still folds
+            // here: `Handling.Torque.Value` reads `Handling`'s attribute.
+            // Any other value object is folded out of the tree, whether or
+            // not it converts.
+            let keeps_children = !child.children().is_empty();
+            if keeps_children {
+                report.record_approximation(
+                    parent_relpath,
+                    child.class.as_str(),
+                    "attribute",
+                    &format!(
+                        "value object '{}' holds children: kept as a Folder for them; \
+                         its value is an attribute of '{}'",
+                        child.name, requested_name
+                    ),
+                );
+            } else {
+                folded_children.insert(*child_ref);
+                report.total_nodes_seen += 1;
+            }
+
+            let salt = &self.salt;
+            let uuids = &self.uuids;
+            let encoded = encode_value_object(child.class.as_str(), &child.properties, |target| {
+                if target.is_none() {
+                    return None;
+                }
+                Some(uuid_bytes_to_hex(
+                    uuids
+                        .get(&target)
+                        .copied()
+                        .unwrap_or_else(|| entity_uuid(salt, &target.to_string()))
+                        .as_bytes(),
+                ))
+            });
+
+            let attr_name = if child.name.is_empty() {
+                child.class.as_str().to_string()
+            } else {
+                child.name.clone()
+            };
+
+            match encoded {
+                Some(value) => {
+                    // Duplicate attribute key under one parent → suffix
+                    // `_2`/`_3`/… and note it. (Roblox allows sibling
+                    // ValueObjects with identical names; attributes cannot.)
+                    let key = unique_attribute_key(&*attributes, &attr_name);
+                    if key != attr_name {
+                        report.record_approximation(
+                            parent_relpath,
+                            child.class.as_str(),
+                            "attribute",
+                            &format!(
+                                "duplicate folded attribute '{}' on '{}' renamed to '{}'",
+                                attr_name, requested_name, key
+                            ),
+                        );
+                    }
+                    // A constrained value's range folds beside it, keyed off
+                    // the value's own (possibly de-duplicated) key.
+                    if let Some((min, max)) = constrained_range(child.class.as_str(), &child.properties) {
+                        for (suffix, bound) in [("MinValue", min), ("MaxValue", max)] {
+                            let bound_key = unique_attribute_key(&*attributes, &format!("{key}_{suffix}"));
+                            attributes.insert(bound_key, bound);
+                        }
+                    }
+                    if child.class.as_str() == "ObjectValue" {
+                        if let Some(rbx_dom_weak::types::Variant::Ref(target)) =
+                            child.properties.get(&rbx_dom_weak::ustr("Value"))
+                        {
+                            if target.is_some() {
+                                self.pending_object_values.push((
+                                    host_path.to_string(),
+                                    format!("attributes.{key}"),
+                                    *target,
+                                ));
+                            }
+                        }
+                    }
+                    attributes.insert(key, value);
+                }
+                None => {
+                    // Dropped ValueObject (RayValue / *ConstrainedValue):
+                    // folded out of the tree, but not representable as an
+                    // attribute — record the drop per the product decision.
+                    report.record_approximation(
+                        parent_relpath,
+                        child.class.as_str(),
+                        "attribute",
+                        &format!(
+                            "ValueObject class dropped (not convertible) — \
+                             '{}' under '{}' not imported",
+                            attr_name, requested_name
+                        ),
+                    );
+                }
+            }
+        }
+        folded_children
     }
 
     fn walk_subtree(
@@ -786,98 +1044,14 @@ impl<'dom> Materializer<'dom> {
         // its own instance). Dropped classes (`RayValue` /
         // `*ConstrainedValue`) are still folded out of the tree but record
         // an approximation instead of converting.
-        let mut folded_children: std::collections::HashSet<Ref> = std::collections::HashSet::new();
-        for child_ref in inst.children().iter() {
-            let Some(child) = self.dom.get_by_ref(*child_ref) else {
-                continue;
-            };
-            if !is_value_object_class(child.class.as_str()) {
-                continue;
-            }
-            // A value object with children of its own (a car's
-            // `Handling.Torque` holding `Location`, `Suspension`, ...) stays
-            // in the tree as a Folder (see `walk_subtree`'s class mapping),
-            // so its children fold into ITS attributes. Its value still folds
-            // here: `Handling.Torque.Value` reads `Handling`'s attribute.
-            // Any other value object is folded out of the tree, whether or
-            // not it converts.
-            let keeps_children = !child.children().is_empty();
-            if keeps_children {
-                report.record_approximation(
-                    parent_relpath,
-                    child.class.as_str(),
-                    "attribute",
-                    &format!(
-                        "value object '{}' holds children: kept as a Folder for them; \
-                         its value is an attribute of '{}'",
-                        child.name, requested_name
-                    ),
-                );
-            } else {
-                folded_children.insert(*child_ref);
-                report.total_nodes_seen += 1;
-            }
-
-            let salt = &self.salt;
-            let encoded = encode_value_object(child.class.as_str(), &child.properties, |target| {
-                if target.is_none() {
-                    return None;
-                }
-                Some(uuid_bytes_to_hex(
-                    entity_uuid(salt, &target.to_string()).as_bytes(),
-                ))
-            });
-
-            let attr_name = if child.name.is_empty() {
-                child.class.as_str().to_string()
-            } else {
-                child.name.clone()
-            };
-
-            match encoded {
-                Some(value) => {
-                    // Duplicate attribute key under one parent → suffix
-                    // `_2`/`_3`/… and note it. (Roblox allows sibling
-                    // ValueObjects with identical names; attributes cannot.)
-                    let key = unique_attribute_key(&bag.attributes, &attr_name);
-                    if key != attr_name {
-                        report.record_approximation(
-                            parent_relpath,
-                            child.class.as_str(),
-                            "attribute",
-                            &format!(
-                                "duplicate folded attribute '{}' on '{}' renamed to '{}'",
-                                attr_name, requested_name, key
-                            ),
-                        );
-                    }
-                    // A constrained value's range folds beside it, keyed off
-                    // the value's own (possibly de-duplicated) key.
-                    if let Some((min, max)) = constrained_range(child.class.as_str(), &child.properties) {
-                        for (suffix, bound) in [("MinValue", min), ("MaxValue", max)] {
-                            let bound_key = unique_attribute_key(&bag.attributes, &format!("{key}_{suffix}"));
-                            bag.attributes.insert(bound_key, bound);
-                        }
-                    }
-                    bag.attributes.insert(key, value);
-                }
-                None => {
-                    // Dropped ValueObject (RayValue / *ConstrainedValue):
-                    // folded out of the tree, but not representable as an
-                    // attribute — record the drop per the product decision.
-                    report.record_approximation(
-                        parent_relpath,
-                        child.class.as_str(),
-                        "attribute",
-                        &format!(
-                            "ValueObject class dropped (not convertible) — \
-                             '{}' under '{}' not imported",
-                            attr_name, requested_name
-                        ),
-                    );
-                }
-            }
-        }
+        let mut folded_children = self.fold_value_objects(
+            inst,
+            parent_relpath,
+            &requested_name,
+            &format!("{parent_relpath}/{requested_name}"),
+            &mut bag.attributes,
+            report,
+        );
 
         // ── DataMesh children: SpecialMesh / BlockMesh / CylinderMesh ──
         //
@@ -1049,6 +1223,8 @@ impl<'dom> Materializer<'dom> {
         // that composes parent by parent lands every node where Roblox had
         // it, whatever sits in between. A node whose parent chain holds no
         // pose is written exactly as before.
+        // True once this node's `[transform]` is relative to its parent's pose.
+        let mut pose_is_parent_relative = false;
         {
             use crate::pose::Pose;
             let (parent_roblox, parent_written) = self
@@ -1085,6 +1261,7 @@ impl<'dom> Materializer<'dom> {
                 let local = parent_written.relative(&written);
                 overrides.position = Some(local.t);
                 overrides.rotation = Some(local.r);
+                pose_is_parent_relative = true;
             }
             self.poses.insert(inst.referent(), (roblox, written));
         }
@@ -1096,7 +1273,7 @@ impl<'dom> Materializer<'dom> {
         // pipeline would mint) so re-imports are idempotent. Computed up
         // front so a binary sink can key its records on it.
         let referent = inst.referent();
-        let uuid = entity_uuid(&self.salt, &referent.to_string());
+        let uuid = self.uuid_of(referent);
         let uuid_hex = uuid_bytes_to_hex(uuid.as_bytes());
         self.referent_to_uuid.insert(referent, uuid);
 
@@ -1110,7 +1287,9 @@ impl<'dom> Materializer<'dom> {
                 (rgba[1] * 255.0).round().clamp(0.0, 255.0) as u8,
                 (rgba[2] * 255.0).round().clamp(0.0, 255.0) as u8,
             ];
-            let pos = overrides.position.unwrap_or([0.0, 0.0, 0.0]);
+            // The world position: `overrides.position` is relative to the
+            // parent's pose by now for a part nested in a part.
+            let pos = self.poses.get(&referent).map_or([0.0, 0.0, 0.0], |(_, written)| written.t);
             let part_id = u64::from_be_bytes(uuid.as_bytes()[..8].try_into().unwrap());
             self.color_manifest.push(crate::color_manifest::ColorRow {
                 world_id: self
@@ -1161,7 +1340,11 @@ impl<'dom> Materializer<'dom> {
             && bag.refs.is_empty()
             && bag.script_source.is_none()
             && !has_mesh_asset_ref
-            && !has_folded_value_object_children;
+            && !has_folded_value_object_children
+            // A binary core is keyed and placed by its own position, with no
+            // parent to compose: a parent-relative pose would put it at the
+            // wrong place in the world.
+            && !pose_is_parent_relative;
 
         let written = {
             let spec = NodeSpec {
@@ -1301,6 +1484,12 @@ impl<'dom> Materializer<'dom> {
             bag.asset_refs.remove("AssetId");
         }
         for (prop, uri) in bag.asset_refs {
+            // An empty reference names nothing: no fetch and no placeholder.
+            // Left in, an empty `MeshContent` beside a real `MeshId` could
+            // take the part's mesh slot, by the hash map's order.
+            if uri.trim().is_empty() {
+                continue;
+            }
             // An Animation's id is kept as written: a Roblox id finds its
             // clip through the Space's id map, which the clip fetch after the
             // walk fills (`crate::animation`).
@@ -1339,8 +1528,10 @@ impl<'dom> Materializer<'dom> {
                     resolved_mesh_id = asset_resolver::AssetReference::parse(&uri).asset_id();
                 }
                 // Forward slashes, so the path reads the same on every OS.
-                patch.asset_mesh =
-                    Some(resolved.asset_path.to_string_lossy().replace('\\', "/"));
+                if resolved.resolved || patch.asset_mesh.is_none() {
+                    patch.asset_mesh =
+                        Some(resolved.asset_path.to_string_lossy().replace('\\', "/"));
+                }
                 continue;
             }
             // Media goes where the class's engine loader reads it. It must
@@ -1514,8 +1705,17 @@ impl<'dom> Materializer<'dom> {
 
         // ── Terrain + CSG: dispatch to the dedicated decoders. ──
         match special {
+            // One instance's decoder never stops the import: the Terrain or
+            // union stays in the Space and the report says what is missing.
             SpecialKind::Terrain if self.opts.import_terrain => {
-                self.import_terrain_instance(inst, &created, report)?;
+                if let Err(e) = self.import_terrain_instance(inst, &created, report) {
+                    report.record_approximation(
+                        &entity_relpath,
+                        &inst.class,
+                        "Terrain",
+                        &format!("terrain voxels not written: {e}"),
+                    );
+                }
             }
             SpecialKind::Terrain => {
                 // Terrain decode disabled by options — note it.
@@ -1527,7 +1727,14 @@ impl<'dom> Materializer<'dom> {
                 );
             }
             SpecialKind::Csg => {
-                self.import_csg_instance(inst, &created, &entity_relpath, report)?;
+                if let Err(e) = self.import_csg_instance(inst, &created, &entity_relpath, report) {
+                    report.record_approximation(
+                        &entity_relpath,
+                        &inst.class,
+                        "Part",
+                        &format!("union geometry not written: {e}"),
+                    );
+                }
             }
             SpecialKind::None => {}
         }
@@ -1855,15 +2062,48 @@ impl<'dom> Materializer<'dom> {
         }
     }
 
-    fn finalise_pending_patches(&mut self) -> Result<(), ImportError> {
+    /// One file that cannot be patched is reported and the rest still are:
+    /// stopping at the first left every later instance without its uuid,
+    /// attributes, script body and mesh.
+    fn finalise_pending_patches(&mut self, report: &mut ImportReport) {
         let patches = std::mem::take(&mut self.pending_patches);
         for (toml_path, patch) in patches {
-            apply_toml_patch(&toml_path, &patch)?;
+            if let Err(e) = apply_toml_patch(&toml_path, &patch) {
+                self.record_patch_failure(&toml_path, &e, report);
+            }
         }
-        Ok(())
     }
 
-    fn finalise_refs(&mut self, report: &mut ImportReport) -> Result<(), ImportError> {
+    fn record_patch_failure(&self, toml_path: &Path, error: &ImportError, report: &mut ImportReport) {
+        let rel = toml_path
+            .strip_prefix(&self.space_root)
+            .unwrap_or(toml_path)
+            .to_string_lossy()
+            .replace('\\', "/");
+        report.record_approximation(
+            &rel,
+            "Instance",
+            "Instance",
+            &format!("imported values not written to the instance file: {error}"),
+        );
+    }
+
+    /// The uuid of the instance `referent` names (`stable_uuids`).
+    fn uuid_of(&self, referent: Ref) -> Uuid {
+        self.uuids
+            .get(&referent)
+            .copied()
+            .unwrap_or_else(|| entity_uuid(&self.salt, &referent.to_string()))
+    }
+
+    fn finalise_refs(&mut self, report: &mut ImportReport) {
+        // An ObjectValue folded to a uuid attribute: its target must be an
+        // instance this import wrote, or the attribute names nothing.
+        for (host, key, target) in std::mem::take(&mut self.pending_object_values) {
+            if !self.referent_to_uuid.contains_key(&target) {
+                report.record_unresolved_ref(&host, &key, &target.to_string());
+            }
+        }
         let pending = std::mem::take(&mut self.pending_refs);
         // Group resolved + unresolved per TOML path so we only re-open
         // each file once.
@@ -1893,9 +2133,10 @@ impl<'dom> Materializer<'dom> {
                 refs_unresolved: unresolved,
                 ..Default::default()
             };
-            apply_toml_patch(&toml_path, &patch)?;
+            if let Err(e) = apply_toml_patch(&toml_path, &patch) {
+                self.record_patch_failure(&toml_path, &e, report);
+            }
         }
-        Ok(())
     }
 }
 
@@ -2150,6 +2391,52 @@ const MOON_TEMPLATE: &str = include_str!("../../engine/assets/lighting_templates
 /// engine's. Kept within the readers' 0.05 to 20 degrees.
 fn celestial_size(roblox: f64, roblox_default: f64, default: f64) -> f64 {
     (default * (roblox / roblox_default)).clamp(0.05, 20.0)
+}
+
+/// True for a class the reflection database knows and does not tag as a
+/// service: an instance a model file holds at its root. A class the database
+/// does not know is taken for a service, as a place's newer services are.
+fn is_content_class(class: &str) -> bool {
+    rbx_reflection_database::get()
+        .ok()
+        .and_then(|db| db.classes.get(class))
+        .is_some_and(|descriptor| !descriptor.tags.contains(&rbx_reflection::ClassTag::Service))
+}
+
+/// A uuid for every instance of `dom` that is the same each time the same
+/// file is imported with the same salt.
+///
+/// `rbx_dom_weak` gives every instance a fresh random `Ref` on each parse, so
+/// a uuid hashed from the `Ref` changed with every import. The instance's
+/// Roblox `UniqueId` is stable across saves and is used when the file carries
+/// one; an instance without one (older files), or one whose id another
+/// instance already took, is keyed by its path of child indices from the
+/// root, which is the same for the same file.
+fn stable_uuids(dom: &WeakDom, salt: &[u8]) -> HashMap<Ref, Uuid> {
+    let mut uuids = HashMap::new();
+    let mut taken = std::collections::HashSet::new();
+    let mut stack = vec![(dom.root_ref(), String::new())];
+    while let Some((referent, path)) = stack.pop() {
+        let Some(inst) = dom.get_by_ref(referent) else {
+            continue;
+        };
+        let by_unique_id = match inst.properties.get(&rbx_dom_weak::ustr("UniqueId")) {
+            Some(rbx_dom_weak::types::Variant::UniqueId(id)) if !id.is_nil() => {
+                Some(entity_uuid(salt, &format!("uid:{id}")))
+            }
+            _ => None,
+        };
+        let uuid = match by_unique_id {
+            Some(uuid) if !taken.contains(&uuid) => uuid,
+            _ => entity_uuid(salt, &format!("path:{path}")),
+        };
+        taken.insert(uuid);
+        uuids.insert(referent, uuid);
+        for (index, child) in inst.children().iter().enumerate() {
+            stack.push((*child, format!("{path}/{index}")));
+        }
+    }
+    uuids
 }
 
 pub(crate) fn derive_space_salt(space_root: &Path) -> Vec<u8> {
@@ -3632,6 +3919,228 @@ mod tests {
         assert!(
             !report.asset_warnings.is_empty(),
             "rbxassetid:// reference should emit an AssetWarning"
+        );
+        let _ = std::fs::remove_dir_all(&space_root);
+    }
+
+    /// A model file parses to a DataModel root holding the model's own
+    /// instances. They land whole under Workspace, the root instance too.
+    #[test]
+    fn a_model_files_root_lands_whole_under_workspace() {
+        let dm = InstanceBuilder::new("DataModel").with_child(
+            InstanceBuilder::new("Model")
+                .with_name("Car")
+                .with_child(InstanceBuilder::new("Part").with_name("Body")),
+        );
+        let rbx = RobloxDom::from_dom(
+            WeakDom::new(dm),
+            crate::parser::RobloxFormat::BinaryModel,
+            PathBuf::new(),
+        );
+        let space_root = make_temp_root("model_file");
+        let report = import_into_space(&rbx, &space_root, ImportOptions::default()).expect("import");
+        let car = space_root.join("Workspace").join("Car");
+        assert!(car.join("_instance.toml").is_file(), "the root Model itself is written");
+        assert!(car.join("Body").join("_instance.toml").is_file());
+        assert!(!space_root.join("_imported").exists(), "a model's root is not a service");
+        assert!(report.skipped_services.is_empty(), "{:?}", report.skipped_services);
+        let _ = std::fs::remove_dir_all(&space_root);
+    }
+
+    #[test]
+    fn services_are_services_and_instances_are_content() {
+        for service in [
+            "Workspace",
+            "Lighting",
+            "Players",
+            "StarterPlayer",
+            "ReplicatedStorage",
+            "ServerScriptService",
+            "MarketplaceService",
+            "SoundService",
+            "Teams",
+        ] {
+            assert!(!is_content_class(service), "{service} is a service");
+        }
+        for content in ["Model", "Part", "Folder", "Script", "MeshPart"] {
+            assert!(is_content_class(content), "{content} is content");
+        }
+        assert!(!is_content_class("MadeUpService"), "an unknown class is taken for a service");
+    }
+
+    /// A Space Studio scaffolds already holds each service's file: the
+    /// place's values go over it.
+    #[test]
+    fn a_service_file_the_space_already_holds_takes_the_places_values() {
+        let dm = InstanceBuilder::new("DataModel")
+            .with_child(InstanceBuilder::new("Lighting").with_property("ClockTime", Variant::Float32(18.5)));
+        let rbx = RobloxDom::from_dom(
+            WeakDom::new(dm),
+            crate::parser::RobloxFormat::BinaryPlace,
+            PathBuf::new(),
+        );
+        let space_root = make_temp_root("service_over");
+        let service_file = space_root.join("Lighting").join("_service.toml");
+        std::fs::create_dir_all(space_root.join("Lighting")).unwrap();
+        std::fs::write(
+            &service_file,
+            "[service]\nclass_name = \"Lighting\"\n\n[properties]\nclock_time = 14.0\nbrightness = 2.0\n",
+        )
+        .unwrap();
+        import_into_space(&rbx, &space_root, ImportOptions::default()).expect("import");
+        let doc: toml::Value = std::fs::read_to_string(&service_file).unwrap().parse().unwrap();
+        assert_eq!(doc["properties"]["clock_time"].as_float(), Some(18.5), "the place's time of day");
+        assert_eq!(doc["properties"]["brightness"].as_float(), Some(2.0), "a key the place does not set");
+        let _ = std::fs::remove_dir_all(&space_root);
+    }
+
+    /// StarterPlayer's script folders spill into their Eustress folders; any
+    /// other child keeps its own instance.
+    #[test]
+    fn a_starter_player_child_with_no_folder_lands_whole() {
+        let dm = InstanceBuilder::new("DataModel").with_child(
+            InstanceBuilder::new("StarterPlayer")
+                .with_child(
+                    InstanceBuilder::new("StarterPlayerScripts")
+                        .with_child(InstanceBuilder::new("Folder").with_name("Controls")),
+                )
+                .with_child(
+                    InstanceBuilder::new("Model")
+                        .with_name("StarterCharacter")
+                        .with_child(InstanceBuilder::new("Part").with_name("Head")),
+                ),
+        );
+        let rbx = RobloxDom::from_dom(
+            WeakDom::new(dm),
+            crate::parser::RobloxFormat::BinaryPlace,
+            PathBuf::new(),
+        );
+        let space_root = make_temp_root("starter_player");
+        import_into_space(&rbx, &space_root, ImportOptions::default()).expect("import");
+        assert!(space_root
+            .join("StarterPlayerScripts")
+            .join("Controls")
+            .join("_instance.toml")
+            .is_file());
+        let character = space_root.join("_imported").join("StarterPlayer").join("StarterCharacter");
+        assert!(character.join("_instance.toml").is_file(), "the Model itself is written");
+        assert!(character.join("Head").join("_instance.toml").is_file());
+        let _ = std::fs::remove_dir_all(&space_root);
+    }
+
+    /// A service with nothing in it leaves no folder and no report line; a
+    /// runtime-only service that does hold something is reported.
+    #[test]
+    fn empty_services_leave_nothing_and_dropped_children_are_reported() {
+        let dm = InstanceBuilder::new("DataModel")
+            .with_child(InstanceBuilder::new("MarketplaceService"))
+            .with_child(InstanceBuilder::new("Debris").with_child(InstanceBuilder::new("Folder").with_name("Kept")));
+        let rbx = RobloxDom::from_dom(
+            WeakDom::new(dm),
+            crate::parser::RobloxFormat::BinaryPlace,
+            PathBuf::new(),
+        );
+        let space_root = make_temp_root("empty_services");
+        let report = import_into_space(&rbx, &space_root, ImportOptions::default()).expect("import");
+        assert!(!space_root.join("_imported").exists(), "no folder for a service with nothing in it");
+        let skipped: Vec<&str> = report.skipped_services.iter().map(|s| s.service.as_str()).collect();
+        assert_eq!(skipped, ["Debris"], "{:?}", report.skipped_services);
+        let _ = std::fs::remove_dir_all(&space_root);
+    }
+
+    /// Every parse gives each instance a fresh random `Ref`. Two DOMs built
+    /// alike stand for two parses of one file: the uuids must match.
+    #[test]
+    fn uuids_are_the_same_on_each_parse_of_the_same_file() {
+        let cube_uuid = |tag: &str| -> String {
+            let dom = make_minimal_place();
+            let space_root = make_temp_root(tag);
+            let opts = ImportOptions {
+                space_salt: Some(b"one-space".to_vec()),
+                ..ImportOptions::default()
+            };
+            import_into_space(&dom, &space_root, opts).expect("import");
+            let doc: toml::Value = std::fs::read_to_string(
+                space_root.join("Workspace").join("Group").join("Cube").join("_instance.toml"),
+            )
+            .unwrap()
+            .parse()
+            .unwrap();
+            let _ = std::fs::remove_dir_all(&space_root);
+            doc["metadata"]["uuid"].as_str().unwrap_or("").to_string()
+        };
+        let first = cube_uuid("stable_a");
+        assert!(!first.is_empty());
+        assert_eq!(first, cube_uuid("stable_b"));
+    }
+
+    /// An ObjectValue folds to a uuid attribute. When the instance it names
+    /// was not written, the report says so.
+    #[test]
+    fn an_object_value_naming_an_unwritten_instance_is_reported() {
+        let ghost = InstanceBuilder::new("FloofPart").with_name("Ghost");
+        let ghost_ref = ghost.referent();
+        let dm = InstanceBuilder::new("DataModel").with_child(
+            InstanceBuilder::new("Workspace").with_child(ghost).with_child(
+                InstanceBuilder::new("Part").with_name("Host").with_child(
+                    InstanceBuilder::new("ObjectValue")
+                        .with_name("Target")
+                        .with_property("Value", Variant::Ref(ghost_ref)),
+                ),
+            ),
+        );
+        let rbx = RobloxDom::from_dom(
+            WeakDom::new(dm),
+            crate::parser::RobloxFormat::BinaryPlace,
+            PathBuf::new(),
+        );
+        let space_root = make_temp_root("object_value");
+        let report = import_into_space(&rbx, &space_root, ImportOptions::default()).expect("import");
+        assert!(
+            report
+                .unresolved_refs
+                .iter()
+                .any(|u| u.host_property == "attributes.Target" && u.host_path.ends_with("Host")),
+            "{:?}",
+            report.unresolved_refs
+        );
+        let _ = std::fs::remove_dir_all(&space_root);
+    }
+
+    /// A value object directly under a service is the service's attribute,
+    /// in its `_service.toml`, where both loaders read it. A script's
+    /// `ReplicatedStorage.RoundTime.Value` is rewritten to read exactly that.
+    #[test]
+    fn a_value_object_under_a_service_is_the_services_attribute() {
+        let dm = InstanceBuilder::new("DataModel").with_child(
+            InstanceBuilder::new("ReplicatedStorage")
+                .with_child(
+                    InstanceBuilder::new("IntValue")
+                        .with_name("RoundTime")
+                        .with_property("Value", Variant::Int64(90)),
+                )
+                .with_child(InstanceBuilder::new("Folder").with_name("Maps")),
+        );
+        let rbx = RobloxDom::from_dom(
+            WeakDom::new(dm),
+            crate::parser::RobloxFormat::BinaryPlace,
+            PathBuf::new(),
+        );
+        let space_root = make_temp_root("service_value");
+        let report = import_into_space(&rbx, &space_root, ImportOptions::default()).expect("import");
+        let storage = space_root.join("ReplicatedStorage");
+        let doc: toml::Value = std::fs::read_to_string(storage.join("_service.toml"))
+            .expect("the service file")
+            .parse()
+            .unwrap();
+        assert_eq!(doc["attributes"]["RoundTime"].as_integer(), Some(90));
+        assert_eq!(doc["service"]["class_name"].as_str(), Some("ReplicatedStorage"));
+        assert!(!storage.join("RoundTime").exists(), "the value object is folded out of the tree");
+        assert!(storage.join("Maps").join("_instance.toml").is_file(), "its siblings still land");
+        assert!(
+            !report.approximations.iter().any(|a| a.reason.contains("materialize failed")),
+            "{:?}",
+            report.approximations
         );
         let _ = std::fs::remove_dir_all(&space_root);
     }

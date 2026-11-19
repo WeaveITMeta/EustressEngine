@@ -51,6 +51,7 @@
 // =============================================================================
 
 import { cleanText, isAccountId, recordPurchase } from './purchases.mjs';
+import { bearerToken } from './bearer.mjs';
 import { creditValueScore } from './bliss.mjs';
 import { simWithLegalLock } from './moderation.mjs';
 import { isAdultListing, mayView, refusalOf, viewerFor } from './adult_content.mjs';
@@ -1686,9 +1687,8 @@ export function walletDebit(env, accountId, { ref, amount, reason, allow_negativ
 /// data and moves nothing. The Player sends it for a real purchase; Studio
 /// never does, so testing a simulation never spends Tickets.
 export async function authenticate(request, env, ctx, deps) {
-  const m = /^Bearer\s+(\S+)\s*$/i.exec(request.headers.get('Authorization') || '');
-  if (!m) return { error: 'Sign in, or send an API key as a Bearer token', status: 401, code: 'unauthenticated' };
-  const token = m[1];
+  const token = bearerToken(request);
+  if (!token) return { error: 'Sign in, or send an API key as a Bearer token', status: 401, code: 'unauthenticated' };
   const keyMode = keyModeOf(token);
   if (keyMode) {
     const raw = await env.USERS.get(apiKeyIndexKey(await sha256Hex(token)));

@@ -643,6 +643,58 @@ pub fn sys_residency_evict(
     }
 }
 
+// ── Prefetch inspector (observe only) ───────────────────────────────────
+
+/// The source name residency reports under in `PrefetchReports`.
+pub const PREFETCH_SOURCE: &str = "residency";
+
+/// A signed cell (the predictor's `XyzGrid` key) to residency's biased one.
+fn biased(k: (i32, i32, i32)) -> Cell {
+    let b = |v: i32| (v as i64 + (1 << 20)).clamp(0, 0x1f_ffff) as u32;
+    (b(k.0), b(k.1), b(k.2))
+}
+
+/// Measure how well residency's own camera prediction keeps ahead, without
+/// changing what it loads (docs/architecture/RAGE_STREAMING_SIM_LOD_JOB_GRAPH.md
+/// phase 1b): the shared predictor (`eustress_common::world_sim::prefetch`)
+/// plans with the same camera, velocity and load radius, and its planner
+/// counts each cell as a hit when residency had already scanned it by the
+/// time it entered the load ball, a miss when not, and how late a miss was.
+/// Its load requests are discarded; its report goes to the inspector
+/// (`sim.inspect`, MCP `inspect_world_sim`) as source `"residency"`.
+pub fn sys_residency_prefetch_observe(
+    state: Res<ResidencyState>,
+    cfg: Res<ResidencyConfig>,
+    motion: Res<CameraMotion>,
+    cameras: Query<(&GlobalTransform, &Camera), With<Camera3d>>,
+    time: Res<Time>,
+    mut planner: Local<eustress_common::world_sim::PrefetchPlanner<(i32, i32, i32)>>,
+    reports: Option<ResMut<eustress_common::world_sim::PrefetchReports>>,
+) {
+    use eustress_common::world_sim::prefetch::{plan_cells, report_of, Focus, PrefetchConfig, XyzGrid};
+    let Some(mut reports) = reports else { return };
+    if !state.enabled {
+        return;
+    }
+    let Some((cam_tf, _)) = cameras.iter().find(|(_, c)| c.order == 0) else {
+        return;
+    };
+    let space = XyzGrid { cell_size: MortonKeyEncoder::default().chunk_size };
+    let pcfg = PrefetchConfig {
+        lead_time_secs: cfg.lead_time_secs,
+        max_lead_distance: cfg.max_lead_distance,
+        need_radius: cfg.load_radius,
+        max_loads_per_tick: cfg.max_cell_loads_per_tick.max(1),
+        ..PrefetchConfig::default()
+    };
+    let foci = [Focus { pos: cam_tf.translation(), vel: motion.velocity }];
+    let plan = plan_cells(&space, &foci, &pcfg);
+    let resident = |k: (i32, i32, i32)| state.resident_cells.contains(&biased(k));
+    let requests = planner.update(time.elapsed_secs_f64(), &plan, &pcfg, resident, |_| 1.0);
+    let report = report_of(PREFETCH_SOURCE, &space, &pcfg, &foci, &plan, &planner, &requests, resident);
+    reports.by_source.insert(PREFETCH_SOURCE.to_string(), report);
+}
+
 // ── M0 diagnostics: live entity-count-by-type ───────────────────────────
 
 /// Read `EUSTRESS_PROFILE` exactly once. Same knob the phase profiler, the
@@ -764,6 +816,19 @@ mod tests {
         assert!(in_box((11, 10, 10), b));
         assert!(!in_box((13, 10, 10), b)); // x out
         assert!(!in_box((11, 12, 10), b)); // y out
+    }
+
+    #[test]
+    fn rage_predictor_cells_map_onto_residency_cells() {
+        use eustress_common::world_sim::prefetch::CellSpace;
+        // The predictor's signed key for a point is residency's biased cell.
+        let space = eustress_common::world_sim::prefetch::XyzGrid { cell_size: MortonKeyEncoder::default().chunk_size };
+        for p in [Vec3::ZERO, Vec3::new(-1.0, 300.0, 513.0), Vec3::new(-700.0, -5.0, 9_000.0)] {
+            let s = space.cell_size;
+            let k = ((p.x / s).floor() as i32, (p.y / s).floor() as i32, (p.z / s).floor() as i32);
+            assert_eq!(biased(k), cell_of(p), "{p:?}");
+            assert!((cell_center(biased(k)) - space.center(k)).length() < 1e-3);
+        }
     }
 
     #[test]

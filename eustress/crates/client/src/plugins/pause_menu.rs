@@ -11,6 +11,7 @@ use avian3d::prelude::LinearVelocity;
 
 use super::player_plugin::{PlayerService, PlayerCamera, SpawnLocation, get_spawn_position_or_default};
 use eustress_play_runtime::screen_menu::{pause_card, row_at, settings_card, step, MenuCard, ScreenMenu};
+use crate::systems::raytracing::RayTracingMenu;
 
 // ============================================================================
 // Settings Data
@@ -238,13 +239,33 @@ fn block_hud_while_open(
     }
 }
 
+/// The settings screen's ray-tracing row, when this Player has one: below
+/// the mouse sensitivity, above Back.
+const RAY_TRACING_ROW: usize = 1;
+
 /// What the menu shows for this state: the main rows, or the settings screen.
-fn current_card(pause: &PauseMenuState, settings: &GameSettings) -> MenuCard {
+/// The settings screen carries the ray-tracing row when `ray_tracing` has
+/// one, with its note as the footer while that row is highlighted.
+fn current_card(pause: &PauseMenuState, settings: &GameSettings, ray_tracing: Option<&RayTracingMenu>) -> MenuCard {
     if pause.settings_screen != SettingsScreen::None {
-        settings_card(settings.mouse_sensitivity, pause.selected)
+        let mut card = settings_card(settings.mouse_sensitivity, pause.selected);
+        if let Some(menu) = ray_tracing {
+            if let Some(row) = &menu.row {
+                card.rows.insert(RAY_TRACING_ROW, row.clone());
+                if pause.selected == RAY_TRACING_ROW && !menu.note.is_empty() {
+                    card.footer = menu.note.clone();
+                }
+            }
+        }
+        card
     } else {
         pause_card(pause.selected)
     }
+}
+
+/// Whether the settings screen shows the ray-tracing row.
+fn has_ray_tracing_row(ray_tracing: Option<&RayTracingMenu>) -> bool {
+    ray_tracing.is_some_and(|menu| menu.row.is_some())
 }
 
 /// Close the menu and give the cursor back to play (the Esc path does the same).
@@ -265,7 +286,8 @@ fn close_pause_menu(
 /// The pause menu's rows, and the keys and clicks that choose them. Drawn by
 /// `eustress_play_runtime::screen_menu`: Up and Down, or a click, highlight a
 /// row; Enter or a click selects it. On Settings, Left and Right change the
-/// mouse sensitivity, the one setting the Player applies so far.
+/// mouse sensitivity, or the ray-tracing choice (Enter or a click on that row
+/// moves it on too), which applies from the next launch.
 fn drive_pause_menu(
     keys: Res<ButtonInput<KeyCode>>,
     buttons: Res<ButtonInput<bevy::input::mouse::MouseButton>>,
@@ -277,13 +299,14 @@ fn drive_pause_menu(
     mut settings_events: MessageWriter<SettingsChangedEvent>,
     mut exit: MessageWriter<AppExit>,
     mut screen: ResMut<ScreenMenu>,
+    mut ray_tracing: Option<ResMut<RayTracingMenu>>,
 ) {
     if !pause.is_open {
         screen.0 = None;
         return;
     }
     let in_settings = pause.settings_screen != SettingsScreen::None;
-    let card = current_card(&pause, &settings);
+    let card = current_card(&pause, &settings, ray_tracing.as_deref());
     let rows = card.rows.len();
 
     if keys.just_pressed(KeyCode::ArrowDown) {
@@ -328,8 +351,24 @@ fn drive_pause_menu(
                 settings_events.write(SettingsChangedEvent);
             }
         }
-        // Back is the only other row: choosing it returns to the main menu.
-        if matches!(choice, Some(row) if row != 0) {
+        // The ray-tracing row: Left and Right step the choice, and Enter or a
+        // click moves it on.
+        if has_ray_tracing_row(ray_tracing.as_deref()) && pause.selected == RAY_TRACING_ROW {
+            let step = if direction != 0.0 {
+                direction as i32
+            } else if choice == Some(RAY_TRACING_ROW) {
+                1
+            } else {
+                0
+            };
+            if step != 0 {
+                if let Some(menu) = ray_tracing.as_deref_mut() {
+                    menu.pending_step += step;
+                }
+            }
+        }
+        // Back is the last row: choosing it returns to the main menu.
+        if matches!(choice, Some(row) if row + 1 == rows) {
             pause.settings_screen = SettingsScreen::None;
             pause.selected = 1;
         }
@@ -347,7 +386,7 @@ fn drive_pause_menu(
         }
     }
 
-    screen.0 = if pause.is_open { Some(current_card(&pause, &settings)) } else { None };
+    screen.0 = if pause.is_open { Some(current_card(&pause, &settings, ray_tracing.as_deref())) } else { None };
 }
 
 /// Apply settings to game systems

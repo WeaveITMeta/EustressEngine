@@ -1,0 +1,45 @@
+[asset]
+mesh = "parts/block.glb"
+scene = "Scene0"
+
+[metadata]
+archivable = true
+class_name = "Part"
+created = "2026-11-16T00:00:00Z"
+last_modified = "2026-11-16T00:00:00Z"
+name = "WallEast_North"
+unit = "m"
+uuid = "2d401ca28c201158a06de98284c25bbe"
+
+[properties]
+anchored = true
+can_collide = true
+cast_shadow = true
+color = [
+    200,
+    196,
+    188,
+]
+destructible = false
+locked = false
+material = "H_Matte"
+reflectance = 0.0
+transparency = 0.0
+
+[transform]
+position = [
+    3.1,
+    1.5,
+    -2.4,
+]
+rotation = [
+    0.0,
+    0.0,
+    0.0,
+    1.0,
+]
+scale = [
+    0.2,
+    3.0,
+    3.2,
+]

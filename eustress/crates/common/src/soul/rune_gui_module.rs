@@ -18,7 +18,10 @@
 #[cfg(feature = "realism-scripting")]
 use rune::{Module, ContextError};
 
-#[cfg(feature = "gui")]
+// The command queues are compiled with or without the `gui` feature (gui
+// `gui_commands`), so a shell that draws its GUI another way, such as the
+// browser Player, still runs a script's GUI and log calls.
+#[cfg(feature = "realism-scripting")]
 use crate::gui::{push_gui_command, gui_snapshot_get, GuiCommand, push_script_log, ScriptLogLevel};
 
 /// Create a Rune module with GUI + logging functions.

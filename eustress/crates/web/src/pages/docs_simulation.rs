@@ -227,6 +227,20 @@ pub fn DocsSimulationPage() -> impl IntoView {
 
                 <main class="docs-content">
                     <header class="docs-hero">
+                        // The hero picture: the page's largest paint, so it loads at
+                        // once (no lazy loading, no entrance animation).
+                        <div class="docs-hero-art">
+                            <img
+                                src="/assets/learn/simulation-hero-1600.webp"
+                                srcset="/assets/learn/simulation-hero-800.webp 800w, /assets/learn/simulation-hero-1600.webp 1600w"
+                                sizes="(max-width: 1024px) 100vw, 840px"
+                                alt="A grid world under a plain ring dial sends two parallel ribbons of light to the right, each carrying four small copies of the scene, each beside a group of bar columns of different heights."
+                                width="1600"
+                                height="900"
+                                fetchpriority="high"
+                                decoding="async"
+                            />
+                        </div>
                         <div class="docs-breadcrumb">
                             <a href="/learn">"Learn"</a>
                             <span class="separator">"/"</span>

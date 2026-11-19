@@ -807,6 +807,18 @@ pub struct ListingReview {
     pub suggested_edit: String,
     #[serde(default)]
     pub reasons: Vec<ReviewReason>,
+    /// What the review's automatic pass fixed in the listing's wording
+    /// (the Worker's `auto_fix.applied`): `title` is what it did, `why` the
+    /// detail. Empty when no pass was made for this publish.
+    #[serde(default)]
+    pub fixed: Vec<ReviewReason>,
+    /// The listing description before and after that pass. Studio writes
+    /// `description_after` into publish.toml when the local description is
+    /// still `description_before`, so the next publish keeps the fix.
+    #[serde(default)]
+    pub description_before: String,
+    #[serde(default)]
+    pub description_after: String,
 }
 
 /// Map whatever status the API sent to an author status. The current Worker
@@ -877,7 +889,27 @@ impl ListingReview {
             h if !h.is_empty() && raw == status => h,
             _ => default_headline(&status).to_string(),
         };
+        // The review's automatic pass, shown with whatever status it belongs
+        // to (the Worker sends it only then, never on a hold).
+        let fix = body.get("auto_fix").filter(|v| v.is_object());
+        let fix_text = |k: &str| fix.and_then(|f| f.get(k)).and_then(|v| v.as_str()).unwrap_or("").to_string();
+        let fixed = fix
+            .and_then(|f| f.get("applied"))
+            .and_then(|v| v.as_array())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|x| {
+                        let t = |k: &str| x.get(k).and_then(|v| v.as_str()).unwrap_or("").to_string();
+                        let title = t("title");
+                        (!title.is_empty()).then(|| ReviewReason { category: t("category"), title, why: t("detail"), what_to_change: String::new() })
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
         Self {
+            fixed,
+            description_before: fix_text("description_before"),
+            description_after: fix_text("description_after"),
             api: String::new(),
             sim_id: sim_id.to_string(),
             rating_label: if matches!(status.as_str(), "listed" | "approved_private") { rating_label(&s("rating")).to_string() } else { String::new() },
@@ -924,6 +956,15 @@ impl ListingReview {
     /// and what to change. Empty until there is a decision to explain.
     pub fn detail_lines(&self) -> Vec<String> {
         let mut v = Vec::new();
+        if !self.fixed.is_empty() {
+            v.push("  Fixed for you by the review:".to_string());
+            for f in &self.fixed {
+                v.push(if f.why.is_empty() { format!("    {}", f.title) } else { format!("    {}: {}", f.title, f.why) });
+            }
+            if !self.reasons.is_empty() {
+                v.push("  Still to change:".to_string());
+            }
+        }
         for r in &self.reasons {
             v.push(format!("  {}", r.title));
             if !r.why.is_empty() {
@@ -1370,6 +1411,32 @@ fn listing_is_public(universe_root: &Path) -> bool {
 /// Poll finished jobs, then start the next one: an appeal first, else a
 /// refresh when one was asked for, the Universe changed, or a waiting review
 /// is due. One request in flight at a time, on its own thread.
+/// The review's automatic pass rewrote the listing's description. When the
+/// Universe's `.eustress/publish.toml` still holds the description from
+/// before that pass, it takes the fixed one, so the Publish dialog opens with
+/// it and the next publish does not send the old text back. A description the
+/// author has edited since is theirs and is left alone. Returns whether the
+/// file was written.
+pub fn adopt_fixed_description(universe_root: &Path, review: &ListingReview) -> Result<bool, String> {
+    let after = review.description_after.trim();
+    if after.is_empty() {
+        return Ok(false);
+    }
+    let path = universe_root.join(".eustress").join("publish.toml");
+    if !path.exists() {
+        return Ok(false);
+    }
+    let mut manifest = eustress_common::load_toml_file::<eustress_common::PublishManifest>(&path)
+        .map_err(|e| format!("reading {}: {e}", path.display()))?;
+    let local = manifest.listing.description.as_deref().unwrap_or("").trim();
+    if local == after || local != review.description_before.trim() {
+        return Ok(false);
+    }
+    manifest.listing.description = Some(after.to_string());
+    eustress_common::save_toml_file(&manifest, &path).map_err(|e| format!("writing {}: {e}", path.display()))?;
+    Ok(true)
+}
+
 pub fn refresh_listing_review(
     mut state: ResMut<ListingReviewState>,
     space_root: Option<Res<crate::space::SpaceRoot>>,
@@ -1440,6 +1507,11 @@ pub fn refresh_listing_review(
                 }
                 if let Err(e) = fresh.save(&universe) {
                     warn!("listing review: {e}");
+                }
+                match adopt_fixed_description(&universe, &fresh) {
+                    Ok(true) => info!("listing review: the description the review fixed is now this Universe's publish description"),
+                    Ok(false) => {}
+                    Err(e) => warn!("listing review: {e}"),
                 }
                 if changed == Some(true) {
                     state.rerequest_note.clear();
@@ -1654,15 +1726,21 @@ fn sync_listing_review_ui(
             ui.set_listing_headline(shown_line(&r.headline));
             ui.set_listing_rating(r.rating_label.as_str().into());
             ui.set_listing_updated(r.updated_label(chrono::Local::now()).into());
-            let reasons: Vec<ListingReason> = r
-                .reasons
-                .iter()
-                .map(|x| ListingReason {
+            // What the review's automatic pass fixed comes first, one card each
+            // ("Fixed for you: ..."), then what is left to change.
+            let fixed = r.fixed.iter().map(|x| ListingReason {
+                category: x.category.as_str().into(),
+                title: shown_block(&format!("Fixed for you: {}", x.title)),
+                why: shown_block(&x.why),
+                what_to_change: SharedString::new(),
+            });
+            let reasons: Vec<ListingReason> = fixed
+                .chain(r.reasons.iter().map(|x| ListingReason {
                     category: x.category.as_str().into(),
                     title: shown_block(&x.title),
                     why: shown_block(&x.why),
                     what_to_change: shown_block(&x.what_to_change),
-                })
+                }))
                 .collect();
             ui.set_listing_reasons(ModelRc::new(VecModel::from(reasons)));
             ui.set_listing_suggested_edit(shown_block(&r.suggested_edit));
@@ -1910,6 +1988,9 @@ mod tests {
             updated_at: chrono::Local::now().to_rfc3339(), api: String::new(), can_appeal: true, rating_label: String::new(),
             suggested_edit: "e".into(),
             reasons: vec![ReviewReason { category: "coppa_links".into(), title: "t".into(), why: "w".into(), what_to_change: "c".into() }],
+            fixed: vec![ReviewReason { category: "statement_missing".into(), title: "Added your Qualification Statement".into(), why: "d".into(), what_to_change: String::new() }],
+            description_before: "a".into(),
+            description_after: "b".into(),
         };
         r.save(&dir).unwrap();
         assert_eq!(ListingReview::load(&dir), Some(r.clone()));
@@ -1983,6 +2064,59 @@ mod tests {
 
     fn review_from(body: serde_json::Value) -> ListingReview {
         ListingReview::from_api("sim-1", &body, true)
+    }
+
+    #[test]
+    fn what_the_review_fixed_is_read_and_shown_before_what_is_left() {
+        let r = review_from(serde_json::json!({
+            "status": "changes_requested", "headline": "h",
+            "reasons": [{ "category": "test_lesson", "title": "Lesson (Code T3)", "why": "w", "what_to_change": "c" }],
+            "auto_fix": {
+                "applied": [{ "category": "statement_missing", "title": "Added your Qualification Statement", "detail": "Added the lines from what the review saw." }, { "title": "" }],
+                "reviewing_again": false, "description_before": "Pong.", "description_after": "Pong.\n\nCategory: Game"
+            }
+        }));
+        assert_eq!(r.fixed.len(), 1, "an entry with no title is dropped");
+        assert_eq!((r.fixed[0].title.as_str(), r.fixed[0].why.as_str()), ("Added your Qualification Statement", "Added the lines from what the review saw."));
+        assert_eq!((r.description_before.as_str(), r.description_after.as_str()), ("Pong.", "Pong.\n\nCategory: Game"));
+        let lines = r.detail_lines();
+        assert_eq!(lines[0], "  Fixed for you by the review:");
+        assert_eq!(lines[1], "    Added your Qualification Statement: Added the lines from what the review saw.");
+        assert_eq!(lines[2], "  Still to change:");
+        assert_eq!(lines[3], "  Lesson (Code T3)");
+        // No pass: nothing extra.
+        let plain = review_from(serde_json::json!({ "status": "changes_requested", "reasons": [{ "title": "t" }] }));
+        assert!(plain.fixed.is_empty() && plain.description_after.is_empty());
+        assert_eq!(plain.detail_lines()[0], "  t");
+    }
+
+    #[test]
+    fn the_fixed_description_replaces_publish_toml_only_while_it_still_holds_the_old_one() {
+        let dir = std::env::temp_dir().join(format!("eustress-autofix-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join(".eustress")).unwrap();
+        let path = dir.join(".eustress").join("publish.toml");
+        let write = |desc: &str| {
+            let mut m = eustress_common::PublishManifest::default();
+            m.listing.description = Some(desc.to_string());
+            eustress_common::save_toml_file(&m, &path).unwrap();
+        };
+        let read = || eustress_common::load_toml_file::<eustress_common::PublishManifest>(&path).unwrap().listing.description.unwrap_or_default();
+        let review = ListingReview { description_before: "Pong.".into(), description_after: "Pong.\n\nCategory: Game".into(), ..Default::default() };
+
+        write("Pong.");
+        assert_eq!(adopt_fixed_description(&dir, &review), Ok(true));
+        assert_eq!(read(), "Pong.\n\nCategory: Game");
+        assert_eq!(adopt_fixed_description(&dir, &review), Ok(false), "already the fixed text");
+
+        write("My own words.");
+        assert_eq!(adopt_fixed_description(&dir, &review), Ok(false), "an edit since is the author's");
+        assert_eq!(read(), "My own words.");
+
+        write("Pong.");
+        assert_eq!(adopt_fixed_description(&dir, &ListingReview::default()), Ok(false), "no pass, nothing to write");
+        assert_eq!(read(), "Pong.");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

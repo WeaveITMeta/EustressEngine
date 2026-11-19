@@ -144,6 +144,8 @@ impl Plugin for EngineTerrainPlugin {
         if !app.is_plugin_added::<eustress_common::terrain::TerrainLayersPlugin>() {
             app.add_plugins(eustress_common::terrain::TerrainLayersPlugin);
         }
+        // The `Road` class methods, over what the layers' bake prepared.
+        crate::road_methods::register(app);
         app.add_systems(Update, crate::terrain_layers::adopt_points_by_folder);
         app.add_systems(
             Update,

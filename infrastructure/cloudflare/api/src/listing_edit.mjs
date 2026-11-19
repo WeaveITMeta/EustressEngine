@@ -4,13 +4,19 @@
 //
 // PATCH /api/simulations/{id}/listing with any of:
 //
-//   { "name": "...", "description": "...", "is_public": true | false }
+//   { "name": "...", "description": "...", "is_public": true | false,
+//     "gpu": "none" | "optional" | "required", "gpu_min_vram_mb": 8192 }
 //
 // The listing's title and description are text a reviewer reads. A changed one sends the listing back to review
 // (sendBackToReview), exactly as a commit from Studio with new text does, and the page then asks for the review with
 // POST /api/simulations/{id}/submit, the same request Studio makes after a publish. Who may see it (`is_public`) is not
 // text a reviewer reads: switching it changes nothing about the review, and a listing that passed review is listed or kept
 // private at once. Tags have their own route (PATCH /api/simulations/{id}/tags).
+//
+// `gpu` is where Eustress may host the listing's sessions (docs/architecture/GPU_HOSTING_RULE.md): "none", the default,
+// and "optional" place on any machine, CPU first; "required" places only on a machine with a GPU of at least
+// `gpu_min_vram_mb` free, which "required" must name (src/fleet_policy.mjs checkGpuSetting). It is not text a reviewer
+// reads either.
 //
 // Only the author, and never while a hold is on the listing. Never while a review is running either: a run judges the
 // title and description it read when it began, and its verdict is applied to the listing as it is when it ends, so an edit
@@ -29,6 +35,7 @@
 import { acquireLease, releaseLease, thresholdsFrom, contentLockedFor, inReview, sendBackToReview, authorStatusOf } from './moderation.mjs';
 import { withTagsWrittenBack } from './tags.mjs';
 import { guardReplacedText } from './listing_guard.mjs';
+import { checkGpuSetting, gpuSettingOf } from './fleet_policy.mjs';
 
 export const LISTING_EDIT_LIMITS = Object.freeze({ name: 120, description: 4000 });
 
@@ -36,7 +43,7 @@ export const LISTING_EDIT_LIMITS = Object.freeze({ name: 120, description: 4000 
 /// field }` for the first one that breaks a rule. Pure.
 export function checkListingEdit(body) {
   if (!body || typeof body !== 'object' || Array.isArray(body)) {
-    return { ok: false, error: 'Send a JSON object with name, description or is_public.', code: 'bad_request', field: null };
+    return { ok: false, error: 'Send a JSON object with name, description, is_public or gpu.', code: 'bad_request', field: null };
   }
   const edit = {};
   if (body.name !== undefined) {
@@ -56,8 +63,17 @@ export function checkListingEdit(body) {
     if (typeof body.is_public !== 'boolean') return { ok: false, error: 'is_public must be true or false.', code: 'bad_visibility', field: 'is_public' };
     edit.is_public = body.is_public;
   }
+  if (body.gpu !== undefined || body.gpu_min_vram_mb !== undefined) {
+    if (body.gpu === undefined) {
+      return { ok: false, error: 'gpu_min_vram_mb goes with gpu: "required".', code: 'bad_gpu', field: 'gpu' };
+    }
+    const gpu = checkGpuSetting(body.gpu, body.gpu_min_vram_mb);
+    if (!gpu.ok) return gpu;
+    edit.gpu = gpu.value.gpu;
+    edit.gpu_min_vram_mb = gpu.value.gpu_min_vram_mb;
+  }
   if (Object.keys(edit).length === 0) {
-    return { ok: false, error: 'Nothing to change: send name, description or is_public.', code: 'bad_request', field: null };
+    return { ok: false, error: 'Nothing to change: send name, description, is_public or gpu.', code: 'bad_request', field: null };
   }
   return { ok: true, edit };
 }
@@ -87,6 +103,17 @@ export function applyListingEdit(sim, edit, at = new Date().toISOString()) {
       changed.push('is_public');
     }
   }
+  if (edit.gpu !== undefined) {
+    const was = gpuSettingOf(sim);
+    if (was.gpu !== edit.gpu || was.gpu_min_vram_mb !== edit.gpu_min_vram_mb) {
+      // "none" is the default and is stored as no setting at all.
+      if (edit.gpu === 'none') delete sim.gpu;
+      else sim.gpu = edit.gpu;
+      if (edit.gpu === 'required') sim.gpu_min_vram_mb = edit.gpu_min_vram_mb;
+      else delete sim.gpu_min_vram_mb;
+      changed.push('gpu');
+    }
+  }
   const review = changed.includes('name') || changed.includes('description');
   // Studio still holds the text this replaced (publish.toml). Its next commit sends it back; the guard keeps this edit
   // (src/listing_guard.mjs, read by world.mjs applyListing).
@@ -108,6 +135,7 @@ function answerOf(simId, sim, changed, review) {
     description: sim.description ?? '',
     is_public: sim.is_public !== false,
     archived: sim.archived === true,
+    ...gpuSettingOf(sim),
     changed,
     // True when the change sends the listing back to review: the page then asks for it (POST .../submit).
     review,

@@ -280,6 +280,8 @@ export component SettingsDialog inherits Rectangle {
     in-out property <bool> notifications-enabled: true;
     // Privacy: anonymous tool-click counts. Persisted in EditorSettings.
     in-out property <bool> usage-telemetry-enabled: true;
+    // Updates: download in the background, install on quit. Persisted in EditorSettings.
+    in-out property <bool> automatic-updates-enabled: true;
     in-out property <bool> notifications-show-dismiss: true;
     in-out property <bool> notifications-mute-file: false;
     in-out property <bool> notifications-mute-script: false;
@@ -519,6 +521,21 @@ export component SettingsDialog inherits Rectangle {
                                             Preferences.set("auto_save_interval",
                                                 i == 0 ? "60" : i == 1 ? "120" : i == 2 ? "300" : i == 3 ? "600" : "900");
                                         }
+                                    }
+                                }
+                            }
+
+                            // Saved with the notification settings: the switch reports through
+                            // `on-notifications-changed`, which stores every value of that set.
+                            SettingsGroup {
+                                title: "UPDATES";
+                                SettingRow {
+                                    divider: false;
+                                    label: "Automatic updates";
+                                    description: "Download new versions in the background and install them when you quit. Every update is checked against Eustress's signing key first.";
+                                    KitSwitch {
+                                        checked <=> root.automatic-updates-enabled;
+                                        toggled => { root.on-notifications-changed(); }
                                     }
                                 }
                             }

@@ -390,10 +390,15 @@ pub fn clip_path(id: u64) -> String {
 /// `[assets] "<id>" = "<file>"`), keeping the entries already there.
 pub fn merge_id_map(space_root: &Path, clips: &BTreeMap<u64, String>) -> Result<(), String> {
     let path = space_root.join(ROBLOX_ID_MAP);
-    let mut doc: toml::Value = std::fs::read_to_string(&path)
-        .ok()
-        .and_then(|text| text.parse().ok())
-        .unwrap_or_else(|| toml::Value::Table(toml::value::Table::new()));
+    // A map that is there but does not parse is left as it is: starting
+    // again from an empty table rewrote the file with this run's clips only,
+    // and every entry it held was gone.
+    let mut doc: toml::Value = match std::fs::read_to_string(&path) {
+        Ok(text) => text
+            .parse::<toml::Value>()
+            .map_err(|e| format!("{} is not valid TOML and was left unchanged: {e}", path.display()))?,
+        Err(_) => toml::Value::Table(toml::value::Table::new()),
+    };
     let root = doc.as_table_mut().ok_or("the id map is not a table")?;
     let assets = root
         .entry("assets".to_string())

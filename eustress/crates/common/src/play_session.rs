@@ -277,6 +277,21 @@ pub fn begin_session(dm: &mut DataModel, local_player: InstanceId, start: &Sessi
     dm.local_player = Some(local_player);
     if let Some(players) = dm.get_service("Players") {
         let _ = dm.set_prop(players, "LocalPlayer", DmValue::Instance(local_player));
+    }
+    let camera = begin_server_session(dm, start);
+    fill_backpack(dm, local_player);
+    SessionIds { local_player, camera }
+}
+
+/// The Play setup of a session with no local player: a host serving as the
+/// server alone (Studio's Start Server from Edit), whose players are the ones
+/// who join. `Players.LocalPlayer` stays nil, as on any server;
+/// `Workspace.CurrentCamera`, `workspace.Gravity`, `Players.RespawnTime` and
+/// `Players.CharacterAutoLoads` are set as [`begin_session`] sets them, which
+/// calls this. Returns the camera.
+pub fn begin_server_session(dm: &mut DataModel, start: &SessionStart) -> Option<InstanceId> {
+    use crate::datamodel::DmValue;
+    if let Some(players) = dm.get_service("Players") {
         let _ = dm.set_prop(players, "RespawnTime", DmValue::Number(RESPAWN_TIME_SECS));
         let _ = dm.set_prop(players, "CharacterAutoLoads", DmValue::Bool(start.character_auto_loads));
     }
@@ -290,8 +305,7 @@ pub fn begin_session(dm: &mut DataModel, local_player: InstanceId, start: &Sessi
         let _ = dm.set_prop(workspace, "Gravity", DmValue::Number(workspace_gravity(start.gravity)));
         camera = Some(cam);
     }
-    fill_backpack(dm, local_player);
-    SessionIds { local_player, camera }
+    camera
 }
 
 /// The containers every player has: a `Backpack` (filled from StarterPack),
@@ -530,6 +544,26 @@ mod tests {
                 SessionCamera::SpaceOrFresh => assert_eq!(current, Some(saved), "a Player shows the Space's own camera"),
             }
         }
+    }
+
+    /// A host serving as the server alone starts the session's world the same
+    /// way, with no local player: `Players.LocalPlayer` stays nil and no
+    /// player gets a Backpack.
+    #[test]
+    fn a_server_alone_begins_a_session_with_no_local_player() {
+        let mut dm = DataModel::new();
+        let ws = dm.get_service("Workspace").unwrap();
+        let players = dm.get_service("Players").unwrap();
+        let start = SessionStart { camera: SessionCamera::Fresh, gravity: Vec3::new(0.0, -9.81, 0.0), character_auto_loads: true };
+        let camera = begin_server_session(&mut dm, &start);
+
+        assert_eq!(dm.local_player, None, "no local player");
+        assert_eq!(dm.get_prop(players, "LocalPlayer").and_then(|v| v.as_instance()), None);
+        assert!(dm.children(players).is_empty(), "nobody is in Players until someone joins");
+        assert_eq!(number(&dm, players, "RespawnTime"), Some(RESPAWN_TIME_SECS));
+        assert_eq!(dm.get_prop(players, "CharacterAutoLoads").and_then(|v| v.as_bool()), Some(true));
+        assert_eq!(dm.get_prop(ws, "CurrentCamera").and_then(|v| v.as_instance()), camera);
+        assert!(camera.is_some());
     }
 
     /// A Space's MaxPlayers is read from its Players service as file key or

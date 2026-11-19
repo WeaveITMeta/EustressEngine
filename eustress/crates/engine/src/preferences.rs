@@ -47,7 +47,7 @@ use slint::{ComponentHandle, SharedString};
 
 use crate::default_scene::StudioCamera;
 use crate::editor_settings::EditorSettings;
-use crate::ui::slint_ui::Preferences;
+use crate::ui::slint_ui::{HostingUi, Preferences};
 use crate::window_focus::IdleSettings;
 
 /// Shadow quality presets, Low to Ultra: the sun's cascade size, the point
@@ -95,7 +95,7 @@ impl Plugin for PreferencesPlugin {
             .init_resource::<ShadowsOff>()
             .add_systems(
                 Update,
-                (register_callbacks, apply_messages, sync_to_slint)
+                (register_callbacks, apply_messages, sync_to_slint, sync_hosting_to_slint)
                     .chain()
                     .after(crate::ui::slint_ui::SlintSystems::Drain),
             )
@@ -124,11 +124,16 @@ impl Plugin for PreferencesPlugin {
     }
 }
 
-/// What the `Preferences` callbacks queue for [`apply_messages`].
+/// What the `Preferences` and `HostingUi` callbacks queue for
+/// [`apply_messages`].
 enum PrefMsg {
     Set(String, String),
     Preview(String, String),
     Reset,
+    /// Add Player (`crate::multiplayer::add_player`).
+    AddPlayer,
+    /// Copy Link (`crate::multiplayer::copy_join_link`).
+    CopyLink,
 }
 
 #[derive(Resource, Default)]
@@ -180,6 +185,21 @@ fn register_callbacks(
             v.push(PrefMsg::Reset);
         }
     });
+    // The Network surfaces' Add Player and Copy Link (ribbon, Network menu,
+    // Network panel).
+    let hosting = slint.window.global::<HostingUi>();
+    let q = inbox.0.clone();
+    hosting.on_add_player(move || {
+        if let Ok(mut v) = q.lock() {
+            v.push(PrefMsg::AddPlayer);
+        }
+    });
+    let q = inbox.0.clone();
+    hosting.on_copy_link(move || {
+        if let Ok(mut v) = q.lock() {
+            v.push(PrefMsg::CopyLink);
+        }
+    });
     *done = true;
 }
 
@@ -211,13 +231,37 @@ fn apply_messages(
     mut settings: ResMut<EditorSettings>,
     mut preview: ResMut<VolumePreview>,
     mut raytracing_requests: MessageWriter<crate::raytracing::RasterFallbackRequest>,
+    host_request: Option<Res<crate::multiplayer::HostRequest>>,
+    reach: Option<Res<crate::multiplayer::HostingReach>>,
+    mut notifications: Option<ResMut<crate::notifications::NotificationManager>>,
 ) {
     let msgs: Vec<PrefMsg> = match inbox.0.lock() {
         Ok(mut v) if !v.is_empty() => std::mem::take(&mut *v),
         _ => return,
     };
+    // A hosting notice: (reports a problem, text).
+    let mut say = |(problem, line): (bool, String)| {
+        info!("multiplayer: {line}");
+        if let Some(n) = notifications.as_mut() {
+            if problem {
+                n.warning(line);
+            } else {
+                n.success(line);
+            }
+        }
+    };
     for msg in msgs {
         match msg {
+            PrefMsg::AddPlayer => {
+                let Some(request) = host_request.as_deref() else { continue };
+                say(crate::multiplayer::add_player(request).unwrap_or_else(|| {
+                    (true, "Start Server first. Add Player then joins it as a player.".to_string())
+                }));
+            }
+            PrefMsg::CopyLink => {
+                let (Some(request), Some(reach)) = (host_request.as_deref(), reach.as_deref()) else { continue };
+                say(crate::multiplayer::copy_join_link(request, reach));
+            }
             PrefMsg::Preview(key, value) => {
                 let Some(v) = level(&value) else { continue };
                 match key.as_str() {
@@ -445,6 +489,46 @@ fn sync_to_slint(
     if preview.music.is_none() {
         g.set_music_volume(settings.music_volume * 100.0);
     }
+}
+
+/// Push hosting's live state (`crate::multiplayer::hosting_snapshot`) to the
+/// `HostingUi` global when it changes, for the Test tab, the Network menu and
+/// the Network panel; and open or close the Network panel on its shortcut
+/// (Ctrl+Alt+N, `Action::ToggleNetworkPanel`). The menu events are read
+/// through an optional cursor, so an app without them still runs this.
+fn sync_hosting_to_slint(
+    slint: Option<NonSend<crate::ui::SlintUiState>>,
+    request: Option<Res<crate::multiplayer::HostRequest>>,
+    host: Option<Res<eustress_networking::HostSession>>,
+    remote: Option<Res<crate::play_datamodel::remote_players::RemotePlayers>>,
+    menu: Option<Res<bevy::ecs::message::Messages<crate::ui::MenuActionEvent>>>,
+    mut cursor: Local<bevy::ecs::message::MessageCursor<crate::ui::MenuActionEvent>>,
+    mut pushed: Local<Option<crate::multiplayer::HostingSnapshot>>,
+) {
+    let toggles = menu.as_deref().map_or(0, |menu| {
+        cursor.read(menu).filter(|e| e.action == crate::keybindings::Action::ToggleNetworkPanel).count()
+    });
+    let Some(slint) = slint else { return };
+    if toggles % 2 == 1 {
+        let shown = slint.window.get_show_network_panel();
+        slint.window.set_show_network_panel(!shown);
+    }
+    let Some(request) = request else { return };
+    let names: Vec<String> = remote.map(|r| r.players().map(|p| p.name.clone()).collect()).unwrap_or_default();
+    let snapshot = crate::multiplayer::hosting_snapshot(&request, host.as_deref(), names);
+    if pushed.as_ref() == Some(&snapshot) {
+        return;
+    }
+    let g = slint.window.global::<HostingUi>();
+    g.set_state(snapshot.phase.as_str().into());
+    g.set_port(i32::from(snapshot.port));
+    g.set_players(i32::try_from(snapshot.players).unwrap_or(i32::MAX));
+    g.set_max_players(i32::from(snapshot.max_players));
+    g.set_join_link(crate::ui::display_text::shown_line(&snapshot.join_link));
+    let names: Vec<SharedString> = snapshot.names.iter().map(|n| crate::ui::display_text::shown_line(n)).collect();
+    g.set_player_names(slint::ModelRc::new(slint::VecModel::from(names)));
+    g.set_host_plays(snapshot.host_plays);
+    *pushed = Some(snapshot);
 }
 
 // ============================================================================

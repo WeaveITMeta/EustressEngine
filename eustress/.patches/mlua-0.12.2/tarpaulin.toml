@@ -1,0 +1,23 @@
+[lua55]
+features = "lua55,vendored,async,send,serde,macros,anyhow,userdata-wrappers"
+
+[lua55_non_send]
+features = "lua55,vendored,async,serde,macros,anyhow,userdata-wrappers"
+
+[lua55_with_memory_limit]
+features = "lua55,vendored,async,send,serde,macros,anyhow,userdata-wrappers"
+rustflags = "--cfg force_memory_limit"
+
+[lua51]
+features = "lua51,vendored,async,send,serde,macros"
+
+[lua51_with_memory_limit]
+features = "lua51,vendored,async,send,serde,macros"
+rustflags = "--cfg force_memory_limit"
+
+[luau]
+features = "luau,async,send,serde,macros"
+
+[luau_with_memory_limit]
+features = "luau,async,send,serde,macros"
+rustflags = "--cfg force_memory_limit"

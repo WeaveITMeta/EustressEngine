@@ -1,0 +1,56 @@
+{
+  "schema": "eustress.gauntlet.not_done_checks/1",
+  "item": "G1.05",
+  "utc": "2026-11-18T03:45:00Z",
+  "build": "third release build of 2026-11-17 on C:\\EustressBuild\\target: cargo build --release of eustress-engine and eustress-forge, 18:48 to 19:34 Arizona, exit 0, 0 errors; source = commit bb910190620076e4073a727a5ea20d49afa83e26 plus the uncommitted working tree",
+  "exit_run": {
+    "command": "the block's two commands, literally (the engine on spaces/harness/RH1_sphere_grid, then harness-scenes capture-selftest)",
+    "result": "CAP_EXIT=0 captures=4 dimension_mismatches=0 repeat_4k_identical=true",
+    "artifact_sha256": "sha256:9415293eda9b852a8721e5bb4493de6537ecad00927e73e102c4968b63663342",
+    "capture_sha256": [
+      "835b557906939fc2964bbba4107d304a59f02eaf6ad517078488397d17685403",
+      "173ed71ac003693298b2b8c0f1e120218c0999b2ae60c05f5607c3a55aaaf40e",
+      "835b557906939fc2964bbba4107d304a59f02eaf6ad517078488397d17685403",
+      "bfe91fd796ba2df3c08ddd63cdcc65793820d4b0cd900ff7eed6cd2aceba6111"
+    ],
+    "scene_put_back": "harness-scenes --seed 42 --scene S1 --replace exit 0, then G1.03's two commands: GEN_A_EXIT=0 GEN_B_EXIT=0 scenes=6 identical=6"
+  },
+  "conditions": [
+    {
+      "condition": "the 3840x2160 PNG is a smaller render scaled up",
+      "holds": false,
+      "evidence": "Shrinking capture 1 to 1920x1080 and scaling it back leaves 13,554 to 18,697 pixels off by more than 8 (largest 86 to 106), by filter; through 1280x720, 23,867 to 28,817 (largest 123 to 129). Control, the same test on a deliberately faked 4K image (the engine's own 1920x1080 capture scaled up): 0 to 2,185 pixels, largest 24. The capture holds detail a 1080p or 720p render cannot."
+    },
+    {
+      "condition": "the first size sticks and later requests return it",
+      "holds": false,
+      "evidence": "One session, requests in the order 3840x2160, 1920x1080, 3840x2160, 2560x1440; each PNG header reads the requested size (dimension_mismatches=0)."
+    },
+    {
+      "condition": "the requested path is ignored",
+      "holds": false,
+      "evidence": "Each capture landed at its requested path under docs/PROMPTS/artifacts/G1.05/captures. A second session wrote a 2560x1440 capture to a requested path on another drive (C:\\EustressBuild\\gauntlet_w1\\g105_both\\ai_2560x1440.png)."
+    },
+    {
+      "condition": "the render target is resized every frame",
+      "holds": false,
+      "evidence": "The engine log of the exit run has exactly 4 'render target resized' lines, one per request (3840x2160, 1920x1080, 3840x2160, 2560x1440). The code compares the size first and resizes only inside a capture request (ai_camera.rs, the two img.resize sites)."
+    },
+    {
+      "condition": "capture_viewport broke while ai_camera_capture was parameterised",
+      "holds": false,
+      "evidence": "One session on this build (a copy of RH1): viewport.capture wrote a fresh 3456x929 PNG of the whole Studio window (4,555,901 bytes, mean 45.6 of 255, 13,604 colours), then ai_camera.capture wrote 2560x1440 to its requested path, then viewport.capture wrote a fresh PNG again, byte-identical to the first. Both paths ship."
+    },
+    {
+      "condition": "NoAtmosphere was removed, or Msaa or Hdr is toggled at runtime for a resize",
+      "holds": false,
+      "evidence": "ai_camera.rs still gives the camera NoAtmosphere in ai_camera_bundle; the resize touches the image asset's size only; no code inserts or removes Msaa or Hdr at runtime."
+    },
+    {
+      "condition": "the two repeated 3840x2160 captures differ",
+      "holds": false,
+      "evidence": "Byte-identical in the exit run (sha256 835b5579...). Control on a copy of RH1: five self-tests in one session, all ten 3840x2160 captures byte-identical. Same build with EUSTRESS_GPU_CLUSTERING=1: five of five self-tests fail, with 4, 5, 2, 7 and 5 pixels differing. A capture from a separate Studio session at 2560x1440 has the same sha256 as the exit run's capture 4 (bfe91fd7...); with GPU clustering it differs."
+    }
+  ],
+  "what_the_pass_rests_on": "Lights are clustered on the CPU by default in this tree (ai_camera.rs cpu_light_clustering, Startup). With Bevy's GPU clustering the light lists are filled through atomics, the order of summation changes from frame to frame, and the criterion fails. EUSTRESS_GPU_CLUSTERING=1 keeps the GPU path. The change is engine-wide, not capture-only; its frame cost is measured separately."
+}

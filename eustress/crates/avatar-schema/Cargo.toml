@@ -7,7 +7,6 @@ description = "Avatar descriptor + derived body metrics. No Bevy, no glam — co
 [dependencies]
 serde = { workspace = true }
 serde_json = { workspace = true }
-toml = "0.8"
 
 # Optional: Bevy derives (Component/Reflect) for the engine-side build.
 # The web crate depends on this crate with default-features = false, so
@@ -18,3 +17,6 @@ bevy = { workspace = true, optional = true }
 default = []
 # Engine-side: adds Component/Reflect derives.
 bevy = ["dep:bevy"]
+[dev-dependencies]
+# The TOML round-trip tests (src/metrics.rs, tests/rigs.rs).
+toml = "0.8"

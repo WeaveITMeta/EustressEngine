@@ -27,17 +27,25 @@ eustress-avatar-schema = { path = "../avatar-schema", default-features = false }
 # src/bin/prerender.rs). They are exclusive on purpose: `csr` turns effects
 # on, and an effect running inside a server render reaches for a window that
 # is not there.
-leptos = { version = "0.7" }
-leptos_router = "0.7"
-leptos_meta = "0.7"
+#
+# Pinned exactly while 0.9 is a release candidate: a caret requirement on a
+# prerelease also accepts the next candidate, and a `cargo update` would move
+# the site to it unreviewed. Leptos's `lazy` feature (route code splitting)
+# stays off: the site ships one module, and the feature costs binary size.
+leptos = { version = "=0.9.0-rc1" }
+leptos_router = "=0.9.0-rc1"
 
 # Server rendering only. hydration_context supplies the shared context a root
 # Owner needs to render on the server. any_spawner's futures executor gives
 # spawn_local somewhere to park a future that is never polled, so a page that
 # fires a fetch on construction renders its loading state instead of aborting
 # the prerender.
-hydration_context = { version = "0.2", optional = true }
-any_spawner = { version = "0.2", features = ["futures-executor"], optional = true }
+#
+# Both must be the versions Leptos itself resolves (its `Owner` takes this
+# hydration_context's SharedContext, and its `Executor` is this any_spawner),
+# so they move with the Leptos pin above.
+hydration_context = { version = "=0.4.0-rc1", optional = true }
+any_spawner = { version = "0.3", features = ["futures-executor"], optional = true }
 
 # WASM utilities
 wasm-bindgen = "0.2"
@@ -116,7 +124,6 @@ console_log = "1"
 console_error_panic_hook = "0.1"
 
 # Bliss (crypto currency): published crates from crates.io
-bliss-core = "0.1.1"
 bliss-crypto = "0.1.1"
 hex = "0.4"
 getrandom = { version = "0.2", features = ["js"] }
@@ -128,6 +135,9 @@ chrono = { version = "0.4", features = ["serde", "wasmbind"] }
 urlencoding = "2.1"
 # Names are compared in composed form (NFC), as the Worker compares them (pages/project_delete.rs).
 unicode-normalization = "0.1"
+# A listing's README (the About tab, components/readme.rs): parsed to events, drawn from a fixed set of elements, never as HTML.
+# No default features: the html renderer is never used.
+pulldown-cmark = { version = "0.13", default-features = false }
 
 # =============================================================================
 # 2. Features
@@ -144,7 +154,6 @@ hydrate = ["leptos/hydrate"]
 # `csr` stays off.
 ssr = [
     "leptos/ssr",
-    "leptos_meta/ssr",
     "leptos_router/ssr",
     "dep:hydration_context",
     "dep:any_spawner",

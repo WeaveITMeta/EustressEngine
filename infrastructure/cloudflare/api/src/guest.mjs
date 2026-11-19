@@ -547,10 +547,10 @@ export async function bodyObject(request) {
   return v && typeof v === 'object' && !Array.isArray(v) ? v : {};
 }
 
-/// `deps` carries the index.js helpers: verifyAuth, json, isListable and bannedBearer, and live.mjs's livePin,
+/// `deps` carries the index.js helpers: verifyAuth, json, isListable and bannedBearer, and live.mjs's livePin and livePins,
 /// holdGuestTicket and guestSession (a call into a listing's guest-only LiveHost object).
 export async function handleGuest(request, env, cors, deps) {
-  const { verifyAuth, json, isListable, livePin, holdGuestTicket, bannedBearer, guestSession } = deps;
+  const { verifyAuth, json, isListable, livePin, livePins, holdGuestTicket, bannedBearer, guestSession } = deps;
   const path = new URL(request.url).pathname;
   const now = Date.now();
 
@@ -606,7 +606,9 @@ export async function handleGuest(request, env, cors, deps) {
     }
     // One certificate pin is one host process: when the listing's account session is live at the same pin, that process
     // would hold accounts and guests at once, so no guest ticket is made for it (live.mjs refuses the heartbeat too).
-    if ((await livePin(env, lease.s, now, { guestOnly: false })) === body.audience) {
+    // Every account server of the listing, not only the one the page shows first.
+    const accountPins = livePins ? await livePins(env, lease.s, now, { guestOnly: false }) : [await livePin(env, lease.s, now, { guestOnly: false })];
+    if (accountPins.includes(body.audience)) {
       return json({ error: 'This session also takes signed-in players, so a guest cannot join it', code: 'pin_in_use' }, 409, headers);
     }
     const { ticket, id, expires } = await signGuestJoin(env, { lease, audience: body.audience, now });

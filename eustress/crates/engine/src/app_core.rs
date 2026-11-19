@@ -310,8 +310,8 @@ pub fn add_core_sim_plugins(app: &mut App, space_root: &Path) {
         .add_plugins(crate::generative_arch::GenerativeArchPlugin)
         // Platform services
         .add_plugins(TeamServicePlugin)
-        // Multiplayer hosting: Start Server (F9) serves the Space being
-        // played to Players over WebTransport. In this tier so the headless
+        // Multiplayer hosting: Start Server (F9) serves the open Space to
+        // Players over WebTransport. In this tier so the headless
         // engine can host too (`EUSTRESS_HOST_ON_PLAY=1`).
         .add_plugins(crate::multiplayer::MultiplayerPlugin)
         // Stress test bots and the dialog's live counters. Headless has no

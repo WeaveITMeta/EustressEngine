@@ -29,6 +29,7 @@ use leptos::portal::Portal;
 
 use crate::api::catalog::Listing;
 use crate::api::live::{get_live_host, is_join_link, is_launch_link, LiveHost};
+use crate::api::releases::{fetch_player_release, DesktopPlatform, PlayerDownload, ReleaseState};
 use crate::api::{self, ApiClient, ApiError};
 use crate::components::browser_player::{BrowserLaunch, BrowserStage};
 use crate::components::key_prompt::{tab_wraps_to, Place};
@@ -321,23 +322,73 @@ pub fn status_chip_class(status: Status) -> &'static str {
 }
 
 /// The link the page may give to the browser: only the Player's own two links, only the characters their grammar uses. A
-/// solo link may end in `?api=production` or `?api=staging` and nothing else; a join link may carry the parameters the
-/// chooser appends (`ticket`, `api`), which is why it is checked against the final-link grammar.
+/// solo link may end in `?api=production` or `?api=staging`, optionally followed by a `ticket` and a `min` in either
+/// order, and nothing else; a join link may carry the parameters the chooser appends (`ticket`, `api`, `min`), which is
+/// why it is checked against the final-link grammar, and a `min` in it must be a version.
 pub fn is_player_link(link: &str) -> bool {
-    is_solo_link(link) || (link.starts_with("eustress-player://join/") && is_launch_link(link))
+    is_solo_link(link) || (link.starts_with("eustress-player://join/") && is_launch_link(link) && join_min_is_a_version(link))
 }
 
-/// `eustress-player://play/<id>`, with exactly `?api=production` or `?api=staging` after the id, or nothing.
+/// `eustress-player://play/<id>`, with exactly `?api=production` or `?api=staging` after the id, then optionally
+/// `&ticket=<ticket>` (the solo play ticket) and `&min=X.Y.Z` in either order, each at most once; or nothing.
 fn is_solo_link(link: &str) -> bool {
     let Some(rest) = link.strip_prefix("eustress-player://play/") else {
         return false;
     };
     let id = match rest.split_once('?') {
         None => rest,
-        Some((id, "api=production" | "api=staging")) => id,
-        Some(_) => return false,
+        Some((id, query)) => {
+            let mut pairs = query.split('&');
+            if !matches!(pairs.next(), Some("api=production" | "api=staging")) {
+                return false;
+            }
+            let (mut ticket, mut min) = (false, false);
+            for pair in pairs {
+                if let Some(value) = pair.strip_prefix("ticket=") {
+                    if ticket || !is_ticket(value) {
+                        return false;
+                    }
+                    ticket = true;
+                } else if let Some(value) = pair.strip_prefix("min=") {
+                    if min || !is_player_version(value) {
+                        return false;
+                    }
+                    min = true;
+                } else {
+                    return false;
+                }
+            }
+            id
+        }
     };
     !id.is_empty() && id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
+}
+
+/// A join link names `min` at most once, and only as a version.
+fn join_min_is_a_version(link: &str) -> bool {
+    let query = link.split_once('?').map(|(_, q)| q).unwrap_or("");
+    let mins: Vec<&str> = query.split('&').filter_map(|pair| pair.strip_prefix("min=")).collect();
+    mins.len() <= 1 && mins.iter().all(|v| is_player_version(v))
+}
+
+/// A Player version a link may name as its minimum: `X.Y.Z`, three parts of one to five digits each.
+pub fn is_player_version(version: &str) -> bool {
+    let parts: Vec<&str> = version.split('.').collect();
+    parts.len() == 3 && parts.iter().all(|p| (1..=5).contains(&p.len()) && p.bytes().all(|b| b.is_ascii_digit()))
+}
+
+/// The minimum Player version to put on links: the manifest's `min_version` when the release has one in the `X.Y.Z` form.
+/// Anything else (no manifest yet, none in it, a value of another form) puts nothing on the link.
+pub fn player_min(release: &ReleaseState) -> Option<String> {
+    match release {
+        ReleaseState::Released(manifest) => manifest
+            .min_version
+            .as_deref()
+            .map(str::trim)
+            .filter(|v| is_player_version(v))
+            .map(str::to_string),
+        _ => None,
+    }
 }
 
 /// A link as the Worker sends it, before the chooser appends anything: a bare `play/<id>` or a join link of at most 512
@@ -612,19 +663,83 @@ pub fn focus_left_the_page() -> bool {
         .is_none_or(|d| d.hidden() || !d.has_focus().unwrap_or(true))
 }
 
-/// After a link was handed over: if the page still has the focus a moment later, nothing opened.
+/// How long the page waits for the Player before it says the Player didn't open, in quarter seconds (3 seconds).
+const LAUNCH_WAIT_TICKS: u32 = 12;
+
+/// After a link was handed over: if the page is still visible and focused 3 seconds later, and never blurred or went hidden
+/// in between, nothing opened. The browser's own "Open Eustress Player?" prompt and the Player taking the screen both blur
+/// the page; the listeners catch a blur too short for the quarter-second checks to see.
 pub async fn watch_launch(handoff: RwSignal<Handoff>, link: String) {
-    for _ in 0..10 {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+    let left = Arc::new(AtomicBool::new(false));
+    #[cfg(not(feature = "ssr"))]
+    let listeners = {
+        let on_blur = left.clone();
+        let blur = window_event_listener(leptos::ev::blur, move |_| on_blur.store(true, Ordering::Relaxed));
+        let on_hide = left.clone();
+        let hide = leptos::leptos_dom::helpers::window_event_listener_untyped("visibilitychange", move |_| {
+            if web_sys::window().and_then(|w| w.document()).is_some_and(|d| d.hidden()) {
+                on_hide.store(true, Ordering::Relaxed);
+            }
+        });
+        (blur, hide)
+    };
+    let mut opened = false;
+    for _ in 0..LAUNCH_WAIT_TICKS {
         TimeoutFuture::new(250).await;
-        if focus_left_the_page() {
-            return;
+        if left.load(Ordering::Relaxed) || focus_left_the_page() {
+            opened = true;
+            break;
         }
+    }
+    #[cfg(not(feature = "ssr"))]
+    {
+        listeners.0.remove();
+        listeners.1.remove();
+    }
+    if opened {
+        return;
     }
     if handoff
         .try_get_untracked()
         .is_some_and(|h| h == Handoff::Opening { link: link.clone() })
     {
         handoff.set(Handoff::NotOpened { link });
+    }
+}
+
+/// Which kind of link a link the page handed over was: a join link joins, anything else plays alone.
+pub fn kind_of_link(link: &str) -> Kind {
+    if link.starts_with("eustress-player://join/") {
+        Kind::Join
+    } else {
+        Kind::Solo
+    }
+}
+
+/// What "Eustress Player didn't open" offers to download.
+#[derive(Clone, Debug, PartialEq)]
+pub enum FallbackDownload {
+    /// The release has a build for this computer: its permanent link.
+    Build(DesktopPlatform, PlayerDownload),
+    /// The release has no build for this computer: no button (no build, no link).
+    NoBuild(DesktopPlatform),
+    /// There is no release yet: no button.
+    NoRelease,
+    /// The manifest is not read yet or could not be read, or the computer is not known: the downloads page, which says the rest.
+    Page,
+}
+
+/// The download for the visitor's computer from the Player's release (the same latest.json the downloads page reads).
+pub fn fallback_download(release: &ReleaseState, platform: Option<DesktopPlatform>) -> FallbackDownload {
+    match (release, platform) {
+        (ReleaseState::Released(manifest), Some(platform)) => match manifest.player_download(platform) {
+            Some(file) => FallbackDownload::Build(platform, file),
+            None => FallbackDownload::NoBuild(platform),
+        },
+        (ReleaseState::Unreleased, _) => FallbackDownload::NoRelease,
+        _ => FallbackDownload::Page,
     }
 }
 
@@ -642,7 +757,8 @@ const TICKET_BUDGET_MS: u32 = 2_500;
 /// The longest ticket the page will pass on.
 const TICKET_MAX_LEN: usize = 2_048;
 
-/// `POST /api/identity/ticket` answers `{ ticket, expires, id }`. No `Debug`, so nothing can print the ticket.
+/// `POST /api/identity/ticket` answers `{ ticket, expires, id }`, and `POST /api/simulations/{id}/play-ticket` answers
+/// `{ ticket, expires }`. No `Debug`, so nothing can print the ticket.
 #[derive(Deserialize)]
 struct TicketAnswer {
     ticket: String,
@@ -663,33 +779,47 @@ pub fn with_api(link: &str, api: &str) -> String {
     format!("{link}{separator}api={api}")
 }
 
-/// `link` with `&ticket=<ticket>&api=<name>` appended. A ticket that is empty, longer than 2,048 characters or has a
-/// character outside `A-Z a-z 0-9 . _ -` is refused: the link comes back with only the API name.
+/// `link` with `&ticket=<ticket>&api=<name>` appended to a join link, or `?api=<name>&ticket=<ticket>` to a solo link
+/// (whose grammar names the API first). A ticket that is empty, longer than 2,048 characters or has a character outside
+/// `A-Z a-z 0-9 . _ -` is refused: the link comes back with only the API name.
 pub fn with_ticket(link: &str, ticket: &str, api: &str) -> String {
     if !is_ticket(ticket) {
         return with_api(link, api);
+    }
+    if link.starts_with("eustress-player://play/") {
+        let named = with_api(link, api);
+        return format!("{named}&ticket={ticket}");
     }
     let separator = if link.contains('?') { '&' } else { '?' };
     format!("{link}{separator}ticket={ticket}&api={api}")
 }
 
-/// The link to give the browser: with the ticket when there is one, with the API name alone otherwise. A result that is
-/// not a link the Player's grammar allows falls back to the one without the ticket.
-pub fn launch_link(link: &str, ticket: Option<&str>, api: &str) -> String {
+/// `link` (which already has a query) with `&min=<version>` appended when there is a minimum in the `X.Y.Z` form.
+pub fn with_min(link: String, min: Option<&str>) -> String {
+    match min.filter(|v| is_player_version(v)) {
+        Some(version) => format!("{link}&min={version}"),
+        None => link,
+    }
+}
+
+/// The link to give the browser: with the ticket when there is one, with the API name alone otherwise, and with the
+/// minimum Player version last when the release names one. A result that is not a link the Player's grammar allows falls
+/// back to the one without the ticket.
+pub fn launch_link(link: &str, ticket: Option<&str>, api: &str, min: Option<&str>) -> String {
     match ticket {
         Some(ticket) => {
-            let full = with_ticket(link, ticket, api);
+            let full = with_min(with_ticket(link, ticket, api), min);
             if is_launch_link(&full) {
                 full
             } else {
-                with_api(link, api)
+                with_min(with_api(link, api), min)
             }
         }
         // Every link names the site's API, solo links included: every released Player reads it (the first release, staging
         // channel v0.1.0 of 2026-10-20, does). A production solo link that named none opened a Player whose registered command
         // pinned staging on staging, which answered "This simulation was not found" (2026-11-11); a Player that reads the
         // name opens a production link on production (docs/networking/PLAYER_JOIN_TICKET.md).
-        None => with_api(link, api),
+        None => with_min(with_api(link, api), min),
     }
 }
 
@@ -712,6 +842,34 @@ pub fn ticket_audience(kind: Kind, signed_in: bool, link: &str) -> Option<&str> 
     }
 }
 
+/// What to ask the API for a ticket: the path and the body. It names a pin or a listing id, never a ticket.
+#[derive(Clone, Debug, PartialEq)]
+pub struct TicketRequest {
+    pub path: String,
+    pub body: serde_json::Value,
+}
+
+/// The ticket to mint at the click, for a signed-in viewer only (docs/networking/PLAYER_JOIN_TICKET.md):
+/// - joining a live session: an identity ticket for the host's pin (`ticket_audience`);
+/// - playing alone in the desktop Player: a play ticket for this listing, which the Player redeems once for a play pass,
+///   so the world downloads under the website's sign-in rather than Studio's. The browser Player plays with the page's own
+///   session and gets none: a ticket is single use, so one it would never redeem is not minted.
+pub fn ticket_request(kind: Kind, signed_in: bool, browser: bool, link: &str, sim_id: &str) -> Option<TicketRequest> {
+    if !signed_in {
+        return None;
+    }
+    match kind {
+        Kind::Join => ticket_audience(kind, signed_in, link).map(|pin| TicketRequest {
+            path: "/api/identity/ticket".to_string(),
+            body: serde_json::json!({ "audience": pin }),
+        }),
+        Kind::Solo if !browser && !sim_id.is_empty() && sim_id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-') => {
+            Some(TicketRequest { path: format!("/api/simulations/{sim_id}/play-ticket"), body: serde_json::json!({}) })
+        }
+        Kind::Solo => None,
+    }
+}
+
 /// The API the Player should use, named by the site's own host.
 fn site_api_name() -> &'static str {
     let host = web_sys::window()
@@ -720,12 +878,12 @@ fn site_api_name() -> &'static str {
     api_name_for_host(&host)
 }
 
-/// Ask for a ticket for `pin`, with the signed-in viewer's session, within the budget. A timeout or any failure is `None`:
-/// the link then opens without a ticket. The failure is dropped on purpose, not logged or shown.
-async fn mint_ticket(api_url: &str, pin: &str) -> Option<String> {
+/// Ask for the ticket `request` names, with the signed-in viewer's session, within the budget. A timeout or any failure
+/// (a 403 for a listing rated above the viewer included) is `None`: the link then opens without a ticket. The failure is
+/// dropped on purpose, not logged or shown.
+async fn mint_ticket(api_url: &str, request: TicketRequest) -> Option<String> {
     let client = ApiClient::new(api_url);
-    let body = serde_json::json!({ "audience": pin });
-    let ask = client.post::<TicketAnswer, _>("/api/identity/ticket", &body);
+    let ask = client.post::<TicketAnswer, _>(&request.path, &request.body);
     futures::pin_mut!(ask);
     match futures::future::select(ask, TimeoutFuture::new(TICKET_BUDGET_MS)).await {
         futures::future::Either::Left((answer, _)) => answer.ok().map(|answer| answer.ticket),
@@ -838,6 +996,9 @@ pub fn PlayChooser(#[prop(into)] sim_id: String, on_close: Callback<()>) -> impl
     let load = RwSignal::new(Load::Loading);
     let live = RwSignal::new(Live::Unknown);
     let handoff = RwSignal::new(Handoff::Idle);
+    // The Player's release, read when the chooser opens (the staging site reads the staging manifest): the download offered when
+    // the Player didn't open, and the minimum version Play links carry.
+    let player_release = RwSignal::new(ReleaseState::Checking);
     let mode = RwSignal::new(read_mode());
     let browser_open = RwSignal::new(false);
     let browser_launch = StoredValue::new_local(None::<BrowserLaunch>);
@@ -853,6 +1014,12 @@ pub fn PlayChooser(#[prop(into)] sim_id: String, on_close: Callback<()>) -> impl
             spawn_local(watch(api_url.get_value(), sim.clone(), load, live, runs, 1));
         });
     }
+    Effect::new(move |_| {
+        spawn_local(async move {
+            let release = fetch_player_release().await;
+            let _ = player_release.try_set(release);
+        });
+    });
 
     // The dialog takes the focus when it opens, so a screen reader reads it and Tab goes to its first control; once the listing is
     // there, the focus moves to the main action so Enter completes what the Play button started.
@@ -953,13 +1120,16 @@ pub fn PlayChooser(#[prop(into)] sim_id: String, on_close: Callback<()>) -> impl
                 Ok(answer) => match chosen_link(&answer, kind) {
                     Ok(link) => {
                         let api = site_api_name();
-                        let shown = launch_link(&link, None, api);
-                        let ticket = match ticket_audience(kind, signed_in, &link) {
-                            Some(pin) => mint_ticket(&api_url.get_value(), pin).await,
+                        let browser = mode.get_untracked() == Some(Mode::Browser);
+                        // The browser Player is the site's own build, never older than the site: no minimum on its link.
+                        let min = if browser { None } else { player_release.with_untracked(player_min) };
+                        let shown = launch_link(&link, None, api, min.as_deref());
+                        let ticket = match ticket_request(kind, signed_in, browser, &link, &sim) {
+                            Some(request) => mint_ticket(&api_url.get_value(), request).await,
                             None => None,
                         };
-                        let ticketed_link = launch_link(&link, ticket.as_deref(), api);
-                        if mode.get_untracked() == Some(Mode::Browser) {
+                        let ticketed_link = launch_link(&link, ticket.as_deref(), api, min.as_deref());
+                        if browser {
                             // The join link stays in memory for the browser Player. It is not
                             // written into the page or the address.
                             let join = (kind == Kind::Join).then(|| ticketed_link);
@@ -1146,21 +1316,51 @@ pub fn PlayChooser(#[prop(into)] sim_id: String, on_close: Callback<()>) -> impl
                                         </div>
                                         <PlayerHelp />
                                     }.into_any(),
-                                    Handoff::NotOpened { link } => view! {
-                                        <div class="lp-panel">
-                                            <div class="lp-icon warn">{icon("alert")}</div>
-                                            <div class="lp-panel-body">
-                                                <h3>"Eustress Player didn't open"</h3>
-                                                <p>"Eustress Player isn't installed or isn't registered with your browser. Download it, run it once, then press Play again."</p>
-                                                <div class="lp-actions">
-                                                    <a href="/downloads/player" class="btn btn-primary">"Download Eustress Player"</a>
-                                                    <a href=link class="btn btn-secondary">"Try again"</a>
-                                                    <button class="btn btn-ghost" on:click=move |_| handoff.set(Handoff::Idle)>"Back"</button>
+                                    Handoff::NotOpened { link } => {
+                                        let offer = player_release.with(|release| fallback_download(release, DesktopPlatform::detect()));
+                                        let sentence = match &offer {
+                                            FallbackDownload::NoBuild(platform) => format!(
+                                                "Eustress Player isn't installed or isn't registered with your browser, and there is no Eustress Player for {} yet.",
+                                                platform.short_label()
+                                            ),
+                                            FallbackDownload::NoRelease => "Eustress Player isn't installed or isn't registered with your browser, and it has no release yet.".to_string(),
+                                            _ => "Eustress Player isn't installed or isn't registered with your browser. Download it, run it once, then press Play again.".to_string(),
+                                        };
+                                        let download = match offer {
+                                            FallbackDownload::Build(platform, file) => {
+                                                let size = file.asset.size_label();
+                                                let label = if size.is_empty() {
+                                                    format!("Download for {}", platform.short_label())
+                                                } else {
+                                                    format!("Download for {} ({size})", platform.short_label())
+                                                };
+                                                Some(view! { <a href=file.url class="btn btn-primary">{label}</a> }.into_any())
+                                            }
+                                            FallbackDownload::Page => Some(view! { <a href="/downloads/player" class="btn btn-primary">"Download Eustress Player"</a> }.into_any()),
+                                            FallbackDownload::NoBuild(_) | FallbackDownload::NoRelease => None,
+                                        };
+                                        // Try again is Play again: the same kind of link, asked for and handed over afresh, with a fresh
+                                        // ticket for a signed-in viewer (a ticket is single use and the page never keeps one, so the link
+                                        // shown here has none). The click finishes before the panel changes, so the button is not removed
+                                        // under it.
+                                        let retry_kind = kind_of_link(&link);
+                                        let try_again = move |_| crate::utils::after_event(move || play.run(retry_kind));
+                                        view! {
+                                            <div class="lp-panel">
+                                                <div class="lp-icon warn">{icon("alert")}</div>
+                                                <div class="lp-panel-body">
+                                                    <h3>"Eustress Player didn't open"</h3>
+                                                    <p>{sentence}</p>
+                                                    <div class="lp-actions">
+                                                        {download}
+                                                        <button class="btn btn-secondary" on:click=try_again>"Try again"</button>
+                                                        <button class="btn btn-ghost" on:click=move |_| handoff.set(Handoff::Idle)>"Back"</button>
+                                                    </div>
                                                 </div>
                                             </div>
-                                        </div>
-                                        <PlayerHelp open=true />
-                                    }.into_any(),
+                                            <PlayerHelp open=true />
+                                        }.into_any()
+                                    }
                                     Handoff::Failed(why) => view! {
                                         <div class="lp-panel">
                                             <div class="lp-icon bad">{icon("alert")}</div>
@@ -1961,9 +2161,9 @@ mod tests {
     }
 
     #[test]
-    fn a_solo_link_gets_the_api_name_and_never_a_ticket() {
+    fn a_solo_link_without_a_ticket_gets_the_api_name() {
         let solo = "eustress-player://play/aaaaaaaa-1111-4111-8111-aaaaaaaaaaaa";
-        let production = launch_link(solo, None, "production");
+        let production = launch_link(solo, None, "production", None);
         assert_eq!(
             production,
             format!("{solo}?api=production"),
@@ -1973,28 +2173,29 @@ mod tests {
             is_player_link(&production),
             "the production solo link is one the page may hand to the browser"
         );
-        let staged = launch_link(solo, None, "staging");
+        let staged = launch_link(solo, None, "staging", None);
         assert_eq!(staged, format!("{solo}?api=staging"));
         assert!(
             is_player_link(&staged),
             "the staging solo link is one the page may hand to the browser"
         );
         assert_eq!(
-            launch_link(&host_link(), None, "staging"),
+            launch_link(&host_link(), None, "staging", None),
             format!("{}&api=staging", host_link())
         );
         assert_eq!(
-            launch_link(&host_link(), Some("tk.1_2-3"), "staging"),
+            launch_link(&host_link(), Some("tk.1_2-3"), "staging", None),
             format!("{}&ticket=tk.1_2-3&api=staging", host_link())
         );
         // A ticket that would make the link something the Player's grammar does not allow is dropped, never the link.
-        let long_worker_link = format!("eustress-player://join/h?pin={}", "a".repeat(500));
+        // 559 characters, a 2,048-character ticket and the API name are more than the 2,614 the final grammar allows.
+        let long_worker_link = format!("eustress-player://join/h?pin={}", "a".repeat(530));
         assert_eq!(
-            launch_link(&long_worker_link, Some(&"b".repeat(2_048)), "staging"),
+            launch_link(&long_worker_link, Some(&"b".repeat(2_048)), "staging", None),
             format!("{long_worker_link}&api=staging")
         );
         assert_eq!(
-            launch_link(&host_link(), Some("a b"), "staging"),
+            launch_link(&host_link(), Some("a b"), "staging", None),
             format!("{}&api=staging", host_link())
         );
     }
@@ -2065,6 +2266,183 @@ mod tests {
         );
         assert!(!is_player_link("eustress-player://play/a b?api=staging"));
         assert!(!is_player_link("eustress-player://play/../x?api=staging"));
+    }
+
+    fn manifest(json: &str) -> ReleaseState {
+        ReleaseState::Released(serde_json::from_str(json).expect("manifest"))
+    }
+
+    const WINDOWS_ONLY: &str = r#"{ "version": "0.2.0", "channel": "staging",
+        "platforms": { "windows-x64-installer": { "url": "https://downloads.eustress.dev/staging/player/v0.2.0/Setup.exe", "size_bytes": 85000000 } } }"#;
+
+    #[test]
+    fn the_minimum_version_comes_from_the_manifest_only_in_the_x_y_z_form() {
+        assert_eq!(player_min(&manifest(WINDOWS_ONLY)), None, "a manifest without min_version puts nothing on links");
+        let with_min = WINDOWS_ONLY.replacen("\"channel\"", "\"min_version\": \"0.2.0\", \"channel\"", 1);
+        assert_eq!(player_min(&manifest(&with_min)), Some("0.2.0".to_string()));
+        let padded = WINDOWS_ONLY.replacen("\"channel\"", "\"min_version\": \" 0.2.0 \", \"channel\"", 1);
+        assert_eq!(player_min(&manifest(&padded)), Some("0.2.0".to_string()));
+        for odd in ["latest", "0.2", "0.2.0-beta", "v0.2.0", "1.2.3.4", "", "0..2", "123456.0.0"] {
+            let json = WINDOWS_ONLY.replacen("\"channel\"", &format!("\"min_version\": \"{odd}\", \"channel\""), 1);
+            assert_eq!(player_min(&manifest(&json)), None, "{odd:?}");
+        }
+        for state in [ReleaseState::Checking, ReleaseState::Unreleased, ReleaseState::Unreachable] {
+            assert_eq!(player_min(&state), None);
+        }
+    }
+
+    #[test]
+    fn every_play_and_join_link_carries_the_minimum_when_there_is_one() {
+        let solo = "eustress-player://play/aaaaaaaa-1111-4111-8111-aaaaaaaaaaaa";
+        let production = launch_link(solo, None, "production", Some("0.2.0"));
+        assert_eq!(production, format!("{solo}?api=production&min=0.2.0"));
+        assert!(is_player_link(&production), "{production}");
+        let staged = launch_link(solo, None, "staging", Some("0.2.0"));
+        assert_eq!(staged, format!("{solo}?api=staging&min=0.2.0"));
+        assert!(is_player_link(&staged), "{staged}");
+
+        let join = launch_link(&host_link(), None, "staging", Some("0.2.0"));
+        assert_eq!(join, format!("{}&api=staging&min=0.2.0", host_link()));
+        assert!(is_player_link(&join), "{join}");
+        let ticketed = launch_link(&host_link(), Some("tk.1_2-3"), "staging", Some("0.2.0"));
+        assert_eq!(ticketed, format!("{}&ticket=tk.1_2-3&api=staging&min=0.2.0", host_link()));
+        assert!(is_player_link(&ticketed), "{ticketed}");
+
+        // The longest Worker link with the longest ticket and the longest minimum is still a link the page may hand over.
+        let worker = format!("eustress-player://join/h?pin={}", "a".repeat(512 - "eustress-player://join/h?pin=".len()));
+        assert_eq!(worker.len(), 512);
+        let longest = launch_link(&worker, Some(&"b".repeat(2_048)), "production", Some("99999.99999.99999"));
+        assert!(longest.contains("&ticket=") && longest.ends_with("&api=production&min=99999.99999.99999"), "{longest:.80}");
+        assert!(is_player_link(&longest));
+
+        // A minimum of any other form is left off; the link is otherwise the same.
+        for odd in ["0.2", "0.2.0-beta", "a.b.c", "1.2.3.4", "", "0.2.0&x=1"] {
+            assert_eq!(launch_link(solo, None, "production", Some(odd)), format!("{solo}?api=production"), "{odd:?}");
+        }
+    }
+
+    #[test]
+    fn a_solo_link_takes_a_minimum_only_after_the_api_name_and_only_as_a_version() {
+        let id = "aaaaaaaa-1111-4111-8111-aaaaaaaaaaaa";
+        for good in ["?api=production&min=0.2.0", "?api=staging&min=10.20.30", "?api=staging&min=99999.99999.99999"] {
+            let link = format!("eustress-player://play/{id}{good}");
+            assert!(is_player_link(&link), "{link}");
+        }
+        for bad in [
+            "?min=0.2.0",
+            "?min=0.2.0&api=staging",
+            "?api=staging&min=",
+            "?api=staging&min=0.2",
+            "?api=staging&min=0.2.0.1",
+            "?api=staging&min=0.2.0x",
+            "?api=staging&min=0.2.0&x=1",
+            "?api=staging&min=0.2.0&min=0.2.0",
+            "?api=staging&mins=0.2.0",
+            "?api=staging&min=123456.0.0",
+            "?api=dev&min=0.2.0",
+        ] {
+            let link = format!("eustress-player://play/{id}{bad}");
+            assert!(!is_player_link(&link), "{link}");
+        }
+        let join = host_link();
+        assert!(is_player_link(&format!("{join}&api=staging&min=0.2.0")));
+        assert!(!is_player_link(&format!("{join}&api=staging&min=abc")), "a join link's minimum is a version too");
+        assert!(!is_player_link(&format!("{join}&api=staging&min=0.2.0&min=0.3.0")), "and named once");
+    }
+
+    #[test]
+    fn a_signed_in_solo_play_in_the_desktop_player_asks_for_a_play_ticket_and_nothing_else_does() {
+        let solo = "eustress-player://play/aaaaaaaa-1111-4111-8111-aaaaaaaaaaaa";
+        let id = "aaaaaaaa-1111-4111-8111-aaaaaaaaaaaa";
+        assert_eq!(
+            ticket_request(Kind::Solo, true, false, solo, id),
+            Some(TicketRequest { path: format!("/api/simulations/{id}/play-ticket"), body: serde_json::json!({}) })
+        );
+        assert_eq!(ticket_request(Kind::Solo, false, false, solo, id), None, "signed out: no ticket");
+        assert_eq!(ticket_request(Kind::Solo, true, true, solo, id), None, "the browser Player would never redeem it");
+        for odd in ["", "a/b", "../x", "a b", "a?b"] {
+            assert_eq!(ticket_request(Kind::Solo, true, false, solo, odd), None, "{odd:?}");
+        }
+        let join = host_link();
+        let pin = pin_of(&join).expect("pin").to_string();
+        assert_eq!(
+            ticket_request(Kind::Join, true, false, &join, id),
+            Some(TicketRequest { path: "/api/identity/ticket".to_string(), body: serde_json::json!({ "audience": pin }) })
+        );
+        assert_eq!(ticket_request(Kind::Join, false, false, &join, id), None);
+        assert_eq!(ticket_request(Kind::Join, true, false, "eustress-player://join/h:1?key=a", id), None, "no pin, no ticket");
+    }
+
+    #[test]
+    fn a_solo_link_names_the_api_first_then_its_ticket_and_minimum_in_either_order() {
+        let solo = "eustress-player://play/aaaaaaaa-1111-4111-8111-aaaaaaaaaaaa";
+        let with = launch_link(solo, Some("eit1.a_b-c"), "staging", None);
+        assert_eq!(with, format!("{solo}?api=staging&ticket=eit1.a_b-c"));
+        assert!(is_player_link(&with), "{with}");
+        let with_min = launch_link(solo, Some("eit1.a_b-c"), "production", Some("0.2.0"));
+        assert_eq!(with_min, format!("{solo}?api=production&ticket=eit1.a_b-c&min=0.2.0"));
+        assert!(is_player_link(&with_min), "{with_min}");
+        assert!(is_player_link(&format!("{solo}?api=staging&min=0.2.0&ticket=eit1.x")), "either order after the API name");
+        assert!(is_player_link(&format!("{solo}?api=staging&ticket={}", "t".repeat(2_048))));
+        // A ticket the grammar refuses leaves the link with the API name (and the minimum) only.
+        assert_eq!(launch_link(solo, Some("a b"), "staging", Some("0.2.0")), format!("{solo}?api=staging&min=0.2.0"));
+        assert_eq!(launch_link(solo, Some(""), "staging", None), format!("{solo}?api=staging"));
+        for bad in [
+            "?ticket=eit1.x&api=staging",
+            "?api=staging&ticket=",
+            "?api=staging&ticket=a b",
+            "?api=staging&ticket=a\"b",
+            "?api=staging&ticket=eit1.x&ticket=eit1.y",
+            "?api=staging&ticket=eit1.x&min=0.2.0&min=0.2.0",
+            "?api=staging&ticket=eit1.x&x=1",
+            "?api=staging&ticket=eit1.x&api=production",
+        ] {
+            let link = format!("{solo}{bad}");
+            assert!(!is_player_link(&link), "{link}");
+        }
+        assert!(!is_player_link(&format!("{solo}?api=staging&ticket={}", "t".repeat(2_049))), "a ticket is at most 2,048");
+    }
+
+    #[test]
+    fn the_fallback_offers_this_computers_build_and_no_button_for_a_computer_the_release_has_none_for() {
+        let release = manifest(WINDOWS_ONLY);
+        match fallback_download(&release, Some(DesktopPlatform::Windows)) {
+            FallbackDownload::Build(DesktopPlatform::Windows, file) => {
+                // The permanent link of the manifest the site reads (the native test reads as production).
+                assert_eq!(file.url, "https://downloads.eustress.dev/player/latest/windows-x64-installer");
+                assert_eq!(file.asset.size_label(), "85 MB");
+            }
+            other => panic!("{other:?}"),
+        }
+        assert_eq!(
+            fallback_download(&release, Some(DesktopPlatform::MacOS)),
+            FallbackDownload::NoBuild(DesktopPlatform::MacOS),
+            "the staging 0.2.0 manifest has no macos-arm64: no build, no link"
+        );
+        assert_eq!(fallback_download(&release, Some(DesktopPlatform::Linux)), FallbackDownload::NoBuild(DesktopPlatform::Linux));
+        assert_eq!(fallback_download(&release, None), FallbackDownload::Page);
+        assert_eq!(fallback_download(&ReleaseState::Unreleased, Some(DesktopPlatform::Windows)), FallbackDownload::NoRelease);
+        assert_eq!(fallback_download(&ReleaseState::Unreachable, Some(DesktopPlatform::Windows)), FallbackDownload::Page);
+        assert_eq!(fallback_download(&ReleaseState::Checking, Some(DesktopPlatform::Windows)), FallbackDownload::Page);
+    }
+
+    #[test]
+    fn the_page_waits_three_seconds_and_listens_for_a_blur_or_a_hidden_page() {
+        assert_eq!(LAUNCH_WAIT_TICKS * 250, 3_000);
+        let watch = between(code(), "pub async fn watch_launch(", "\n}");
+        assert!(watch.contains("leptos::ev::blur"), "a blur between two checks still counts");
+        assert!(watch.contains("\"visibilitychange\"") && watch.contains("d.hidden()"));
+        assert!(watch.contains("listeners.0.remove()") && watch.contains("listeners.1.remove()"), "the listeners are removed");
+        // The browser Player gets no minimum: it is the site's own build.
+        let play = between(code(), "let play = Callback::new(", "// Escape closes.");
+        assert!(play.contains("let min = if browser { None } else { player_release.with_untracked(player_min) };"));
+        let not_opened = between(code(), "Handoff::NotOpened { link } => {", "<PlayerHelp open=true />");
+        assert!(not_opened.contains("fallback_download(release, DesktopPlatform::detect())"));
+        assert!(not_opened.contains("FallbackDownload::NoBuild(_) | FallbackDownload::NoRelease => None,"));
+        assert!(not_opened.contains("<button class=\"btn btn-secondary\" on:click=try_again>\"Try again\"</button>"));
+        assert!(not_opened.contains("play.run(retry_kind)"), "Try again plays again, so a signed-in viewer gets a fresh ticket");
+        assert_eq!(kind_of_link("eustress-player://join/h:1?pin=a&api=staging"), Kind::Join);
+        assert_eq!(kind_of_link("eustress-player://play/abc?api=staging&min=0.2.0"), Kind::Solo);
     }
 
     #[test]
@@ -2220,7 +2598,7 @@ mod tests {
         // What the page keeps is built without a ticket, and every Handoff in the callback is given only that.
         assert!(lines
             .iter()
-            .any(|l| l.trim() == "let shown = launch_link(&link, None, api);"));
+            .any(|l| l.trim() == "let shown = launch_link(&link, None, api, min.as_deref());"));
         let handoffs: Vec<&str> = lines
             .iter()
             .copied()

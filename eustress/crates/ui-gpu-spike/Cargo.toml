@@ -1,0 +1,46 @@
+[package]
+name = "eustress-ui-gpu-spike"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "Spike, not part of Studio: Studio's Slint UI drawn by Slint 1.19's Skia GPU renderer on Bevy's own wgpu 29 device, measured against the software path Studio uses today."
+
+[[bin]]
+name = "ui-gpu-spike"
+path = "src/main.rs"
+
+[features]
+# Everything heavy is behind `spike`, which nothing turns on by default. A
+# workspace-wide build or test (`cargo test --workspace`) therefore compiles an
+# empty binary here and never unifies this crate's Slint features (Skia, wgpu
+# 29) into the engine's Slint. Build it with:
+#   cargo build --release -p eustress-ui-gpu-spike --features spike
+default = []
+spike = ["dep:bevy", "dep:slint", "dep:skia-safe", "dep:slint-build"]
+
+[dependencies]
+bevy = { workspace = true, optional = true, features = [
+    "default_app",
+    "std",
+    "bevy_winit",
+    "multi_threaded",
+    "3d_bevy_render",
+] }
+# `renderer-skia` + `unstable-wgpu-29` give `SkiaWGPU29Renderer`, the only
+# renderer in Slint 1.19.0 that renders on a caller's wgpu 29 device (FemtoVG's
+# wgpu renderer is wgpu 30 only). `renderer-skia-vulkan` lets Skia use a Vulkan
+# wgpu device on Windows; Studio's device is Vulkan on this machine.
+slint = { workspace = true, optional = true, features = [
+    "renderer-skia",
+    "renderer-skia-vulkan",
+    "unstable-wgpu-29",
+] }
+# Not used directly. Slint's Skia on Windows with Vulkan asks skia-bindings for
+# d3d + gl + vulkan; rust-skia publishes prebuilt Skia for that set only with
+# svg and textlayout too. Asking for them here selects the published archive
+# (`...-d3d-ganesh-gl-jpegd-jpege-pdf-svg-textlayout-vulkan`) instead of a
+# from-source Skia build.
+skia-safe = { version = "0.157.0", optional = true, features = ["svg", "textlayout"] }
+
+[build-dependencies]
+slint-build = { git = "https://github.com/slint-ui/slint", tag = "v1.19.0", optional = true }

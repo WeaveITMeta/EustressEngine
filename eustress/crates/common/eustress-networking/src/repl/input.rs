@@ -196,7 +196,10 @@ impl PeerInput {
                 continue;
             }
             if let Some(n) = newest {
-                if s.tick + KEPT as u64 <= n {
+                // The tick is the player's own number, so the distance is
+                // taken by subtraction: `s.tick + KEPT` overflows near the
+                // top of the range.
+                if n.saturating_sub(s.tick) >= KEPT as u64 {
                     continue; // too old to matter
                 }
             }
@@ -258,6 +261,19 @@ mod tests {
             assert!(back.angle_between(d) < 0.0005, "{d} came back as {back}");
         }
         assert_eq!(decode_dir(encode_dir(Vec3::ZERO)).length(), 1.0);
+    }
+
+    /// A player chooses its ticks. The largest one there is must be read
+    /// like any other: in a build that checks arithmetic, adding the kept
+    /// window to it overflowed and took the host down.
+    #[test]
+    fn a_sample_with_the_largest_tick_does_not_overflow() {
+        let mut p = PeerInput::default();
+        let s = |tick| InputSample { tick, ..Default::default() };
+        assert_eq!(p.accept(&InputFrame { samples: vec![s(10)] }), 1);
+        assert_eq!(p.accept(&InputFrame { samples: vec![s(u64::MAX)] }), 1);
+        assert_eq!(p.latest().unwrap().tick, u64::MAX);
+        assert_eq!(p.accept(&InputFrame { samples: vec![s(u64::MAX - 1), s(11)] }), 1, "one inside the kept window, one far too old");
     }
 
     #[test]

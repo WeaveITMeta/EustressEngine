@@ -221,6 +221,20 @@ pub fn DocsUniversesPage() -> impl IntoView {
 
                 <main class="docs-content">
                     <header class="docs-hero">
+                        // The hero picture: the page's largest paint, so it loads at
+                        // once (no lazy loading, no entrance animation).
+                        <div class="docs-hero-art">
+                            <img
+                                src="/assets/learn/universes-hero-1600.webp"
+                                srcset="/assets/learn/universes-hero-800.webp 800w, /assets/learn/universes-hero-1600.webp 1600w"
+                                sizes="(max-width: 1024px) 100vw, 840px"
+                                alt="An open frame box holds three grid worlds side by side and a shared shelf of small blocks, with a row of fading panels receding behind the middle world."
+                                width="1600"
+                                height="900"
+                                fetchpriority="high"
+                                decoding="async"
+                            />
+                        </div>
                         <div class="docs-breadcrumb">
                             <a href="/learn">"Learn"</a>
                             <span class="separator">"/"</span>
@@ -691,6 +705,19 @@ git checkout <commit> -- Workspace/WelcomeCube/_instance.toml"#}</code></pre>
 
                         <div id="branching-git" class="subsection">
                             <h3>"Git Branches"</h3>
+                            <figure class="learn-figure">
+                                <img
+                                    src="/assets/learn/universes-fig-1-1200.webp"
+                                    srcset="/assets/learn/universes-fig-1-600.webp 600w, /assets/learn/universes-fig-1-1200.webp 1200w"
+                                    sizes="(max-width: 660px) 92vw, (max-width: 1099px) 600px, 500px"
+                                    alt="A thin slab of small cubes forks into two parallel slabs, one with a sphere in place of a cube, while one thick solid slab runs unbroken beneath both."
+                                    width="1200"
+                                    height="900"
+                                    loading="lazy"
+                                    decoding="async"
+                                />
+                                <figcaption>"A branch of a Space is a git branch of its folder, so switching branches changes the files. State that lives only in the database stays as it is on every branch."</figcaption>
+                            </figure>
                             <p>
                                 "A branch of a Space is a git branch of its folder. You can use any git client, or
                                 let an agent use the git tools of the "<a href="/learn/mcp">"MCP server"</a>"

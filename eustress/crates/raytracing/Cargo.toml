@@ -1,0 +1,57 @@
+[package]
+name = "eustress-raytracing"
+version = "0.1.0"
+edition = "2021"
+description = "Hardware ray-traced lighting (Bevy Solari, DLSS Ray Reconstruction), decided per launch and per GPU, for Studio and the Player."
+license = "PolyForm-Shield-1.0.0"
+
+# Studio (eustress-engine) and the Player (eustress-client) both link this
+# one crate, so a feature turned on for one is on for both in a build that
+# compiles them together: a `dlss` build gives both apps DLSS, and each app
+# inserts the DLSS project id before DefaultPlugins in every build.
+
+[dependencies]
+# Every bevy feature the code names, listed here so the crate builds alone
+# (the workspace bevy has default-features = false). Each is already on in
+# Studio's and the Player's own bevy feature sets, so linking this crate
+# turns on nothing new in either.
+bevy = { workspace = true, features = [
+    "bevy_log",
+    "bevy_render",
+    "bevy_pbr",
+    "bevy_asset",
+    "bevy_color",
+] }
+# The lighting, sky, terrain and light classes the traced scene mirrors.
+eustress-common = { path = "../common" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+dirs = { workspace = true }
+
+[dev-dependencies]
+# The tests run on the multi-threaded task pool Studio and the Player both
+# use. Two `surfaces` tests change a chunk while its proxy build is still
+# running; on the single-threaded pool a build finishes inside the frame that
+# started it, so there is never one to catch.
+bevy = { workspace = true, features = ["multi_threaded"] }
+
+[features]
+default = []
+# Hardware ray-traced lighting (Bevy Solari 0.19). Decided per launch and per
+# GPU (Auto by default, guarded); a GPU without ray queries draws exactly as
+# before. Adds bevy_solari (pure Rust and WGSL, no native SDK) and turns on
+# bevy_pbr's `dfg_lut` (bevy_solari asks for it), which every raster frame
+# then uses too. `dfg_lut` turns on bevy_image's zstd support, which refuses
+# to compile without a backend, so the backend Studio and the Player use is
+# named here and the crate builds alone with this feature.
+raytracing = ["bevy/bevy_solari", "bevy/zstd_rust"]
+# NVIDIA DLSS Ray Reconstruction on Solari cameras. Build-time: DLSS_SDK,
+# VULKAN_SDK, libclang and the MSVC C compiler. Run time: nvngx_dlss.dll and
+# nvngx_dlssd.dll beside the exe. Makes the renderer Vulkan-only wherever a
+# Vulkan driver exists (Bevy's raw_vulkan_init). `bevy_anti_alias` is named
+# because `bevy::anti_alias` (the dlss module) exists only with it.
+dlss = ["raytracing", "bevy/dlss", "bevy/bevy_anti_alias"]
+# For CI and machines without the DLSS SDK: compiles every `dlss` code path
+# with DLSS itself compiled out (dlss_wgpu's `mock`; Bevy's dlss module
+# absent; raw_vulkan_init still on), so `--all-features` builds anywhere.
+force_disable_dlss = ["dlss", "bevy/force_disable_dlss"]

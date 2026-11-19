@@ -1,11 +1,11 @@
 //! How much of an outside string Studio's Slint UI draws at once.
 //!
-//! Slint's software renderer keeps physical coordinates as `i16`: a glyph
-//! more than 32,767 physical px from its Text's origin used to abort Studio
-//! (0xC0000409). A Text sized to its content grows one line per line of its
-//! string, and a line with no break grows sideways, so a string from a file,
-//! a Space, a model or a peer could crash Studio by its shape alone. The
-//! renderer is patched to clip instead (`.patches/slint-2447c697/PATCH.md`);
+//! Slint's software renderer keeps physical coordinates as `i16`. A Text
+//! sized to its content grows one line per line of its string, and a line
+//! with no break grows sideways, so a string from a file, a Space, a model
+//! or a peer can reach far past 32,767 physical px. Slint 1.19 clips such
+//! text instead of aborting the process (`render_tests` below holds every
+//! Slint update to that);
 //! the bound (`eustress_common::text_bound`, re-exported here) keeps every
 //! such Text a size a person can read and a frame can lay out, at any display
 //! scale up to 200%. [`shown_block`], [`shown_nowrap`] and [`shown_line`]
@@ -261,39 +261,9 @@ mod sink_scan {
     }
 }
 
-/// The renderer patch is made for one Slint revision. While it is applied,
-/// every Slint crate in the lockfile must come from that revision: a `cargo
-/// update` that moves Slint fails here until the patch is checked against
-/// the new revision (`.patches/slint-2447c697/PATCH.md`, `verify.mjs`).
-#[cfg(test)]
-mod slint_patch {
-    const MANIFEST: &str = include_str!("../../../../Cargo.toml");
-    const LOCK: &str = include_str!("../../../../Cargo.lock");
-    const PATCHED_FOR: &str = "2447c697327e7f87c5044af229e0be6c18608fcc";
-
-    #[test]
-    fn slint_stays_on_the_revision_the_patch_was_made_for() {
-        if !MANIFEST.contains(".patches/slint-2447c697/i-slint-renderer-software") {
-            return; // the patch is not applied
-        }
-        let sources: Vec<&str> = LOCK
-            .lines()
-            .filter(|l| l.starts_with("source = \"git+https://github.com/slint-ui/slint"))
-            .collect();
-        assert!(!sources.is_empty(), "no Slint crates in Cargo.lock");
-        for source in sources {
-            assert!(
-                source.ends_with(&format!("#{PATCHED_FOR}\"")),
-                "Slint moved ({source}) while .patches/slint-2447c697 is applied: check the patch \
-                 against the new revision (PATCH.md, verify.mjs) before building with it"
-            );
-        }
-    }
-}
-
-/// The renderer half (`.patches/slint-2447c697/PATCH.md`): text past the
-/// software renderer's `i16` pixel space draws instead of aborting Studio.
-/// Every raw case here panics with the stock renderer.
+/// The renderer half: text past the software renderer's `i16` pixel space
+/// draws instead of aborting Studio. A Slint revision whose renderer panics
+/// on any raw case here (1.17 did) fails this test.
 #[cfg(test)]
 mod render_tests {
     use super::*;

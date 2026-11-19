@@ -1,0 +1,45 @@
+[asset]
+mesh = "parts/ball.glb"
+scene = "Scene0"
+
+[metadata]
+archivable = true
+class_name = "Part"
+created = "2026-11-16T00:00:00Z"
+last_modified = "2026-11-16T00:00:00Z"
+name = "Fill"
+unit = "m"
+uuid = "83ecee1f71297f356caf0aeb5545e7e8"
+
+[properties]
+anchored = true
+can_collide = false
+cast_shadow = false
+color = [
+    255,
+    255,
+    255,
+]
+destructible = false
+locked = false
+material = "H_Emissive"
+reflectance = 0.0
+transparency = 0.0
+
+[transform]
+position = [
+    -5.0,
+    3.0,
+    3.0,
+]
+rotation = [
+    0.0,
+    0.0,
+    0.0,
+    1.0,
+]
+scale = [
+    0.1,
+    0.1,
+    0.1,
+]

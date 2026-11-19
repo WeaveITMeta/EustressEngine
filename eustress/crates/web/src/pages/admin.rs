@@ -293,6 +293,11 @@ pub fn AdminPage() -> impl IntoView {
                 </div>
                 <h1 class="dashboard-title">"Analytics"</h1>
                 <p class="dashboard-subtitle">"Visits, sign-ups, and the conversion funnel."</p>
+                <p class="admin-links">
+                    <a class="btn btn-secondary" href="/admin/appeals">"Review appeals"</a>
+                    " "
+                    <a class="btn btn-secondary" href="/admin/telemetry">"Tool telemetry"</a>
+                </p>
             </section>
 
             <div class="dashboard-container">

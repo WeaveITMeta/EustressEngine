@@ -996,3 +996,20 @@ test('a rejection that is neither the destination nor ours goes to review after 
   const short = (await treasuryCall(env, 'holds', { status: 'held' })).holds.find((h) => h.user_id === 'short');
   assert.ok(short && short.attempts >= HOLD_MAX_REJECTED_ATTEMPTS, 'a short balance is ours: tried without limit');
 });
+// An agent account (src/agents.mjs) earns nothing (D4). Its routes refuse effort already; the settlement holds if one ever
+// gets through: its share is not minted, as a banned account's is not (security review 2026-11-15, F2).
+test('a settlement mints nothing for an agent account, and pays the people beside it', async () => {
+  const { env, counter } = world({ treasuryUsd: 100_000 });
+  const D = day(1);
+  user(env, 'u-person', { stripe_connect_id: 'acct_p' });
+  user(env, 'u-agent', { account_type: 'agent', sponsor_id: 'u-person' });
+  contrib(env, D, 'u-person', 300);
+  contrib(env, D, 'u-agent', 300);
+  const s = stripe();
+  const { job } = await withFetch(s.fetch, () => settle(env, counter, D));
+  assert.equal(job.phase, 'done', JSON.stringify(job.errors));
+  assert.equal(await ledgerBalanceMinor(env, 'u-agent'), 0);
+  assert.ok((await ledgerBalanceMinor(env, 'u-person')) > 0);
+  const dist = JSON.parse(env.PAYOUTS.store.get(`distribution:${D}`).value);
+  assert.equal(dist.recipients.length, 1);
+});

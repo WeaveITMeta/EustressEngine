@@ -1,0 +1,11 @@
+# EEP _service.toml: marks this folder as a Service container.
+[service]
+class_name = "StarterCharacterScripts"
+icon = "starterplayer"
+description = "Scripts cloned into each character on spawn"
+can_have_children = true
+
+[metadata]
+id = "startercharacterscripts-service"
+created = "2026-11-16T00:00:00Z"
+last_modified = "2026-11-16T00:00:00Z"

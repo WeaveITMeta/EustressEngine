@@ -54,6 +54,22 @@ Studio makes after a publish, with every limit that route has: the daily number 
 and a case a person holds staying with the person. A review that is not started then is started by the moderation sweep,
 which reviews pending listings on its own.
 
+## A pending appeal is withdrawn
+
+McKale 2026-11-14 ("Withdraw it"). An appeal is about the version that was decided. When the listing changes while an
+appeal waits for a person, the changed listing gets its own review, and the appeal is withdrawn:
+- the run that reviews it (trigger `publish` or `sweep`) marks the appeal `withdrawn` and logs `appeal_withdrawn`;
+- it takes the appeal out of the Review Workspace;
+- a person's later `moderation_resolve_appeal` is refused ("no pending appeal"), so it can never overwrite the newer
+  decision.
+
+This covers every change: a web edit of the title or description, a tags change, and a Studio republish. A staff rerun
+does not withdraw it, and a hold or quarantine is never reviewed this way.
+
+The creator sees the appeal status `withdrawn`, with "You changed this listing, so your appeal was withdrawn and the new
+version was reviewed instead." While an appeal is pending, the edit dialog says that saving a new title or description
+withdraws it; a change to visibility alone keeps it. The creator may appeal the new decision.
+
 ## Never mid-review
 
 A review run judges the title and description it read when it began, and its verdict is applied to the listing as it is

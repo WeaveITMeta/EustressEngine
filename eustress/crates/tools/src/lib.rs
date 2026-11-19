@@ -75,6 +75,8 @@ pub mod spatial_tools;
 pub mod universe_tools;
 pub mod website_tools;
 pub mod moderation_tools;
+/// The Guardian Code judge for authors: the guide, the listing checks and the verdict.
+pub mod judge_tools;
 /// A tool result that carries an image (the screenshot tools).
 pub mod image_result;
 /// The AI camera tools, for the hosts that run them off the engine's main
@@ -101,6 +103,12 @@ pub fn register_all_tools(registry: &mut ToolRegistry) {
     registry.register(website_tools::WebsiteAddReferenceTool);
     registry.register(website_tools::WebsiteRemoveReferenceTool);
     registry.register(website_tools::WebsiteManifestUrlTool);
+    // The sim page: theme, images and off-site links (PageSpec v1).
+    registry.register(website_tools::WebsiteThemeGetTool);
+    registry.register(website_tools::WebsiteThemeSetTool);
+    registry.register(website_tools::WebsiteLinkAddTool);
+    registry.register(website_tools::WebsiteLinkRemoveTool);
+    registry.register(website_tools::WebsiteLinksListTool);
 
     // Gallery moderation queue, over api.eustress.dev with an admin JWT. Network
     // tools; inert without EUSTRESS_MODERATOR_TOKEN (see moderation_tools.rs).
@@ -108,6 +116,13 @@ pub fn register_all_tools(registry: &mut ToolRegistry) {
     registry.register(moderation_tools::ModerationCaseTool);
     registry.register(moderation_tools::ModerationActTool);
     registry.register(moderation_tools::ModerationBackfillTool);
+
+    // The listing review (Guardian Code) for authors, so a Space is compliant from the
+    // start: the guide offline, the deterministic listing checks offline, and the live
+    // verdict rules over the network. None writes a file (see judge_tools.rs).
+    registry.register(judge_tools::JudgeGuideTool);
+    registry.register(judge_tools::JudgeCheckListingTool);
+    registry.register(judge_tools::JudgeVerdictTool);
 
     registry.register(entity_tools::CreateEntityTool);
     registry.register(entity_tools::InsertGaussianSplatsTool);

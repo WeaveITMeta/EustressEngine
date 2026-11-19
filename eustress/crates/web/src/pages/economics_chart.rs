@@ -554,7 +554,7 @@ mod tests {
     }
 
     /// The drawings the admin view and Actual mode add, for a month: where Eustress's half goes, the same month with a shortfall,
-    /// a month with gifts to the Treasury, and a period of payouts.
+    /// a month with gifts to the Treasury, a month with engine sponsorships, and a period of payouts.
     fn every_drawing(s: &Inputs) -> Vec<String> {
         let m = company(s);
         let e = expenses(s, &m);
@@ -565,9 +565,13 @@ mod tests {
         gifts.gifts_usd = 1000.0;
         gifts.gross += 1000.0;
         gifts.actual = true;
+        let mut sponsors = m.clone();
+        sponsors.sponsors_usd = 1000.0;
+        sponsors.gross += 1000.0;
+        sponsors.actual = true;
         let days = vec![PayoutDay { date: "2026-10-01".into(), paid_usd: 12.5, contributors: 3 }, PayoutDay { date: "2026-10-02".into(), paid_usd: 0.0, contributors: 0 }];
         let mut out = all_three(s).to_vec();
-        out.extend([expenses_svg(&e, "a month"), expenses_svg(&short, "a month"), company_svg(s, &gifts), payouts_svg(&days, "in 2026-10")]);
+        out.extend([expenses_svg(&e, "a month"), expenses_svg(&short, "a month"), company_svg(s, &gifts), company_svg(s, &sponsors), payouts_svg(&days, "in 2026-10")]);
         out
     }
 

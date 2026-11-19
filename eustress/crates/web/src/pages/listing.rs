@@ -7,6 +7,11 @@
 //   GET /api/simulations/{id}            the listing (and, for its author, the review)
 //   GET /api/simulations/{id}/live       is it hosted now
 //   GET /api/simulations/{id}/previews   the captures Studio took at publish
+//   GET /api/simulations/{id}/page       the themed page and the README (api/sim_page.rs)
+//
+// Under the short description sit four tabs (docs/design/SIM_PAGE_README_AND_TABS.md, section 4): Servers (live status), Shop (the
+// Space's passes), Links (the approved page links) and About (the README, components/readme.rs). Links and About are shown only
+// when there is something in them. Details sits in the right column, under the download and Studio buttons.
 //
 // Every Play button here opens the Play chooser in place (components/play_chooser.rs); the Play area itself is the same panel the
 // chooser draws, so the page and the dialog never disagree. A Space that is not in the Gallery is its author's to see, and everyone
@@ -24,8 +29,12 @@ use leptos::task::spawn_local;
 use crate::api::catalog::{self, art_of, card_tags, is_multiplayer, published_words, rating_words, size_words, suggested_tags_label, ArtKind, Listing};
 use crate::api::ApiClient;
 use crate::api::live::{latency_label, LiveServer};
+use crate::api::sim_page::{self as sim_api, SimPage};
+use crate::pages::listing_edit::ListingEditDialog;
+use crate::pages::sim_page::{banner_view, gallery_view, links_view, logo_view, theme_of};
 use crate::components::play_chooser::{now_ms, status_of, watch, Facts, Live, Load, PlayChooserSlot, PlayStatePanel, Status, Viewer};
-use crate::components::{CentralNav, Footer};
+use crate::components::{CentralNav, Footer, PassStore};
+use crate::components::readme::{has_readme, readme_view};
 use crate::components::adult_content::{Age21ListingNotice, AdultListingNotice};
 use crate::pages::review_panel::status_label;
 use crate::state::{AppState, AuthState};
@@ -116,6 +125,93 @@ pub fn detail_rows(listing: &Listing, now_ms: f64) -> Vec<(&'static str, String)
 /// The crumb between "Gallery" and the Space: its first tag, as the link that filters the Gallery to it.
 pub fn crumb_tag(listing: &Listing) -> Option<String> {
     card_tags(listing).into_iter().next()
+}
+
+/// The tabs under the description (docs/design/SIM_PAGE_README_AND_TABS.md, section 4), in the order the bar shows them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Tab {
+    Servers,
+    Shop,
+    Links,
+    About,
+}
+
+impl Tab {
+    pub const ALL: [Tab; 4] = [Tab::Servers, Tab::Shop, Tab::Links, Tab::About];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Tab::Servers => "Servers",
+            Tab::Shop => "Shop",
+            Tab::Links => "Links",
+            Tab::About => "About",
+        }
+    }
+
+    /// The word in the tab's and its panel's element ids.
+    pub fn key(self) -> &'static str {
+        match self {
+            Tab::Servers => "servers",
+            Tab::Shop => "shop",
+            Tab::Links => "links",
+            Tab::About => "about",
+        }
+    }
+
+    fn index(self) -> usize {
+        match self {
+            Tab::Servers => 0,
+            Tab::Shop => 1,
+            Tab::Links => 2,
+            Tab::About => 3,
+        }
+    }
+}
+
+/// Whether the page has an approved link to show (the Links tab).
+pub fn page_has_links(page: &Option<SimPage>) -> bool {
+    page.as_ref().is_some_and(|p| !sim_api::visible_links(&p.links).is_empty())
+}
+
+/// Whether the page has a README that draws anything (the About tab).
+pub fn page_has_readme(page: &Option<SimPage>) -> bool {
+    page.as_ref().and_then(|p| p.readme.as_ref()).is_some_and(has_readme)
+}
+
+/// The tabs shown: Servers and Shop always, Links and About only when they have something.
+pub fn visible_tabs(links: bool, about: bool) -> Vec<Tab> {
+    Tab::ALL.into_iter().filter(|t| match t {
+        Tab::Links => links,
+        Tab::About => about,
+        _ => true,
+    }).collect()
+}
+
+/// The tab that is up: the one the visitor chose, while it is shown; before they choose, About when there is one, else Servers.
+/// The README arrives after the listing, so a visitor who has not chosen moves to About when it comes.
+pub fn shown_tab(chosen: Option<Tab>, visible: &[Tab]) -> Tab {
+    match chosen {
+        Some(t) if visible.contains(&t) => t,
+        _ if visible.contains(&Tab::About) => Tab::About,
+        _ => Tab::Servers,
+    }
+}
+
+/// The tab a key moves to from `current`: left and right step through the shown tabs and wrap, Home and End go to the ends.
+/// Any other key moves nothing.
+pub fn key_tab(current: Tab, visible: &[Tab], key: &str) -> Option<Tab> {
+    let n = visible.len();
+    if n == 0 {
+        return None;
+    }
+    let at = visible.iter().position(|t| *t == current).unwrap_or(0);
+    match key {
+        "ArrowRight" => Some(visible[(at + 1) % n]),
+        "ArrowLeft" => Some(visible[(at + n - 1) % n]),
+        "Home" => Some(visible[0]),
+        "End" => Some(visible[n - 1]),
+        _ => None,
+    }
 }
 
 // -----------------------------------------------------------------------------
@@ -253,6 +349,19 @@ fn ListingBody(listing: Listing, live: RwSignal<Live>) -> impl IntoView {
             });
         });
     }
+    // The themed page the creator set and the Worker approved (docs/design/SIM_PAGE_THEME_AND_LINKS.md). Nothing, for any failure:
+    // the page is then exactly what it is without one.
+    let page = RwSignal::new(None::<SimPage>);
+    {
+        let id = id.clone();
+        Effect::new(move |_| {
+            let id = id.clone();
+            spawn_local(async move {
+                let client = ApiClient::new(&api_url.get_value());
+                page.set(sim_api::fetch_page(&client, &id).await);
+            });
+        });
+    }
     let frames = {
         let listing = listing.clone();
         Memo::new(move |_| frames_of(&listing, &previews.get()))
@@ -283,13 +392,33 @@ fn ListingBody(listing: Listing, live: RwSignal<Live>) -> impl IntoView {
     let note = moderation.note.clone();
     let play_id = id.clone();
     let join_id = id.clone();
+    // Share Source is on: anyone may open a copy in Studio (a fork into a new Universe of their own).
+    let studio_copy = listing.studio_copy_link();
+    let is_open = studio_copy.is_some();
+    // The author edits the title, description, visibility and tags here (pages/listing_edit.rs).
+    let editing = RwSignal::new(false);
+    let edit_listing = StoredValue::new(listing.clone());
+    let can_edit = is_author.clone();
 
     let playing = move || match live.get() {
         Live::Hosted { players, .. } => players,
         _ => 0,
     };
 
+    // The tabs under the description. Which are shown follows the page; which is up follows the visitor's choice, and before they
+    // choose it is About when the README is there (it arrives after the listing) and Servers otherwise.
+    let shop_id = id.clone();
+    let chosen = RwSignal::new(None::<Tab>);
+    let tabs = Memo::new(move |_| page.with(|p| visible_tabs(page_has_links(p), page_has_readme(p))));
+    let current = Memo::new(move |_| tabs.with(|v| shown_tab(chosen.get(), v)));
+    let tab_refs: [NodeRef<leptos::html::Button>; 4] = [NodeRef::new(), NodeRef::new(), NodeRef::new(), NodeRef::new()];
+
     view! {
+        <div
+            class=move || sim_api::root_class(theme_of(&page.get()).as_ref())
+            style=move || sim_api::root_style(theme_of(&page.get()).as_ref())
+        >
+        {move || banner_view(&page.get(), &api_url.get_value())}
         <div class="g-wrap">
             <nav class="g-crumbs" aria-label="Breadcrumb">
                 <a href="/gallery">"Gallery"</a>
@@ -339,7 +468,7 @@ fn ListingBody(listing: Listing, live: RwSignal<Live>) -> impl IntoView {
                             _ => ().into_any(),
                         }}
                     </div>
-                    <h1 class="g-ltitle">{name.clone()}</h1>
+                    <h1 class="g-ltitle">{move || logo_view(&page.get(), &api_url.get_value())}{name.clone()}</h1>
                     {author.zip(author_href).map(|(a, href)| view! {
                         <a class="g-maker" href=href><span class="g-av" aria-hidden="true">{initial}</span>{format!("@{a}")}</a>
                     })}
@@ -369,14 +498,63 @@ fn ListingBody(listing: Listing, live: RwSignal<Live>) -> impl IntoView {
                         }}
                     </div>
                     <div class="g-links">
+                        {move || can_edit().then(|| view! {
+                            <button type="button" class="g-btn g-btn-primary g-edit-listing" on:click=move |_| editing.set(true)>"Edit listing"</button>
+                        })}
                         <a class="g-btn" href="/downloads/player">"Download Eustress Player"</a>
+                        {studio_copy.map(|link| view! {
+                            <a class="g-btn g-btn-primary g-studio-copy" href=link>"Open a copy in Studio"</a>
+                        })}
                     </div>
+                    {is_open.then(|| view! {
+                        <p class="g-hint g-studio-hint">
+                            "The author shares this Space's source. Studio saves your copy as a new Universe of your own; publishing it makes a new listing, and this one stays as it is. Needs "
+                            <a href="/download">"Eustress Studio"</a>"."
+                        </p>
+                    })}
+                    <section class="g-csec g-ldetails">
+                        <h2>"Details"</h2>
+                        <dl class="g-kv g-glass">
+                            {details.into_iter().map(|(k, v)| view! { <dt>{k}</dt><dd>{v}</dd> }).collect_view()}
+                        </dl>
+                    </section>
                 </aside>
 
                 <div class="g-lcopy">
-                    {(!description.is_empty()).then(|| view! {
-                        <section class="g-csec"><h2>"About"</h2><p class="g-about">{description}</p></section>
-                    })}
+                    {move || gallery_view(&page.get(), &api_url.get_value())}
+                    {(!description.is_empty()).then(|| view! { <p class="g-about lt-desc">{description}</p> })}
+                    <div
+                        class="lt-tabs"
+                        role="tablist"
+                        aria-label="About this Space"
+                        on:keydown=move |ev| {
+                            let next = tabs.with_untracked(|v| key_tab(current.get_untracked(), v, ev.key().as_str()));
+                            if let Some(tab) = next {
+                                ev.prevent_default();
+                                chosen.set(Some(tab));
+                                if let Some(button) = tab_refs[tab.index()].get_untracked() {
+                                    let _ = button.focus();
+                                }
+                            }
+                        }
+                    >
+                        {move || tabs.get().into_iter().map(|tab| view! {
+                            <button
+                                type="button"
+                                role="tab"
+                                class="lt-tab"
+                                id=format!("lt-tab-{}", tab.key())
+                                aria-controls=format!("lt-panel-{}", tab.key())
+                                aria-selected=move || (current.get() == tab).to_string()
+                                tabindex=move || if current.get() == tab { "0" } else { "-1" }
+                                node_ref=tab_refs[tab.index()]
+                                on:click=move |_| chosen.set(Some(tab))
+                            >
+                                {tab.label()}
+                            </button>
+                        }).collect_view()}
+                    </div>
+                    <div class="lt-panel" role="tabpanel" id="lt-panel-servers" aria-labelledby="lt-tab-servers" tabindex="0" hidden=move || current.get() != Tab::Servers>
                     {move || {
                         let listed = matches!(status, Status::Listed | Status::Private);
                         match live.get() {
@@ -414,17 +592,31 @@ fn ListingBody(listing: Listing, live: RwSignal<Live>) -> impl IntoView {
                                     </div>
                                 </section>
                             }.into_any(),
-                            _ => ().into_any(),
+                            _ if !listed => view! { <p class="g-hint lt-empty">"Servers show here once this Space is listed."</p> }.into_any(),
+                            _ => view! { <p class="g-hint lt-empty">"No live status to show right now."</p> }.into_any(),
                         }
                     }}
-                    <section class="g-csec">
-                        <h2>"Details"</h2>
-                        <dl class="g-kv g-glass">
-                            {details.into_iter().map(|(k, v)| view! { <dt>{k}</dt><dd>{v}</dd> }).collect_view()}
-                        </dl>
-                    </section>
+                    </div>
+                    <div class="lt-panel lt-shop" role="tabpanel" id="lt-panel-shop" aria-labelledby="lt-tab-shop" tabindex="0" hidden=move || current.get() != Tab::Shop>
+                        <PassStore sim_id=shop_id />
+                        <p class="g-hint lt-empty lt-shop-empty">"Nothing for sale in this Space yet."</p>
+                    </div>
+                    {move || page_has_links(&page.get()).then(|| view! {
+                        <div class="lt-panel" role="tabpanel" id="lt-panel-links" aria-labelledby="lt-tab-links" tabindex="0" hidden=move || current.get() != Tab::Links>
+                            {links_view(&page.get_untracked())}
+                        </div>
+                    })}
+                    {move || page.with(|p| p.as_ref().and_then(|p| p.readme.clone())).filter(has_readme).map(|readme| view! {
+                        <div class="lt-panel lt-about" role="tabpanel" id="lt-panel-about" aria-labelledby="lt-tab-about" tabindex="0" hidden=move || current.get() != Tab::About>
+                            {readme_view(&readme, &api_url.get_value())}
+                        </div>
+                    })}
                 </div>
             </div>
+        </div>
+        {move || editing.get().then(|| view! {
+            <ListingEditDialog listing=edit_listing.get_value() on_close=Callback::new(move |_| editing.set(false)) />
+        })}
         </div>
     }
 }
@@ -611,6 +803,106 @@ mod tests {
         let live = include_str!("listing.rs").split("#[cfg(test)]").next().unwrap();
         assert!(live.contains("suggested_tags_label(&listing, is_author())"));
         assert!(!live.contains("suggested_tags_label(&listing, true)"));
+    }
+
+    /// The page's own source, without the tests.
+    fn page_source() -> &'static str {
+        include_str!("listing.rs").split(concat!("#[cfg", "(test)]")).next().unwrap()
+    }
+
+    #[test]
+    fn details_sits_in_the_right_column_under_the_download_link_and_the_studio_hint() {
+        let page = page_source();
+        let at = |needle: &str| page.find(needle).unwrap_or_else(|| panic!("{needle} is not in the page"));
+        let download = at("\"Download Eustress Player\"");
+        let studio_hint = at("class=\"g-hint g-studio-hint\"");
+        let details = at("<h2>\"Details\"</h2>");
+        let side_end = at("</aside>");
+        let copy = at("<div class=\"g-lcopy\">");
+        assert!(download < details && studio_hint < details, "Details comes after the download link and the open-source hint");
+        assert!(details < side_end && side_end < copy, "Details is in the right column, not in the left one");
+        assert_eq!(page.matches("<h2>\"Details\"</h2>").count(), 1, "Details is drawn once");
+        assert!(!page.contains("<h2>\"About\"</h2>"), "the short description has no heading");
+    }
+
+    #[test]
+    fn the_four_tabs_are_named_and_drawn_as_a_tab_list() {
+        let labels: Vec<&str> = Tab::ALL.iter().map(|t| t.label()).collect();
+        assert_eq!(labels, ["Servers", "Shop", "Links", "About"]);
+        let page = page_source();
+        for needle in [
+            "role=\"tablist\"",
+            "role=\"tab\"",
+            "role=\"tabpanel\"",
+            "{tab.label()}",
+            "aria-selected=",
+            "aria-controls=format!(\"lt-panel-{}\", tab.key())",
+            "id=\"lt-panel-servers\"",
+            "id=\"lt-panel-shop\"",
+            "id=\"lt-panel-links\"",
+            "id=\"lt-panel-about\"",
+            "<PassStore sim_id=shop_id />",
+            "readme_view(&readme,",
+            "links_view(&page.get_untracked())",
+        ] {
+            assert!(page.contains(needle), "{needle} is not in the page");
+        }
+        // The live status moved into the Servers panel, the Offline line and Join with it.
+        let servers = at_between(page, "id=\"lt-panel-servers\"", "id=\"lt-panel-shop\"");
+        assert!(servers.contains("\"Offline: nobody is hosting right now\"") && servers.contains(">\"Join\"</button>"), "{servers}");
+    }
+
+    fn at_between<'a>(page: &'a str, from: &str, to: &str) -> &'a str {
+        let a = page.find(from).expect("start");
+        let b = a + page[a..].find(to).expect("end");
+        &page[a..b]
+    }
+
+    #[test]
+    fn links_and_about_show_only_with_something_in_them_and_about_comes_up_first() {
+        assert_eq!(visible_tabs(false, false), [Tab::Servers, Tab::Shop]);
+        assert_eq!(visible_tabs(true, false), [Tab::Servers, Tab::Shop, Tab::Links]);
+        assert_eq!(visible_tabs(false, true), [Tab::Servers, Tab::Shop, Tab::About]);
+        assert_eq!(visible_tabs(true, true), Tab::ALL);
+        // Before the visitor chooses: About when it is there, else Servers. The README arriving later moves an unchosen page to About.
+        assert_eq!(shown_tab(None, &visible_tabs(true, false)), Tab::Servers);
+        assert_eq!(shown_tab(None, &visible_tabs(false, true)), Tab::About);
+        // A choice holds while its tab is shown, including after the README arrives.
+        assert_eq!(shown_tab(Some(Tab::Shop), &visible_tabs(false, false)), Tab::Shop);
+        assert_eq!(shown_tab(Some(Tab::Shop), &visible_tabs(false, true)), Tab::Shop);
+        assert_eq!(shown_tab(Some(Tab::Links), &visible_tabs(false, false)), Tab::Servers, "a hidden tab is never up");
+        assert_eq!(shown_tab(Some(Tab::About), &visible_tabs(false, false)), Tab::Servers);
+    }
+
+    #[test]
+    fn the_arrow_keys_move_through_the_shown_tabs_and_wrap() {
+        let v = visible_tabs(false, true);
+        assert_eq!(key_tab(Tab::Servers, &v, "ArrowRight"), Some(Tab::Shop));
+        assert_eq!(key_tab(Tab::Shop, &v, "ArrowRight"), Some(Tab::About), "Links is hidden, so it is skipped");
+        assert_eq!(key_tab(Tab::About, &v, "ArrowRight"), Some(Tab::Servers));
+        assert_eq!(key_tab(Tab::Servers, &v, "ArrowLeft"), Some(Tab::About));
+        assert_eq!(key_tab(Tab::Shop, &v, "Home"), Some(Tab::Servers));
+        assert_eq!(key_tab(Tab::Servers, &v, "End"), Some(Tab::About));
+        assert_eq!(key_tab(Tab::Servers, &v, "Enter"), None);
+        assert_eq!(key_tab(Tab::Servers, &[], "ArrowRight"), None);
+    }
+
+    #[test]
+    fn the_tabs_follow_what_the_page_has() {
+        use crate::api::sim_page::{PageLink, Readme};
+        let mut page = SimPage::default();
+        assert!(!page_has_links(&Some(page.clone())) && !page_has_readme(&Some(page.clone())));
+        assert!(!page_has_links(&None) && !page_has_readme(&None));
+        // A link that would not be drawn does not make a Links tab.
+        page.links = vec![PageLink { kind: "website".into(), url: "http://insecure.example".into(), label: "Site".into() }];
+        assert!(!page_has_links(&Some(page.clone())));
+        page.links.push(PageLink { kind: "website".into(), url: "https://example.com".into(), label: "Site".into() });
+        assert!(page_has_links(&Some(page.clone())));
+        // A README that draws nothing (only raw HTML) makes no About tab.
+        page.readme = Some(Readme { markdown: "<div>hidden</div>".into(), ..Default::default() });
+        assert!(!page_has_readme(&Some(page.clone())));
+        page.readme = Some(Readme { markdown: "# Battery lab".into(), ..Default::default() });
+        assert!(page_has_readme(&Some(page)));
     }
 
     #[test]

@@ -1,0 +1,48 @@
+[asset]
+mesh = "parts/block.glb"
+scene = "Scene0"
+
+[attributes]
+surface = "emissive"
+
+[metadata]
+archivable = true
+class_name = "Part"
+created = "2026-11-16T00:00:00Z"
+last_modified = "2026-11-16T00:00:00Z"
+name = "EmissivePanel"
+unit = "m"
+uuid = "9402dad3800f33931b704b715ffc552e"
+
+[properties]
+anchored = true
+can_collide = true
+cast_shadow = false
+color = [
+    255,
+    230,
+    200,
+]
+destructible = false
+locked = false
+material = "H_Emissive"
+reflectance = 0.0
+transparency = 0.0
+
+[transform]
+position = [
+    1.230903,
+    0.5,
+    1.415948,
+]
+rotation = [
+    0.0,
+    0.0,
+    0.0,
+    1.0,
+]
+scale = [
+    0.6,
+    1.0,
+    0.05,
+]

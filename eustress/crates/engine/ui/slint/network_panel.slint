@@ -1,433 +1,277 @@
 // ============================================================================
-// Eustress Engine Studio - Network Panel
-// Server management and multiplayer testing
+// Eustress Studio - Network panel
+// Hosting the open Space, in the order a creator follows it: Host (start or
+// stop the server, live state), Players (who is in, Add Player), Share (the
+// join link, who may join, the Gallery), Monitor (Stress Test, Output).
+// The ribbon's Test tab and the Network menu follow the same order.
+//
+// Every value comes from Rust: `HostingUi` (engine/src/preferences.rs pushes
+// it from `crate::multiplayer`) and `Preferences` (Settings > Hosting).
+// Chrome: DialogScrim > DialogCard (DRAFTING_UX.md Law 1). Escape, the close
+// button and an outside click all close it.
 // ============================================================================
 
-import { VerticalBox, HorizontalBox, ScrollView, Slider, Button } from "std-widgets.slint";
-import { Theme, PanelHeader } from "theme.slint";
+import { ScrollView } from "std-widgets.slint";
+import { Theme } from "theme.slint";
+import { DialogScrim, DialogCard, KitButton, KitSwitch, KitNotice, SettingsGroup, SettingRow, KitSectionLabel } from "dialog_kit.slint";
+import { Preferences } from "settings.slint";
 
-// Connected client data
-export struct ClientData {
-    id: int,
-    name: string,
-    ping: int,
-    status: string,
-    is-synthetic: bool,
+// Hosting now, for the Test tab, the Network menu and the Network panel.
+export global HostingUi {
+    // "off", "starting" or "on" (`multiplayer::HostPhase::as_str`).
+    in property <string> state: "off";
+    // The UDP port, once listening.
+    in property <int> port: 0;
+    // Players in the session, the creator's character counted while it exists.
+    in property <int> players: 0;
+    in property <int> max-players: 0;
+    // The link players use; empty until the server listens.
+    in property <string> join-link: "";
+    // The joined players, in the order they joined.
+    in property <[string]> player-names: [];
+    // The creator's own character is one of the players.
+    in property <bool> host-plays: false;
+    // Open the Player on this computer, joined to this server.
+    callback add-player();
+    // Put the link to share on the clipboard.
+    callback copy-link();
+}
+
+// A status dot: green while hosting, amber while starting, grey when off.
+export component HostingDot inherits Rectangle {
+    in property <string> state: "off";
+    width: 10px;
+    height: 10px;
+    border-radius: 5px;
+    background: root.state == "on" ? Theme.accent-green : root.state == "starting" ? Theme.accent-yellow : Theme.text-secondary;
+    drop-shadow-blur: root.state == "on" ? 6px : 0px;
+    drop-shadow-color: Theme.accent-green.with-alpha(0.6);
 }
 
 export component NetworkPanel inherits Rectangle {
-    // Properties
-    in property <bool> server-running: false;
-    in property <string> server-address: "";
-    in property <int> server-port: 7777;
-    in property <[ClientData]> clients: [];
-    in property <int> synthetic-client-count: 0;
-    in property <bool> forge-connected: false;
-    in property <string> forge-status: "";
-    
-    // Stats
-    in property <int> bytes-sent: 0;
-    in property <int> bytes-received: 0;
-    in property <int> packets-per-second: 0;
-    in property <float> avg-latency: 0;
-    
-    // Callbacks
     callback on-start-server();
     callback on-stop-server();
-    callback on-connect-forge();
-    callback on-disconnect-forge();
-    callback on-allocate-server();
-    callback on-spawn-synthetic-clients(int);
-    callback on-disconnect-all();
-    callback on-kick-client(int);
-    callback on-start-stress-test();
-    
-    background: Theme.panel-background;
-    
-    VerticalBox {
-        padding: 0px;
-        spacing: 0px;
-        
-        PanelHeader {
-            title: "Network";
+    callback on-show-stress-test();
+    callback on-show-output();
+    callback on-show-hosting-settings();
+    callback on-close();
+
+    property <bool> hosting: HostingUi.state == "on";
+    property <bool> starting: HostingUi.state == "starting";
+
+    width: 100%;
+    height: 100%;
+    background: transparent;
+
+    // Escape closes. Other keys pass through.
+    keys := FocusScope {
+        width: 100%;
+        height: 100%;
+        init => { self.focus(); }
+        key-pressed(event) => {
+            if (event.text == Key.Escape) {
+                root.on-close();
+                return accept;
+            }
+            return reject;
         }
-        
-        ScrollView {
-            vertical-stretch: 1;
-            
-            VerticalBox {
-                padding: 8px;
-                spacing: 12px;
-                
-                // Server section
-                Text {
-                    text: "Local Server";
-                    color: Theme.text-secondary;
-                    font-size: 11px;
-                    font-weight: 600;
-                }
-                
-                Rectangle {
-                    height: 60px;
-                    background: Theme.background-tertiary;
-                    border-radius: 4px;
-                    
-                    HorizontalBox {
-                        padding: 12px;
-                        spacing: 12px;
-                        
-                        // Status indicator
-                        Rectangle {
-                            width: 12px;
-                            height: 12px;
-                            background: root.server-running ? Theme.accent-green : Theme.text-secondary;
-                            border-radius: 6px;
-                        }
-                        
-                        VerticalBox {
-                            horizontal-stretch: 1;
-                            spacing: 2px;
-                            
-                            Text {
-                                text: root.server-running ? "Server Running" : "Server Stopped";
-                                color: Theme.text-primary;
-                                font-weight: 500;
-                            }
-                            
-                            if root.server-running: Text {
-                                text: root.server-address + ":" + root.server-port;
-                                color: Theme.text-secondary;
-                                font-size: 11px;
-                            }
-                        }
-                        
-                        Rectangle {
-                            width: 80px;
-                            height: 32px;
-                            background: root.server-running ? Theme.accent-red : Theme.button-primary;
-                            border-radius: 4px;
-                            
-                            TouchArea {
-                                clicked => {
-                                    if root.server-running {
-                                        root.on-stop-server();
-                                    } else {
-                                        root.on-start-server();
-                                    }
-                                }
-                            }
-                            
-                            Text {
-                                text: root.server-running ? "Stop" : "Start";
-                                color: white;
-                                horizontal-alignment: center;
-                                vertical-alignment: center;
-                            }
-                        }
-                    }
-                }
-                
-                // Forge Cloud section
-                Text {
-                    text: "Forge Cloud";
-                    color: Theme.text-secondary;
-                    font-size: 11px;
-                    font-weight: 600;
-                }
-                
-                Rectangle {
-                    height: 48px;
-                    background: Theme.background-tertiary;
-                    border-radius: 4px;
-                    
-                    HorizontalBox {
-                        padding: 12px;
-                        spacing: 12px;
-                        
-                        Rectangle {
-                            width: 12px;
-                            height: 12px;
-                            background: root.forge-connected ? Theme.accent-green : Theme.text-secondary;
-                            border-radius: 6px;
-                        }
-                        
-                        Text {
-                            horizontal-stretch: 1;
-                            text: root.forge-connected ? root.forge-status : "Not connected";
-                            color: Theme.text-primary;
-                            vertical-alignment: center;
-                        }
-                        
-                        Rectangle {
-                            width: 80px;
-                            height: 28px;
-                            background: Theme.button-background;
-                            border-radius: 4px;
-                            
-                            TouchArea {
-                                clicked => {
-                                    if root.forge-connected {
-                                        root.on-disconnect-forge();
-                                    } else {
-                                        root.on-connect-forge();
-                                    }
-                                }
-                            }
-                            
-                            Text {
-                                text: root.forge-connected ? "Disconnect" : "Connect";
-                                color: Theme.text-primary;
-                                font-size: 12px;
-                                horizontal-alignment: center;
-                                vertical-alignment: center;
-                            }
-                        }
-                    }
-                }
-                
-                if root.forge-connected: Rectangle {
-                    height: 32px;
-                    background: Theme.button-background;
-                    border-radius: 4px;
-                    
-                    TouchArea {
-                        clicked => { root.on-allocate-server(); }
-                    }
-                    
-                    Text {
-                        text: "Allocate Cloud Server";
-                        color: Theme.text-primary;
-                        horizontal-alignment: center;
-                        vertical-alignment: center;
-                    }
-                }
-                
-                // Stats section
-                if root.server-running: VerticalBox {
-                    spacing: 8px;
-                    
-                    Text {
-                        text: "Statistics";
-                        color: Theme.text-secondary;
-                        font-size: 11px;
-                        font-weight: 600;
-                    }
-                    
-                    Rectangle {
-                        height: 80px;
-                        background: Theme.background-tertiary;
-                        border-radius: 4px;
-                        
-                        HorizontalBox {
-                            padding: 12px;
-                            spacing: 16px;
-                            
-                            VerticalBox {
-                                horizontal-stretch: 1;
-                                
-                                Text {
-                                    text: root.clients.length;
-                                    color: Theme.accent-blue;
-                                    font-size: 24px;
-                                    font-weight: 600;
-                                }
-                                
-                                Text {
-                                    text: "Clients";
-                                    color: Theme.text-secondary;
-                                    font-size: 11px;
-                                }
-                            }
-                            
-                            VerticalBox {
-                                horizontal-stretch: 1;
-                                
-                                Text {
-                                    text: round(root.avg-latency) + "ms";
-                                    color: Theme.accent-green;
-                                    font-size: 24px;
-                                    font-weight: 600;
-                                }
-                                
-                                Text {
-                                    text: "Avg Latency";
-                                    color: Theme.text-secondary;
-                                    font-size: 11px;
-                                }
-                            }
-                            
-                            VerticalBox {
-                                horizontal-stretch: 1;
-                                
-                                Text {
-                                    text: root.packets-per-second;
-                                    color: Theme.accent-yellow;
-                                    font-size: 24px;
-                                    font-weight: 600;
-                                }
-                                
-                                Text {
-                                    text: "Packets/s";
-                                    color: Theme.text-secondary;
-                                    font-size: 11px;
-                                }
-                            }
-                        }
-                    }
-                }
-                
-                // Synthetic clients section
-                Text {
-                    text: "Synthetic Clients";
-                    color: Theme.text-secondary;
-                    font-size: 11px;
-                    font-weight: 600;
-                }
-                
-                HorizontalBox {
-                    spacing: 8px;
-                    
-                    Text {
-                        text: "Count:";
-                        color: Theme.text-primary;
-                        vertical-alignment: center;
-                    }
-                    
-                    Slider {
-                        horizontal-stretch: 1;
-                        minimum: 0;
-                        maximum: 100;
-                        value: root.synthetic-client-count;
-                    }
-                    
-                    Text {
-                        width: 30px;
-                        text: root.synthetic-client-count;
-                        color: Theme.text-secondary;
-                        horizontal-alignment: right;
-                        vertical-alignment: center;
-                    }
-                }
-                
-                HorizontalBox {
-                    spacing: 8px;
-                    
-                    Rectangle {
-                        horizontal-stretch: 1;
-                        height: 32px;
-                        background: Theme.button-primary;
-                        border-radius: 4px;
-                        
-                        TouchArea {
-                            clicked => { root.on-spawn-synthetic-clients(root.synthetic-client-count); }
-                        }
-                        
-                        Text {
-                            text: "Spawn";
-                            color: white;
-                            horizontal-alignment: center;
-                            vertical-alignment: center;
-                        }
-                    }
-                    
-                    Rectangle {
-                        horizontal-stretch: 1;
-                        height: 32px;
-                        background: Theme.button-background;
-                        border-radius: 4px;
-                        
-                        TouchArea {
-                            clicked => { root.on-disconnect-all(); }
-                        }
-                        
-                        Text {
-                            text: "Disconnect All";
-                            color: Theme.text-primary;
-                            horizontal-alignment: center;
-                            vertical-alignment: center;
-                        }
-                    }
-                }
-                
-                // Stress test
-                Rectangle {
-                    height: 32px;
-                    background: Theme.button-background;
-                    border-radius: 4px;
-                    
-                    TouchArea {
-                        clicked => { root.on-start-stress-test(); }
-                    }
-                    
-                    Text {
-                        text: "Start Stress Test...";
-                        color: Theme.text-primary;
-                        horizontal-alignment: center;
-                        vertical-alignment: center;
-                    }
-                }
-                
-                // Connected clients list
-                if root.clients.length > 0: VerticalBox {
-                    spacing: 4px;
-                    
-                    Text {
-                        text: "Connected Clients";
-                        color: Theme.text-secondary;
-                        font-size: 11px;
-                        font-weight: 600;
-                    }
-                    
-                    for client in root.clients: Rectangle {
-                        height: 36px;
-                        background: client-touch.has-hover ? Theme.explorer-item-hover : transparent;
-                        border-radius: 4px;
-                        
-                        client-touch := TouchArea {}
-                        
-                        HorizontalBox {
-                            padding: 8px;
+
+        DialogScrim {
+            dismiss => { root.on-close(); }
+
+            DialogCard {
+                x: (parent.width - self.width) / 2;
+                y: (parent.height - self.height) / 2;
+                width: min(460px, parent.width - 40px);
+                height: min(620px, parent.height - 40px);
+                icon: @image-url("../../assets/icons/ui/network.svg");
+                title: "Network";
+                subtitle: "Host this Space, test it as a player, and share it.";
+                close => { root.on-close(); }
+
+                ScrollView {
+                    vertical-stretch: 1;
+
+                    VerticalLayout {
+                        padding: 16px;
+                        spacing: 18px;
+
+                        // ── Host ────────────────────────────────────────
+                        VerticalLayout {
                             spacing: 8px;
-                            
+                            KitSectionLabel { text: "HOST"; }
                             Rectangle {
-                                width: 8px;
-                                height: 8px;
-                                background: client.status == "connected" ? Theme.accent-green : Theme.text-secondary;
-                                border-radius: 4px;
-                            }
-                            
-                            Text {
-                                horizontal-stretch: 1;
-                                text: client.name + (client.is-synthetic ? " (synthetic)" : "");
-                                color: Theme.text-primary;
-                                vertical-alignment: center;
-                            }
-                            
-                            Text {
-                                text: client.ping + "ms";
-                                color: client.ping < 50 ? Theme.accent-green :
-                                       client.ping < 100 ? Theme.accent-yellow :
-                                       Theme.accent-red;
-                                font-size: 11px;
-                                vertical-alignment: center;
-                            }
-                            
-                            Rectangle {
-                                width: 50px;
-                                height: 24px;
-                                background: Theme.button-background;
-                                border-radius: 4px;
-                                
-                                TouchArea {
-                                    clicked => { root.on-kick-client(client.id); }
+                                background: Theme.background-secondary.with-alpha(0.6);
+                                border-radius: Theme.radius-md;
+                                border-width: 1px;
+                                border-color: root.hosting ? Theme.accent-green.with-alpha(0.45) : Theme.border-color;
+
+                                HorizontalLayout {
+                                    padding: 12px;
+                                    spacing: 12px;
+                                    VerticalLayout {
+                                        alignment: center;
+                                        HostingDot { state: HostingUi.state; }
+                                    }
+                                    VerticalLayout {
+                                        horizontal-stretch: 1;
+                                        alignment: center;
+                                        spacing: 2px;
+                                        Text {
+                                            text: root.hosting ? "Server running" : root.starting ? "Starting the server..." : "Server off";
+                                            color: Theme.text-primary;
+                                            font-size: Theme.font-md;
+                                            font-weight: 600;
+                                        }
+                                        Text {
+                                            text: root.hosting
+                                                ? ("Port " + HostingUi.port + (Preferences.host-lan ? ", other computers can join" : ", this computer only"))
+                                                : "Studio hosts as the server: no character for you, the free camera is your view.";
+                                            color: Theme.text-secondary;
+                                            font-size: Theme.font-sm;
+                                            wrap: word-wrap;
+                                        }
+                                    }
+                                    VerticalLayout {
+                                        alignment: center;
+                                        KitButton {
+                                            text: root.hosting ? "Stop Server" : root.starting ? "Cancel" : "Start Server";
+                                            kind: root.hosting || root.starting ? "danger" : "primary";
+                                            clicked => {
+                                                if root.hosting || root.starting {
+                                                    root.on-stop-server();
+                                                } else {
+                                                    root.on-start-server();
+                                                }
+                                            }
+                                        }
+                                    }
                                 }
-                                
+                            }
+                        }
+
+                        // ── Players ─────────────────────────────────────
+                        VerticalLayout {
+                            spacing: 8px;
+                            KitSectionLabel { text: "PLAYERS"; }
+                            HorizontalLayout {
+                                spacing: 12px;
                                 Text {
-                                    text: "Kick";
-                                    color: Theme.text-primary;
-                                    font-size: 11px;
-                                    horizontal-alignment: center;
+                                    horizontal-stretch: 1;
                                     vertical-alignment: center;
+                                    text: root.hosting
+                                        ? (HostingUi.players + " of " + HostingUi.max-players + " players" + (HostingUi.host-plays ? ", you included" : ""))
+                                        : "Nobody can join until the server runs.";
+                                    color: root.hosting ? Theme.text-primary : Theme.text-secondary;
+                                    font-size: Theme.font-md;
+                                    font-weight: root.hosting ? 600 : 400;
+                                }
+                                KitButton {
+                                    text: "Add Player";
+                                    has-icon: true;
+                                    icon: @image-url("../../assets/icons/ui/user.svg");
+                                    enabled: root.hosting;
+                                    clicked => { HostingUi.add-player(); }
+                                }
+                            }
+                            Text {
+                                text: "Add Player opens the Player on this computer, joined to this server, so you can test as a player.";
+                                color: Theme.text-secondary;
+                                font-size: Theme.font-sm;
+                                wrap: word-wrap;
+                            }
+                            for name in HostingUi.player-names: Rectangle {
+                                height: 26px;
+                                border-radius: Theme.radius-sm;
+                                background: Theme.background-secondary.with-alpha(0.4);
+                                HorizontalLayout {
+                                    padding-left: 10px;
+                                    padding-right: 10px;
+                                    spacing: 8px;
+                                    VerticalLayout {
+                                        alignment: center;
+                                        Rectangle {
+                                            width: 6px;
+                                            height: 6px;
+                                            border-radius: 3px;
+                                            background: Theme.accent-green;
+                                        }
+                                    }
+                                    Text {
+                                        horizontal-stretch: 1;
+                                        text: name;
+                                        color: Theme.text-primary;
+                                        font-size: Theme.font-sm;
+                                        vertical-alignment: center;
+                                        overflow: elide;
+                                    }
+                                }
+                            }
+                        }
+
+                        // ── Share ───────────────────────────────────────
+                        SettingsGroup {
+                            title: "SHARE";
+                            note: "Who may join and the Gallery apply the next time the server starts.";
+                            SettingRow {
+                                divider: false;
+                                label: "Join link";
+                                description: root.hosting ? HostingUi.join-link : "Ready once the server runs.";
+                                KitButton {
+                                    text: "Copy Link";
+                                    has-icon: true;
+                                    icon: @image-url("../../assets/icons/ui/link.svg");
+                                    enabled: root.hosting;
+                                    clicked => { HostingUi.copy-link(); }
+                                }
+                            }
+                            SettingRow {
+                                label: "Players on other computers can join";
+                                description: "Off: this computer only. On: your local network, and the internet with the port forwarded.";
+                                KitSwitch {
+                                    managed: true;
+                                    checked: Preferences.host-lan;
+                                    toggled(on) => { Preferences.set("host_lan", on ? "1" : "0"); }
+                                }
+                            }
+                            SettingRow {
+                                label: "List in Gallery";
+                                description: "Show the session live on its Gallery page, for a published simulation hosted while you are signed in as its author.";
+                                KitSwitch {
+                                    managed: true;
+                                    checked: Preferences.host-list-in-gallery;
+                                    toggled(on) => { Preferences.set("host_list_in_gallery", on ? "1" : "0"); }
+                                }
+                            }
+                        }
+                        if Preferences.host-status != "": KitNotice {
+                            kind: "info";
+                            text: Preferences.host-status;
+                        }
+
+                        // ── Monitor ─────────────────────────────────────
+                        VerticalLayout {
+                            spacing: 8px;
+                            KitSectionLabel { text: "MONITOR"; }
+                            HorizontalLayout {
+                                spacing: 8px;
+                                alignment: start;
+                                KitButton {
+                                    text: "Stress Test...";
+                                    has-icon: true;
+                                    icon: @image-url("../../assets/icons/ui/stress.svg");
+                                    clicked => { root.on-show-stress-test(); }
+                                }
+                                KitButton {
+                                    text: "Output";
+                                    has-icon: true;
+                                    icon: @image-url("../../assets/icons/ui/terminal.svg");
+                                    clicked => { root.on-show-output(); }
+                                }
+                                KitButton {
+                                    text: "Hosting Settings...";
+                                    kind: "ghost";
+                                    clicked => { root.on-show-hosting-settings(); }
                                 }
                             }
                         }

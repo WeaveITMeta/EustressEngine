@@ -1,0 +1,48 @@
+[asset]
+mesh = "parts/block.glb"
+scene = "Scene0"
+
+[attributes]
+surface = "dielectric"
+
+[metadata]
+archivable = true
+class_name = "Part"
+created = "2026-11-16T00:00:00Z"
+last_modified = "2026-11-16T00:00:00Z"
+name = "DielectricCube"
+unit = "m"
+uuid = "2b2dc5135b433073f55faca24bfcf7d5"
+
+[properties]
+anchored = true
+can_collide = true
+cast_shadow = true
+color = [
+    180,
+    40,
+    40,
+]
+destructible = false
+locked = false
+material = "H_Dielectric"
+reflectance = 0.0
+transparency = 0.0
+
+[transform]
+position = [
+    1.065052,
+    0.35,
+    -1.3436,
+]
+rotation = [
+    0.0,
+    0.0,
+    0.0,
+    1.0,
+]
+scale = [
+    0.7,
+    0.7,
+    0.7,
+]

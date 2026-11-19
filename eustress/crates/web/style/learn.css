@@ -1,0 +1,1455 @@
+/* =============================================================================
+   LEARN: the /learn hub and every guide (/docs/*, /learn/{mcp,cli,ide,lsp})
+   Loaded after main.css. Every rule is scoped under .page-learn-industrial
+   (the hub) or .page-docs (the guides), so no other page can change.
+
+   What this sheet does:
+   - Reading rhythm: body text at 16px in a color that passes WCAG AA on the
+     page background (main.css draws guide prose in #6e7681, about 4.1:1),
+     a measure of about 72 characters, and a clear h1 / h2 / h3 ladder.
+   - Table of contents: calmer list, a left rail for subsections, and a
+     scroll-linked "you are here" state where the browser supports scroll
+     timelines; below 1024px it becomes a sticky strip of section chips.
+   - Code blocks: header on top of the code (main.css lays them out as a
+     flex row), one quiet panel, horizontal scroll inside the block.
+   - Tables, callouts and diagrams that read at a glance.
+   - Picture slots: .docs-hero-art (any guide's hero), .learn-figure (a
+     numbered figure in a guide) and .learn-hero-art (the hub's hero).
+     A page is complete without them, and a slot whose file is missing
+     shows a quiet panel instead of a broken-image icon.
+   ============================================================================= */
+
+/* -----------------------------------------------------------------------------
+   Tokens
+   -------------------------------------------------------------------------- */
+.page-docs,
+.page-learn-industrial {
+    --lx-bg: #0a0a12;
+    --lx-ink: #eef2f6;             /* headings: 17.5:1 on --lx-bg, 14.7:1 on a card */
+    --lx-body: #b6c0cb;            /* prose: 10.7:1, 9.0:1 on a card */
+    --lx-dim: #8f9aa6;             /* secondary text: 6.9:1, 5.8:1 on a card */
+    --lx-line: rgba(143, 154, 166, 0.16);
+    --lx-line-strong: rgba(143, 154, 166, 0.3);
+    --lx-panel: rgba(21, 25, 33, 0.78);
+    --lx-panel-deep: rgba(12, 15, 21, 0.92);
+    --lx-accent: var(--color-eustress-green, #3cba54);
+    --lx-accent-hi: var(--color-eustress-green-hover, #00e676);
+    --lx-accent-soft: rgba(60, 186, 84, 0.12);
+    --lx-accent-line: rgba(60, 186, 84, 0.45);
+    --lx-code: #a5c8ff;            /* inline code: 11.6:1 */
+    --lx-radius: 12px;
+    --lx-radius-sm: 8px;
+    --lx-measure: 72ch;
+    --lx-nav: 57px;                /* the fixed top bar */
+    --lx-anchor: 88px;             /* where an anchored heading lands */
+}
+
+/* Focus: one visible ring for every link and control in the stack. */
+.page-docs a:focus-visible,
+.page-docs button:focus-visible,
+.page-learn-industrial a:focus-visible,
+.page-learn-industrial button:focus-visible {
+    outline: 2px solid var(--lx-accent-hi);
+    outline-offset: 3px;
+    border-radius: 6px;
+}
+
+/* =============================================================================
+   GUIDES (.page-docs)
+   ============================================================================= */
+
+/* Layout ------------------------------------------------------------------ */
+.page-docs .docs-layout {
+    gap: 48px;
+}
+
+.page-docs .docs-content {
+    color: var(--lx-body);
+    font-size: 16px;
+    line-height: 1.75;
+}
+
+/* main.css gives every .docs-section the hub's centered 1200px box with 48px
+   side padding; inside a guide the content column already sets the width. */
+.page-docs .docs-section {
+    max-width: none;
+    margin: 0 0 72px;
+    padding: 0;
+    border-bottom: 0;
+    scroll-margin-top: var(--lx-anchor);
+}
+
+.page-docs .subsection {
+    margin-bottom: 48px;
+    scroll-margin-top: var(--lx-anchor);
+}
+
+.page-docs .subsection:last-child {
+    margin-bottom: 0;
+}
+
+/* Hero -------------------------------------------------------------------- */
+.page-docs .docs-hero {
+    --lx-hero-pad: 40px;
+    position: relative;
+    overflow: hidden;
+    padding: var(--lx-hero-pad);
+    margin-bottom: 64px;
+    text-align: left;
+    background:
+        radial-gradient(120% 140% at 100% 0%, rgba(60, 186, 84, 0.08) 0%, transparent 55%),
+        linear-gradient(180deg, rgba(24, 28, 37, 0.9) 0%, rgba(15, 18, 25, 0.9) 100%);
+    border: 1px solid var(--lx-line);
+    border-radius: 16px;
+}
+
+.page-docs .docs-breadcrumb {
+    margin-bottom: 12px;
+    font-size: 14px;
+    color: var(--lx-dim);
+}
+
+.page-docs .docs-breadcrumb .separator {
+    color: var(--lx-dim);
+    opacity: 1;
+}
+
+.page-docs .docs-breadcrumb .current {
+    color: var(--lx-body);
+}
+
+.page-docs .docs-breadcrumb a {
+    display: inline-flex;
+    align-items: center;
+    min-height: 24px;
+    color: var(--lx-accent);
+}
+
+.page-docs .docs-title {
+    margin: 0 0 16px;
+    font-size: clamp(2rem, 1.4rem + 2.2vw, 2.75rem);
+    line-height: 1.12;
+    letter-spacing: -0.025em;
+    color: var(--lx-ink);
+}
+
+.page-docs .docs-subtitle {
+    max-width: var(--lx-measure);
+    margin: 0 0 24px;
+    font-size: 18px;
+    line-height: 1.65;
+    color: var(--lx-body);
+}
+
+.page-docs .docs-meta {
+    gap: 8px;
+}
+
+.page-docs .docs-meta .meta-item {
+    gap: 6px;
+    padding: 4px 12px 4px 10px;
+    font-size: 13px;
+    line-height: 1.5;
+    color: var(--lx-body);
+    background: rgba(143, 154, 166, 0.08);
+    border: 1px solid var(--lx-line);
+    border-radius: 999px;
+}
+
+.page-docs .docs-meta .meta-item img {
+    width: 14px;
+    height: 14px;
+    opacity: 0.85;
+}
+
+/* The hero picture slot. One element, first inside .docs-hero:
+   <div class="docs-hero-art"><img ...></div>
+   It bleeds to the card's edges and is cropped to a wide band, so a 16:9
+   illustration never pushes the title far below the fold. */
+.page-docs .docs-hero-art {
+    margin: calc(-1 * var(--lx-hero-pad)) calc(-1 * var(--lx-hero-pad)) 32px;
+    aspect-ratio: 12 / 5;
+    overflow: hidden;
+    background:
+        radial-gradient(80% 120% at 70% 30%, rgba(60, 186, 84, 0.12) 0%, transparent 60%),
+        linear-gradient(135deg, #121722 0%, #0b0e15 100%);
+    border-bottom: 1px solid var(--lx-line);
+}
+
+.page-docs .docs-hero-art img {
+    display: block;
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    object-position: center;
+    /* A missing file shows the panel behind it, not alt text and a broken icon. */
+    color: transparent;
+    font-size: 0;
+}
+
+/* Section headings ------------------------------------------------------- */
+.page-docs .section-title {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    margin: 0 0 28px;
+    padding: 28px 0 0;
+    font-size: clamp(1.5rem, 1.25rem + 0.9vw, 1.875rem);
+    font-weight: 750;
+    line-height: 1.2;
+    letter-spacing: -0.015em;
+    text-transform: none;
+    color: var(--lx-ink);
+    border-top: 1px solid var(--lx-line);
+}
+
+.page-docs .section-number {
+    flex: none;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 40px;
+    height: 30px;
+    padding: 0 8px;
+    font-family: var(--font-mono, 'JetBrains Mono', monospace);
+    font-size: 14px;
+    font-weight: 700;
+    letter-spacing: 0.02em;
+    color: var(--lx-accent);
+    background: var(--lx-accent-soft);
+    border: 1px solid var(--lx-accent-line);
+    border-radius: 6px;
+}
+
+.page-docs .subsection h3 {
+    margin: 0 0 14px;
+    font-size: 1.3125rem;
+    font-weight: 650;
+    line-height: 1.3;
+    letter-spacing: -0.01em;
+    color: var(--lx-ink);
+}
+
+.page-docs .subsection h4 {
+    margin: 28px 0 10px;
+    font-size: 1.0625rem;
+    font-weight: 650;
+    color: var(--lx-ink);
+}
+
+/* Prose ------------------------------------------------------------------ */
+.page-docs .docs-content p {
+    font-size: 16px;
+    line-height: 1.75;
+    color: var(--lx-body);
+}
+
+.page-docs .subsection > p,
+.page-docs .docs-section > p,
+.page-docs .subsection > .docs-list,
+.page-docs .subsection > .numbered-list,
+.page-docs .subsection > ul,
+.page-docs .subsection > ol {
+    max-width: var(--lx-measure);
+}
+
+.page-docs .subsection > p {
+    margin: 0 0 18px;
+}
+
+.page-docs .docs-content strong {
+    color: var(--lx-ink);
+    font-weight: 650;
+}
+
+.page-docs .docs-content :where(code) {
+    padding: 1px 6px;
+    font-size: 0.875em;
+    color: var(--lx-code);
+    background: rgba(143, 154, 166, 0.1);
+    border: 1px solid rgba(143, 154, 166, 0.14);
+    border-radius: 5px;
+    overflow-wrap: break-word;
+}
+
+/* Links in prose, tables, lists and callouts: the accent with an underline,
+   so a link never depends on color alone. */
+.page-docs .docs-content a:not([class]) {
+    color: var(--lx-accent);
+    text-decoration: underline;
+    text-decoration-color: var(--lx-accent-line);
+    text-decoration-thickness: 1px;
+    text-underline-offset: 3px;
+    border-bottom: 0;
+}
+
+.page-docs .docs-content a:not([class]):hover {
+    color: var(--lx-accent-hi);
+    text-decoration-color: currentColor;
+}
+
+/* Lists ------------------------------------------------------------------ */
+.page-docs .docs-list {
+    margin: 8px 0 24px;
+    padding-left: 22px;
+}
+
+.page-docs .docs-list li {
+    margin-bottom: 10px;
+    padding-left: 4px;
+    line-height: 1.7;
+}
+
+.page-docs .docs-list li::marker {
+    color: var(--lx-accent);
+}
+
+.page-docs .numbered-list {
+    margin: 8px 0 24px;
+}
+
+.page-docs .numbered-list li {
+    margin: 0;
+    padding: 12px 0 12px 44px;
+    line-height: 1.65;
+    border-bottom: 1px solid var(--lx-line);
+}
+
+.page-docs .numbered-list li:last-child {
+    border-bottom: 0;
+}
+
+.page-docs .numbered-list li::before {
+    top: 13px;
+    width: 26px;
+    height: 26px;
+    font-family: var(--font-mono, 'JetBrains Mono', monospace);
+    font-size: 12px;
+    color: var(--lx-accent);
+    background: var(--lx-accent-soft);
+    border: 1px solid var(--lx-accent-line);
+    border-radius: 7px;
+}
+
+/* Code blocks ------------------------------------------------------------
+   Markup: <div class="code-block"><div class="code-header"><span
+   class="code-lang">..</span></div><pre><code>..</code></pre></div>, and
+   on a few pages <pre class="code-block"><code>..</code></pre>. */
+.page-docs .code-block {
+    display: block;
+    margin: 20px 0 28px;
+    padding: 0;
+    overflow: hidden;
+    font-size: 14px;
+    white-space: normal;
+    background: var(--lx-panel-deep);
+    border: 1px solid var(--lx-line);
+    border-radius: var(--lx-radius-sm);
+}
+
+.page-docs .code-block .code-header {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 8px 14px;
+    background: rgba(143, 154, 166, 0.06);
+    border-bottom: 1px solid var(--lx-line);
+    border-radius: 0;
+}
+
+/* Three small marks, the shape of a terminal or editor tab. Decorative. */
+.page-docs .code-block .code-header::before {
+    content: "";
+    flex: none;
+    width: 34px;
+    height: 8px;
+    background:
+        radial-gradient(circle at 4px 4px, rgba(143, 154, 166, 0.45) 3.5px, transparent 4px),
+        radial-gradient(circle at 17px 4px, rgba(143, 154, 166, 0.3) 3.5px, transparent 4px),
+        radial-gradient(circle at 30px 4px, rgba(143, 154, 166, 0.2) 3.5px, transparent 4px);
+}
+
+.page-docs .code-block .code-lang {
+    font-family: var(--font-mono, 'JetBrains Mono', monospace);
+    font-size: 12px;
+    font-weight: 500;
+    letter-spacing: 0.04em;
+    text-transform: none;
+    color: var(--lx-dim);
+}
+
+.page-docs .code-block pre {
+    margin: 0;
+    padding: 16px 18px;
+    overflow-x: auto;
+    white-space: pre;
+    background: transparent;
+    border-radius: 0;
+    scrollbar-width: thin;
+    scrollbar-color: rgba(143, 154, 166, 0.35) transparent;
+}
+
+.page-docs pre.code-block {
+    padding: 16px 18px;
+    overflow-x: auto;
+    white-space: pre;
+}
+
+.page-docs .code-block code,
+.page-docs .docs-content :where(pre) code {
+    display: block;
+    padding: 0;
+    font-family: var(--font-mono, 'JetBrains Mono', monospace);
+    font-size: 13.5px;
+    line-height: 1.7;
+    color: #dbe3ec;
+    white-space: pre;
+    background: none;
+    border: 0;
+    border-radius: 0;
+    overflow-wrap: normal;
+    tab-size: 4;
+}
+
+/* Tables -----------------------------------------------------------------
+   Kept as real tables on wide screens (main.css turns them into scroll
+   boxes at 768px and below). Separate borders let the frame round off. */
+.page-docs .docs-table {
+    width: 100%;
+    margin: 20px 0 28px;
+    border-collapse: separate;
+    border-spacing: 0;
+    font-size: 14.5px;
+    line-height: 1.55;
+    background: rgba(15, 18, 25, 0.6);
+    border: 1px solid var(--lx-line);
+    border-radius: var(--lx-radius-sm);
+    overflow: hidden;
+}
+
+.page-docs .docs-table th,
+.page-docs .docs-table td {
+    padding: 11px 16px;
+    text-align: left;
+    vertical-align: top;
+    border-bottom: 1px solid var(--lx-line);
+}
+
+.page-docs .docs-table tr:last-child td {
+    border-bottom: 0;
+}
+
+.page-docs .docs-table th {
+    font-size: 12px;
+    font-weight: 650;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    color: var(--lx-dim);
+    background: rgba(143, 154, 166, 0.07);
+    border-bottom-color: var(--lx-line-strong);
+    white-space: nowrap;
+}
+
+.page-docs .docs-table td {
+    color: var(--lx-body);
+}
+
+.page-docs .docs-table td:first-child {
+    color: var(--lx-ink);
+    font-weight: 500;
+}
+
+.page-docs .docs-table tbody tr:nth-child(even) td {
+    background: rgba(143, 154, 166, 0.035);
+}
+
+.page-docs .docs-table tbody tr:hover td {
+    background: rgba(60, 186, 84, 0.05);
+}
+
+/* A tool or setting name is never cut in the middle: its column grows to fit
+   it (a narrow screen scrolls the table), and code with spaces in it, such
+   as a command line, still wraps at the spaces. */
+.page-docs .docs-table code {
+    font-size: 0.86em;
+    overflow-wrap: normal;
+}
+
+/* Callouts --------------------------------------------------------------- */
+.page-docs .callout {
+    --lx-callout: #60a5fa;
+    --lx-callout-bg: rgba(96, 165, 250, 0.07);
+    gap: 14px;
+    max-width: calc(var(--lx-measure) + 80px);
+    margin: 24px 0 28px;
+    padding: 18px 20px 18px 18px;
+    background: var(--lx-callout-bg);
+    border: 1px solid var(--lx-line);
+    border-left: 3px solid var(--lx-callout);
+    border-radius: 4px var(--lx-radius-sm) var(--lx-radius-sm) 4px;
+}
+
+.page-docs .callout > img {
+    width: 20px;
+    height: 20px;
+    margin-top: 3px;
+}
+
+.page-docs .callout strong {
+    display: block;
+    margin-bottom: 4px;
+    font-size: 15.5px;
+    line-height: 1.45;
+    color: var(--lx-ink);
+}
+
+.page-docs .callout p {
+    margin: 0;
+    font-size: 15px;
+    line-height: 1.7;
+    color: var(--lx-body);
+}
+
+.page-docs .callout p + p {
+    margin-top: 8px;
+}
+
+.page-docs .callout-info { --lx-callout: #60a5fa; --lx-callout-bg: rgba(96, 165, 250, 0.07); }
+.page-docs .callout-tip { --lx-callout: #3cba54; --lx-callout-bg: rgba(60, 186, 84, 0.07); }
+.page-docs .callout-new { --lx-callout: #a78bfa; --lx-callout-bg: rgba(167, 139, 250, 0.08); }
+.page-docs .callout-advanced { --lx-callout: #e0a72e; --lx-callout-bg: rgba(224, 167, 46, 0.07); }
+.page-docs .callout-warning { --lx-callout: #f87171; --lx-callout-bg: rgba(248, 113, 113, 0.07); }
+
+/* Diagrams (inline SVG) -------------------------------------------------- */
+.page-docs .docs-figure,
+.page-docs .perspective-figure {
+    margin: 28px 0 32px;
+    padding: 28px 24px 20px;
+    background:
+        linear-gradient(rgba(143, 154, 166, 0.045) 1px, transparent 1px) 0 0 / 24px 24px,
+        linear-gradient(90deg, rgba(143, 154, 166, 0.045) 1px, transparent 1px) 0 0 / 24px 24px,
+        var(--lx-panel-deep);
+    border: 1px solid var(--lx-line);
+    border-radius: var(--lx-radius);
+}
+
+/* Labels near the right edge of a viewBox (for example "load, watch, save"
+   in the MCP diagram) are drawn past it; let them show inside the padding. */
+.page-docs .docs-diagram,
+.page-docs .perspective-diagram {
+    overflow: visible;
+}
+
+.page-docs .docs-figure figcaption,
+.page-docs .perspective-figure figcaption {
+    max-width: var(--lx-measure);
+    margin: 18px auto 0;
+    font-size: 14px;
+    line-height: 1.6;
+    color: var(--lx-dim);
+    text-align: center;
+}
+
+.page-docs .docs-diagram .dg-title { fill: var(--lx-ink); }
+.page-docs .docs-diagram .dg-label { fill: var(--lx-ink); }
+.page-docs .docs-diagram .dg-note { fill: #a3aeba; }
+.page-docs .docs-diagram .dg-box { fill: rgba(96, 165, 250, 0.13); stroke: #60a5fa; }
+.page-docs .docs-diagram .dg-box-accent { fill: rgba(34, 211, 238, 0.12); stroke: #22d3ee; }
+.page-docs .docs-diagram .dg-box-violet { fill: rgba(167, 139, 250, 0.15); stroke: #a78bfa; }
+.page-docs .docs-diagram .dg-box-muted { fill: rgba(143, 154, 166, 0.08); stroke: rgba(143, 154, 166, 0.55); }
+.page-docs .docs-diagram .dg-line { stroke: rgba(163, 174, 186, 0.75); }
+.page-docs .docs-diagram .dg-arrowhead { fill: rgba(163, 174, 186, 0.9); }
+.page-docs .perspective-diagram .pd-note { fill: #a3aeba; }
+
+/* Picture figures in a guide ---------------------------------------------
+   <figure class="learn-figure"><img ...><figcaption>..</figcaption></figure>
+   Numbered "Figure 1", "Figure 2" in page order. Beside its caption on
+   wide screens, stacked on narrow ones. */
+.page-docs .docs-content {
+    counter-reset: lx-figure;
+}
+
+.page-docs .learn-figure {
+    counter-increment: lx-figure;
+    max-width: 600px;
+    margin: 28px 0 36px;
+    padding: 0;
+}
+
+.page-docs .learn-figure img {
+    display: block;
+    width: 100%;
+    height: auto;
+    aspect-ratio: 4 / 3;
+    object-fit: cover;
+    background:
+        radial-gradient(70% 90% at 60% 35%, rgba(60, 186, 84, 0.1) 0%, transparent 60%),
+        linear-gradient(135deg, #131823 0%, #0b0e15 100%);
+    border: 1px solid var(--lx-line);
+    border-radius: var(--lx-radius);
+    color: transparent;
+    font-size: 0;
+}
+
+.page-docs .learn-figure figcaption {
+    margin-top: 12px;
+    font-size: 14.5px;
+    line-height: 1.6;
+    color: var(--lx-body);
+}
+
+.page-docs .learn-figure figcaption::before {
+    content: "Figure " counter(lx-figure);
+    display: block;
+    margin-bottom: 4px;
+    font-family: var(--font-mono, 'JetBrains Mono', monospace);
+    font-size: 12px;
+    font-weight: 600;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    color: var(--lx-accent);
+}
+
+@media (min-width: 1100px) {
+    .page-docs .learn-figure {
+        max-width: none;
+        display: grid;
+        grid-template-columns: minmax(0, 3fr) minmax(0, 2fr);
+        gap: 24px;
+        align-items: end;
+    }
+
+    .page-docs .learn-figure figcaption {
+        margin: 0;
+        padding: 0 0 6px 18px;
+        border-left: 2px solid var(--lx-accent-line);
+    }
+}
+
+/* Stat cards, feature cards, equations: same panel language -------------- */
+.page-docs .docs-content .stats-grid .stat-card,
+.page-docs .feature-card,
+.page-docs .equation-card {
+    background: var(--lx-panel);
+    border: 1px solid var(--lx-line);
+    border-radius: var(--lx-radius);
+}
+
+.page-docs .feature-card:hover {
+    border-color: var(--lx-accent-line);
+}
+
+.page-docs .feature-card p,
+.page-docs .stat-note,
+.page-docs .equation-label {
+    color: var(--lx-dim);
+}
+
+/* Closing call to action and previous / next ----------------------------- */
+.page-docs .future-cta {
+    margin-top: 32px;
+    padding: 32px 28px;
+    background:
+        radial-gradient(90% 140% at 50% 0%, rgba(60, 186, 84, 0.1) 0%, transparent 60%),
+        var(--lx-panel);
+    border: 1px solid var(--lx-accent-line);
+    border-radius: 14px;
+}
+
+.page-docs .future-cta p {
+    max-width: none;
+    font-size: 18px;
+}
+
+.page-docs .future-cta .cta-buttons a {
+    min-height: 44px;
+    display: inline-flex;
+    align-items: center;
+}
+
+.page-docs .docs-nav-footer {
+    gap: 16px;
+    margin-top: 56px;
+    padding-top: 28px;
+    border-top: 1px solid var(--lx-line);
+}
+
+.page-docs .nav-prev,
+.page-docs .nav-next {
+    min-height: 72px;
+    padding: 16px 20px;
+    max-width: 340px;
+    background: var(--lx-panel);
+    border: 1px solid var(--lx-line);
+    border-radius: var(--lx-radius);
+    transition: border-color 0.15s ease, background-color 0.15s ease;
+}
+
+.page-docs .nav-prev:hover,
+.page-docs .nav-next:hover {
+    background: rgba(60, 186, 84, 0.06);
+    border-color: var(--lx-accent-line);
+}
+
+.page-docs .nav-label {
+    font-size: 12px;
+    color: var(--lx-dim);
+}
+
+.page-docs .nav-title {
+    font-size: 16px;
+    color: var(--lx-ink);
+}
+
+/* Table of contents (desktop) --------------------------------------------- */
+.page-docs .docs-toc {
+    top: calc(var(--lx-nav) + 32px);
+    width: 264px;
+    max-height: calc(100vh - var(--lx-nav) - 56px);
+    padding: 20px 14px 16px;
+    background: rgba(14, 17, 24, 0.88);
+    border: 1px solid var(--lx-line);
+    border-radius: 14px;
+    backdrop-filter: none;
+    -webkit-backdrop-filter: none;
+    scrollbar-width: thin;
+    scrollbar-color: rgba(143, 154, 166, 0.3) transparent;
+}
+
+.page-docs .toc-header {
+    gap: 10px;
+    margin: 0 6px 12px;
+    padding-bottom: 14px;
+    border-bottom: 1px solid var(--lx-line);
+}
+
+.page-docs .toc-header h2 {
+    font-size: 16px;
+    line-height: 1.3;
+    color: var(--lx-ink);
+}
+
+.page-docs .toc-icon {
+    width: 22px;
+    height: 22px;
+}
+
+.page-docs .toc-nav {
+    gap: 2px;
+}
+
+.page-docs .toc-section {
+    margin-bottom: 6px;
+}
+
+.page-docs .toc-section-title {
+    display: block;
+    padding: 7px 10px;
+    font-size: 14px;
+    font-weight: 600;
+    line-height: 1.35;
+    color: var(--lx-body);
+    border-radius: 7px;
+    transition: background-color 0.15s ease, color 0.15s ease;
+}
+
+.page-docs .toc-section-title:hover {
+    color: var(--lx-ink);
+    background: rgba(143, 154, 166, 0.08);
+}
+
+.page-docs .toc-section-title.active {
+    color: var(--lx-accent);
+    background: var(--lx-accent-soft);
+    box-shadow: inset 2px 0 0 var(--lx-accent);
+}
+
+.page-docs .toc-subsections {
+    margin: 2px 0 4px 14px;
+    padding: 0;
+    border-left: 1px solid var(--lx-line);
+}
+
+.page-docs .toc-subsection {
+    margin-left: -1px;
+    padding: 4px 10px 4px 14px;
+    font-size: 13px;
+    line-height: 1.45;
+    color: var(--lx-dim);
+    border-left: 1px solid transparent;
+    transition: color 0.15s ease, border-color 0.15s ease;
+}
+
+.page-docs .toc-subsection:hover {
+    color: var(--lx-ink);
+    border-left-color: var(--lx-accent);
+}
+
+.page-docs .toc-footer {
+    margin: 12px 6px 0;
+    padding-top: 12px;
+    border-top: 1px solid var(--lx-line);
+}
+
+.page-docs .toc-back {
+    min-height: 32px;
+    font-size: 14px;
+    color: var(--lx-dim);
+}
+
+.page-docs .toc-back:hover {
+    color: var(--lx-accent);
+}
+
+/* "You are here" -----------------------------------------------------------
+   Each guide's TOC lists its sections in page order, one .toc-section per
+   <section class="docs-section"> (true on all 24 guides). Where the browser
+   has scroll-driven animations, the Nth section names a view timeline and
+   the Nth TOC entry lights up while that section crosses a reading line
+   36% down the viewport. No script. Elsewhere the static .active class
+   (Overview) is what shows, as before. */
+@keyframes lx-toc-here {
+    from, to {
+        color: var(--lx-accent);
+        background-color: var(--lx-accent-soft);
+        box-shadow: inset 2px 0 0 var(--lx-accent);
+    }
+}
+
+@supports (animation-timeline: view()) and (timeline-scope: --lx-a) {
+    .page-docs .docs-layout {
+        timeline-scope: --lx-s1, --lx-s2, --lx-s3, --lx-s4, --lx-s5, --lx-s6,
+            --lx-s7, --lx-s8, --lx-s9, --lx-s10, --lx-s11, --lx-s12;
+    }
+
+    .page-docs .docs-content > section.docs-section {
+        view-timeline-axis: block;
+        view-timeline-inset: 36% 63%;
+    }
+
+    .page-docs .docs-content > section.docs-section:nth-of-type(1) { view-timeline-name: --lx-s1; }
+    .page-docs .docs-content > section.docs-section:nth-of-type(2) { view-timeline-name: --lx-s2; }
+    .page-docs .docs-content > section.docs-section:nth-of-type(3) { view-timeline-name: --lx-s3; }
+    .page-docs .docs-content > section.docs-section:nth-of-type(4) { view-timeline-name: --lx-s4; }
+    .page-docs .docs-content > section.docs-section:nth-of-type(5) { view-timeline-name: --lx-s5; }
+    .page-docs .docs-content > section.docs-section:nth-of-type(6) { view-timeline-name: --lx-s6; }
+    .page-docs .docs-content > section.docs-section:nth-of-type(7) { view-timeline-name: --lx-s7; }
+    .page-docs .docs-content > section.docs-section:nth-of-type(8) { view-timeline-name: --lx-s8; }
+    .page-docs .docs-content > section.docs-section:nth-of-type(9) { view-timeline-name: --lx-s9; }
+    .page-docs .docs-content > section.docs-section:nth-of-type(10) { view-timeline-name: --lx-s10; }
+    .page-docs .docs-content > section.docs-section:nth-of-type(11) { view-timeline-name: --lx-s11; }
+    .page-docs .docs-content > section.docs-section:nth-of-type(12) { view-timeline-name: --lx-s12; }
+
+    /* The scroll position decides, so the fixed "Overview" mark steps aside. */
+    .page-docs .toc-section-title.active {
+        color: var(--lx-body);
+        background: transparent;
+        box-shadow: none;
+    }
+
+    .page-docs .toc-nav > .toc-section > .toc-section-title {
+        animation: lx-toc-here linear;
+        animation-fill-mode: none;
+        animation-range: cover 0% cover 100%;
+    }
+
+    .page-docs .toc-nav > .toc-section:nth-child(1) > .toc-section-title { animation-timeline: --lx-s1; }
+    .page-docs .toc-nav > .toc-section:nth-child(2) > .toc-section-title { animation-timeline: --lx-s2; }
+    .page-docs .toc-nav > .toc-section:nth-child(3) > .toc-section-title { animation-timeline: --lx-s3; }
+    .page-docs .toc-nav > .toc-section:nth-child(4) > .toc-section-title { animation-timeline: --lx-s4; }
+    .page-docs .toc-nav > .toc-section:nth-child(5) > .toc-section-title { animation-timeline: --lx-s5; }
+    .page-docs .toc-nav > .toc-section:nth-child(6) > .toc-section-title { animation-timeline: --lx-s6; }
+    .page-docs .toc-nav > .toc-section:nth-child(7) > .toc-section-title { animation-timeline: --lx-s7; }
+    .page-docs .toc-nav > .toc-section:nth-child(8) > .toc-section-title { animation-timeline: --lx-s8; }
+    .page-docs .toc-nav > .toc-section:nth-child(9) > .toc-section-title { animation-timeline: --lx-s9; }
+    .page-docs .toc-nav > .toc-section:nth-child(10) > .toc-section-title { animation-timeline: --lx-s10; }
+    .page-docs .toc-nav > .toc-section:nth-child(11) > .toc-section-title { animation-timeline: --lx-s11; }
+    .page-docs .toc-nav > .toc-section:nth-child(12) > .toc-section-title { animation-timeline: --lx-s12; }
+}
+
+/* Table of contents below 1024px: a sticky strip of section chips ---------
+   main.css hides the TOC here; this brings back its section links as a
+   row that scrolls sideways, under the fixed top bar. Subsections, the
+   header and the back link stay hidden (the breadcrumb links back). */
+@media (max-width: 1024px) {
+    .page-docs {
+        --lx-anchor: 132px;
+    }
+
+    /* The strip sits right under the top bar; the column gap of the stacked
+       layout would otherwise open a second empty band below it. */
+    .page.page-docs {
+        padding-top: var(--lx-nav);
+    }
+
+    .page-docs .docs-layout {
+        gap: 0;
+    }
+
+    .page-docs .docs-toc {
+        display: block;
+        position: sticky;
+        top: var(--lx-nav);
+        z-index: 20;
+        align-self: stretch;
+        width: auto;
+        min-width: 0;
+        max-height: none;
+        margin: 0 0 24px;
+        padding: 8px 0;
+        overflow: visible;
+        background: var(--lx-bg);
+        border: 0;
+        border-bottom: 1px solid var(--lx-line);
+        border-radius: 0;
+    }
+
+    .page-docs .toc-header,
+    .page-docs .toc-subsections,
+    .page-docs .toc-footer {
+        display: none;
+    }
+
+    .page-docs .toc-nav {
+        flex-direction: row;
+        gap: 8px;
+        overflow-x: auto;
+        overscroll-behavior-x: contain;
+        scrollbar-width: none;
+        padding: 2px 2px;
+    }
+
+    .page-docs .toc-nav::-webkit-scrollbar {
+        display: none;
+    }
+
+    .page-docs .toc-section {
+        flex: none;
+        margin: 0;
+    }
+
+    .page-docs .toc-section-title {
+        display: inline-flex;
+        align-items: center;
+        min-height: 44px;
+        padding: 0 16px;
+        white-space: nowrap;
+        border: 1px solid var(--lx-line);
+        border-radius: 999px;
+    }
+
+    .page-docs .toc-section-title.active {
+        box-shadow: none;
+        border-color: var(--lx-accent-line);
+    }
+
+    .page-docs .toc-section-title:focus-visible {
+        outline-offset: -2px;
+    }
+
+    @keyframes lx-toc-here-strip {
+        from, to {
+            color: var(--lx-accent);
+            background-color: var(--lx-accent-soft);
+            border-color: var(--lx-accent-line);
+        }
+    }
+
+    @supports (animation-timeline: view()) and (timeline-scope: --lx-a) {
+        .page-docs .toc-nav > .toc-section > .toc-section-title {
+            animation-name: lx-toc-here-strip;
+        }
+
+        .page-docs .toc-section-title.active {
+            border-color: var(--lx-line);
+        }
+    }
+}
+
+/* main.css clips .page sideways below 768px with overflow-x: hidden, which
+   also makes it a scroll container and stops the sticky strip. clip trims
+   the same overflow without that side effect. */
+@media (max-width: 768px) {
+    .page.page-docs {
+        overflow-x: clip;
+    }
+
+    .page-docs .docs-toc {
+        margin-left: calc(-1 * var(--space-md, 16px));
+        margin-right: calc(-1 * var(--space-md, 16px));
+        padding-left: var(--space-md, 16px);
+        padding-right: var(--space-md, 16px);
+    }
+
+    .page-docs .docs-hero {
+        --lx-hero-pad: 20px;
+        padding: var(--lx-hero-pad);
+        margin-bottom: 48px;
+        border-radius: 14px;
+    }
+
+    .page-docs .docs-hero-art {
+        aspect-ratio: 16 / 9;
+        margin-bottom: 24px;
+    }
+
+    .page-docs .docs-subtitle {
+        font-size: 17px;
+    }
+
+    .page-docs .docs-section {
+        margin-bottom: 56px;
+    }
+
+    .page-docs .section-title {
+        gap: 12px;
+        padding-top: 24px;
+    }
+
+    .page-docs .docs-table th,
+    .page-docs .docs-table td {
+        padding: 10px 12px;
+    }
+
+    /* Diagrams keep a legible size and scroll sideways inside their panel
+       instead of shrinking their 11px labels to 5px. */
+    .page-docs .docs-figure,
+    .page-docs .perspective-figure {
+        padding: 20px 16px 16px;
+        overflow-x: auto;
+    }
+
+    .page-docs .docs-diagram,
+    .page-docs .perspective-diagram {
+        min-width: 520px;
+    }
+
+    /* The caption stays put under the part of the drawing in view. Its width
+       is the panel's inner width: viewport, less the page gutters (2 x 16),
+       the panel padding (2 x 16) and its borders (2 x 1). */
+    .page-docs .docs-figure figcaption,
+    .page-docs .perspective-figure figcaption {
+        position: sticky;
+        left: 0;
+        width: calc(100vw - 66px);
+        max-width: none;
+        margin-left: 0;
+        margin-right: 0;
+    }
+
+    .page-docs .callout {
+        padding: 16px 16px 16px 14px;
+    }
+
+    .page-docs .docs-nav-footer {
+        flex-direction: column;
+    }
+
+    .page-docs .nav-prev,
+    .page-docs .nav-next {
+        max-width: none;
+        margin-left: 0;
+    }
+}
+
+/* =============================================================================
+   HUB (.page-learn-industrial)
+   ============================================================================= */
+
+/* Hero ---------------------------------------------------------------------
+   With the picture slot present the hero is text beside picture, left
+   aligned; without it (older markup) it stays centered as before. */
+.page-learn-industrial .learn-subtitle {
+    font-size: 18px;
+    line-height: 1.65;
+    color: var(--lx-body);
+}
+
+.page-learn-industrial .learn-title {
+    letter-spacing: -0.03em;
+    line-height: 1.08;
+}
+
+.page-learn-industrial .learn-count {
+    color: var(--lx-dim);
+}
+
+.page-learn-industrial .learn-hero:has(.learn-hero-art) {
+    display: grid;
+    gap: 32px;
+    max-width: 1200px;
+    padding: 40px 48px 24px;
+    text-align: left;
+    align-items: center;
+}
+
+.page-learn-industrial .learn-hero-text .hero-header {
+    justify-content: flex-start;
+}
+
+.page-learn-industrial .learn-hero-text .hero-header .header-line:first-child {
+    display: none;
+}
+
+.page-learn-industrial .learn-hero-text .learn-title {
+    font-size: clamp(2.25rem, 1.6rem + 2.6vw, 3.5rem);
+    margin-bottom: 16px;
+}
+
+.page-learn-industrial .learn-hero-text .learn-subtitle {
+    max-width: 60ch;
+}
+
+.page-learn-industrial .learn-hero-text .learn-jump {
+    justify-content: flex-start;
+    margin-top: 28px;
+}
+
+.page-learn-industrial .learn-hero-art {
+    position: relative;
+    aspect-ratio: 16 / 9;
+    overflow: hidden;
+    background:
+        radial-gradient(70% 90% at 60% 35%, rgba(60, 186, 84, 0.12) 0%, transparent 60%),
+        linear-gradient(135deg, #131823 0%, #0b0e15 100%);
+    border: 1px solid var(--lx-line);
+    border-radius: 16px;
+    box-shadow: 0 24px 60px rgba(0, 0, 0, 0.45);
+}
+
+.page-learn-industrial .learn-hero-art img {
+    display: block;
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    color: transparent;
+    font-size: 0;
+}
+
+@media (min-width: 1024px) {
+    .page-learn-industrial .learn-hero:has(.learn-hero-art) {
+        grid-template-columns: minmax(0, 1fr) minmax(0, 1.05fr);
+        gap: 48px;
+        padding-top: 56px;
+    }
+}
+
+/* Track jump chips --------------------------------------------------------- */
+.page-learn-industrial .learn-jump .chip {
+    display: inline-flex;
+    align-items: center;
+    color: var(--lx-body);
+    border-color: var(--lx-line-strong);
+}
+
+.page-learn-industrial .learn-jump .chip:hover {
+    color: var(--lx-ink);
+    border-color: var(--lx-accent-line);
+}
+
+@media (max-width: 1024px), (pointer: coarse) {
+    .page-learn-industrial .learn-jump .chip {
+        min-height: 44px;
+        padding: 0 16px;
+    }
+}
+
+/* Section headers and per-track color --------------------------------------
+   Each track has its own hue on its header bar and card edges. The track's
+   name is always written beside it, so the color is a second cue only. */
+.page-learn-industrial {
+    --lx-track: var(--lx-accent);
+    --lx-track-soft: rgba(60, 186, 84, 0.14);
+}
+
+.page-learn-industrial #build { --lx-track: #f0a93b; --lx-track-soft: rgba(240, 169, 59, 0.14); }
+.page-learn-industrial #script { --lx-track: #3cba54; --lx-track-soft: rgba(60, 186, 84, 0.14); }
+.page-learn-industrial #simulate { --lx-track: #22d3ee; --lx-track-soft: rgba(34, 211, 238, 0.13); }
+.page-learn-industrial #ship { --lx-track: #60a5fa; --lx-track-soft: rgba(96, 165, 250, 0.14); }
+.page-learn-industrial #agents { --lx-track: #a78bfa; --lx-track-soft: rgba(167, 139, 250, 0.15); }
+.page-learn-industrial #foundations { --lx-track: #b0bcc8; --lx-track-soft: rgba(176, 188, 200, 0.13); }
+
+.page-learn-industrial .learn-section {
+    padding-top: 40px;
+    padding-bottom: 24px;
+}
+
+.page-learn-industrial .learn-section .section-header-industrial {
+    gap: 12px;
+}
+
+.page-learn-industrial .learn-section .section-header-industrial h2 {
+    font-size: 1.625rem;
+    letter-spacing: -0.015em;
+}
+
+.page-learn-industrial .learn-track .section-header-industrial::before {
+    content: "";
+    flex: none;
+    width: 4px;
+    height: 26px;
+    border-radius: 2px;
+    background: var(--lx-track);
+}
+
+.page-learn-industrial .learn-track {
+    border-top: 1px solid var(--lx-line);
+    margin-top: 16px;
+}
+
+.page-learn-industrial .learn-lede {
+    color: var(--lx-body);
+    font-size: 16px;
+    line-height: 1.65;
+}
+
+/* Start Here: a numbered path ---------------------------------------------- */
+.page-learn-industrial .learn-path {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 12px;
+    counter-reset: none;
+}
+
+.page-learn-industrial .learn-path > li {
+    position: relative;
+}
+
+.page-learn-industrial .learn-step {
+    align-items: flex-start;
+    gap: 16px;
+    padding: 18px 20px;
+    background: var(--lx-panel);
+    border: 1px solid var(--lx-line);
+    border-radius: var(--lx-radius);
+}
+
+.page-learn-industrial .learn-step:hover {
+    border-color: var(--lx-accent-line);
+}
+
+.page-learn-industrial .learn-step-num {
+    width: 32px;
+    height: 32px;
+    font-size: 14px;
+    color: var(--lx-accent);
+    background: var(--lx-accent-soft);
+    border: 1px solid var(--lx-accent-line);
+    border-radius: 8px;
+}
+
+.page-learn-industrial .learn-step-body h3 {
+    font-size: 17px;
+    color: var(--lx-ink);
+}
+
+.page-learn-industrial .learn-step-body p {
+    font-size: 14.5px;
+    color: var(--lx-body);
+}
+
+/* The thread between steps (decorative). */
+.page-learn-industrial .learn-path > li:not(:last-child)::after {
+    content: "";
+    position: absolute;
+    left: 35px;
+    bottom: -12px;
+    width: 2px;
+    height: 12px;
+    background: var(--lx-accent-line);
+}
+
+@media (min-width: 1100px) {
+    .page-learn-industrial .learn-path {
+        grid-template-columns: repeat(5, minmax(0, 1fr));
+        gap: 16px;
+    }
+
+    .page-learn-industrial .learn-step {
+        flex-direction: column;
+        gap: 14px;
+        padding: 20px;
+    }
+
+    .page-learn-industrial .learn-path > li:not(:last-child)::after {
+        left: auto;
+        right: -16px;
+        top: 35px;
+        bottom: auto;
+        width: 16px;
+        height: 2px;
+    }
+}
+
+/* Guide cards --------------------------------------------------------------- */
+.page-learn-industrial .docs-grid {
+    grid-template-columns: repeat(auto-fill, minmax(min(100%, 264px), 1fr));
+    gap: 16px;
+}
+
+.page-learn-industrial .doc-card {
+    position: relative;
+    gap: 10px;
+    padding: 20px 20px 16px;
+    overflow: hidden;
+    background: linear-gradient(180deg, rgba(27, 31, 40, 0.82) 0%, rgba(17, 20, 27, 0.82) 100%);
+    border: 1px solid var(--lx-line);
+    border-radius: 14px;
+}
+
+.page-learn-industrial .doc-card::before {
+    content: "";
+    position: absolute;
+    inset: 0 0 auto 0;
+    height: 2px;
+    background: var(--lx-track);
+    opacity: 0.55;
+    transition: opacity 0.2s ease;
+}
+
+.page-learn-industrial .doc-card:hover {
+    border-color: var(--lx-line-strong);
+}
+
+.page-learn-industrial .doc-card:hover::before {
+    opacity: 1;
+}
+
+.page-learn-industrial .doc-card-top {
+    position: relative;
+    min-height: 44px;
+    margin-bottom: 4px;
+}
+
+/* The icon's tile. The icon itself is a white-filtered SVG, so the tile is
+   drawn behind it rather than as its own background. */
+.page-learn-industrial .doc-card-top::before {
+    content: "";
+    position: absolute;
+    left: 0;
+    top: 0;
+    width: 44px;
+    height: 44px;
+    border-radius: 10px;
+    background: var(--lx-track-soft);
+    border: 1px solid var(--lx-line);
+}
+
+.page-learn-industrial .doc-card .doc-icon {
+    position: relative;
+    width: 24px;
+    height: 24px;
+    margin: 10px;
+}
+
+.page-learn-industrial .doc-badge {
+    color: #d4c8ff;
+    font-size: 11px;
+}
+
+.page-learn-industrial .doc-card h3 {
+    font-size: 17px;
+    line-height: 1.3;
+    color: var(--lx-ink);
+}
+
+.page-learn-industrial .doc-card p {
+    font-size: 14.5px;
+    line-height: 1.55;
+    color: var(--lx-body);
+}
+
+.page-learn-industrial .doc-card-meta {
+    align-items: center;
+    padding-top: 12px;
+    margin-top: auto;
+    font-size: 12.5px;
+    color: var(--lx-dim);
+    border-top-color: var(--lx-line);
+}
+
+.page-learn-industrial .doc-card-meta span:first-child {
+    padding: 2px 10px;
+    color: var(--lx-body);
+    background: rgba(143, 154, 166, 0.08);
+    border: 1px solid var(--lx-line);
+    border-radius: 999px;
+}
+
+/* For AI assistants, resources, help ---------------------------------------- */
+.page-learn-industrial .learn-agents-card {
+    background:
+        radial-gradient(80% 140% at 0% 0%, rgba(167, 139, 250, 0.1) 0%, transparent 60%),
+        var(--lx-panel);
+    border: 1px solid rgba(167, 139, 250, 0.3);
+    border-radius: 14px;
+}
+
+.page-learn-industrial .learn-agents-body p {
+    color: var(--lx-body);
+}
+
+.page-learn-industrial .learn-agents-body a {
+    color: var(--lx-accent);
+    text-decoration: underline;
+    text-decoration-color: var(--lx-accent-line);
+    text-underline-offset: 3px;
+    border-bottom: 0;
+}
+
+.page-learn-industrial .resource-card,
+.page-learn-industrial .help-card {
+    background: var(--lx-panel);
+    border: 1px solid var(--lx-line);
+    border-radius: 14px;
+}
+
+.page-learn-industrial .resource-card:hover {
+    border-color: var(--lx-accent-line);
+}
+
+.page-learn-industrial .resource-content p,
+.page-learn-industrial .help-content p {
+    color: var(--lx-body);
+}
+
+.page-learn-industrial .btn-help {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-height: 44px;
+}
+
+@media (max-width: 768px) {
+    .page-learn-industrial .learn-hero:has(.learn-hero-art) {
+        padding: 24px 0 8px;
+        gap: 24px;
+    }
+
+    .page-learn-industrial .learn-hero-art {
+        border-radius: 12px;
+    }
+
+    .page-learn-industrial .learn-section .section-header-industrial h2 {
+        font-size: 1.375rem;
+    }
+}
+
+/* =============================================================================
+   Motion
+   ============================================================================= */
+@media (prefers-reduced-motion: reduce) {
+    .page-docs *,
+    .page-learn-industrial * {
+        transition: none !important;
+    }
+
+    .page-learn-industrial .doc-card:hover,
+    .page-learn-industrial .learn-step:hover {
+        transform: none;
+    }
+
+    .page-docs,
+    .page-docs .docs-content {
+        scroll-behavior: auto;
+    }
+}

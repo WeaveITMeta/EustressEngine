@@ -157,6 +157,20 @@ pub fn DocsGettingStartedPage() -> impl IntoView {
 
                 <main class="docs-content">
                     <header class="docs-hero">
+                        // The hero picture: the page's largest paint, so it loads at
+                        // once (no lazy loading, no entrance animation).
+                        <div class="docs-hero-art">
+                            <img
+                                src="/assets/learn/getting-started-hero-1600.webp"
+                                srcset="/assets/learn/getting-started-hero-800.webp 800w, /assets/learn/getting-started-hero-1600.webp 1600w"
+                                sizes="(max-width: 1024px) 100vw, 840px"
+                                alt="Five small grid platforms rise like stepping stones along a glowing path: an empty one, one with a cube, one where the cube has moved, one with a bouncing sphere, and a final complete scene."
+                                width="1600"
+                                height="900"
+                                fetchpriority="high"
+                                decoding="async"
+                            />
+                        </div>
                         <div class="docs-breadcrumb">
                             <a href="/learn">"Learn"</a>
                             <span class="separator">"/"</span>
@@ -246,6 +260,19 @@ pub fn DocsGettingStartedPage() -> impl IntoView {
 
                         <div id="overview-terms" class="subsection">
                             <h3>"Universes and Spaces"</h3>
+                            <figure class="learn-figure">
+                                <img
+                                    src="/assets/learn/getting-started-fig-1-1200.webp"
+                                    srcset="/assets/learn/getting-started-fig-1-600.webp 600w, /assets/learn/getting-started-fig-1-1200.webp 1200w"
+                                    sizes="(max-width: 660px) 92vw, (max-width: 1099px) 600px, 500px"
+                                    alt="A large translucent frame holding three separate grid platforms, each with a different small arrangement of solids: one cube, two stacked slabs, and a sphere beside a cylinder."
+                                    width="1200"
+                                    height="900"
+                                    loading="lazy"
+                                    decoding="async"
+                                />
+                                <figcaption>"A Universe is a folder of related Spaces, and every Space belongs to a Universe. Everything you build lives in a Space."</figcaption>
+                            </figure>
                             <p>
                                 "A Space is one world: its parts, lights, scripts and settings, kept together in one
                                 folder. A Universe is a folder of related Spaces. Everything you build lives in a
@@ -561,6 +588,19 @@ pub fn DocsGettingStartedPage() -> impl IntoView {
 
                         <div id="play-stop" class="subsection">
                             <h3>"What Stop Restores"</h3>
+                            <figure class="learn-figure">
+                                <img
+                                    src="/assets/learn/getting-started-fig-2-1200.webp"
+                                    srcset="/assets/learn/getting-started-fig-2-600.webp 600w, /assets/learn/getting-started-fig-2-1200.webp 1200w"
+                                    sizes="(max-width: 660px) 92vw, (max-width: 1099px) 600px, 500px"
+                                    alt="A cube shown three times above a slab: hanging in the air, resting on the slab after a fall, and back in the air, joined to the resting cube by a curved glowing line."
+                                    width="1200"
+                                    height="900"
+                                    loading="lazy"
+                                    decoding="async"
+                                />
+                                <figcaption>"When you press Run or Play, Studio takes a snapshot of the Space, and Stop puts it back. A run leaves what you built as it was."</figcaption>
+                            </figure>
                             <p>
                                 "When you press Run or Play, Studio takes a snapshot of the Space. Stop puts it back:
                                 every part returns to where it was, with its color, transparency and anchoring;

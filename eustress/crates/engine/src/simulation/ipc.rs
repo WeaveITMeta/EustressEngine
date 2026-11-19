@@ -141,7 +141,9 @@ pub fn sync_sim_ipc(space_root: Option<Res<crate::space::SpaceRoot>>, mut ipc: R
         return;
     }
     let space = space_root.0.as_path();
-    let universe = crate::space::universe_root_for_path(space).or_else(|| walk_up_to_universe(space));
+    // The same Universe the bridge's port file goes to, so the engine owns
+    // the Universe it resolves here.
+    let universe = crate::engine_bridge::open_space_universe(space).or_else(|| walk_up_to_universe(space));
     ipc.workspace = universe.as_deref().and_then(Path::parent).map(Path::to_path_buf);
     ipc.space_name = space.file_name().and_then(|n| n.to_str()).map(str::to_owned);
     ipc.universe = universe;

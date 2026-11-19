@@ -201,7 +201,7 @@ pub fn BlissPage() -> impl IntoView {
     {
         spawn_local(refresh_bliss_kpis(kpi));
         // Every 20 seconds, for as long as the page is open: leaving it ends the polling.
-        if let Ok(poll) = leptos::leptos_dom::helpers::set_interval_with_handle(move || spawn_local(refresh_bliss_kpis(kpi)), std::time::Duration::from_secs(20)) {
+        if let Ok(poll) = leptos::leptos_dom::helpers::set_interval(move || spawn_local(refresh_bliss_kpis(kpi)), std::time::Duration::from_secs(20)) {
             on_cleanup(move || poll.clear());
         }
     }

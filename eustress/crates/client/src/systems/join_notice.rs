@@ -205,6 +205,30 @@ pub fn fetch_failed(error: &str, signed_in: bool) -> PlainNotice {
     }
 }
 
+/// How `space_fetch` starts its line when the gallery's one-time Play ticket
+/// could not be traded for a pass: then the HTTP status and the API's code,
+/// or why the API could not be reached. The line never holds the ticket.
+pub const PLAY_TICKET_REFUSED: &str = "the gallery's Play ticket was refused";
+
+/// [`fetch_failed`] for a solo launch that carried the gallery's one-time
+/// Play ticket. The ticket works once, so the way back in is the gallery,
+/// which makes a new one: the same link would be refused.
+pub fn fetch_failed_with_gallery_ticket(error: &str) -> PlainNotice {
+    let error = error.trim();
+    if let Some(rest) = error.strip_prefix(PLAY_TICKET_REFUSED) {
+        let status = rest.trim_start_matches(':').split_whitespace().next().and_then(|w| w.parse::<u16>().ok());
+        let detail = match status {
+            _ if rest.ends_with(" used") => "This Play link was already used. Each one opens the game once.",
+            _ if rest.ends_with(" expired") => "This Play link has expired.",
+            Some(code) if code >= 500 => "Eustress could not check this Play link right now.",
+            Some(_) => "Eustress did not accept this Play link.",
+            None => "Eustress could not be reached to check this Play link.",
+        };
+        return notice("This Play link cannot be used", detail, Some(GALLERY_REJOIN));
+    }
+    via_gallery(fetch_failed(error, true), error)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -322,6 +346,30 @@ mod tests {
         assert_eq!(fetch_failed(&format!("503 Service Unavailable from {url}"), true).title, "Eustress is having trouble");
         assert_eq!(fetch_failed(&format!("GET {url}: error sending request"), true).title, "Could not reach Eustress");
         assert_eq!(fetch_failed("empty .pak", true).title, "The simulation could not be downloaded");
+    }
+
+    /// A solo launch with the gallery's Play ticket is sent back to the
+    /// gallery however it fails, and a ticket that was refused says why in
+    /// plain words.
+    #[test]
+    fn a_solo_launch_with_a_gallery_ticket_is_played_again_from_the_gallery() {
+        let cases = [
+            (format!("{PLAY_TICKET_REFUSED}: 403 used"), "This Play link was already used. Each one opens the game once."),
+            (format!("{PLAY_TICKET_REFUSED}: 401 expired"), "This Play link has expired."),
+            (format!("{PLAY_TICKET_REFUSED}: 401 invalid"), "Eustress did not accept this Play link."),
+            (format!("{PLAY_TICKET_REFUSED}: 503 busy"), "Eustress could not check this Play link right now."),
+            (format!("{PLAY_TICKET_REFUSED}: could not reach https://api-staging.eustress.dev/x: timed out"), "Eustress could not be reached to check this Play link."),
+        ];
+        for (error, detail) in cases {
+            let n = fetch_failed_with_gallery_ticket(&error);
+            assert_eq!(n.title, "This Play link cannot be used", "{error}");
+            assert_eq!(n.detail, detail, "{error}");
+            assert_eq!(n.hint.as_deref(), Some(GALLERY_REJOIN), "{error}");
+        }
+        // A download that fails after the pass keeps its own headline, and goes back to the gallery.
+        let url = "https://api-staging.eustress.dev/api/simulations/ab/world/manifest";
+        let n = fetch_failed_with_gallery_ticket(&format!("404 Not Found from {url}: "));
+        assert_eq!((n.title.as_str(), n.hint.as_deref()), ("This simulation was not found", Some(GALLERY_REJOIN)));
     }
 
     #[test]

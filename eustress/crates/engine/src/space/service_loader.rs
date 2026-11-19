@@ -429,6 +429,26 @@ pub(crate) fn service_class_props(
     }
 }
 
+/// A service's `[attributes]` as the component a script reads through
+/// `GetAttribute` (the Play seed copies it to the service's instance): the
+/// value objects an import folded from directly under a Roblox service.
+/// `None` for a file with none. The table arrives among the definition's
+/// flattened top-level keys, which is why no service property is made of it.
+fn service_attributes(definition: &ServiceDefinition) -> Option<eustress_common::attributes::Attributes> {
+    let table = definition.properties.get("attributes")?.as_table()?;
+    let mut doc = toml::Table::new();
+    doc.insert("attributes".to_string(), toml::Value::Table(table.clone()));
+    let values = eustress_common::datamodel::record::record_attribute_values(&toml::Value::Table(doc));
+    if values.is_empty() {
+        return None;
+    }
+    let mut attributes = eustress_common::attributes::Attributes::new();
+    for (key, value) in values {
+        attributes.set(&key, value);
+    }
+    Some(attributes)
+}
+
 pub fn spawn_service(
     commands: &mut Commands,
     path: std::path::PathBuf,
@@ -468,6 +488,9 @@ pub fn spawn_service(
     )).id();
     if !class_props.is_empty() {
         commands.entity(entity).insert(eustress_common::datamodel::record::RecordClassProps(class_props));
+    }
+    if let Some(attributes) = service_attributes(&definition) {
+        commands.entity(entity).insert(attributes);
     }
     if let Some(marker) = legacy_soul_key {
         commands.entity(entity).insert(marker);
@@ -517,6 +540,9 @@ pub fn spawn_service_as_ui_root(
     )).id();
     if !class_props.is_empty() {
         commands.entity(entity).insert(eustress_common::datamodel::record::RecordClassProps(class_props));
+    }
+    if let Some(attributes) = service_attributes(&definition) {
+        commands.entity(entity).insert(attributes);
     }
     if let Some(marker) = legacy_soul_key {
         commands.entity(entity).insert(marker);

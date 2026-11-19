@@ -79,6 +79,13 @@ impl Replica {
         net
     }
 
+    /// Pair `net` with an instance this tree already has, for a frame that
+    /// names it as a parent without having loaded it under a record key: the
+    /// anchors a handoff snapshot is spawned under (`crate::handoff`).
+    pub fn bind_net(&mut self, net: NetId, id: InstanceId) {
+        self.ids.bind(net, id);
+    }
+
     /// This player's own `Player` instance and session peer, so the host's
     /// `Player` for this peer lands on it instead of making a second one.
     pub fn set_local_player(&mut self, peer: PeerId, player: InstanceId) {

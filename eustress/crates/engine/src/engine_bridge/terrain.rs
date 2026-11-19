@@ -88,10 +88,10 @@ const FLAT_DIG_DEPTH: f32 = 32.0;
 const FLAT_BAND: f32 = 128.0;
 /// Farthest from world Y 0 a flat plate may sit, metres.
 const MAX_FLAT_HEIGHT: f32 = 10_000.0;
-/// Most control points one `terrain.layer_create` gives a spline. Each point
-/// reads the spline's folder back to number itself, so the cost grows with
-/// the square of the count.
-const MAX_SPLINE_POINTS: usize = 64;
+/// Most control points one `terrain.layer_create` gives a spline: a bound on
+/// one request's size, not on a road's (the points are numbered in one pass,
+/// so the cost grows with the count). 4096 points is 40 km at 10 m apart.
+const MAX_SPLINE_POINTS: usize = 4096;
 /// How far either side of its position a spline created without points puts
 /// its first two, metres, as Insert does.
 const NEW_SPLINE_HALF_LENGTH: f32 = 20.0;
@@ -1622,12 +1622,11 @@ pub fn terrain_layer_create(world: &mut World, req: &BridgeRequest) -> BridgeRes
         Err(e) => return refuse(req, e),
     };
     // Points sit under the spline, which Insert places unturned at `position`.
-    let mut point_errors = Vec::new();
-    for point in &points {
-        if let Err(e) = crate::terrain_layers::append_spline_point(&created.folder_path, *point - position) {
-            point_errors.push(e);
-        }
-    }
+    let local: Vec<Vec3> = points.iter().map(|point| *point - position).collect();
+    let point_errors: Vec<String> = crate::terrain_layers::append_spline_points(&created.folder_path, &local)
+        .into_iter()
+        .filter_map(Result::err)
+        .collect();
     let label = format!("Insert {}", class.name());
     if let Some(mut undo) = world.get_resource_mut::<crate::undo::UndoStack>() {
         undo.push_labeled(

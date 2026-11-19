@@ -4,6 +4,10 @@ use super::{AvatarDescriptor, AvatarSystems, DespawnAllAvatars, MotionOverrides,
 use bevy::prelude::*;
 use std::sync::{mpsc, Mutex};
 
+/// The avatar service's path on the API in use: where a [`SpawnSavedAvatar`]
+/// token is sent, so a host can check that API issued it before handing it over.
+pub const PROFILE_PATH: &str = "/api/avatar";
+
 /// Hosts provide their existing session token; it is never logged or persisted here.
 #[derive(Message)]
 pub struct SpawnSavedAvatar {
@@ -114,10 +118,12 @@ fn fetch_profile(token: &str) -> Result<AvatarDescriptor, String> {
     struct Response {
         descriptor: Option<AvatarDescriptor>,
     }
+    // No redirects: the token goes to the API that issued it and nowhere else.
     let response = ureq::AgentBuilder::new()
         .timeout(std::time::Duration::from_secs(10))
+        .redirects(0)
         .build()
-        .get(&crate::api_base::api_url("/api/avatar"))
+        .get(&crate::api_base::api_url(PROFILE_PATH))
         .set("Authorization", &format!("Bearer {}", token.trim()))
         .call()
         .map_err(|e| format!("profile request failed: {e}"))?;

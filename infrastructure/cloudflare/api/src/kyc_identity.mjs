@@ -41,16 +41,21 @@
 //     as the account;
 //   - POST /api/auth/logout and POST /api/kyc/link;
 //   - administrators (src/admin_check.mjs), so the TAKE IT DOWN and moderation
-//     duties are never locked out; and agent accounts (account_type 'agent'),
-//     which never see a document.
+//     duties are never locked out. An agent account (account_type 'agent',
+//     src/agents.mjs) never sees a document; it may write only what that file's
+//     AGENT_WRITES allowlist names, and nothing while revoked or suspended. The
+//     two exceptions above do not apply to an agent's session: on those routes
+//     it may only sign in, sign out and register (AGENT_OPEN_ROUTES).
 // Reads (GET, HEAD) are not blocked. A record that cannot be read refuses the
 // request (503); a record that cannot be parsed is treated as unverified.
 // =============================================================================
 
 import { routePolicy, isMutating, PUBLIC } from './route_policy.mjs';
+import { bearerToken, presentsBearer } from './bearer.mjs';
 import { alertAdmins } from './grok_model.mjs';
 import { isAdmin } from './admin_check.mjs';
 import { keyModeOf } from './commerce.mjs';
+import { agentGateVerdict, AGENT_NOT_ALLOWED, AGENT_OPEN_ROUTES } from './agents.mjs';
 
 /// How old a verified session may be when it makes or upgrades an account.
 export const KYC_SESSION_MAX_AGE_MS = 24 * 3600 * 1000;
@@ -459,9 +464,8 @@ const GATE_OPEN = new Set(['/api/auth/logout', '/api/kyc/link']);
 /// The account a mutating request acts as: from a session token, or from a
 /// commerce API key. Null when the request names none the Worker accepts.
 async function actingAccount(request, env, deps) {
-  const m = /^Bearer\s+(\S+)\s*$/i.exec(request.headers.get('Authorization') || '');
-  if (!m) return null;
-  const token = m[1];
+  const token = bearerToken(request);
+  if (!token) return null;
   if (keyModeOf(token)) {
     const raw = await env.USERS.get(`apikey:${await sha256Hex(token)}`);
     if (!raw) return null;
@@ -476,8 +480,18 @@ async function actingAccount(request, env, deps) {
 export async function kycGate(request, env, cors, deps) {
   if (!isMutating(request.method)) return null;
   const path = new URL(request.url).pathname;
-  if (GATE_OPEN.has(path)) return null;
-  if (routePolicy(request.method, path).class === PUBLIC) return null;
+  // The routes this gate leaves open (its own list, and the `public` class) are open to an agent's session only for
+  // signing in and out and registering: elsewhere an agent's session acting there is refused (security review F3). This
+  // runs before the open routes return, so /api/kyc/link and a public route that records the session never act as an agent.
+  if (GATE_OPEN.has(path) || routePolicy(request.method, path).class === PUBLIC) {
+    return agentOnOpenRoute(request, env, cors, deps, path);
+  }
+  // A Bearer header that does not read cleanly is refused here, never passed on as "no session": the route reads
+  // the header with the same reader, but a credential this gate cannot place must not act anywhere (security review
+  // 2026-11-15, F1).
+  if (presentsBearer(request) && !bearerToken(request)) {
+    return deps.json({ error: 'Your sign-in could not be read. Sign in again.', code: 'bad_token' }, 401, cors);
+  }
   let raw;
   let accountId;
   try {
@@ -493,6 +507,19 @@ export async function kycGate(request, env, cors, deps) {
   if (raw === null || raw === undefined) return null;
   let user;
   try { user = JSON.parse(raw); } catch { user = {}; }
+  // An agent account (src/agents.mjs) never sees a document, and writes only what the agent allowlist names. Revoked,
+  // suspended, or under a sponsor who may not sponsor: nothing at all.
+  if (user.account_type === 'agent') {
+    // Standing (read after write), the sponsor and its value freeze, the allowlist, then the daily limits.
+    let verdict;
+    try {
+      verdict = await agentGateVerdict(env, user, request.method, path);
+    } catch (e) {
+      console.error('kyc gate: the agent\'s standing could not be read:', e?.name || 'Error');
+      return deps.json({ error: 'This is temporarily unavailable. Try again in a minute.', code: 'account_unavailable' }, 503, cors);
+    }
+    return verdict ? deps.json(verdict.body, verdict.status, cors) : null;
+  }
   if (!needsKyc(user)) return null;
   try {
     if (await isAdmin(env, accountId)) return null;
@@ -504,6 +531,26 @@ export async function kycGate(request, env, cors, deps) {
     code: 'kyc_required',
     reason: 'Your account was created before identity verification was required. Verify your ID to use everything beyond reading your own account.',
   }, 403, cors);
+}
+
+/// The gate on an open route: null for anyone but an agent's session, and for an agent on AGENT_OPEN_ROUTES; otherwise 403
+/// agent_not_allowed. Only a credential that reads cleanly is placed: an open route takes no session it cannot read, and
+/// a signed-out request stays signed out. A storage failure lets the request through to the route, which on every route
+/// that acts as an account (kyc/link included) asks again itself.
+async function agentOnOpenRoute(request, env, cors, deps, path) {
+  if (!bearerToken(request) || AGENT_OPEN_ROUTES.has(path)) return null;
+  let raw;
+  try {
+    const accountId = await actingAccount(request, env, deps);
+    if (!accountId) return null;
+    raw = await env.USERS.get(`user:${accountId}`);
+  } catch (e) {
+    console.error('kyc gate: the account on an open route could not be read:', e?.message || e);
+    return null;
+  }
+  let user = null;
+  try { user = raw ? JSON.parse(raw) : null; } catch { user = null; }
+  return user?.account_type === 'agent' ? deps.json(AGENT_NOT_ALLOWED, 403, cors) : null;
 }
 
 // ---------------------------------------------------------------------------
@@ -518,6 +565,9 @@ export async function handleKycLink(request, env, cors, deps) {
   const body = await request.json().catch(() => ({}));
   const raw = await env.USERS.get(`user:${userId}`);
   if (!raw) return json({ error: 'User not found' }, 404, cors);
+  // An agent account never holds a document: a verification linked to it would make it a verified adult and spend a
+  // person's one account (security review F2). Refused here as well as at the gate.
+  if (JSON.parse(raw).account_type === 'agent') return json(AGENT_NOT_ALLOWED, 403, cors);
   if (JSON.parse(raw).kyc_verified === true) return json({ ok: true, already_verified: true }, 200, cors);
 
   const kyc = await kycSessionForAccount(env, body?.kyc_session_id, body?.kyc_claim_secret);

@@ -1,0 +1,24 @@
+[package]
+name = "eustress-agent-eval"
+version = "0.1.0"
+edition = "2021"
+description = "Agent-surface evaluation for Eustress: the tool-surface conformance census (G7.01). Drives the MCP server over stdio and a running engine over the Engine Bridge; never links the engine."
+authors = ["EustressEngine Contributors"]
+license = "PolyForm-Shield-1.0.0"
+publish = false
+
+[lib]
+name = "eustress_agent_eval"
+path = "src/lib.rs"
+
+[[bin]]
+name = "eustress-agent-census"
+path = "src/bin/agent_census.rs"
+
+[dependencies]
+# Every request and every artifact is JSON.
+serde_json = { workspace = true }
+# The engine is reached over its TCP bridge only. This crate must never
+# depend on eustress-engine: a census iteration costs seconds over a socket
+# and a full engine build when linked.
+eustress-bridge-client = { path = "../bridge-client" }

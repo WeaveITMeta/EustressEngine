@@ -10,7 +10,11 @@
 //! - **Services** hash their class, and `game` is [`NetId::ROOT`].
 //! - **Runtime instances** (`Instance.new`, `Clone`, players, characters) get
 //!   an id the host mints, with [`NetId::RUNTIME_BIT`] set, so it can never
-//!   equal a scene id.
+//!   equal a scene id. The bits under it name the host that minted it (its
+//!   origin, [`NetId::origin`]) and that host's own sequence number, so two
+//!   hosts of one universe never mint the same id and an instance handed from
+//!   one host to another keeps its id there (`crate::handoff`). Origin 0 is a
+//!   host on its own; its ids are the plain sequence numbers.
 //!
 //! The hash is FNV-1a 64 finished with SplitMix64, written out here: `std`'s
 //! hasher may change between Rust releases, and a host and a player built by
@@ -47,9 +51,31 @@ impl NetId {
         !self.is_none() && !self.is_runtime()
     }
 
+    /// Bits of a runtime id that hold the minting host's origin.
+    pub const ORIGIN_BITS: u32 = 24;
+    /// Bits of a runtime id that hold the minting host's sequence number.
+    pub const SEQ_BITS: u32 = 63 - Self::ORIGIN_BITS;
+    /// The largest origin a host may have.
+    pub const MAX_ORIGIN: u32 = (1 << Self::ORIGIN_BITS) - 1;
+    const SEQ_MASK: u64 = (1 << Self::SEQ_BITS) - 1;
+
     /// The runtime id with sequence number `n` (from 1).
     pub fn runtime(n: u64) -> NetId {
         NetId(Self::RUNTIME_BIT | (n & !Self::RUNTIME_BIT))
+    }
+
+    /// The runtime id host `origin` mints with sequence number `n` (from 1).
+    /// Origin 0 gives [`NetId::runtime`]`(n)`. An origin past
+    /// [`NetId::MAX_ORIGIN`] keeps its low bits only, so callers check it
+    /// first (`HostReplicator::set_origin` does).
+    pub fn runtime_in(origin: u32, n: u64) -> NetId {
+        let origin = (origin & Self::MAX_ORIGIN) as u64;
+        NetId(Self::RUNTIME_BIT | (origin << Self::SEQ_BITS) | (n & Self::SEQ_MASK))
+    }
+
+    /// The host that minted a runtime id; `None` for a scene id or none.
+    pub fn origin(self) -> Option<u32> {
+        self.is_runtime().then(|| ((self.0 & !Self::RUNTIME_BIT) >> Self::SEQ_BITS) as u32)
     }
 }
 
@@ -190,6 +216,34 @@ mod tests {
         assert_eq!(mix(1), 0x5692_161d_100b_05e5);
         // The whole scheme, end to end (computed independently).
         assert_eq!(scene_net_id("Workspace/Car/Body"), NetId(0x716b_568c_2755_1a60));
+    }
+
+    /// A runtime id names the host that minted it, so two hosts of one
+    /// universe never mint the same id, and a lone host's ids are unchanged.
+    #[test]
+    fn runtime_ids_carry_their_origin() {
+        for n in [1u64, 2, 77, (1 << NetId::SEQ_BITS) - 1] {
+            assert_eq!(NetId::runtime_in(0, n), NetId::runtime(n), "origin 0 must keep today's ids");
+        }
+        let a = NetId::runtime_in(1, 5);
+        let b = NetId::runtime_in(2, 5);
+        assert_ne!(a, b, "the same sequence number on two hosts collided");
+        assert!(a.is_runtime() && b.is_runtime());
+        assert_eq!(a.origin(), Some(1));
+        assert_eq!(b.origin(), Some(2));
+        assert_eq!(NetId::runtime_in(NetId::MAX_ORIGIN, 9).origin(), Some(NetId::MAX_ORIGIN));
+        assert_eq!(NetId::runtime(3).origin(), Some(0));
+        assert_eq!(scene_net_id("Workspace/Car").origin(), None);
+        assert_eq!(NetId::NONE.origin(), None);
+        // Every origin's ids stay in the runtime range, apart from each other.
+        let mut seen = std::collections::HashSet::new();
+        for origin in [0, 1, 2, 4095, NetId::MAX_ORIGIN] {
+            for n in 1..200u64 {
+                let id = NetId::runtime_in(origin, n);
+                assert!(id.is_runtime() && !id.is_scene());
+                assert!(seen.insert(id), "{origin}/{n} collided");
+            }
+        }
     }
 
     #[test]

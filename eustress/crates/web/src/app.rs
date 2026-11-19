@@ -26,6 +26,7 @@ use crate::pages::{
     legal_acts::LegalActPage,
     admin::AdminPage,
     admin_telemetry::AdminTelemetryPage,
+    admin_appeals::AdminAppealsPage,
     ai::AiPage,
     home::HomePage,
     login::LoginPage,
@@ -71,6 +72,11 @@ use crate::pages::{
     play::PlayPage,
     delta_thanks::DeltaThanksPage,
     email_links::{CancelEmailChangePage, UndoKeyReplacementPage, VerifyEmailPage},
+    discord_callback::DiscordCallbackPage,
+    discord::DiscordPage,
+    discord_roles::DiscordRolesPage,
+    slack::SlackPage,
+    slack_callback::SlackCallbackPage,
     replacement_key::ReplacementKeyPage,
     premium::PremiumPage,
     press::PressPage,
@@ -94,6 +100,9 @@ use crate::pages::{
     tickets::TicketsPage,
     trust_registry::TrustRegistryPage,
     kyc::KycPage,
+    grants::GrantsPage,
+    invest::InvestPage,
+    quality_gate::QualityGatePage,
     verify::VerifyPage,
     verify_account::VerifyAccountPage,
     license::LicensePage,
@@ -347,6 +356,15 @@ pub fn App() -> impl IntoView {
                 <Route path=path!("/cancel-email-change") view=CancelEmailChangePage />
                 <Route path=path!("/replacement-key") view=ReplacementKeyPage />
                 <Route path=path!("/undo-key-replacement") view=UndoKeyReplacementPage />
+                // Discord sends the browser back here after the person allows the link (src/pages/discord_callback.rs).
+                <Route path=path!("/auth/discord/callback") view=DiscordCallbackPage />
+                // Slack sends the browser back here after the person allows the link (src/pages/slack_callback.rs).
+                <Route path=path!("/auth/slack/callback") view=SlackCallbackPage />
+                // The Eustress Discord app's showcase (its Custom URL, "Add App") and its Linked Roles Verification URL (src/pages/discord.rs, discord_roles.rs).
+                <Route path=path!("/discord") view=DiscordPage />
+                <Route path=path!("/discord/roles") view=DiscordRolesPage />
+                // The Eustress Slack app's showcase, and where the Worker sends the browser after an install (src/pages/slack.rs).
+                <Route path=path!("/slack") view=SlackPage />
                 <Route path=path!("/profile/:username") view=ProfilePage />
                 <Route path=path!("/profile") view=ProfilePage />
                 <Route path=path!("/purchases") view=PurchasesPage />
@@ -378,10 +396,14 @@ pub fn App() -> impl IntoView {
                 // Admin-only (server-side gated by requireAdmin)
                 <Route path=path!("/admin") view=AdminPage />
                 <Route path=path!("/admin/telemetry") view=AdminTelemetryPage />
+                <Route path=path!("/admin/appeals") view=AdminAppealsPage />
 
                 // Info pages
                 <Route path=path!("/license") view=LicensePage />
                 <Route path=path!("/kyc") view=KycPage />
+                <Route path=path!("/grants") view=GrantsPage />
+                <Route path=path!("/quality-gate") view=QualityGatePage />
+                <Route path=path!("/invest") view=InvestPage />
                 <Route path=path!("/verify") view=VerifyPage />
                 <Route path=path!("/verify-account") view=VerifyAccountPage />
                 <Route path=path!("/support") view=SupportPage />
@@ -514,7 +536,8 @@ fn TitleSync() -> impl IntoView {
             pathname.track();
             // The route's view is swapped in during the same reactive pass
             // that fires this effect; read the heading once that pass is done.
-            set_timeout(sync, std::time::Duration::ZERO);
+            // The handle is only for cancelling; this read is never cancelled.
+            let _ = set_timeout(sync, std::time::Duration::ZERO);
         });
 
         // Any later change in the page, such as a heading that arrives with

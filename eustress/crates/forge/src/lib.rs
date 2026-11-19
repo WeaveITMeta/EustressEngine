@@ -92,6 +92,12 @@
 
 pub mod config;
 pub mod error;
+/// Placement policy for Eustress-hosted sessions: pure functions, no I/O.
+pub mod fleet;
+/// `eustress-forge host`: the agent on each rented machine that applies the fleet plan.
+pub mod fleet_host;
+/// This computer's GPU, read from the operating system without creating a device.
+pub mod gpu_probe;
 pub mod jobs;
 /// One process per job on this computer. No Nomad.
 pub mod local_launch;

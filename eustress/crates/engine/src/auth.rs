@@ -152,6 +152,10 @@ pub enum SignInSource {
     Dialog,
     /// Switching to another saved identity.
     Switch,
+    /// Eustress refused the session's token (it expired after its 72 hours,
+    /// or a sign-out elsewhere ended it), so Studio signs in again with the
+    /// identity file on its own.
+    Renew,
 }
 
 /// A finished sign-in, for the UI to show once.
@@ -304,9 +308,7 @@ impl AuthState {
         self.error = None;
         self.jwt_valid = false;
         self.identity = None;
-        if let Some(path) = get_token_path() {
-            let _ = std::fs::remove_file(path);
-        }
+        forget_saved_login();
     }
 
     /// Whether a finished sign-in waits to be shown.
@@ -671,8 +673,18 @@ fn get_token_path() -> Option<std::path::PathBuf> {
 /// AI agent runs as had on this folder. This is the one write path for every
 /// login file (production's and each other API's). A login that cannot be
 /// saved so lasts for this session only.
+///
+/// The origin of the API that issued the login is recorded beside it first
+/// (`eustress_common::api_base::login_origin_file`): the Player on this
+/// computer borrows the login and sends it only to that origin, so a Player
+/// reading between the two writes finds a record already true of the file.
 fn save_token(token: &str) {
     let Some(path) = get_token_path() else { return };
+    if let Some(record) = get_origin_record_path() {
+        if let Err(e) = save_origin_record_to(&record, &api_origin()) {
+            warn!("auth: the login's API was not recorded ({e}); the Player on this computer may play as a guest");
+        }
+    }
     if let Err(e) = save_token_to(&path, token) {
         warn!("auth: the login was not saved ({e}); it lasts for this session only");
     }
@@ -681,6 +693,28 @@ fn save_token(token: &str) {
 /// [`save_token`] into `path`.
 fn save_token_to(path: &std::path::Path, token: &str) -> std::io::Result<()> {
     crate::private_file::write_private(path, token.as_bytes())
+}
+
+/// The record beside this API's saved login that names the origin of the
+/// API that issued it.
+fn get_origin_record_path() -> Option<std::path::PathBuf> {
+    Some(dirs::data_local_dir()?.join("EustressEngine").join(eustress_common::api_base::login_origin_file()))
+}
+
+/// Write `origin` (`api_origin`, one line) into the record at `path`, as
+/// privately as the login itself.
+fn save_origin_record_to(path: &std::path::Path, origin: &str) -> std::io::Result<()> {
+    crate::private_file::write_private(path, format!("{origin}\n").as_bytes())
+}
+
+/// Remove this API's saved login and the record of its origin.
+fn forget_saved_login() {
+    if let Some(path) = get_token_path() {
+        let _ = std::fs::remove_file(path);
+    }
+    if let Some(record) = get_origin_record_path() {
+        let _ = std::fs::remove_file(record);
+    }
 }
 
 /// Make the login files saved before they were private private, once, at
@@ -787,9 +821,7 @@ pub fn auth_poll_system(mut auth_state: ResMut<AuthState>) {
     for result in finished {
         let change = auth_state.apply(result);
         if change.forget {
-            if let Some(path) = get_token_path() {
-                let _ = std::fs::remove_file(path);
-            }
+            forget_saved_login();
         }
         if let Some(token) = change.save {
             save_token(&token);
@@ -1140,6 +1172,25 @@ mod tests {
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "jwt-two", "replaced, not appended");
         crate::private_file::verify(&dir).unwrap();
         crate::private_file::verify(&path).unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Beside a saved login, Studio records the origin of the API that issued
+    /// it, privately, under the name the Player reads, and the record is never
+    /// taken for a login file.
+    #[test]
+    fn a_saved_login_records_its_api_origin() {
+        let dir = std::env::temp_dir().join(format!("eustress-login-origin-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let staging = eustress_common::api_base::STAGING_API;
+        let name = eustress_common::api_base::login_origin_file_for(staging);
+        assert_eq!(name, format!("{}.origin", eustress_common::api_base::login_file_for(staging)));
+        assert!(!is_login_file(&name) && !is_login_file("auth_token.origin"), "a record is not a login");
+        let record = dir.join(&name);
+        save_origin_record_to(&record, &eustress_common::api_base::origin_of(staging)).unwrap();
+        assert_eq!(std::fs::read_to_string(&record).unwrap(), "https://api-staging.eustress.dev\n");
+        crate::private_file::verify(&dir).unwrap();
+        crate::private_file::verify(&record).unwrap();
         let _ = std::fs::remove_dir_all(&dir);
     }
 

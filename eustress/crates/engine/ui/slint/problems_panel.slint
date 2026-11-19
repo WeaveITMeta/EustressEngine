@@ -154,8 +154,8 @@ export component ProblemsPanel inherits Rectangle {
         // ── Problem list ────────────────────────────────────────────────
         Flickable {
             vertical-stretch: 1;
-            viewport-height: list-col.preferred-height;
-            viewport-width: self.width;
+            content-height: list-col.preferred-height;
+            content-width: self.width;
 
             list-col := VerticalLayout {
                 spacing: 0px;

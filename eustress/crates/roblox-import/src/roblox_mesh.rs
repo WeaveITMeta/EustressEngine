@@ -290,9 +290,10 @@ fn decode_v1(body: &[u8], minor: u32) -> Result<CsgMesh, MeshError> {
         } else {
             [n[0], n[1], n[2]]
         });
-        // uv: Roblox stores V flipped relative to glTF; keep raw — the
-        // renderer's sampler handles convention. Drop the optional w.
-        mesh.uvs.push([t[0], t[1]]);
+        // uv: version 1 stores V inverted (`1 - v`); the binary versions do
+        // not. Flipped here so every version hands the glb the same V, top
+        // to bottom. Drop the optional w.
+        mesh.uvs.push([t[0], 1.0 - t[1]]);
     }
     // v1 is a raw triangle soup: every 3 vertices = 1 triangle, indices
     // are 0,1,2,3,…
@@ -326,11 +327,15 @@ fn decode_v2(body: &[u8]) -> Result<CsgMesh, MeshError> {
     let mut cur = Cursor::new(body);
     // Canonical v2 header is exactly 12 bytes: the 4 size/flag bytes below
     // plus the two u32 counts that follow (4 + 8 = 12 = sizeof_header).
-    let _sizeof_header = cur.u16()? as usize;
+    let sizeof_header = cur.u16()? as usize;
     let sizeof_vertex = cur.take(1)?[0] as usize;
     let sizeof_face = cur.take(1)?[0] as usize;
     let num_verts = cur.u32()? as usize;
     let num_faces = cur.u32()? as usize;
+    // A header longer than the 12 bytes read: the vertices start after it.
+    if sizeof_header > 12 {
+        cur.skip(sizeof_header - 12)?;
+    }
 
     validate_counts(sizeof_vertex, sizeof_face, num_verts, num_faces)?;
 
@@ -591,6 +596,16 @@ fn read_vertices(
     num_verts: usize,
     mesh: &mut CsgMesh,
 ) -> Result<(), MeshError> {
+    // The count is the file's own. A table the bytes left cannot hold is
+    // refused before it sizes an allocation: a 40-byte file claiming 50
+    // million vertices otherwise reserves gigabytes.
+    let need = num_verts.saturating_mul(sizeof_vertex.max(32));
+    if cur.remaining() < need {
+        return Err(MeshError::Truncated {
+            wanted: need,
+            had: cur.remaining(),
+        });
+    }
     mesh.positions.reserve(num_verts);
     mesh.normals.reserve(num_verts);
     mesh.uvs.reserve(num_verts);
@@ -636,6 +651,13 @@ fn read_faces(
     num_faces: usize,
     mesh: &mut CsgMesh,
 ) -> Result<(), MeshError> {
+    let need = num_faces.saturating_mul(sizeof_face.max(12));
+    if cur.remaining() < need {
+        return Err(MeshError::Truncated {
+            wanted: need,
+            had: cur.remaining(),
+        });
+    }
     mesh.indices.reserve(num_faces * 3);
     for _ in 0..num_faces {
         let a = cur.u32()?;
@@ -917,7 +939,7 @@ mod tests {
         assert_eq!(mesh.positions.len(), 3);
         assert_eq!(mesh.indices, vec![0, 1, 2]);
         assert_eq!(mesh.positions[0], [1.0, 0.0, 0.0]);
-        assert_eq!(mesh.uvs[1], [1.0, 0.0]);
+        assert_eq!(mesh.uvs[1], [1.0, 1.0], "version 1 stores V inverted");
     }
 
     /// Version 1.00 stores positions at twice their size; 1.01 fixed that.
@@ -943,6 +965,19 @@ mod tests {
             assert!((len - 1.0).abs() < 1e-5, "normal {n:?} is not unit length");
         }
         assert!((mesh.normals[0][1] + 1.0).abs() < 1e-6, "direction kept");
+    }
+
+    /// The header's counts are the file's own claim: a table the file cannot
+    /// hold is refused before it sizes an allocation.
+    #[test]
+    fn a_count_the_file_cannot_hold_is_truncated() {
+        let mut blob = b"version 2.00\n".to_vec();
+        blob.extend_from_slice(&12u16.to_le_bytes());
+        blob.push(40u8);
+        blob.push(12u8);
+        blob.extend_from_slice(&1_000_000u32.to_le_bytes());
+        blob.extend_from_slice(&1_000_000u32.to_le_bytes());
+        assert!(matches!(decode_mesh(&blob), Err(MeshError::Truncated { .. })));
     }
 
     #[test]

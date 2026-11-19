@@ -1,0 +1,11 @@
+[project]
+name = "S6_domain_sim"
+version = "0.1.0"
+author = "harness-scenes"
+eustress_version = "harness-scenes"
+created = "2026-11-16T00:00:00Z"
+last_opened = "2026-11-16T00:00:00Z"
+
+[format]
+eep_version = "1.0"
+scene_format = "toml"

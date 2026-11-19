@@ -21,6 +21,7 @@ pub mod api;
 pub mod app;
 pub mod capture;
 pub mod components;
+pub mod critical_css;
 pub mod identity_file;
 pub mod pages;
 pub mod seo;
@@ -52,11 +53,27 @@ use wasm_bindgen::prelude::*;
 /// running WASM. The live app renders the same tree into `<body>`, so the
 /// static copy is emptied first; otherwise the page would show twice.
 pub fn mount_app() {
-    if let Some(app) = web_sys::window()
-        .and_then(|w| w.document())
-        .and_then(|d| d.get_element_by_id("app"))
-    {
-        app.set_inner_html("");
+    let document = web_sys::window().and_then(|w| w.document());
+    if let Some(document) = &document {
+        // A prerendered page parks the full stylesheets (address in data-href,
+        // media="print") so they do not compete with its first paint (see
+        // critical_css). assets/loader.js puts them back before this runs; this
+        // is the guarantee, so the live app is never drawn with only one page's
+        // critical CSS.
+        let selector = format!("link[{}][media=\"print\"]", critical_css::DEFERRED);
+        while let Ok(Some(sheet)) = document.query_selector(&selector) {
+            if let Some(href) = sheet.get_attribute("data-href") {
+                if sheet.get_attribute("href").is_none() {
+                    let _ = sheet.set_attribute("href", &href);
+                }
+            }
+            if sheet.set_attribute("media", "all").is_err() {
+                break;
+            }
+        }
+        if let Some(app) = document.get_element_by_id("app") {
+            app.set_inner_html("");
+        }
     }
     leptos::mount::mount_to_body(app::App);
 }

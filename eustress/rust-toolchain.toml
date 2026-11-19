@@ -1,4 +1,6 @@
 [toolchain]
-channel = "stable"
+# Pinned so every machine and CI runner builds with the same compiler.
+# 1.100 stabilises the allocator API (common::frame_arena) and the never type.
+channel = "1.100.0"
 components = ["rustfmt", "clippy"]
 targets = ["wasm32-unknown-unknown"]

@@ -1,0 +1,10 @@
+[metadata]
+archivable = true
+class_name = "SoulScript"
+name = "RodHeatModel"
+uuid = "c4ee12d8561166a6801a6498a152577e"
+
+[script]
+enabled = true
+run_context = "Rune"
+source = "RodHeatModel.rune"

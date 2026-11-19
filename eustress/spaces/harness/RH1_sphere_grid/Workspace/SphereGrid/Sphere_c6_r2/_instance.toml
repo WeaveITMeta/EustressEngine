@@ -1,0 +1,49 @@
+[asset]
+mesh = "parts/ball.glb"
+scene = "Scene0"
+
+[attributes]
+metallic = 0.5
+roughness = 0.857143
+
+[metadata]
+archivable = true
+class_name = "Part"
+created = "2026-11-16T00:00:00Z"
+last_modified = "2026-11-16T00:00:00Z"
+name = "Sphere_c6_r2"
+unit = "m"
+uuid = "dad019f5634834197c93fafe0263eb8e"
+
+[properties]
+anchored = true
+can_collide = true
+cast_shadow = true
+color = [
+    204,
+    204,
+    204,
+]
+destructible = false
+locked = false
+material = "H_R6_M2"
+reflectance = 0.0
+transparency = 0.0
+
+[transform]
+position = [
+    2.5,
+    0.4,
+    0.0,
+]
+rotation = [
+    0.0,
+    0.0,
+    0.0,
+    1.0,
+]
+scale = [
+    0.8,
+    0.8,
+    0.8,
+]

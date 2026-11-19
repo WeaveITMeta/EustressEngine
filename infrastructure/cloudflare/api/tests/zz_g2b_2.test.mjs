@@ -1,8 +1,9 @@
-// Probe G2B-2: the signed-out cap (ages_10) does not reach a listing's images. The thumbnail, the cover, the preview list
-// and each preview frame of a listed teen_13 or mature_17 listing are served to a visitor with no session, because those
-// routes gate on isAdultListing only (refuseUnsignedImage; listPreviews calls refuseAdult only for adult listings).
-// The listing page itself refuses the same visitor with sign_in_required.
-// Expected (fails today): every image route of a listing above ages_10 refuses a signed-out visitor, as its page does.
+// Probe G2B-2: a listing's images and its page agree for a visitor with no session. The probe found the page of a teen_13
+// or mature_17 listing refused signed out (the ages_10 cap of 2026-10-16) while its thumbnail, cover and previews were
+// served, because those routes gate on isAdultListing only (refuseUnsignedImage; listPreviews calls refuseAdult only for
+// adult listings). McKale, 2026-11-19, closed it the other way: solo browsing needs no sign-in up to mature_17
+// (src/adult_content.mjs SOLO_SIGNED_OUT_CAP), so the page is served signed out as its images are. An adult listing's
+// images still need a signed URL, which only a viewer allowed to see it is given.
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { loadWorker, fakeEnv, fakeKv, fakeDoNamespace, ctx, testPng } from './helpers/load_worker.mjs';
@@ -45,24 +46,22 @@ async function get(env, path) {
   return { status: res.status, body, bytes };
 }
 
-// TODO (not in round 3): the orchestrator's round 3 list leaves the image routes out. Serving an image of a listing above ages_10
-// only to a session would need signed image URLs for those listings too (an <img> request carries no Authorization), a design
-// change in adult_content.mjs, cover.mjs and index.js listPreviews. Runs, and reports, as a todo until that lands.
-test('G2B-2: a signed-out visitor is refused a teen or mature listing page but served its thumbnail, cover and previews', { todo: 'image routes: not in round 3' }, async () => {
+test('G2B-2: a signed-out visitor is served a teen or mature listing page and its thumbnail, cover and previews alike; an adult one neither', async () => {
   const env = { ...fakeEnv(), KYC_STATUS: fakeKv() };
   env.LIVE_HOSTS = fakeDoNamespace(LiveHost, env);
   env.LIVE_INDEX = fakeDoNamespace(LiveIndex, env);
   await env.USERS.put(`user:${AUTHOR}`, JSON.stringify({ kyc_verified: true, id: AUTHOR, username: 'maker' }));
-  const served = [];
+  const imagePaths = (id) => [`/api/simulations/${id}/thumbnail`, `/api/simulations/${id}/cover`, `/api/simulations/${id}/previews`, `/api/simulations/${id}/preview/0`];
   for (const [id, rating] of [['cccccccc-0000-4000-8000-000000000001', 'teen_13'], ['cccccccc-0000-4000-8000-000000000002', 'mature_17']]) {
     await listing(env, id, rating);
     const page = await get(env, `/api/simulations/${id}`);
-    assert.deepEqual([page.status, page.body?.code], [403, 'sign_in_required'], `${rating}: the page is refused signed out`);
-    for (const path of [`/api/simulations/${id}/thumbnail`, `/api/simulations/${id}/cover`, `/api/simulations/${id}/previews`, `/api/simulations/${id}/preview/0`]) {
-      const r = await get(env, path);
-      if (r.status === 200) served.push(`${rating} ${path.split(id)[1]} -> 200 (${r.body ? JSON.stringify(r.body) : `${r.bytes.length} image bytes`})`);
-    }
+    assert.equal(page.status, 200, `${rating}: the page is served signed out`);
+    for (const path of imagePaths(id)) assert.equal((await get(env, path)).status, 200, `${rating} ${path.split(id)[1]}`);
   }
-  console.log(served.join('\n'));
-  assert.deepEqual(served, [], 'served to a visitor with no session above ages_10');
+  // Adult content: the page and every image are refused to the same visitor.
+  const adult = 'cccccccc-0000-4000-8000-000000000003';
+  await listing(env, adult, 'adult_18');
+  const page = await get(env, `/api/simulations/${adult}`);
+  assert.deepEqual([page.status, page.body?.code], [403, 'adult_content_off'], 'adult_18: the page');
+  for (const path of imagePaths(adult)) assert.equal((await get(env, path)).status, 403, `adult_18 ${path.split(adult)[1]}`);
 });

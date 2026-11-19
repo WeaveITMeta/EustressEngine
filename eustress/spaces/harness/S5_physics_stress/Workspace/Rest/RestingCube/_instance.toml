@@ -1,0 +1,54 @@
+[asset]
+mesh = "parts/block.glb"
+scene = "Scene0"
+
+[attributes]
+hold_ticks = 600
+
+[metadata]
+archivable = true
+class_name = "Part"
+created = "2026-11-16T00:00:00Z"
+last_modified = "2026-11-16T00:00:00Z"
+name = "RestingCube"
+unit = "m"
+uuid = "285dbac984a90d3075d5d60664659299"
+
+[properties]
+anchored = false
+can_collide = true
+cast_shadow = true
+color = [
+    60,
+    160,
+    60,
+]
+destructible = false
+locked = false
+material = "SmoothPlastic"
+reflectance = 0.0
+transparency = 0.0
+
+[properties.physics]
+density = 1000.0
+density_unit = "kg/m3"
+friction_kinetic = 0.6
+friction_static = 0.6
+
+[transform]
+position = [
+    -6.0,
+    0.25,
+    5.0,
+]
+rotation = [
+    0.0,
+    0.0,
+    0.0,
+    1.0,
+]
+scale = [
+    0.5,
+    0.5,
+    0.5,
+]

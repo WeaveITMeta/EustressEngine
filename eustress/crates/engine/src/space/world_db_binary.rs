@@ -1454,6 +1454,12 @@ pub fn register(app: &mut App) {
             ),
         )
         .add_systems(Update, drain_pending_binary_recreate)
+        // Prefetch inspector: how far ahead residency's camera prediction
+        // keeps, measured with the shared predictor; changes nothing it loads.
+        .add_systems(
+            Update,
+            super::residency::sys_residency_prefetch_observe.after(super::residency::sys_residency_load),
+        )
         // Phase 4 — select-to-stream-in for the virtual DB Explorer. Runs
         // before eviction so a just-streamed entity is registered/pinned in
         // the same frame's selection pass (the spawn itself is deferred, so

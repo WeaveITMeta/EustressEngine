@@ -38,6 +38,7 @@ use super::tree::sequence_from_tree;
 use super::{legacy_motion, AnimatorDriven, LiveTree, PoseReady};
 use crate::avatar::rig::{AvatarRig, HumanoidBone};
 use crate::avatar::AvatarDescriptor;
+use crate::frame_arena::FrameArena;
 use crate::datamodel::animation::{effective_weights, AnimatorFrame, ClipInfo, Priority, TrackSample};
 use crate::datamodel::{DataModel, DmValue, InstanceId, OutputLevel};
 
@@ -748,21 +749,23 @@ pub fn drive_graphs(
     mut graphs: ResMut<Assets<AnimationGraph>>,
     mut runtimes: Query<(Entity, &mut AnimatorRuntime, &mut AnimationPlayer, &mut AnimationGraphHandle)>,
     posed: Query<(), With<PoseReady>>,
+    mut arena: Local<FrameArena>,
 ) {
     let Some(tree) = tree else { return };
+    // This frame's scratch lists live in the arena; last frame's are gone.
+    arena.reset();
+    let arena: &FrameArena = &arena;
     let (frame, pins) = {
         let g = tree.dm.lock();
         let frame: Vec<AnimatorFrame> = g.animation_frame();
-        let pins: HashMap<InstanceId, bool> = runtimes
-            .iter()
-            .map(|(_, rt, ..)| {
-                let keep = matches!(
-                    g.get_prop(rt.animator, "RootMotionMode").as_ref().and_then(|v| v.as_str()),
-                    Some("Keep")
-                );
-                (rt.animator, !keep)
-            })
-            .collect();
+        let mut pins: Vec<(InstanceId, bool), &FrameArena> = Vec::new_in(arena);
+        pins.extend(runtimes.iter().map(|(_, rt, ..)| {
+            let keep = matches!(
+                g.get_prop(rt.animator, "RootMotionMode").as_ref().and_then(|v| v.as_str()),
+                Some("Keep")
+            );
+            (rt.animator, !keep)
+        }));
         (frame, pins)
     };
 
@@ -770,29 +773,34 @@ pub fn drive_graphs(
         let rt = &mut *rt;
         let Some(rig) = rt.rig.as_ref() else { continue };
         rt.frames_bound = rt.frames_bound.saturating_add(1);
-        rt.pin_root_motion = pins.get(&rt.animator).copied().unwrap_or(true);
+        rt.pin_root_motion = pins.iter().rfind(|(a, _)| *a == rt.animator).map_or(true, |&(_, pin)| pin);
 
         // The tracks whose clips are ready, in track order.
         let empty = Vec::new();
         let tracks: &Vec<TrackSample> =
             frame.iter().find(|f| f.animator == rt.animator).map(|f| &f.tracks).unwrap_or(&empty);
-        let mut samples: Vec<&TrackSample> = Vec::new();
-        let mut handles: Vec<Handle<AnimationClip>> = Vec::new();
-        let mut coverages: Vec<Vec<usize>> = Vec::new();
+        let mut samples: Vec<&TrackSample, &FrameArena> = Vec::new_in(arena);
+        let mut members: Vec<(InstanceId, AssetId<AnimationClip>), &FrameArena> = Vec::new_in(arena);
         for s in tracks {
-            if let Some(ClipState::Ready { handle, coverage, .. }) = rt.clips.get(&s.content) {
+            if let Some(ClipState::Ready { handle, .. }) = rt.clips.get(&s.content) {
                 samples.push(s);
-                handles.push(handle.clone());
-                coverages.push(coverage.clone());
+                members.push((s.track, handle.id()));
             }
         }
-        let members: Vec<(InstanceId, AssetId<AnimationClip>)> =
-            samples.iter().zip(&handles).map(|(s, h)| (s.track, h.id())).collect();
 
         // A new membership builds a new graph, swapped in once Bevy has threaded it.
-        let current = rt.layout.as_ref().map(|l| &l.members);
-        let pending = rt.pending.as_ref().map(|(_, l, _)| &l.members);
-        if current != Some(&members) && pending != Some(&members) {
+        let current = rt.layout.as_ref().map(|l| l.members.as_slice());
+        let pending = rt.pending.as_ref().map(|(_, l, _)| l.members.as_slice());
+        if current != Some(&members[..]) && pending != Some(&members[..]) {
+            // Only a new graph needs the clips' handles and joint coverage.
+            let mut handles: Vec<Handle<AnimationClip>> = Vec::with_capacity(samples.len());
+            let mut coverages: Vec<Vec<usize>> = Vec::with_capacity(samples.len());
+            for s in &samples {
+                if let Some(ClipState::Ready { handle, coverage, .. }) = rt.clips.get(&s.content) {
+                    handles.push(handle.clone());
+                    coverages.push(coverage.clone());
+                }
+            }
             let (classes, merged) = coverage_classes(rig.joints.joints.len(), &coverages);
             if merged && rt.warned.insert("merged".into()) {
                 warn!("animation: a rig has more joint classes than Bevy's 64 mask groups; its blend is approximate");
@@ -800,7 +808,7 @@ pub fn drive_graphs(
             let targets: Vec<AnimationTargetId> = rig.joints.joints.iter().map(|j| j.target).collect();
             let (graph, nodes) = build_graph(&rig.rest, &handles, &classes, &targets);
             let handle = graphs.add(graph);
-            rt.pending = Some((handle, Layout { members: members.clone(), classes, nodes }, 0));
+            rt.pending = Some((handle, Layout { members: members.to_vec(), classes, nodes }, 0));
         }
         if let Some((_, _, frames)) = rt.pending.as_mut() {
             *frames += 1;
@@ -820,18 +828,18 @@ pub fn drive_graphs(
 
         // This frame's weights and times, on the graph in use.
         if let Some(layout) = rt.layout.as_ref() {
-            let index_of: HashMap<InstanceId, usize> =
-                samples.iter().enumerate().map(|(i, s)| (s.track, i)).collect();
             for (class, nodes) in layout.classes.iter().zip(&layout.nodes) {
                 // The layout's track indices refer to its own members; map them
-                // to this frame's samples by track id.
-                let current: Vec<Option<&TrackSample>> = class
-                    .tracks
-                    .iter()
-                    .map(|&t| layout.members.get(t).and_then(|(id, _)| index_of.get(id)).map(|&i| samples[i]))
-                    .collect();
-                let pairs: Vec<(Priority, f32)> =
-                    current.iter().map(|s| s.map_or((Priority::Core, 0.0), |s| (s.priority, s.weight))).collect();
+                // to this frame's samples by track id (a rig has a handful of
+                // tracks, so a scan beats building a map every frame; the last
+                // sample of an id wins, as the map did).
+                let mut current: Vec<Option<&TrackSample>, &FrameArena> =
+                    Vec::with_capacity_in(class.tracks.len(), arena);
+                current.extend(class.tracks.iter().map(|&t| {
+                    layout.members.get(t).and_then(|(id, _)| samples.iter().rfind(|s| s.track == *id)).copied()
+                }));
+                let mut pairs: Vec<(Priority, f32), &FrameArena> = Vec::with_capacity_in(current.len(), arena);
+                pairs.extend(current.iter().map(|s| s.map_or((Priority::Core, 0.0), |s| (s.priority, s.weight))));
                 let (weights, rest) = effective_weights(&pairs);
                 if let Some(a) = player.animation_mut(nodes.rest) {
                     a.set_weight(rest).set_seek_time(0.0);

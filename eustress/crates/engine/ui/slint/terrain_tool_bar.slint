@@ -748,8 +748,8 @@ component MaterialSwatchButton inherits Rectangle {
                     ScrollView {
                         width: 100%;
                         height: 100%;
-                        viewport-width: root.grid-w;
-                        viewport-height: max(root.tile-h, Math.ceil(body.matches / root.columns) * root.pitch-y - root.gap);
+                        content-width: root.grid-w;
+                        content-height: max(root.tile-h, Math.ceil(body.matches / root.columns) * root.pitch-y - root.gap);
                         horizontal-scrollbar-policy: always-off;
 
                         // Compacting filter without a filtered model: every

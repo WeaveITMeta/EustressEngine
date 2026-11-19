@@ -53,6 +53,7 @@ pub const DESCRIPTIONS: &[(&str, &str)] = &[
     ("/community", "The Eustress community: the people building on Eustress, who is hosting right now, and what they published."),
     ("/contact", "Contact the Eustress team with a question or feedback."),
     ("/cookies", "How Eustress uses cookies and similar storage, and the choices you have."),
+    ("/discord", "The Eustress app for Discord: find Spaces, see who is playing now, link your account, and use Linked Roles. What it does, who sees what, and privacy."),
     ("/dmca", "The Eustress DMCA policy: how to report copyright infringement and how takedown notices are handled."),
     ("/docs/getting-started", "Install Eustress, create a Universe and a Space, add a part, press Play, save, and run your first script."),
     ("/docs/studio", "A tour of Studio, the Eustress editor: Explorer, Properties, Insert Object, tools and snapping, undo and History, shortcuts, saving and modes."),
@@ -76,6 +77,7 @@ pub const DESCRIPTIONS: &[(&str, &str)] = &[
     ("/docs/philosophy", "Why Eustress is built the way it is, and the mechanism behind each principle."),
     ("/download", "Download Eustress Studio, the editor for building, simulating and publishing Spaces."),
     ("/downloads/player", "Download Eustress Player to play and join published Spaces."),
+    ("/grants", "How Eustress Studio finds federal grants and contracts on SAM.gov and Grants.gov, screens them, and drafts the first response."),
     ("/gallery", "The Eustress Gallery: browse published Spaces, filter by tag, and open one to play or read about."),
     ("/leaderboard", "The Eustress leaderboard: the people who define the community, ranked."),
     ("/learn", "Guides for building a Space, giving it behavior, simulating it, publishing it, and handing it to AI agents."),
@@ -87,7 +89,9 @@ pub const DESCRIPTIONS: &[(&str, &str)] = &[
     ("/marketplace", "The Eustress Marketplace: models, scripts, audio, textures and avatar items from creators, with who made each one and what it costs."),
     ("/premium", "Eustress plans and pricing, billed monthly or yearly."),
     ("/press", "Official assets and information for press coverage of Eustress."),
+    ("/quality-gate", "The review every Eustress publication and themed Space page passes before anyone sees it, and what it allows."),
     ("/privacy", "The Eustress privacy policy: what data Eustress collects, why, and the choices you have."),
+    ("/slack", "The Eustress app for Slack: find Spaces, see who is playing now, link your account, and follow a Space into a channel. What it does, what it can see, and privacy."),
     ("/support", "Get help with Eustress. Pick the channel that fits your problem: Discord, GitHub issues or email."),
     ("/take-it-down", "Report intimate images or videos shared without consent, including ones made by AI. No account needed."),
     ("/terms", "The terms of service for Eustress Engine and eustress.dev."),
@@ -959,6 +963,29 @@ mod tests {
         let vendored = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/vendor/model-viewer-4.0.0.min.js");
         assert!(vendored.is_file(), "{} ships", vendored.display());
     }
+
+    #[test]
+    fn the_fonts_are_served_from_this_site_and_every_file_exists() {
+        assert!(!INDEX.contains("fonts.googleapis.com") && !INDEX.contains("fonts.gstatic.com"), "no font origin but this one");
+        assert!(INDEX.contains(r#"<link data-trunk rel="css" href="style/fonts.css">"#));
+        let crate_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let css = include_str!("../style/fonts.css");
+        let mut named: Vec<&str> = css.split("url(").skip(1).map(|s| &s[..s.find(')').unwrap()]).collect();
+        assert!(named.len() >= 50, "every weight and subset has a face: {}", named.len());
+        // What the shell preloads must be among them.
+        let preloads: Vec<&str> = INDEX.split("<link rel=\"preload\" href=\"").skip(1).map(|s| &s[..s.find('"').unwrap()]).collect();
+        assert!(preloads.contains(&"/assets/fonts/inter-latin.woff2"), "{preloads:?}");
+        for p in &preloads {
+            assert!(named.contains(p), "{p} is preloaded but fonts.css never uses it");
+        }
+        named.sort_unstable();
+        named.dedup();
+        for url in named {
+            let file = crate_dir.join(url.trim_start_matches('/'));
+            let bytes = std::fs::read(&file).unwrap_or_else(|e| panic!("{} is missing ({e})", file.display()));
+            assert_eq!(&bytes[..4], b"wOF2", "{} is not WOFF2", file.display());
+        }
+    }
     const REDIRECTS: &str = include_str!("../_redirects");
     const LLMS: &str = include_str!("../llms.txt");
     const APP: &str = include_str!("app.rs");
@@ -980,6 +1007,40 @@ mod tests {
         for (route, _) in DESCRIPTIONS {
             assert!(*route == "/404" || routes.contains(&route.to_string()), "{route} is described but not in the sitemap");
         }
+    }
+
+    #[test]
+    fn the_discord_page_is_listed_and_its_roles_page_is_a_rewrite_kept_out_of_search() {
+        let routes = routes_from_sitemap(SITEMAP);
+        assert!(routes.contains(&"/discord".to_string()), "/discord is in the sitemap");
+        assert!(!routes.contains(&"/discord/roles".to_string()), "the Linked Roles page is not listed");
+        assert!(description_for("/discord").starts_with("The Eustress app for Discord"));
+        assert!(rules().iter().any(|(from, to, status)| from == "/discord/roles" && to == "/" && *status == 200), "/discord/roles is rewritten to the shell");
+        assert!(!rules().iter().any(|(from, _, _)| from == "/discord"), "/discord has its own prerendered file");
+        let headers = include_str!("../_headers");
+        let at = headers.find("
+/discord/roles").expect("/discord/roles has a header block");
+        assert!(headers[at + 1..].lines().nth(1).unwrap_or("").contains("noindex"), "/discord/roles is noindex");
+    }
+
+    #[test]
+    fn the_slack_page_is_listed_and_the_shell_carries_the_app_id() {
+        let routes = routes_from_sitemap(SITEMAP);
+        assert!(routes.contains(&"/slack".to_string()), "/slack is in the sitemap");
+        assert!(description_for("/slack").starts_with("The Eustress app for Slack"));
+        assert!(!rules().iter().any(|(from, _, _)| from == "/slack"), "/slack has its own prerendered file");
+        assert!(INDEX.contains("<meta name=\"slack-app-id\" content=\"A0CHNKPQCKX\">"));
+    }
+
+    #[test]
+    fn the_slack_callback_is_a_rewrite_the_router_draws_and_the_sitemap_leaves_out() {
+        let routes = routes_from_sitemap(SITEMAP);
+        assert!(!routes.contains(&"/auth/slack/callback".to_string()), "the Slack callback is not listed");
+        assert!(
+            rules().iter().any(|(from, to, status)| from == "/auth/slack/callback" && to == "/" && *status == 200),
+            "/auth/slack/callback is rewritten to the shell"
+        );
+        assert!(app_routes().contains(&"/auth/slack/callback".to_string()), "the router has the Slack callback");
     }
 
     #[test]
@@ -1187,7 +1248,7 @@ mod tests {
         use leptos::prelude::*;
         use leptos::tachys::view::RenderHtml;
         use leptos_router::location::RequestUrl;
-        let _ = leptos::task::Executor::init_futures_executor();
+        let _ = any_spawner::Executor::init_futures_executor();
         let shared: std::sync::Arc<dyn SharedContext + Send + Sync> = std::sync::Arc::new(SsrSharedContext::new());
         let owner = Owner::new_root(Some(shared));
         let html = owner.with(|| {

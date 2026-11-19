@@ -142,8 +142,8 @@ export component CommandBar inherits Rectangle {
                 y: 2px;
                 width: parent.width - 30px;
                 height: parent.height - 4px;
-                viewport-width: self.width;
-                viewport-height: max(self.height, input-area.preferred-height);
+                content-width: self.width;
+                content-height: max(self.height, input-area.preferred-height);
 
                 input-area := TextInput {
                     width: parent.width;

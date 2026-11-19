@@ -7,6 +7,7 @@ members = [
     "crates/runtime",
     "crates/play-runtime",
     "crates/player-web",
+    "crates/raytracing",
     "crates/engine",
     "crates/client",
     "crates/server",
@@ -44,6 +45,8 @@ members = [
     "crates/radiance",
     "crates/ppisp",
     "crates/genesis",
+    "crates/agent-eval",
+    "crates/ui-gpu-spike",
     "benches/instance-capacity"
 ]
 
@@ -53,10 +56,11 @@ resolver = "2"
 # Core Bevy 0.19 (wgpu 29.0.3, MSRV 1.95, edition 2024 upstream) — see docs/architecture/BEVY_019_MIGRATION.md
 bevy = { version = "0.19", default-features = false }
 
-# UI - Slint from git with software renderer + FemtoVG GPU renderer (OpenGL)
-# NOTE: renderer-femtovg-wgpu would share Bevy's wgpu device, but Slint master targets wgpu 28
-# while Bevy 0.18 uses wgpu 27. Switch to renderer-femtovg-wgpu when Bevy upgrades to wgpu 28.
-slint = { git = "https://github.com/slint-ui/slint", branch = "master", features = ["std", "compat-1-2", "renderer-software", "renderer-femtovg"] }
+# UI - Slint 1.19.0 from git (tag v1.19.0) with software renderer + FemtoVG GPU renderer (OpenGL)
+# NOTE: Studio draws its UI with the software renderer (engine/src/ui/slint_gpu.rs).
+# Slint 1.19 offers `unstable-wgpu-29`, the wgpu Bevy 0.19 uses, so `renderer-femtovg-wgpu`
+# could share Bevy's device; `backdrop-blur` needs that or Skia, the software renderer skips it.
+slint = { git = "https://github.com/slint-ui/slint", tag = "v1.19.0", features = ["std", "compat-1-2", "renderer-software", "renderer-femtovg"] }
 # egui REMOVED - using Slint exclusively
 
 # Input - DISABLED until leafwing-input-manager supports Bevy 0.19
@@ -86,8 +90,11 @@ quinn = "0.11"
 # Physics (Avian 0.7.0 — crates.io release 2026-06-20, Bevy 0.19 compatible)
 avian3d = { version = "0.7", default-features = false, features = ["3d", "f32", "parry-f32", "debug-plugin", "parallel", "collider-from-mesh", "bevy_scene", "xpbd_joints"] }
 
-# Luau scripting runtime (Roblox Luau via mlua)
-mlua = { version = "0.10", features = ["luau", "serialize", "send"] }
+# Luau scripting runtime (Roblox Luau via mlua). 0.12 bundles Luau 0.740 and
+# requires `Sync` userdata under `send`. Its bundled Luau build no longer
+# defines NDEBUG, which leaves every LUAU_ASSERT live in release; the
+# `LUAU_CXXFLAGS` entry in .cargo/config.toml puts it back.
+mlua = { version = "0.12.2", features = ["luau", "serialize", "send"] }
 
 # bytes — shared buffer type for streaming payloads
 bytes = "1.7"
@@ -184,7 +191,16 @@ opt-level = 3
 
 # Patch gpu-allocator to use windows 0.58 (matches wgpu-hal's windows version)
 [patch.crates-io]
+# mlua 0.12.2 with one change (src/luau/heap_dump.rs): `Lua::heap_dump` is
+# refused on wasm32-unknown-unknown, where the `libc` crate has no C stdio
+# and the crate otherwise fails to compile. Every other target is unchanged.
+# The browser Player (crates/player-web) cannot build without it.
+mlua = { path = ".patches/mlua-0.12.2" }
 gpu-allocator = { path = ".patches/gpu-allocator-fresh" }
+# dlss_wgpu 4.0.0 (the version Bevy 0.19's `dlss` feature uses) against DLSS
+# SDK 310.9.1, with the NGX library picked by the target's C runtime. Only a
+# `dlss` build compiles it.
+dlss_wgpu = { path = "vendor/dlss_wgpu" }
 # Vendored Fjall + lsm-tree (2026-05-16). This IS the fork: the engine
 # now builds the database substrate from workspace-owned source, so the
 # deep internal differentiators (memory-mapped .eustress I/O fusion,
@@ -200,14 +216,6 @@ lsm-tree = { path = "vendor/lsm-tree" }
 # what, why and when to drop it.
 avian3d = { path = ".patches/avian3d-0.7.0" }
 
-# Slint's software renderer (2026-10-01): a Text or TextInput drawing past
-# 32,767 physical px panicked in an i16 conversion and aborted Studio. Two
-# functions patched; `.patches/slint-2447c697/PATCH.md` says what, why and when
-# to drop it. Only this crate is replaced; it takes the rest of Slint from the
-# same git source.
-[patch."https://github.com/slint-ui/slint"]
-i-slint-renderer-software = { path = ".patches/slint-2447c697/i-slint-renderer-software" }
-
 # codegen-units was 8. The Slint UI compiles to a single generated file of
 # over a million lines, and at 8 units rustc averaged 1.1 busy threads across a
 # 241-minute release build: 16,066 CPU seconds spread over four hours of wall
@@ -220,6 +228,15 @@ opt-level = 3
 lto = false
 codegen-units = 32
 strip = true
+
+# The browser Player keeps its wasm's `target_features` section, which
+# `strip = true` deletes. wasm-bindgen reads it to see that the module uses
+# reference types; the Luau VM's C++ exceptions need the externref table that
+# turns on, and without it wasm-bindgen refuses the module ("externref table
+# required for catch wrappers"). The name section this also keeps is removed
+# by wasm-bindgen when the Player is packaged (package_player.mjs).
+[profile.release.package.eustress-player-web]
+strip = false
 
 # What ships in the installer. `release` plus cross-crate thin LTO.
 #
@@ -244,5 +261,20 @@ strip = true
 [profile.dist]
 inherits = "release"
 lto = "thin"
+
+# The website's WebAssembly (crates/web). Every visitor downloads it, so size
+# comes first: `release` built for size, with fat LTO and one codegen unit so
+# dead code across crates goes. `release` alone (speed-first, 32 units, no LTO)
+# made a 10 MB module, 2.6 MB on the wire. Only the web build uses it:
+#
+#   CARGO_INCREMENTAL=0 trunk build --release --cargo-profile web
+#
+# (`CARGO_INCREMENTAL=0` for the reason given under `dist`.) The engine's
+# profiles are untouched.
+[profile.web]
+inherits = "release"
+opt-level = "z"
+lto = true
+codegen-units = 1
 
 

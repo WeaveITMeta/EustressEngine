@@ -78,6 +78,29 @@ KeyRotated = { type = "string", source = "key_rotated_at", value = "", readonly 
 PreviousKeyId = { type = "string", value = "", readonly = true, description = "The key that rotation replaced. It keeps working for KeyOverlapDays so a site still running it stays up. Empty when no rotation is in flight." }
 RotateKey = { type = "bool", value = false, description = "Turn this on to mint a new key. The engine shows the new key once so you can copy it, keeps the previous key working for KeyOverlapDays, then switches this back off. Rotating is how you cut off a consumer." }
 
+[Page]
+BannerFadeMs = { type = "int", value = 600, min = 0, max = 2000, description = "How long the banner takes to fade in, in milliseconds (0 to 2000). 0 shows it at once." }
+ImageBanner = { type = "string", value = "", description = "Banner image, as a path inside this Space such as Assets/page/banner.png. PNG, JPEG or WebP, at most 2 MB. Empty means none." }
+ImageGallery0 = { type = "string", value = "", description = "Gallery image 1, as a path inside this Space. PNG, JPEG or WebP, at most 2 MB. Empty skips it." }
+ImageGallery1 = { type = "string", value = "", description = "Gallery image 2, as a path inside this Space. Empty skips it." }
+ImageGallery2 = { type = "string", value = "", description = "Gallery image 3, as a path inside this Space. Empty skips it." }
+ImageGallery3 = { type = "string", value = "", description = "Gallery image 4, as a path inside this Space. Empty skips it." }
+ImageGallery4 = { type = "string", value = "", description = "Gallery image 5, as a path inside this Space. Empty skips it." }
+ImageGallery5 = { type = "string", value = "", description = "Gallery image 6, as a path inside this Space. Empty skips it." }
+ImageLogo = { type = "string", value = "", description = "Logo image, as a path inside this Space such as Assets/page/logo.png. PNG, JPEG or WebP, at most 2 MB. Empty means none." }
+SlideshowIntervalS = { type = "int", value = 6, min = 3, max = 30, description = "Seconds each gallery image shows before the next (3 to 30)." }
+ThemeColorAccent = { type = "string", value = "", description = "Accent colour as #RRGGBB, replacing the preset's accent. Empty keeps the preset's." }
+ThemeColorBackground = { type = "string", value = "", description = "Page background as #RRGGBB, replacing the preset's. Empty keeps the preset's. Text must stay readable on it (4.5 to 1); if it does not, the page uses the preset's text colour." }
+ThemeColorPrimary = { type = "string", value = "", description = "Primary colour as #RRGGBB (links, buttons), replacing the preset's. Empty keeps the preset's." }
+ThemeColorSurface = { type = "string", value = "", description = "Card and panel colour as #RRGGBB, replacing the preset's. Empty keeps the preset's." }
+ThemeColorText = { type = "string", value = "", description = "Text colour as #RRGGBB, replacing the preset's. It must reach a 4.5 to 1 contrast on the background and the surface, or the page uses the preset's text colour." }
+ThemeFont = { type = "enum", value = "default", options = ["default", "inter", "space-grotesk", "ibm-plex-sans", "jetbrains-mono", "merriweather"], description = "The page's font. default is Inter." }
+ThemeLayout = { type = "enum", value = "default", options = ["default", "classic", "wide", "compact"], description = "How the page is laid out. default is classic." }
+ThemeMotion = { type = "enum", value = "default", options = ["default", "none", "subtle", "full"], description = "How much the page animates. The page always honours a visitor's reduced-motion setting. default is subtle." }
+ThemePreset = { type = "enum", value = "default", options = ["default", "studio", "daylight", "blueprint", "laboratory", "arcade", "paper"], description = "A full colour set for the page. default is studio. Nothing here reaches the public page until it is reviewed at publish." }
+
 [Description]
 Description = { type = "string", value = "Website holds the References a site reads. On publish they bake into one manifest at universes/{id}/website-manifest.json, and a site fetches that single document to update every value it shows.", readonly = true }
+PageLinks = { type = "string", value = "Off-site links (your website, socials, shop, docs) are PageLink children of this service: add one with the website_link_add tool, or add a folder under Website whose _instance.toml has class_name = \"PageLink\". Each has a kind (website, social, shop or other), a https url and a short label. Every link is reviewed before it shows, and a risky one is removed with the reason.", readonly = true }
 KeyVisibility = { type = "string", value = "The manifest key is revocable attribution and rate limiting rather than secrecy: a website sends it from browser JavaScript, so anyone who opens devtools can read it.", readonly = true }
+Readme = { type = "string", value = "Add a README.md file to this Website folder and the sim page shows it, rendered, under an About tab. At most 32 KiB of UTF-8. Images are files inside this Space, written relative to this folder like a GitHub README (Assets/diagram.png is Website/Assets/diagram.png; ../Assets/diagram.png is the Space's own Assets folder): at most 8, PNG, JPEG or WebP, 2 MB each. A remote image is never loaded and shows its alt text instead. Raw HTML is dropped. Its text, links and images are reviewed before any of it shows.", readonly = true }

@@ -32,7 +32,6 @@ tokio-stream  = { version = "0.1", features = ["sync"] }
 
 # REST + SSE
 axum          = { version = "0.8", features = ["json", "macros"] }
-axum-extra    = { version = "0.10", features = ["typed-header"] }
 tower         = "0.5"
 tower-http    = { version = "0.6", features = ["cors", "trace"] }
 

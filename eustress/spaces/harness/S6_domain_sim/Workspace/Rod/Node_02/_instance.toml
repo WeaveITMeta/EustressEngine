@@ -1,0 +1,48 @@
+[asset]
+mesh = "parts/block.glb"
+scene = "Scene0"
+
+[attributes]
+node_index = 2
+
+[metadata]
+archivable = true
+class_name = "Part"
+created = "2026-11-16T00:00:00Z"
+last_modified = "2026-11-16T00:00:00Z"
+name = "Node_02"
+unit = "m"
+uuid = "55b72e4e9d74132fd8dc26f0ab032de4"
+
+[properties]
+anchored = true
+can_collide = true
+cast_shadow = true
+color = [
+    184,
+    115,
+    51,
+]
+destructible = false
+locked = false
+material = "Metal"
+reflectance = 0.0
+transparency = 0.0
+
+[transform]
+position = [
+    -0.11,
+    0.05,
+    0.0,
+]
+rotation = [
+    0.0,
+    0.0,
+    0.0,
+    1.0,
+]
+scale = [
+    0.02,
+    0.02,
+    0.02,
+]

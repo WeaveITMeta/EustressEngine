@@ -732,6 +732,10 @@ fn update_preview(
                     transform,
                     SurfacePreviewQuad,
                     Name::new("SurfacePlacePreview"),
+                    // An editor overlay: drawn by the viewport, never by the AI capture camera.
+                    bevy::camera::visibility::RenderLayers::layer(
+                        crate::editor_overlay::EDITOR_OVERLAY_LAYER,
+                    ),
                 ))
                 .id();
             placement.preview = Some(e);

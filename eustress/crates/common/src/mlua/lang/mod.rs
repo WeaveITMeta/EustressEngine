@@ -57,7 +57,7 @@ pub struct SyntaxError {
 /// Whether the Play VM would accept `source`: its Luau compiler's first
 /// syntax error, or `None`. Compiling runs nothing.
 pub fn check(source: &str) -> Option<SyntaxError> {
-    match mlua::Compiler::new().compile(source) {
+    match mlua::chunk::Compiler::new().compile(source) {
         Ok(_) => None,
         Err(mlua::Error::SyntaxError { message, .. }) => {
             // The compiler writes `<line>: <message>`.

@@ -208,6 +208,20 @@ pub fn DocsImportingPage() -> impl IntoView {
 
                 <main class="docs-content">
                     <header class="docs-hero">
+                        // The hero picture: the page's largest paint, so it loads at
+                        // once (no lazy loading, no entrance animation).
+                        <div class="docs-hero-art">
+                            <img
+                                src="/assets/learn/importing-hero-1600.webp"
+                                srcset="/assets/learn/importing-hero-800.webp 800w, /assets/learn/importing-hero-1600.webp 1600w"
+                                sizes="(max-width: 1024px) 100vw, 840px"
+                                alt="A picture slab, a cloud of points, a faceted mesh, a ruled grid slab and a terrain tile each follow a path through one ring gate onto a grid platform, where they stand as solid parts."
+                                width="1600"
+                                height="900"
+                                fetchpriority="high"
+                                decoding="async"
+                            />
+                        </div>
                         <div class="docs-breadcrumb">
                             <a href="/learn">"Learn"</a>
                             <span class="separator">"/"</span>
@@ -767,6 +781,19 @@ ppisp = true"#}</code></pre>
 
                         <div id="splats-load" class="subsection">
                             <h3>"What Happens on Load"</h3>
+                            <figure class="learn-figure">
+                                <img
+                                    src="/assets/learn/importing-fig-1-1200.webp"
+                                    srcset="/assets/learn/importing-fig-1-600.webp 600w, /assets/learn/importing-fig-1-1200.webp 1200w"
+                                    sizes="(max-width: 660px) 92vw, (max-width: 1099px) 600px, 500px"
+                                    alt="A dense cloud of tiny points with four lone points drifting away from it, beside the same cloud with no stray points and several translucent boxes fitted around its core."
+                                    width="1200"
+                                    height="900"
+                                    loading="lazy"
+                                    decoding="async"
+                                />
+                                <figcaption>"Before the cloud reaches the GPU, blobs that float alone in empty space are removed. The solid part of the cloud is fitted with boxes and becomes a static collider."</figcaption>
+                            </figure>
                             <ul class="docs-list">
                                 <li><strong>"Floater removal"</strong>": before the cloud reaches the GPU, blobs that float alone in empty space are removed, judged by how much solid material surrounds them rather than by their opacity, so faint but dense detail such as foliage stays. Near-invisible blobs below 0.005 opacity go too. The environment variables "<code>"EUSTRESS_SPLAT_CULL_GRID"</code>", "<code>"EUSTRESS_SPLAT_CULL_MIN_MASS"</code>", "<code>"EUSTRESS_SPLAT_CULL_DUST"</code>", "<code>"EUSTRESS_SPLAT_CULL_MAX_REMOVE"</code>" and "<code>"EUSTRESS_SPLAT_CULL_VOXEL"</code>" tune it."</li>
                                 <li><strong>"Collider"</strong>": the solid part of the cloud is fitted with boxes about 1/48 of its largest extent, between 5 cm and 2 m each, and becomes a static collider, so the capture is solid to physics."</li>

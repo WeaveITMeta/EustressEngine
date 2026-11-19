@@ -840,7 +840,7 @@ mod tests {
         use hydration_context::{SharedContext, SsrSharedContext};
         use leptos::tachys::view::RenderHtml;
         use leptos_router::location::RequestUrl;
-        let _ = leptos::task::Executor::init_futures_executor();
+        let _ = any_spawner::Executor::init_futures_executor();
         let shared: std::sync::Arc<dyn SharedContext + Send + Sync> = std::sync::Arc::new(SsrSharedContext::new());
         let owner = Owner::new_root(Some(shared));
         let html = owner.with(|| {

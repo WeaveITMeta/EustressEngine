@@ -1,0 +1,48 @@
+[asset]
+mesh = "parts/block.glb"
+scene = "Scene0"
+
+[attributes]
+occluder_distance_m = 15.0
+
+[metadata]
+archivable = true
+class_name = "Part"
+created = "2026-11-16T00:00:00Z"
+last_modified = "2026-11-16T00:00:00Z"
+name = "Slab_06_15p0m"
+unit = "m"
+uuid = "ac542888cd925c0ea69a1f2a8a580dc4"
+
+[properties]
+anchored = true
+can_collide = true
+cast_shadow = true
+color = [
+    60,
+    60,
+    60,
+]
+destructible = false
+locked = false
+material = "H_Matte"
+reflectance = 0.0
+transparency = 0.0
+
+[transform]
+position = [
+    20.0,
+    15.05,
+    -0.018765,
+]
+rotation = [
+    0.0,
+    0.0,
+    0.0,
+    1.0,
+]
+scale = [
+    1.0,
+    0.1,
+    1.0,
+]

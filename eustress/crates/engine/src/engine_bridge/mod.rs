@@ -79,6 +79,8 @@ pub use protocol::{BridgeRequest, BridgeResponse, BridgeError, MethodName};
 use instance_file::{InstanceFile, SharedInstanceFile};
 use server::PendingRequests;
 use port_file::PortFile;
+/// The Universe an open Space's `engine.port` belongs to (see the function).
+pub use port_file::open_space_universe;
 #[cfg(unix)]
 use unix_socket_file::UnixSocketFile;
 
@@ -815,6 +817,7 @@ fn drain_bridge_requests(world: &mut World) {
             MethodName::EntityPromote => protocol::handlers::entity_promote(world, &pending.request),
             MethodName::EntityDemote => protocol::handlers::entity_demote(world, &pending.request),
             MethodName::OplogTail => protocol::handlers::oplog_tail(&pending.request),
+            MethodName::SimInspect => protocol::handlers::sim_inspect(world, &pending.request),
             // Deferred above to `pump_sim_step`, so this arm is dead today.
             // It reports an error rather than `unreachable!` because a panic
             // here would take the whole engine down with it — and the only
@@ -936,7 +939,9 @@ fn resync_port_file_to_space(
     let Some(mut handle) = handle else { return };
     let Some(port) = handle.port else { return };
 
-    let Some(universe) = crate::space::universe_root_for_path(&space_root.0) else {
+    // The open Space's own Universe, inside the workspace or not; `None`
+    // (the scratch Space) keeps whatever slot the port file already has.
+    let Some(universe) = port_file::open_space_universe(&space_root.0) else {
         return;
     };
     let target = universe.join(".eustress").join("engine.port");

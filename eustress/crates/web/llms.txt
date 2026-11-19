@@ -54,6 +54,8 @@ Every guide describes what Eustress Engine does today and ends with a What's Nex
 - [Bliss (BLS)](https://eustress.dev/bliss): the platform currency and its ledger
 - [Press and media resources](https://eustress.dev/press)
 - [License](https://eustress.dev/license): PolyForm Shield 1.0.0
+- [Quality Gate](https://eustress.dev/quality-gate): the review every publication and themed Space page passes, and what links it allows
+- [Grants](https://eustress.dev/grants): how Studio's Public Sector mode finds, screens and drafts federal grants and contracts from SAM.gov and Grants.gov
 - [Contact](https://eustress.dev/contact)
 
 ## API

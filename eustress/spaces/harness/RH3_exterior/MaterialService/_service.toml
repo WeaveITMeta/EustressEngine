@@ -1,0 +1,5 @@
+[service]
+class_name = "MaterialService"
+icon = "materialservice"
+description = "PBR material presets and custom materials"
+can_have_children = true

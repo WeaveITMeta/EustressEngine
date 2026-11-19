@@ -281,14 +281,14 @@ test('the Gallery list hides adult content by default, signed out and signed in,
   const everyone = [KIDS, MATURE, ADULT, UNRATED, ADULT_PAK, LONE_ADULT].sort();
   const safe = [KIDS, MATURE].sort();
   for (const path of ['/api/simulations', '/api/gallery']) {
-    // Signed out sees G to PG only (McKale, 2026-10-16): the mature_17 listing is left out too.
-    assert.deepEqual(ids(await call(env, 'GET', path)), [KIDS], `${path} signed out`);
+    // Signed out, the Gallery is solo browsing up to mature_17 (McKale, 2026-11-19), and never adult content.
+    assert.deepEqual(ids(await call(env, 'GET', path)), safe, `${path} signed out`);
     assert.deepEqual(ids(await call(env, 'GET', path, { who: 'off' })), safe, `${path} off`);
     assert.deepEqual(ids(await call(env, 'GET', path, { who: 'author' })), safe, `${path}: the browse list follows the setting, the author's too`);
     assert.deepEqual(ids(await call(env, 'GET', path, { who: 'on' })), everyone, `${path} on`);
   }
   // Search, tags and genre are the same list, cut the same way.
-  assert.deepEqual(ids(await call(env, 'GET', '/api/simulations?q=world')), [KIDS], 'signed out');
+  assert.deepEqual(ids(await call(env, 'GET', '/api/simulations?q=world')), safe, 'signed out');
   assert.deepEqual(ids(await call(env, 'GET', '/api/simulations?q=world', { who: 'off' })), safe);
   assert.deepEqual(ids(await call(env, 'GET', '/api/simulations?tag=adult-18-tag', { who: 'off' })), []);
   assert.deepEqual(ids(await call(env, 'GET', '/api/simulations?tag=adult-18-tag', { who: 'on' })), [ADULT, ADULT_PAK, LONE_ADULT].sort());
@@ -299,8 +299,8 @@ test('rating_max narrows the list and never widens it past the setting', async (
   const env = await environment();
   for (const who of [undefined, 'off']) {
     for (const asked of ['adult_18', 'ADULT_18', 'nonsense', '']) {
-      // Signed out is capped at ages_10, so the mature_17 listing is never in its list.
-      const expected = who ? [KIDS, MATURE].sort() : [KIDS];
+      // Signed out, the Gallery is capped at mature_17 (the solo cap, McKale 2026-11-19), the same as signed in with it off.
+      const expected = [KIDS, MATURE].sort();
       assert.deepEqual(ids(await call(env, 'GET', `/api/simulations?rating_max=${asked}`, { who })), expected, `${who || 'signed out'} ${asked}`);
     }
     assert.deepEqual(ids(await call(env, 'GET', '/api/simulations?rating_max=all_ages', { who })), [KIDS]);
@@ -397,9 +397,10 @@ test('a cached slice computed for a viewer who turned it on is never served to a
         assert.ok(!makers.text.includes('loner'), `makers${query}, ${who || 'signed out'}`);
       }
     }
-    // One entry per slice, never one per account: the off viewers share one more entry for each route, and the signed-out
-    // viewers (capped at ages_10) one more again.
-    assert.equal(cache.store.size, held + 4);
+    // One entry per slice, never one per account: the off viewers share one more entry for each route; the signed-out
+    // viewers share the makers' mature_17 entry (the solo cap, McKale 2026-11-19) and add one for the live strip, which
+    // is multiplayer and keeps ages_10 for them.
+    assert.equal(cache.store.size, held + 3);
     assert.ok([...cache.store.keys()].every((k) => /rating_max=(all_ages|ages_10|teen_13|mature_17|adult_18|adult_21)$/.test(k)), [...cache.store.keys()].join(' '));
     assert.ok(![...cache.store.keys()].some((k) => k.includes(ON) || k.includes(OFF)), 'no account in a key');
   } finally { restore(); }
@@ -579,7 +580,7 @@ test('the lists: adult_21 is hidden from a viewer who is off and from one who is
   const adult18 = [ADULT, ADULT_PAK, LONE_ADULT];
   const adult21 = [ADULT21, ADULT21_PAK, LONE21, UNRATED];
   for (const path of ['/api/simulations', '/api/gallery', '/api/simulations?q=world', '/api/simulations?genre=all', '/api/simulations?rating_max=adult_21']) {
-    assert.deepEqual(ids(await call(env, 'GET', path)), [KIDS], `${path} signed out (G to PG only)`);
+    assert.deepEqual(ids(await call(env, 'GET', path)), safe.sort(), `${path} signed out (the solo cap, mature_17)`);
     assert.deepEqual(ids(await call(env, 'GET', path, { who: 'off' })), safe.sort(), `${path} off`);
     assert.deepEqual(ids(await call(env, 'GET', path, { who: 'young' })), [...safe, ...adult18].sort(), `${path} on, 19`);
     assert.deepEqual(ids(await call(env, 'GET', path, { who: 'on' })), [...safe, ...adult18, ...adult21].sort(), `${path} on, 30`);
@@ -719,10 +720,12 @@ test('a cached slice computed for a viewer of 21 or over is never served to a vi
         assert.ok(!(await call(env, 'GET', `/api/makers${query}`, { who })).text.includes('solo21'));
       }
     }
-    // One entry per slice and route, never one per account: adult_21, adult_18, mature_17 and ages_10 (signed out).
-    assert.equal(cache.store.size, held + 6);
+    // One entry per slice and route, never one per account: adult_21, adult_18, mature_17 (off, and signed out on the
+    // makers, the solo cap), and ages_10 (signed out on the live strip, which keeps the multiplayer cap).
+    assert.equal(cache.store.size, held + 5);
     const keys = [...cache.store.keys()];
-    for (const slice of ['adult_21', 'adult_18', 'mature_17', 'ages_10']) assert.equal(keys.filter((k) => k.endsWith(`rating_max=${slice}`)).length, 2, slice);
+    for (const slice of ['adult_21', 'adult_18', 'mature_17']) assert.equal(keys.filter((k) => k.endsWith(`rating_max=${slice}`)).length, 2, slice);
+    assert.deepEqual(keys.filter((k) => k.endsWith('rating_max=ages_10')).map((k) => k.includes('/makers')), [false], 'ages_10: the live strip only');
     assert.ok(!keys.some((k) => k.includes(ON) || k.includes(YOUNG) || k.includes(OFF)), 'no account in a key');
   } finally { restore(); }
 });

@@ -199,6 +199,20 @@ pub fn DocsServicesPage() -> impl IntoView {
 
                 <main class="docs-content">
                     <header class="docs-hero">
+                        // The hero picture: the page's largest paint, so it loads at
+                        // once (no lazy loading, no entrance animation).
+                        <div class="docs-hero-art">
+                            <img
+                                src="/assets/learn/services-hero-1600.webp"
+                                srcset="/assets/learn/services-hero-800.webp 800w, /assets/learn/services-hero-1600.webp 1600w"
+                                sizes="(max-width: 1024px) 100vw, 840px"
+                                alt="Four shallow trays stacked inside one wireframe frame: one holds a small grid world, one a sun sphere under a dome arc, one a few file slabs, and one a cube sending out rings of light."
+                                width="1600"
+                                height="900"
+                                fetchpriority="high"
+                                decoding="async"
+                            />
+                        </div>
                         <div class="docs-breadcrumb">
                             <a href="/learn">"Learn"</a>
                             <span class="separator">"/"</span>

@@ -6,6 +6,8 @@
 import { HorizontalBox, VerticalBox, ScrollView, Slider, LineEdit } from "std-widgets.slint";
 import { Theme, IconButton, ToolbarSeparator } from "theme.slint";
 import { TerrainToolsUi } from "terrain_tool_bar.slint";
+import { HostingUi, HostingDot } from "network_panel.slint";
+import { Preferences } from "settings.slint";
 
 // An "Eustress Mode" entry for the Modes dropdown (id/name/icon-id pushed
 // from Rust's ModeRegistry). `icon-id` is one of the small compile-time
@@ -1467,17 +1469,46 @@ export component Ribbon inherits Rectangle {
                                 padding-top: 4px;
                                 padding-bottom: 4px;
                                 
-                                DropdownHeader { label: "SERVER"; }
-                                DropdownItem { label: "Start Local Server"; shortcut: "F9"; clicked => { root.on-start-server(); } }
-                                DropdownItem { label: "Stop Server"; clicked => { root.on-stop-server(); } }
+                                // Host, Players, Share, Monitor: the Test
+                                // tab's order. One server item, Start or
+                                // Stop by what is running.
+                                DropdownHeader {
+                                    label: HostingUi.state == "on" ? "HOST: RUNNING ON PORT " + HostingUi.port
+                                        : HostingUi.state == "starting" ? "HOST: STARTING" : "HOST";
+                                }
+                                DropdownItem {
+                                    label: HostingUi.state == "on" ? "Stop Server" : HostingUi.state == "starting" ? "Cancel Server Start" : "Start Server";
+                                    shortcut: HostingUi.state == "off" ? "F9" : "";
+                                    clicked => {
+                                        if HostingUi.state == "off" {
+                                            root.on-start-server();
+                                        } else {
+                                            root.on-stop-server();
+                                        }
+                                    }
+                                }
+                                DropdownSeparator {}
+                                DropdownHeader { label: HostingUi.state == "on" ? "PLAYERS: " + HostingUi.players + " OF " + HostingUi.max-players : "PLAYERS"; }
+                                DropdownItem { label: "Add Player"; enabled: HostingUi.state == "on"; clicked => { HostingUi.add-player(); } }
+                                DropdownSeparator {}
+                                DropdownHeader { label: "SHARE"; }
+                                DropdownItem { label: "Copy Join Link"; enabled: HostingUi.state == "on"; clicked => { HostingUi.copy-link(); } }
+                                DropdownItem {
+                                    label: Preferences.host-lan ? "Other Computers Can Join  [on]" : "Other Computers Can Join  [off]";
+                                    clicked => { Preferences.set("host_lan", Preferences.host-lan ? "0" : "1"); }
+                                }
+                                DropdownItem {
+                                    label: Preferences.host-list-in-gallery ? "List in Gallery  [on]" : "List in Gallery  [off]";
+                                    clicked => { Preferences.set("host_list_in_gallery", Preferences.host-list-in-gallery ? "0" : "1"); }
+                                }
+                                DropdownSeparator {}
+                                DropdownHeader { label: "MONITOR"; }
+                                DropdownItem { label: "Network Panel"; clicked => { root.on-show-network-panel(); } }
+                                DropdownItem { label: "Stress Test..."; clicked => { root.on-show-stress-test(); } }
                                 DropdownSeparator {}
                                 DropdownHeader { label: "FORGE CLOUD"; }
                                 DropdownItem { label: "Connect to Forge..."; clicked => { root.on-show-forge-connect(); } }
                                 DropdownItem { label: "Allocate Server"; clicked => { root.on-allocate-forge-server(); } }
-                                DropdownSeparator {}
-                                DropdownHeader { label: "BENCHMARK"; }
-                                DropdownItem { label: "Network Panel"; clicked => { root.on-show-network-panel(); } }
-                                DropdownItem { label: "Start Stress Test..."; clicked => { root.on-show-stress-test(); } }
                             }
                         }
                     }
@@ -3263,55 +3294,150 @@ export component Ribbon inherits Rectangle {
             }
 
             // ════════════════════════════════════════════════════════════
-            // TEST TAB — Server, Clients, Play, Network, Benchmark, Debug
+            // TEST TAB: Play, then hosting in the order a creator follows
+            // it: Host, Players, Share, Monitor. The Network menu and the
+            // Network panel (network_panel.slint) keep the same order;
+            // `HostingUi` carries the live state from Rust.
             // ════════════════════════════════════════════════════════════
             if root.ribbon-tab == "test": HorizontalLayout {
                 padding-left: 6px;
                 padding-right: 6px;
                 spacing: 6px;
                 alignment: center;
-                
-                ToolGroup {
-                    label: "Server";
-                    IconButton { icon: @image-url("../../assets/icons/ui/server.svg"); label: "Start"; tooltip: "Start Server (F9)"; tint: Theme.accent-green; clicked => { root.on-start-server(); } }
-                    IconButton { icon: @image-url("../../assets/icons/ui/close.svg"); label: "Stop"; tooltip: "Stop Server"; tint: Theme.text-error; clicked => { root.on-stop-server(); } }
-                }
-                GroupDivider {}
-                
-                ToolGroup {
-                    label: "Clients";
-                    IconButton { icon: @image-url("../../assets/icons/ui/client.svg"); label: "Spawn"; tooltip: "Spawn Synthetic Clients"; tint: Theme.cat-parts; clicked => { root.on-plugin-action("network:spawn-clients"); } }
-                    IconButton { icon: @image-url("../../assets/icons/ui/close.svg"); label: "Disconnect"; tooltip: "Disconnect All"; tint: Theme.accent-red; clicked => { root.on-plugin-action("network:disconnect-all"); } }
-                }
-                GroupDivider {}
-                
+
                 ToolGroup {
                     label: "Play";
-                    IconButton { icon: @image-url("../../assets/icons/ui/gamepad.svg"); label: "Play"; tooltip: "Play Here"; tint: Theme.accent-green; clicked => { root.on-play-with-character(); } }
-                    IconButton { icon: @image-url("../../assets/icons/ui/pause.svg"); label: "Pause"; tooltip: "Pause"; tint: Theme.cat-constraint; clicked => { root.on-pause(); } }
+                    IconButton { icon: @image-url("../../assets/icons/ui/gamepad.svg"); label: "Play"; shortcut: root.shortcut-play-character; tooltip: "Play here with your character"; tint: Theme.accent-green; clicked => { root.on-play-with-character(); } }
+                    IconButton { icon: @image-url("../../assets/icons/ui/pause.svg"); label: "Pause"; shortcut: root.shortcut-pause-resume; tooltip: "Pause or resume Play"; tint: Theme.cat-constraint; clicked => { root.on-pause(); } }
+                    IconButton { icon: @image-url("../../assets/icons/ui/stop.svg"); label: "Stop"; shortcut: root.shortcut-stop-play; tooltip: "Stop Play and put the Space back as it was"; tint: Theme.text-error; clicked => { root.on-stop(); } }
                 }
                 GroupDivider {}
-                
+
+                // The one primary action: Start Server, which becomes Stop
+                // Server while hosting (Cancel while it starts), beside the
+                // live state.
                 ToolGroup {
-                    label: "Network";
-                    IconButton { icon: @image-url("../../assets/icons/ui/server.svg"); label: "Server"; tooltip: "Dedicated Server"; tint: Theme.cat-parts; clicked => { root.on-start-server(); } }
-                    IconButton { icon: @image-url("../../assets/icons/ui/client.svg"); label: "Client"; tooltip: "Join as Client"; tint: Theme.cat-parts; clicked => { root.on-menu-action("test:join-client"); } }
-                    IconButton { icon: @image-url("../../assets/icons/ui/network.svg"); label: "Local"; tooltip: "Local Server + Client"; tint: Theme.cat-parts; clicked => { root.on-menu-action("test:local"); } }
+                    label: "Host";
+                    IconButton {
+                        icon: HostingUi.state == "off" ? @image-url("../../assets/icons/ui/server.svg") : @image-url("../../assets/icons/ui/stop.svg");
+                        label: HostingUi.state == "on" ? "Stop Server" : HostingUi.state == "starting" ? "Cancel" : "Start Server";
+                        tooltip: HostingUi.state == "off"
+                            ? "Start Server (F9): host this Space as the server. You get no character and take no player slot; players join it."
+                            : "Stop the server. Everyone who joined leaves.";
+                        tint: HostingUi.state == "off" ? Theme.accent-green : Theme.text-error;
+                        selected: HostingUi.state != "off";
+                        clicked => {
+                            if HostingUi.state == "off" {
+                                root.on-start-server();
+                            } else {
+                                root.on-stop-server();
+                            }
+                        }
+                    }
+                    VerticalLayout {
+                        alignment: center;
+                        spacing: 3px;
+                        width: 96px;
+                        HorizontalLayout {
+                            spacing: 5px;
+                            VerticalLayout {
+                                alignment: center;
+                                HostingDot { state: HostingUi.state; }
+                            }
+                            Text {
+                                text: HostingUi.state == "on" ? "Hosting" : HostingUi.state == "starting" ? "Starting..." : "Off";
+                                color: Theme.text-primary;
+                                font-size: 11px;
+                                font-weight: 600;
+                                vertical-alignment: center;
+                            }
+                        }
+                        Text {
+                            text: HostingUi.state == "on" ? "Port " + HostingUi.port : "Not hosting";
+                            color: Theme.text-secondary;
+                            font-size: 10px;
+                        }
+                        Text {
+                            text: Preferences.host-lan ? "Other computers" : "This computer only";
+                            color: Theme.text-secondary;
+                            font-size: 10px;
+                        }
+                    }
                 }
                 GroupDivider {}
-                
+
                 ToolGroup {
-                    label: "Benchmark";
-                    IconButton { icon: @image-url("../../assets/icons/ui/network.svg"); label: "Network"; tooltip: "Network Panel"; tint: Theme.accent-yellow; clicked => { root.on-show-network-panel(); } }
-                    IconButton { icon: @image-url("../../assets/icons/ui/stress.svg"); label: "Stress"; tooltip: "Stress Test"; tint: Theme.accent-yellow; clicked => { root.on-show-stress-test(); } }
+                    label: "Players";
+                    IconButton {
+                        icon: @image-url("../../assets/icons/ui/user.svg");
+                        label: "Add Player";
+                        tooltip: HostingUi.state == "on"
+                            ? "Open the Player on this computer, joined to this server, to test as a player"
+                            : "Start the server first. Add Player then joins it as a player.";
+                        tint: Theme.cat-parts;
+                        enabled: HostingUi.state == "on";
+                        clicked => { HostingUi.add-player(); }
+                    }
+                    VerticalLayout {
+                        alignment: center;
+                        min-width: 44px;
+                        Text {
+                            text: HostingUi.state == "on" ? HostingUi.players + "/" + HostingUi.max-players : "-";
+                            color: HostingUi.state == "on" && HostingUi.players > 0 ? Theme.accent-green : Theme.text-primary;
+                            font-size: 18px;
+                            font-weight: 700;
+                            horizontal-alignment: center;
+                        }
+                        Text {
+                            text: "players";
+                            color: Theme.text-secondary;
+                            font-size: 10px;
+                            horizontal-alignment: center;
+                        }
+                    }
                 }
                 GroupDivider {}
-                
+
+                // Who may join and the Gallery are Settings > Hosting's
+                // values; they apply the next time the server starts.
                 ToolGroup {
-                    label: "Debug";
-                    IconButton { icon: @image-url("../../assets/icons/ui/terminal.svg"); label: "Output"; tooltip: "Output Console"; tint: Theme.text-primary; clicked => { root.on-menu-action("test:console"); } }
-                    IconButton { icon: @image-url("../../assets/icons/ui/debug.svg"); label: "Debug"; tooltip: "Debug Mode"; tint: Theme.text-primary; clicked => { root.on-menu-action("test:debug"); } }
-                    IconButton { icon: @image-url("../../assets/icons/ui/cleanup.svg"); label: "Reset"; tooltip: "Reset Simulation"; tint: Theme.text-error; clicked => { root.on-stop(); } }
+                    label: "Share";
+                    IconButton {
+                        icon: @image-url("../../assets/icons/ui/link.svg");
+                        label: "Copy Link";
+                        tooltip: HostingUi.state == "on" ? "Copy the join link players use" : "Start the server first. The join link exists once it runs.";
+                        tint: Theme.accent-blue;
+                        enabled: HostingUi.state == "on";
+                        clicked => { HostingUi.copy-link(); }
+                    }
+                    IconButton {
+                        icon: @image-url("../../assets/icons/ui/users.svg");
+                        label: "Other Computers";
+                        tooltip: Preferences.host-lan
+                            ? "On: players on other computers can join. Applies the next time the server starts."
+                            : "Off: only this computer can join. Turn on to let other computers join from the next server start.";
+                        tint: Theme.accent-cyan;
+                        selected: Preferences.host-lan;
+                        clicked => { Preferences.set("host_lan", Preferences.host-lan ? "0" : "1"); }
+                    }
+                    IconButton {
+                        icon: @image-url("../../assets/icons/ui/globe.svg");
+                        label: "Gallery";
+                        tooltip: Preferences.host-list-in-gallery
+                            ? "On: a published simulation, hosted while you are signed in as its author, shows live on its Gallery page."
+                            : "Off: the session is not listed. Turn on to show it live on its Gallery page from the next server start.";
+                        tint: Theme.accent-cyan;
+                        selected: Preferences.host-list-in-gallery;
+                        clicked => { Preferences.set("host_list_in_gallery", Preferences.host-list-in-gallery ? "0" : "1"); }
+                    }
+                }
+                GroupDivider {}
+
+                ToolGroup {
+                    label: "Monitor";
+                    IconButton { icon: @image-url("../../assets/icons/ui/network.svg"); label: "Network"; tooltip: "Network panel: the server, its players and sharing in one place"; tint: Theme.accent-yellow; clicked => { root.on-show-network-panel(); } }
+                    IconButton { icon: @image-url("../../assets/icons/ui/stress.svg"); label: "Stress"; tooltip: "Stress Test: synthetic players join the running server and report what they cost"; tint: Theme.accent-yellow; clicked => { root.on-show-stress-test(); } }
+                    IconButton { icon: @image-url("../../assets/icons/ui/terminal.svg"); label: "Output"; tooltip: "Show or hide the Output, where joins, leaves and the join link appear"; tint: Theme.text-primary; selected: root.show-output; clicked => { root.show-output = !root.show-output; } }
                 }
             }
             

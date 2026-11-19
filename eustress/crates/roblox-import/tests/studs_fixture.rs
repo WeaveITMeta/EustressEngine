@@ -155,6 +155,8 @@ fn cast(boxes: &[(u64, Vector3, Vector3)], q: &RayQuery) -> Option<RayHit> {
                 distance,
                 terrain: false,
                 material: None,
+                owner: None,
+                surface: None,
             });
         }
     }

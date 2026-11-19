@@ -1,0 +1,45 @@
+[asset]
+mesh = "parts/block.glb"
+scene = "Scene0"
+
+[metadata]
+archivable = true
+class_name = "Part"
+created = "2026-11-16T00:00:00Z"
+last_modified = "2026-11-16T00:00:00Z"
+name = "Board"
+unit = "m"
+uuid = "16f7890b397f232067312bf2b82149bb"
+
+[properties]
+anchored = true
+can_collide = true
+cast_shadow = true
+color = [
+    20,
+    20,
+    20,
+]
+destructible = false
+locked = false
+material = "H_Matte"
+reflectance = 0.0
+transparency = 0.0
+
+[transform]
+position = [
+    0.0,
+    1.0,
+    -4.0,
+]
+rotation = [
+    0.0,
+    0.0,
+    0.0,
+    1.0,
+]
+scale = [
+    2.0,
+    1.4,
+    0.05,
+]

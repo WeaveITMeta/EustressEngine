@@ -1,2 +1,6 @@
 # Auto detect text files and perform LF normalization
 * text=auto
+
+# The generated harness Spaces are hashed byte for byte (gauntlet G1.03),
+# so their line endings stay exactly as written.
+eustress/spaces/harness/** -text

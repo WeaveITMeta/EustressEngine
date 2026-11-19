@@ -1,0 +1,16 @@
+[constraint]
+attachment0 = ""
+attachment1 = ""
+enabled = true
+limits_enabled = false
+upper_angle = 45.0
+
+[metadata]
+archivable = true
+class_name = "BallSocketConstraint"
+name = "Joint_5"
+uuid = "2100b260be431d2c953ebd82c5d1dc23"
+
+[references]
+attachment0 = "cd0a181640fdabe41797ddff6a0cb39d"
+attachment1 = "63800eaa30d3ab52ef44fd4d76b7d25b"

@@ -44,10 +44,13 @@ fn answer(req: &BridgeRequest, result: Result<Value, String>) -> BridgeResponse 
     }
 }
 
-/// The methods a class declares, each with whether this build implements it.
-fn methods_json(world: &World, class: &str) -> Vec<Value> {
+/// The methods an instance answers to (its class's, and `Road`'s when it is
+/// a road), each with whether this build implements it.
+fn methods_json(world: &World, entity: Entity, class: &str) -> Vec<Value> {
     let impls = world.get_resource::<ClassMethodImpls>();
-    class_methods::methods_of(class)
+    crate::road_methods::method_classes(world, entity, class)
+        .iter()
+        .flat_map(|c| class_methods::methods_of(c).collect::<Vec<_>>())
         .map(|m| {
             json!({
                 "method": format!("{}:{}", m.class, m.name),
@@ -72,7 +75,7 @@ pub fn properties_get(world: &mut World, req: &BridgeRequest) -> BridgeResponse 
             "instance": target_json(&t),
             "count": rows.len(),
             "properties": rows.iter().map(service::Row::json).collect::<Vec<_>>(),
-            "methods": methods_json(world, &t.class),
+            "methods": methods_json(world, t.entity, &t.class),
             "not_covered": NOT_COVERED,
         }))
     })();
@@ -144,7 +147,7 @@ pub fn class_call_method(world: &mut World, req: &BridgeRequest) -> BridgeRespon
             editing_only(world)?;
         }
         let t = resolve(world, &req.params)?;
-        if t.class != class {
+        if !crate::road_methods::method_classes(world, t.entity, &t.class).iter().any(|c| c == class) {
             return Err(format!("{} is a {}, not a {class}", t.name, t.class));
         }
         let call = world

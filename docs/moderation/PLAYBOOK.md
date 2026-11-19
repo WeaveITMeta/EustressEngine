@@ -220,6 +220,8 @@ An author may appeal `rejected` and `changes_requested` once at a time, with 10 
 
 - Every appeal goes to the Review Workspace, and a person decides it against the Code's exact text. No model reviews an appeal.
 - A person closes it with `moderation_resolve_appeal` as `overturned` (lists it) or `upheld` (returns it to the prior status). The decision is recorded under the case's reference, which never names the reviewer. Every overturn is a false rejection, used to tune the thresholds, the question wording and the Code.
+- A person works appeals on the website at `/admin/appeals` (administrators only): the appeals waiting, oldest first; the case (the listing's title and description, the appeal's text, the decision and its reasons, the judge's test scores with their evidence, the captures the judge saw, the history); and Overturn or Uphold with a rationale of at least 20 characters and, for an overturn, the rating to list it at. Each read is audited as the admin routes are.
+- A newer review can decide a case while its appeal waits (a republish, or an edit of the listing's text). The page names it, and an Uphold then needs a confirmation, since it puts the decision appealed back over the newer one.
 
 ## 11. Audits
 

@@ -178,6 +178,38 @@ the 3:45 PM `host.js` loaded the `3b18266227074573` build whole and played:
 the cache case works. Locally the Station's own Top button took the camera
 straight down with nothing fighting it.
 
+### Pong drew black (2026-11-14 evening)
+
+McKale published Pong (`9a6951e9-09da-40b7-9d23-9a6ce1cd9c08`): the browser
+Player ran it (the scripts scored) but drew only black. Pong's camera is
+orthographic and looks straight down. Packed variants of the same Space,
+served to the Player locally, isolated it:
+
+| variant | drawn |
+|---|---|
+| as published (orthographic, straight down) | black |
+| perspective, straight down | yes |
+| orthographic, tilted 0.5° or 0.001 rad | yes |
+| orthographic, tilted 0.0001 rad | black |
+
+0.0001 rad still rounds to exactly vertical in f32. Skipping single GPU passes
+from the page (a test hook that turns a labelled pass into a no-op) showed the
+sky composite is fine and the standard-material opaque pass writes black: in
+an orthographic view looking straight down every level surface is seen
+exactly face-on (view direction equal to the normal on every pixel), and a
+shading term turns that into NaN on WebGPU. The fix is in the Play camera
+step (`play-runtime/src/camera.rs` `off_vertical`): an orthographic Play
+camera within 0.001 rad of vertical renders tilted exactly 0.001 rad toward
+the top of the screen, roll kept (6 cm across 60 m; picking uses the same
+transform). Two related changes went with it: the orthographic sky ray is
+kept half a degree off vertical (`orthographic_sky.rs`, Bevy's
+`fast_atan2(0, 0)` is 0/0), and orthographic sky cameras get no volumetric
+god-ray fog (`sky_atmosphere.rs`, Bevy's volumetric fog marches perspective
+rays). Neither alone fixed Pong; the camera tilt did. Staging `b1e0204d`,
+build folder `webgpu/fb1dd3e34133001a/`. Production `2da7ddee` (McKale:
+"Yes, deploy"): the published Pong played on eustress.dev, drawn straight
+down, in a visible tab.
+
 ### Why each build has its own folder
 
 eustress.dev serves `/player/host.js` and the glue `eustress_player.js` with
@@ -193,6 +225,39 @@ to name it. `--keep <dir>` copies in the builds the previous package's
 `host.js` names, so a cached `host.js` still finds a whole build. The staging
 script passes `--keep crates/web/dist/player` when it exists: keep that folder
 equal to what the site serves after every deploy.
+
+### Frame time: no `trace` on bevy_ecs (2026-11-15)
+
+The browser build named `bevy_ecs` with its `trace` feature. In a browser,
+bevy_log's tracing layer turns every span into a `performance.mark` and a
+`performance.measure`, and `trace` wraps every system, run condition and
+schedule in a span. Pong made about 2,600 of those calls into JavaScript each
+frame, and the page's timing buffer grew without limit (3.9 million entries
+after 25 s). `crates/player-web/Cargo.toml` now names `bevy_ecs` with no
+features and says why.
+
+Measured in Chrome on WebGPU, window visible, 600 frames, work inside the
+frame callback:
+
+| Space | Before | After |
+|---|---|---|
+| Pong (local world) | 23.4 ms mean, 35.1 ms p99, 64 ms worst | 8.2 ms mean, 10.4 ms p99, 11 ms worst |
+| The Super Station (production world) | 71.6 ms mean, 357 ms p99 | 16.1 ms mean, 23.6 ms p99 |
+
+A profiling build (`trace` and `debug` on, never shipped) showed no single
+system above 1 ms a frame on Pong after that. Measure with the window visible:
+a hidden or covered page gets frames seconds apart and proves nothing.
+
+Production `0be18348` (2026-11-15, McKale: "Yes, deploy"), build folder
+`webgpu/c874dcb34a219144/`. The upload was `crates/web/dist` (byte-identical
+to what eustress.dev served, apart from Cloudflare's own email obfuscation on
+ten pages) with only `/player` changed; the three earlier builds stay. On
+eustress.dev the published Pong played from the play dialog on that build:
+10.7 ms of work a frame, 2,861 frames in about 45 s.
+
+mlua 0.12.2 does not compile for `wasm32-unknown-unknown` (its heap dump calls
+C stdio the `libc` crate lacks there). The workspace patches it from
+`.patches/mlua-0.12.2`, which refuses `Lua::heap_dump` on that target only.
 
 ## What was run (2026-11-13, scripts)
 

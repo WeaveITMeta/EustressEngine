@@ -768,6 +768,7 @@ impl Plugin for CameraControllerPlugin {
             // the camera without the Slint chrome.
             .add_message::<crate::ui::MenuActionEvent>()
             .add_plugins(crate::view_grid::ViewGridPlugin)
+            .add_plugins(crate::editor_overlay::EditorOverlayPlugin)
             .add_systems(Update, (
                 ensure_camera_exists,
                 update_camera_viewport_for_ui,

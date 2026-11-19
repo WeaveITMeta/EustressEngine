@@ -194,6 +194,20 @@ pub fn DocsScriptingPage() -> impl IntoView {
 
                 <main class="docs-content">
                     <header class="docs-hero">
+                        // The hero picture: the page's largest paint, so it loads at
+                        // once (no lazy loading, no entrance animation).
+                        <div class="docs-hero-art">
+                            <img
+                                src="/assets/learn/scripting-hero-1600.webp"
+                                srcset="/assets/learn/scripting-hero-800.webp 800w, /assets/learn/scripting-hero-1600.webp 1600w"
+                                sizes="(max-width: 1024px) 100vw, 840px"
+                                alt="Three file slabs marked with plain bars of light send a pulse through a ring into a grid world, where a cube spins and a door slab slides open."
+                                width="1600"
+                                height="900"
+                                fetchpriority="high"
+                                decoding="async"
+                            />
+                        </div>
                         <div class="docs-breadcrumb">
                             <a href="/learn">"Learn"</a>
                             <span class="separator">"/"</span>
@@ -672,6 +686,19 @@ pub fn on_update(dt) {
 
                         <div id="luau-example" class="subsection">
                             <h3>"Building from the Command Bar"</h3>
+                            <figure class="learn-figure">
+                                <img
+                                    src="/assets/learn/scripting-fig-1-1200.webp"
+                                    srcset="/assets/learn/scripting-fig-1-600.webp 600w, /assets/learn/scripting-fig-1-1200.webp 1200w"
+                                    sizes="(max-width: 660px) 92vw, (max-width: 1099px) 600px, 500px"
+                                    alt="A staircase of flat steps rising on a grid platform among a few other solids, its glow shifting from violet at the bottom to green at the top, with a thin line running along the ground to the first step."
+                                    width="1200"
+                                    height="900"
+                                    loading="lazy"
+                                    decoding="async"
+                                />
+                                <figcaption>"A command-bar run can build a staircase of parts. Every Part the run creates is saved into the Space and stays after the run."</figcaption>
+                            </figure>
                             <p>
                                 "When a command-bar run ends, every "<code>"Part"</code>" it created becomes a real
                                 part: it is saved into the Space under "<code>"Workspace"</code>" and spawned, so

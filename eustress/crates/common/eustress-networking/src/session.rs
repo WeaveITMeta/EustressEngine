@@ -446,6 +446,26 @@ pub const ADMISSION_TIMEOUT: f64 = 15.0;
 /// What the host tells a player the gallery could not admit in time.
 pub const ADMISSION_UNCONFIRMED: &str = "The gallery could not confirm this join right now. Join again from the gallery.";
 
+/// Seconds a connection may stay open without saying `Hello` before the host
+/// closes it. Every connection holds a seat from the moment it opens (see
+/// `HostSession::has_room`), so a connection that says nothing would
+/// otherwise hold its seat for as long as it liked, and `max_players` of
+/// them would fill the session for everyone else.
+pub const HELLO_TIMEOUT: f64 = 10.0;
+
+/// What the host tells a connection it closes for saying nothing.
+pub const HELLO_OVERDUE: &str = "The host heard nothing from this Player. Join again from the gallery.";
+
+/// The largest frame the host reads from a connection the session has not
+/// let in yet: one that has not said `Hello`, or one waiting for the
+/// gallery's admission. All that is due from it is a `Hello` (a name, a
+/// version and a ticket of at most `wire::MAX_TICKET_CHARS`). A larger
+/// frame is refused before it is decoded.
+pub const MAX_UNADMITTED_FRAME_BYTES: usize = 16 * 1024;
+
+/// Why a connection that sent a larger frame before it was let in is closed.
+pub const UNADMITTED_TOO_LARGE: &str = "sent too much before joining";
+
 /// The gallery admitted a player: its ticket's id, for the heartbeat, and
 /// whether it plays as a guest.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -536,6 +556,8 @@ struct HostPeer {
     receipt_times: VecDeque<f64>,
     /// Its catch-up world frames went out; live ones may follow.
     caught_up: bool,
+    /// Awaiting `Hello`: when the host gives up and closes it.
+    hello_by: f64,
     /// Awaiting admission: when the host gives up and refuses it.
     admit_by: f64,
     /// The gallery's id for the ticket that admitted it, for the heartbeat.
@@ -566,6 +588,7 @@ impl HostPeer {
             prompts: HashSet::new(),
             receipt_times: VecDeque::new(),
             caught_up: false,
+            hello_by: now + HELLO_TIMEOUT,
             admit_by: 0.0,
             admitted: None,
             guest: false,
@@ -1080,6 +1103,20 @@ impl HostSession {
     /// too while the host plays.
     pub fn player_count(&self) -> usize {
         self.peers.values().filter(|p| p.stage == PeerStage::Ready).count() + usize::from(self.host_plays)
+    }
+
+    /// Seats taken, everyone counted: the players in the world, the ones
+    /// downloading it, the ones waiting for the gallery's admission, and the
+    /// host's own character while the host plays. A fleet reads this to know
+    /// how full a session is; [`Self::player_count`] leaves out a player
+    /// until it enters the world, which a long download makes minutes late.
+    pub fn seated_count(&self) -> usize {
+        self.peers.values().filter(|p| p.stage != PeerStage::AwaitingHello).count() + usize::from(self.host_plays)
+    }
+
+    /// Connections open now, the ones that have not said `Hello` included.
+    pub fn connection_count(&self) -> usize {
+        self.peers.len()
     }
 
     /// The most players the session holds, everyone counted
@@ -1620,6 +1657,11 @@ fn host_pump(
                 let peer = host.next_peer;
                 host.next_peer += 1;
                 host.peers.insert(conn, HostPeer::new(peer, remote, datagrams, now));
+            }
+            // A connection the session has not let in yet owes a `Hello` and
+            // nothing else: a larger frame is refused before it is decoded.
+            LinkEvent::Frame { conn, body } if oversized_before_admission(&host, conn, body.len()) => {
+                kick(&link, &mut host, conn, UNADMITTED_TOO_LARGE);
             }
             LinkEvent::Frame { conn, body } => match decode_body::<ToHost>(&body) {
                 Ok(ToHost::Remote(call)) => host_remote(&link, &mut host, &mut arrivals, conn, call, false, now),
@@ -2163,6 +2205,17 @@ fn host_avatar_frame(
     }
 }
 
+/// Whether a frame of `len` bytes comes from a connection the session has not
+/// let in yet and is larger than anything such a connection may send
+/// ([`MAX_UNADMITTED_FRAME_BYTES`]).
+fn oversized_before_admission(host: &HostSession, conn: ConnId, len: usize) -> bool {
+    len > MAX_UNADMITTED_FRAME_BYTES
+        && host
+            .peers
+            .get(&conn)
+            .is_some_and(|p| matches!(p.stage, PeerStage::AwaitingHello | PeerStage::AwaitingAdmission))
+}
+
 fn kick(link: &NetLink, host: &mut HostSession, conn: ConnId, reason: &str) {
     link.send(conn, &ToPlayer::Kicked { reason: reason.to_string() });
     link.close(conn, reason);
@@ -2242,6 +2295,17 @@ fn host_admissions(
     for conn in late {
         info!("net: no word from the gallery on peer {} in {ADMISSION_TIMEOUT} s", host.peers[&conn].peer);
         refuse(&link, &mut host, conn, ADMISSION_UNCONFIRMED);
+    }
+    // A connection that never said `Hello` gives its seat back.
+    let silent: Vec<ConnId> = host
+        .peers
+        .iter()
+        .filter(|(_, p)| p.stage == PeerStage::AwaitingHello && now >= p.hello_by)
+        .map(|(conn, _)| *conn)
+        .collect();
+    for conn in silent {
+        info!("net: peer {} said nothing for {HELLO_TIMEOUT} s after connecting; closing it", host.peers[&conn].peer);
+        refuse(&link, &mut host, conn, HELLO_OVERDUE);
     }
 }
 
@@ -3588,6 +3652,84 @@ mod tests {
         let (msgs, closed) = sent_to(&ends, 8);
         assert_eq!(msgs, vec![ToPlayer::Refused { reason: ADMISSION_UNCONFIRMED.to_string() }]);
         assert!(closed && app.world().resource::<HostSession>().peers.is_empty());
+    }
+
+    /// A connection holds a seat from the moment it opens. One that never
+    /// says `Hello` is closed after [`HELLO_TIMEOUT`], so silent connections
+    /// cannot fill a session; a player who said `Hello` in time is untouched.
+    #[test]
+    fn a_connection_that_never_says_hello_gives_its_seat_back() {
+        let (mut app, ends) = admission_host(false, &[7, 8]);
+        say(&ends, 8, &hello(None));
+        app.update();
+        app.world_mut().resource_mut::<Time>().advance_by(std::time::Duration::from_secs_f64(HELLO_TIMEOUT - 1.0));
+        app.update();
+        assert!(app.world().resource::<HostSession>().peers.contains_key(&7), "inside the wait it keeps its seat");
+        app.world_mut().resource_mut::<Time>().advance_by(std::time::Duration::from_secs_f64(2.0));
+        app.update();
+        {
+            let host = app.world().resource::<HostSession>();
+            assert!(!host.peers.contains_key(&7), "the silent connection still holds a seat");
+            assert!(host.peers.contains_key(&8), "a player who said Hello was closed too");
+        }
+        let mut refused = Vec::new();
+        let mut closed = false;
+        for c in ends.commands.try_iter() {
+            match c {
+                LinkCommand::Frame { conn: 7, frame } => refused.push(decode_body::<ToPlayer>(&frame[4..]).unwrap()),
+                LinkCommand::Close { conn: 7, .. } => closed = true,
+                _ => {}
+            }
+        }
+        assert_eq!(refused, vec![ToPlayer::Refused { reason: HELLO_OVERDUE.to_string() }]);
+        assert!(closed, "the connection was not closed");
+    }
+
+    /// Before the session lets a connection in (no `Hello` yet, or waiting
+    /// for the gallery), a frame larger than a `Hello` can be is refused
+    /// without being decoded: the reason is the size, not "unreadable".
+    #[test]
+    fn a_large_frame_before_joining_is_refused_unread() {
+        let (mut app, ends) = admission_host(true, &[7, 8]);
+        let too_large = || vec![0xffu8; MAX_UNADMITTED_FRAME_BYTES + 1];
+        ends.events.send(LinkEvent::Frame { conn: 7, body: too_large() }).unwrap();
+        say(&ends, 8, &hello(Some("eit1.a.b")));
+        app.update();
+        ends.events.send(LinkEvent::Frame { conn: 8, body: too_large() }).unwrap();
+        app.update();
+        let kicked: Vec<(ConnId, String)> = ends
+            .commands
+            .try_iter()
+            .filter_map(|c| match c {
+                LinkCommand::Frame { conn, frame } => match decode_body::<ToPlayer>(&frame[4..]) {
+                    Ok(ToPlayer::Kicked { reason }) => Some((conn, reason)),
+                    _ => None,
+                },
+                _ => None,
+            })
+            .collect();
+        assert_eq!(kicked, vec![(7, UNADMITTED_TOO_LARGE.to_string()), (8, UNADMITTED_TOO_LARGE.to_string())]);
+    }
+
+    /// A fleet counts seats, not only the players already in the world: a
+    /// player downloading the world, or waiting for the gallery, has a seat.
+    #[test]
+    fn seated_counts_everyone_past_hello() {
+        let mut host = HostSession::new(host_config());
+        let at = |peer: PeerId, stage: PeerStage| {
+            let mut p = HostPeer::new(peer, String::new(), true, 0.0);
+            p.stage = stage;
+            p
+        };
+        host.peers.insert(1, at(1, PeerStage::AwaitingHello));
+        host.peers.insert(2, at(2, PeerStage::AwaitingAdmission));
+        host.peers.insert(3, at(3, PeerStage::Downloading));
+        host.peers.insert(4, at(4, PeerStage::Ready));
+        assert_eq!(host.player_count(), 1, "in the world");
+        assert_eq!(host.seated_count(), 3, "seats taken: everyone who said Hello");
+        assert_eq!(host.connection_count(), 4, "connections, the silent one included");
+        host.set_host_plays(true);
+        assert_eq!((host.player_count(), host.seated_count()), (2, 4), "the host's own character has a seat");
     }
 
     /// A session whose heartbeat the gallery refused before ever listing it

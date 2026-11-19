@@ -420,6 +420,13 @@ fn apply_variant(bag: &mut PropertyBag, target_class: ClassName, key: &str, vari
 // Well-known overrides (Position/Size/Color/etc. → InstanceOverrides slots)
 // ---------------------------------------------------------------------------
 
+/// The alpha a part's colour keeps when `Color` or `BrickColor` is read.
+/// Properties arrive in a hash map's order, so `Transparency` may already
+/// have set it; a colour read after it must not put the part back to opaque.
+fn kept_alpha(bag: &PropertyBag) -> f32 {
+    bag.overrides.color_rgba.map_or(1.0, |rgba| rgba[3])
+}
+
 fn try_well_known(
     bag: &mut PropertyBag,
     _target_class: ClassName,
@@ -466,7 +473,7 @@ fn try_well_known(
         // ─── Color / Material ──────────────────────────────────────
         "Color" => match variant {
             Variant::Color3(c) => {
-                bag.overrides.color_rgba = Some([c.r, c.g, c.b, 1.0]);
+                bag.overrides.color_rgba = Some([c.r, c.g, c.b, kept_alpha(bag)]);
                 bag.metadata_extras.insert(
                     "roblox_color_srgb".to_string(),
                     toml::Value::Array(vec![
@@ -482,7 +489,7 @@ fn try_well_known(
                     c.r as f32 / 255.0,
                     c.g as f32 / 255.0,
                     c.b as f32 / 255.0,
-                    1.0,
+                    kept_alpha(bag),
                 ]);
                 bag.metadata_extras.insert(
                     "roblox_color_srgb".to_string(),
@@ -504,7 +511,7 @@ fn try_well_known(
                     c.r as f32 / 255.0,
                     c.g as f32 / 255.0,
                     c.b as f32 / 255.0,
-                    1.0,
+                    kept_alpha(bag),
                 ]);
                 // Preserve the categorical token + full sRGB-0-255. BrickColor
                 // is `#[repr(u16)]` so the discriminant IS the palette number;
@@ -968,7 +975,15 @@ fn try_gui_property(
             val_float(variant).map(|v| ("gui", "background_transparency", v))
         }
         "BorderColor3" => color_f32(variant).map(|v| ("gui", "border_color", v)),
-        "BorderSizePixel" => val_int(variant).map(|v| ("gui", "border_size_pixel", v)),
+        // `border_size` is the key the loader reads (`GuiTomlProperties`);
+        // `border_size_pixel` is the class template's name for the same
+        // value, so both carry it.
+        "BorderSizePixel" => val_int(variant).map(|v| {
+            if let Some(px) = v.as_integer() {
+                put_section(bag, "gui", "border_size", toml::Value::Float(px as f64));
+            }
+            ("gui", "border_size_pixel", v)
+        }),
         "BorderMode" => enum_u32(variant).map(|e| {
             let s = if e == 1 { "Middle" } else { "Outline" };
             ("gui", "border_mode", toml::Value::String(s.to_string()))
@@ -1727,8 +1742,11 @@ fn try_constraint_property(bag: &mut PropertyBag, target_class: ClassName, key: 
             "Stiffness" => { if let Some(v) = val_float(variant) { put_section(bag, "constraint", "stiffness", v); return true; } }
             "Damping" => { if let Some(v) = val_float(variant) { put_section(bag, "constraint", "damping", v); return true; } }
             "FreeLength" => { if let Some(v) = val_studs_to_m(variant) { put_section(bag, "constraint", "free_length", v.clone()); put_section(bag, "constraint", "rest_length", v); return true; } }
-            "MaxLength" => { if let Some(v) = val_studs_to_m(variant) { put_section(bag, "constraint", "max_length", v); put_section(bag, "constraint", "limits_enabled", toml::Value::Boolean(true)); return true; } }
-            "MinLength" => { if let Some(v) = val_studs_to_m(variant) { put_section(bag, "constraint", "min_length", v); put_section(bag, "constraint", "limits_enabled", toml::Value::Boolean(true)); return true; } }
+            // Every spring carries MaxLength and MinLength; only
+            // `LimitsEnabled` says whether they bind. Setting the flag here
+            // too made it depend on the order the properties arrived in.
+            "MaxLength" => { if let Some(v) = val_studs_to_m(variant) { put_section(bag, "constraint", "max_length", v); return true; } }
+            "MinLength" => { if let Some(v) = val_studs_to_m(variant) { put_section(bag, "constraint", "min_length", v); return true; } }
             "LimitsEnabled" => { if let Some(v) = val_bool(variant) { put_section(bag, "constraint", "limits_enabled", v); return true; } }
             // `Coils` is a Float32 in Roblox; reading it as an integer dropped it.
             "Coils" => { if let Some(v) = val_float(variant).or_else(|| val_int(variant)) { put_section(bag, "constraint", "coils", v); return true; } }
@@ -2186,9 +2204,9 @@ fn try_light_property(
             Variant::Color3uint8(c) => Some((
                 "color",
                 toml::Value::Array(vec![
-                    toml::Value::Integer(c.r as i64),
-                    toml::Value::Integer(c.g as i64),
-                    toml::Value::Integer(c.b as i64),
+                    toml::Value::Float(c.r as f64 / 255.0),
+                    toml::Value::Float(c.g as f64 / 255.0),
+                    toml::Value::Float(c.b as f64 / 255.0),
                 ]),
             )),
             _ => None,
@@ -3185,6 +3203,62 @@ mod tests {
         );
         let rgba = bag.overrides.color_rgba.unwrap();
         assert!((rgba[3] - 0.5).abs() < 1e-6);
+    }
+
+    /// Properties arrive in a hash map's order. A part's transparency must
+    /// survive whichever of `Color` and `Transparency` is read first.
+    #[test]
+    fn transparency_survives_either_property_order() {
+        let color = Variant::Color3(Color3::new(0.2, 0.4, 0.6));
+        let transparency = Variant::Float32(0.75);
+        for order in [["Color", "Transparency"], ["Transparency", "Color"]] {
+            let mut bag = PropertyBag::default();
+            for key in order {
+                let value = if key == "Color" { &color } else { &transparency };
+                apply_variant(&mut bag, ClassName::Part, key, value);
+            }
+            let rgba = bag.overrides.color_rgba.expect("a colour");
+            assert!((rgba[3] - 0.25).abs() < 1e-6, "{order:?}: alpha {}", rgba[3]);
+            assert!(
+                (rgba[0] - 0.2).abs() < 1e-6 && (rgba[2] - 0.6).abs() < 1e-6,
+                "{order:?}: {rgba:?}"
+            );
+        }
+    }
+
+    /// A spring's limits bind only when `LimitsEnabled` says so, whichever
+    /// order its lengths and the flag are read in.
+    #[test]
+    fn a_springs_limits_follow_limits_enabled_alone() {
+        for order in [
+            ["LimitsEnabled", "MaxLength", "MinLength"],
+            ["MaxLength", "MinLength", "LimitsEnabled"],
+        ] {
+            let mut bag = PropertyBag::default();
+            for key in order {
+                let value = if key == "LimitsEnabled" {
+                    Variant::Bool(false)
+                } else {
+                    Variant::Float32(5.0)
+                };
+                apply_variant(&mut bag, ClassName::SpringConstraint, key, &value);
+            }
+            let constraint = &bag.section_props["constraint"];
+            assert_eq!(constraint["limits_enabled"].as_bool(), Some(false), "{order:?}");
+            assert!(constraint.contains_key("max_length") && constraint.contains_key("min_length"));
+        }
+    }
+
+    /// `border_size` is the key the GUI loader reads.
+    #[test]
+    fn a_frames_border_is_written_under_the_key_the_loader_reads() {
+        let bag = map_properties(
+            &props_with(vec![("BorderSizePixel", Variant::Int32(3))]),
+            ClassName::Frame,
+        );
+        let gui = &bag.section_props["gui"];
+        assert_eq!(gui["border_size"].as_float(), Some(3.0));
+        assert_eq!(gui["border_size_pixel"].as_integer(), Some(3));
     }
 
     #[test]

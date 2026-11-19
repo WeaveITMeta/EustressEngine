@@ -12,16 +12,20 @@
 //! - [`solo`]: a published world played with no host, from its Gallery id.
 //! - Browser builds only: `entry` (the export host.js calls), `app` (the
 //!   Bevy app), `link` (the session's transport over `js/net.js`), `fetch`
-//!   (downloading a published world), `explore` (the camera when a Space
-//!   loads no character), `world` (opening the world that arrives, from its
-//!   records, and spawning the local character)
-//!   and `page` (the page's state and stop switch).
+//!   (downloading a published world), `mouse` (the mouse, kept in step with
+//!   the browser's pointer lock), `world` (opening the world that arrives,
+//!   from its records, and spawning the local character)
+//!   and `page` (the page's state and stop switch), and `libc_shim` (the
+//!   host calls the Luau VM's libc makes).
 //!
 //! Nothing here logs, keeps or reports a join link, its key, its ticket or
 //! its pin. A page runs one session; joining again reloads the page, so
 //! nothing of the last session's app is left behind.
 
 pub mod join;
+/// Whether the browser still holds the mouse the Player locked. The system
+/// that acts on it is [`mouse`], compiled for wasm32 only.
+pub mod mouse_lock;
 /// A published world played alone: the Gallery id, the API, and assembling
 /// its chunks. The browser download is [`fetch`], compiled for wasm32 only.
 pub mod solo;
@@ -32,11 +36,15 @@ mod app;
 #[cfg(target_arch = "wasm32")]
 mod entry;
 #[cfg(target_arch = "wasm32")]
-mod explore;
-#[cfg(target_arch = "wasm32")]
 mod fetch;
+/// The libc calls the Luau VM's C runtime leaves to a host, defined in the
+/// module so the page needs no WASI host.
+#[cfg(target_arch = "wasm32")]
+mod libc_shim;
 #[cfg(target_arch = "wasm32")]
 mod link;
+#[cfg(target_arch = "wasm32")]
+mod mouse;
 #[cfg(target_arch = "wasm32")]
 mod page;
 #[cfg(target_arch = "wasm32")]

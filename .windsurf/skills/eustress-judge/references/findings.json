@@ -1,0 +1,435 @@
+{
+  "_generated": "by infrastructure/cloudflare/api/scripts/sync-judge-skill.mjs from src/moderation.mjs and src/tags.mjs; do not edit",
+  "policy_version": "2.8",
+  "review_schema": 2,
+  "code_sha256": "sha256:d3c4885dae0bd55950e5c7a199bdd568c93a9698368ac4f1f56d20547e5cfbd2",
+  "tests": {
+    "build_quality": "T1",
+    "objective": "T2",
+    "lesson": "T3",
+    "real_world": "T4"
+  },
+  "statement": {
+    "labels": [
+      "Category",
+      "Objective",
+      "Lesson",
+      "Real-world link"
+    ],
+    "categories": [
+      "Digital twin",
+      "Simulation",
+      "STEM lab",
+      "Training",
+      "Learning",
+      "Tool",
+      "Cooperative challenge",
+      "Game",
+      "Concept or prototype",
+      "Product",
+      "Fiction",
+      "Adult"
+    ],
+    "value_max_chars": 300,
+    "rule": "A label starts its line, any case, then a colon. The first line with a label counts. Present only when all four lines have text after the label and the Category is one of the list (a trailing period is ignored)."
+  },
+  "fiction": {
+    "tag": "fiction",
+    "genre_tags": [
+      "science-fiction",
+      "sci-fi",
+      "scifi",
+      "fantasy",
+      "high-fantasy",
+      "urban-fantasy",
+      "speculative",
+      "speculative-fiction",
+      "hard-sf",
+      "alternate-history",
+      "historical-fiction",
+      "mystery",
+      "detective",
+      "adventure",
+      "cyberpunk",
+      "steampunk",
+      "solarpunk",
+      "dieselpunk",
+      "space-opera",
+      "dystopia",
+      "utopia",
+      "post-apocalyptic",
+      "fairy-tale",
+      "folklore",
+      "mythology",
+      "myth",
+      "fable",
+      "drama",
+      "comedy",
+      "satire",
+      "thriller",
+      "western",
+      "noir",
+      "romance",
+      "superhero",
+      "magical-realism",
+      "interactive-fiction",
+      "climate-fiction",
+      "cli-fi"
+    ],
+    "genre_suffixes": [
+      "-fiction",
+      "-fi"
+    ]
+  },
+  "tags": {
+    "max_author_tags": 8,
+    "max_review_tags": 5,
+    "shape": "^[a-z0-9]+(?:-[a-z0-9]+)*$"
+  },
+  "articles": {
+    "group_a": [
+      "A1",
+      "A2",
+      "A3",
+      "A4",
+      "A5",
+      "A6",
+      "A7",
+      "A8",
+      "A9",
+      "A10",
+      "A11",
+      "A12",
+      "A13",
+      "A14"
+    ],
+    "group_b": [
+      "B1",
+      "B2",
+      "B3",
+      "B4",
+      "B5",
+      "B6",
+      "B7",
+      "B8",
+      "B9",
+      "B10",
+      "B11"
+    ]
+  },
+  "ratings": [
+    "all_ages",
+    "ages_10",
+    "teen_13",
+    "mature_17",
+    "adult_18",
+    "adult_21"
+  ],
+  "descriptors": [
+    "fantasy violence",
+    "realistic violence",
+    "blood",
+    "language",
+    "sexual themes",
+    "nudity (clinical or artistic)",
+    "sexual content",
+    "alcohol",
+    "tobacco",
+    "psychedelics",
+    "simulated gambling (no money)",
+    "in-Space purchases",
+    "players interact"
+  ],
+  "author_copy": {
+    "code_B1": {
+      "title": "Fright beyond mild (Code B1)",
+      "why": "Code B1: mild fright is fine, but Eustress does not list fear as the product: repeated jump scares (more than one in any two minutes, or as the main thing the Space does), a pursuer built to terrify that the visitor cannot fight or escape, a listing sold as horror or a jumpscare game, or gore and mutilated bodies as decoration.",
+      "what_to_change": "Space out or remove the startles, give the visitor a way to fight or escape what hunts them, and describe it as something other than horror. Spooky places, monsters to fight and an occasional startle are fine."
+    },
+    "code_B2": {
+      "title": "Tragedy as play (Code B2)",
+      "why": "Code B2: a Space may teach about a tragedy, but the visitor may not cause, join or score the suffering of person-like characters, or play through a real disaster with victims.",
+      "what_to_change": "Make the tragedy something the visitor learns about, not something they play through."
+    },
+    "code_B3": {
+      "title": "Combat beyond its limits (Code B3)",
+      "why": "Code B3: a game may have combat in fiction or in history (a real conflict that ended at least 25 years ago), never against real life: no real person, real group or present-day real place as a target, no attack on civilians, children, a school, a place of worship, a hospital or a crowd, no harm to captives or the helpless, no torture or execution, and no excessive gore (blood, hit effects and brief pieces from a kill are fine; realistic dismemberment, remains left in the scene and harm to bodies after death are not).",
+      "what_to_change": "Set the combat in an invented world or in history, and remove any real target, attack on civilians, harm to non-combatants, torture, execution or excessive gore. Or score something other than harm, such as targets, accuracy or a correct decision."
+    },
+    "code_B4": {
+      "title": "Meme bait (Code B4)",
+      "why": "Code B4: Eustress does not list meme or brainrot characters, names, sounds or images in the listing, the tags, a character or the GUI.",
+      "what_to_change": "Replace the meme material with your own."
+    },
+    "code_B5": {
+      "title": "Hollow loop (Code B5)",
+      "why": "Code B5: time in a listed Space must buy something, so its main progress may not grow only by clicking or resetting, and nothing may reward coming back after time away (daily rewards, streaks, timers, energy). Passive income from what the visitor built or chose is fine.",
+      "what_to_change": "Remove the loop or the return reward, and let progress depend on decisions the visitor can get wrong."
+    },
+    "code_B6": {
+      "title": "Unfair economy (Code B6)",
+      "why": "Code B6: skill and effort decide who wins, never money. A Space may sell itself, editions, expansions, cosmetics or a subscription at real-money prices, but nothing that buys progress, chance or a skip, no unasked or pressured sales, no hidden prices or social-reach rewards, and no payment off Eustress. A game with combat has no loot boxes, crates or spins at all, bought or earned, and no betting.",
+      "what_to_change": "Remove the paid progress, paid chance, paid skip, purchase prompt, sales pressure, hidden price, reach reward or payment link, and in a game with combat any loot box, crate, spin or bet."
+    },
+    "code_B7": {
+      "title": "Copied work (Code B7)",
+      "why": "Code B7: Eustress lists work you made, not a clone, a re-upload, an asset flip or an untouched template.",
+      "what_to_change": "Add your own authored change: your layout, your scripts, your task."
+    },
+    "code_B8": {
+      "title": "Filler (Code B8)",
+      "why": "Code B8: Eustress does not list a Space that is empty or broken, default parts throughout, one asset repeated without variety, or generator output with nothing of your own.",
+      "what_to_change": "Build the Space out with your own task, measurements, detail or scripts, then publish again."
+    },
+    "code_B9": {
+      "title": "Misrepresentation or false teaching (Code B9)",
+      "why": "Code B9: a listing must say what the Space is, and the Space must teach only what is true.",
+      "what_to_change": "Make the title, description and statement match the Space, and correct anything false that is presented as fact."
+    },
+    "code_B10": {
+      "title": "Distasteful content (Code B10)",
+      "why": "Code B10: Eustress does not list gore or waste shown for shock, the degradation of a real person or a group, animals hurt for show, or sexual content built on non-consent or degradation.",
+      "what_to_change": "Remove that material."
+    },
+    "code_B11": {
+      "title": "Hard drugs (Code B11)",
+      "why": "Code B11: Eustress lists no hard drugs, ever: no use, sale, making or glamorising of opioids outside medical care, cocaine or crack, methamphetamine, or cannabis, in any part of a Space. Medical care, overdose first aid such as naloxone, and accurate teaching about addiction, its treatment and its prevention are allowed.",
+      "what_to_change": "A Space whose subject is hard drugs cannot be listed. If they appear only in part of it, remove every hard drug from the Space, a single prop included, and publish again."
+    },
+    "test_build_quality": {
+      "title": "Build quality (Code T1)",
+      "why": "Code T1: a listed Space is built deliberately for its purpose, with nothing broken or placeholder.",
+      "what_to_change": "Fix what is broken or placeholder, and add the detail and variety your purpose needs."
+    },
+    "test_objective": {
+      "title": "Objective (Code T2)",
+      "why": "Code T2: a visitor must be able to tell what the Space is for, and the Space must give them a way to do it.",
+      "what_to_change": "Give the visitor a task, a question, a measurement or a system to operate, with the controls or readouts to do it."
+    },
+    "test_lesson": {
+      "title": "Lesson (Code T3)",
+      "why": "Code T3: a listed Space teaches or lets a visitor practise something specific, and it is there in the Space, not only in the listing. A game's lesson can be the skill its play exercises, such as reaction time or spatial awareness.",
+      "what_to_change": "Build in the skill, concept or method your listing names, so a visitor can learn or practise it, or make the play exercise a real skill."
+    },
+    "test_real_world": {
+      "title": "Real-world effect (Code T4)",
+      "why": "Code T4: time in a listed Space connects to real life through a real place, system, data, skill, problem or knowledge, or through use: a working tool a visitor brings their own input to and leaves with a usable result. A game connects through the skill its play exercises, such as reaction time or spatial awareness.",
+      "what_to_change": "Connect the Space to something real, such as a named place and its source data, a model your scripts compute, measured data, or a tool a visitor uses on their own question or data, and say so in the statement. A map of your own framework counts when its structure ships in the Space."
+    },
+    "test_real_world_fiction": {
+      "title": "The idea in your fiction (Code T4 for Fiction)",
+      "why": "Code T4 for Fiction: a fiction Space carries a theme, a question or a speculative idea worth the visitor's time, and it is labelled as fiction.",
+      "what_to_change": "Build the idea into the Space so a visitor meets it, and name it in the Lesson line."
+    },
+    "statement_missing": {
+      "title": "Qualification Statement missing (Code Part III)",
+      "why": "Every listing states what it is, what to do, what it teaches and how it connects to real life, as four labelled lines in its description.",
+      "what_to_change": "Add these four lines to the description, each on its own line: \"Category: \" followed by one of Digital twin, Simulation, STEM lab, Training, Learning, Tool, Cooperative challenge, Game, Concept or prototype, Product, Fiction, Adult; \"Objective: \" and one sentence; \"Lesson: \" and one sentence; \"Real-world link: \" and one sentence."
+    },
+    "fiction_label_missing": {
+      "title": "Label your fiction (Code Part III)",
+      "why": "Fiction, science fiction and fantasy are listed when they are labelled as fiction, so people can find what they are looking for.",
+      "what_to_change": "Add the tag \"fiction\" and at least one genre tag, such as \"science-fiction\" or \"fantasy\", and set the Category line to Fiction."
+    },
+    "questionnaire_unanswered": {
+      "title": "Answer the rating questionnaire (Code Part V)",
+      "why": "Every listing answers a short questionnaire about what the Space contains, which sets its age band and content descriptors.",
+      "what_to_change": "Answer every question of the rating questionnaire in the publish form, then publish again."
+    },
+    "review_unconfirmed": {
+      "title": "The review could not confirm what your listing says",
+      "why": "A listing is listed on what the Space shows and what its scripts do. The review read every script and looked at every screenshot, and could not confirm part of what the listing claims.",
+      "what_to_change": "Show the claimed feature working: before you publish, open the Space at the view where its controls, readouts or results are visible so the screenshots capture them, and say in the statement exactly what the visitor does and sees."
+    },
+    "confirm_build_quality": {
+      "title": "Show the build (Code T1)",
+      "why": "Code T1: the review could not tell from the screenshots and scripts whether the Space is finished and working.",
+      "what_to_change": "Publish with the finished build in view, so the screenshots show the Space whole and working, with nothing placeholder."
+    },
+    "confirm_objective": {
+      "title": "Show what the visitor does (Code T2)",
+      "why": "Code T2: the review could not see the task, question or measurement the Space gives the visitor, or the controls to do it.",
+      "what_to_change": "Show the task and the controls or readouts that do it in your screenshots (for example the question box and a traced answer), and name the task in the Objective line."
+    },
+    "confirm_lesson": {
+      "title": "Show what the visitor learns (Code T3)",
+      "why": "Code T3: the review could not find the skill, concept or method the listing names in the Space itself.",
+      "what_to_change": "Make the lesson visible in the Space (a panel, a labelled readout or a guided step), show it in your screenshots, and name it in the Lesson line."
+    },
+    "confirm_real_world": {
+      "title": "Name the real-world source (Code T4)",
+      "why": "Code T4: the review could not confirm how the Space connects to something real.",
+      "what_to_change": "Name the source in the Real-world link line: the place and its source data, the system your scripts compute, or the dataset and where it comes from."
+    },
+    "images_not_seen": {
+      "title": "Some of your images could not be checked",
+      "why": "Every image a listing shows is reviewed before it is listed. One of this listing's images (the thumbnail, the cover or a screenshot) was too large, of a type that cannot be read, or changed during the review.",
+      "what_to_change": "Keep the thumbnail and cover as PNG, JPEG or WebP under 3.6 MB, then publish again from Studio so fresh screenshots are taken."
+    },
+    "statement_unclear": {
+      "title": "Make your statement describe this Space (Code Part III)",
+      "why": "The four statement lines say what the Space is, what to do, what it teaches and how it connects to real life. The review could not match them to this Space.",
+      "what_to_change": "Rewrite each line so it describes this Space specifically: the suggested statement below is drawn from what the review saw and read."
+    },
+    "not_yet_B3_lawful": {
+      "title": "Not yet: score the decision, not the harm (Code B3)",
+      "why": "Code B3: training whose score is a correct lawful decision (de-escalation, shoot or don't-shoot) is welcome, but no score, progress or win may come from harming a person-like character.",
+      "what_to_change": "Score the decision the trainee makes (the right call, its timing, its justification), not hits on a person-like character, then publish again."
+    },
+    "harm_sensitive_place": {
+      "title": "Shows security detail of a real place (Code A10)",
+      "why": "Code A10: a twin of a named private home's interior, the control rooms of critical infrastructure, or the entrances, guard posts, cameras or door control of a named school, place of worship, hospital or government building is not listed. An exterior twin made from public space is fine.",
+      "what_to_change": "Remove the interior security detail, or move the Space to an invented place. If you own or protect this property, ask Eustress support about a property attestation."
+    },
+    "safety_review": {
+      "title": "Not listed after the safety review",
+      "why": "Parts of this Space did not pass the safety review.",
+      "what_to_change": "If you believe this is a mistake, appeal from this review and a person will decide."
+    },
+    "republish_for_scripts": {
+      "title": "Republish from the current Studio",
+      "why": "Every listing is reviewed on every script it ships, read from the published package. This listing was published in an older format the review cannot read its scripts from.",
+      "what_to_change": "Republish this listing from the current Studio so the review can read every script."
+    },
+    "scripts_not_read": {
+      "title": "The review could not read every script",
+      "why": "Every listing is reviewed on every script it ships. The review could not read all of the scripts this listing ships.",
+      "what_to_change": "Publish again from the current Studio so the review can read every script."
+    },
+    "claimed_files_missing": {
+      "title": "Files the description says ship are not in the package",
+      "why": "The review checks every file and folder the description says ships with the Space against the published package.",
+      "what_to_change": "Publish the named files with the Space (turn on Share Source for server files), or take the claim out of the description, then publish again."
+    },
+    "too_much_script": {
+      "title": "Too much script to review in one listing",
+      "why": "Every listing is reviewed on every script and supporting file it ships, and this one ships more script, or more files, than one review can read.",
+      "what_to_change": "Publish fewer Spaces per Universe, or remove the scripts and files a Space does not use (or combine many small files into fewer), then publish again."
+    },
+    "republish_package": {
+      "title": "The published package could not be read",
+      "why": "The review reads every script from the published package, and part of the package this listing published could not be read.",
+      "what_to_change": "Publish again from the current Studio so the package is uploaded whole and can be read."
+    },
+    "review_undecided": {
+      "title": "The review could not reach a decision",
+      "why": "The review could not reach a decision on this listing as it was published.",
+      "what_to_change": "Republish with a clearer description and screenshots that show what the Space does, then publish again."
+    },
+    "statement_contradicted": {
+      "title": "The statement does not match the Space (Code B9)",
+      "why": "Code B9: the Qualification Statement must describe what the Space actually is and does.",
+      "what_to_change": "Rewrite the statement so each line is true of the Space, or change the Space to match it."
+    },
+    "not_yet_B5": {
+      "title": "Not yet: remove the hollow loop (Code B5)",
+      "why": "Code B5: the rest of the Space qualifies, but a loop that grows only by clicking or resetting, or a reward for coming back, cannot be listed. Passive income is fine.",
+      "what_to_change": "Remove the loop or the return reward, then publish again."
+    },
+    "not_yet_B6": {
+      "title": "Not yet: make the economy fair (Code B6)",
+      "why": "Code B6: the rest of the Space qualifies, but something in it sells progress, chance or a skip, pushes a sale, hides a price, rewards social reach, takes payment off Eustress, or, in a game with combat, offers a loot box, crate, spin or bet.",
+      "what_to_change": "Remove it, then publish again."
+    },
+    "not_yet_B9": {
+      "title": "Not yet: fix the wording (Code B9)",
+      "why": "Code B9: the rest of the Space qualifies, but its title, description, thumbnail, tags, category, rating answers or fiction label say something the Space does not show.",
+      "what_to_change": "Change the wording or the answer so it says what the Space is, then publish again."
+    },
+    "not_yet_tags": {
+      "title": "Not yet: fix your tags (Code B9)",
+      "why": "Code B9: the rest of the Space qualifies, but its tags claim a topic, genre or audience the Space does not have, or a tag is a slur, an insult or personal information. Tags are how people find a Space, so they say what it is.",
+      "what_to_change": "Fix your tags so each one describes what the Space contains, and remove any slur, insult or personal information. You may also leave the tags empty, and the review will choose them. Then publish again."
+    },
+    "code_not_met": {
+      "title": "Not ready for the Gallery yet",
+      "why": "The Guardian Code lists a Space that passes its four tests: build quality, objective, lesson and real-world effect.",
+      "what_to_change": "Make the change the review suggests, then publish again."
+    },
+    "harm_real_world_instructions": {
+      "title": "Contains real-world instructions for serious harm",
+      "why": "Fiction, games and simulations about crime are welcome; working instructions for real crime are not.",
+      "what_to_change": "Remove the part that works as a real-world how-to and keep the fictional framing."
+    },
+    "harm_fraud": {
+      "title": "Contains material that works as a real scam or phishing template",
+      "why": "Stories and warnings about scams are welcome; usable scam material is not.",
+      "what_to_change": "Remove the part that could be used against real people."
+    },
+    "harm_self_harm": {
+      "title": "Contains self-harm instructions presented as real advice",
+      "why": "Depicting difficult experiences is allowed; method instructions are not.",
+      "what_to_change": "Remove the instructions. Linking to support resources is encouraged."
+    },
+    "harm_hate": {
+      "title": "Contains real advocacy of hatred against a protected group",
+      "why": "Depicting and condemning hatred is allowed; promoting it is not.",
+      "what_to_change": "Remove the material that promotes hatred or violence against a group."
+    },
+    "harm_crime_rehearsal": {
+      "title": "Models a real place for a crime (Code A13)",
+      "why": "Code A13: a real business, bank, store, depot, prison or home may not be modelled with its security, or paired with a heist, break-in, escape or theft. A heist in an invented place is fiction and is fine.",
+      "what_to_change": "Move the story to an invented place, or remove the security detail and the crime mechanic. If you own or protect this property, ask Eustress support about a property attestation."
+    },
+    "harm_stalking": {
+      "title": "Centres on a private person (Code A14)",
+      "why": "Code A14: a Space may model public places as places, never one private person's home, workplace, vehicle, routine or likeness.",
+      "what_to_change": "Remove what singles out a private person. If the property is yours, ask Eustress support about a property attestation."
+    },
+    "harm_policy": {
+      "title": "Contains material the Gallery does not list",
+      "why": "Part of this Universe crosses a line in the Gallery rules.",
+      "what_to_change": "Review the Gallery rules, remove the material that crosses them, and publish again."
+    },
+    "coppa_links": {
+      "title": "Off-platform links or contact details in an experience aimed at children",
+      "why": "Experiences for children under 13 cannot send players to other sites or share contact details.",
+      "what_to_change": "Remove the links, handles, email addresses and phone numbers, or describe the experience for an older audience."
+    },
+    "coppa_personal_data": {
+      "title": "Collects personal information in an experience aimed at children",
+      "why": "Experiences for children under 13 cannot collect names, emails, locations or chat from players.",
+      "what_to_change": "Remove the scripts that collect or send player information, or describe the experience for an older audience."
+    },
+    "coppa_chance": {
+      "title": "Chance-based or real-money mechanics in an experience aimed at children",
+      "why": "Loot boxes and paid random rewards are not allowed in experiences for children under 13.",
+      "what_to_change": "Remove the chance-based or paid mechanics, or describe the experience for an older audience."
+    },
+    "coppa_rating": {
+      "title": "Content above an all-ages rating in an experience aimed at children",
+      "why": "An experience directed at children under 13 has to be suitable for all ages.",
+      "what_to_change": "Tone down the content to all-ages, or describe the experience for an older audience."
+    },
+    "removed_A1": {
+      "title": "Sexual content involving a minor (Code A1)",
+      "why": "Code A1: Eustress removes any depiction, description, simulation or text involving sexual activity, exploitation, grooming or nudity of anyone under 18, whether real, fictional, drawn, generated or described.",
+      "what_to_change": "This content cannot be listed or played on Eustress, and editing it does not restore it. Your account and your other listings are not affected. If you believe this is a mistake, appeal from this review and a person will decide."
+    },
+    "removed_A2": {
+      "title": "Terrorism or violent extremism (Code A2)",
+      "why": "Code A2: Eustress removes the promotion, glorification or recruitment for terrorism or ideologically motivated violence, and practical guidance for it.",
+      "what_to_change": "This content cannot be listed or played on Eustress, and editing it does not restore it. Your account and your other listings are not affected. If you believe this is a mistake, appeal from this review and a person will decide."
+    },
+    "removed_A3": {
+      "title": "Attack planning (Code A3)",
+      "why": "Code A3: Eustress removes planning, rehearsal or practical guidance for a real-world attack on people, including realistic recreations of real venues framed as practice.",
+      "what_to_change": "This content cannot be listed or played on Eustress, and editing it does not restore it. Your account and your other listings are not affected. If you believe this is a mistake, appeal from this review and a person will decide."
+    },
+    "removed_A5": {
+      "title": "A real person shown sexually without consent (Code A5)",
+      "why": "Code A5: Eustress removes intimate or sexual depictions of a real, identifiable person made or shared without their consent, deepfakes included.",
+      "what_to_change": "This content cannot be listed or played on Eustress, and editing it does not restore it. Your account and your other listings are not affected. If you believe this is a mistake, appeal from this review and a person will decide."
+    },
+    "removed_A6": {
+      "title": "Doxxing, threats or targeted harassment (Code A6)",
+      "why": "Code A6: Eustress removes private information about a real person, and credible threats or harassment against a named individual.",
+      "what_to_change": "This content cannot be listed or played on Eustress, and editing it does not restore it. Your account and your other listings are not affected. If you believe this is a mistake, appeal from this review and a person will decide."
+    },
+    "removed_A12": {
+      "title": "War and military targeting (Code A12)",
+      "why": "Code A12: Eustress removes twins of active military sites and defence facilities, current positions of forces in an active conflict, and real places paired with strike planning.",
+      "what_to_change": "This content cannot be listed or played on Eustress, and editing it does not restore it. Your account and your other listings are not affected. If you believe this is a mistake, appeal from this review and a person will decide."
+    }
+  }
+}

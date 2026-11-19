@@ -59,7 +59,23 @@ pub struct MethodDecl {
 
 /// Every declared class method. A class adds its methods here, and its
 /// engine plugin implements each under the same class and name.
-pub static METHODS: &[MethodDecl] = &[];
+///
+/// `Road` methods are called on a road: a `TerrainSpline` in Road mode
+/// answers to them until roads have a class of their own.
+pub static METHODS: &[MethodDecl] = &[MethodDecl {
+    class: "Road",
+    name: "Audit",
+    params: &[MethodParam {
+        name: "network",
+        kind: ParamKind::Bool,
+        unit: "",
+        required: false,
+        doc: "Audit every designed road in the Space instead of this one",
+    }],
+    returns: "Per road: its class, length, violations (Radius, Grade, Fill, Cut where no structure carries               it) and structures; per junction it meets: centre, elevation, control, junctions closer than               40 m, and per leg its road, setback, lanes in and out, lanes with no exit, and the step in               metres between the leg's surface and the box's at its mouth",
+    doc: "Report where a designed road and its junctions break the rules they were built to, measured on           the surfaces as drawn",
+    effect: MethodEffect::Read,
+}];
 
 /// The method `name` of `class`, when declared.
 pub fn declared(class: &str, name: &str) -> Option<&'static MethodDecl> {
@@ -141,9 +157,15 @@ mod tests {
     }
 
     #[test]
-    fn nothing_is_declared_yet() {
-        assert!(METHODS.is_empty());
+    fn a_road_declares_its_audit_and_nothing_undeclared() {
+        let audit = declared("Road", "Audit").expect("Road:Audit");
+        assert_eq!(audit.effect, MethodEffect::Read);
+        assert_eq!(params_schema(audit)["properties"]["network"]["type"], "boolean");
         assert!(declared("Road", "Split").is_none());
-        assert_eq!(methods_of("Road").count(), 0);
+        assert_eq!(methods_of("Road").count(), 1);
+        // No class declares one name twice.
+        for (i, a) in METHODS.iter().enumerate() {
+            assert!(METHODS[i + 1..].iter().all(|b| (a.class, a.name) != (b.class, b.name)), "{}:{}", a.class, a.name);
+        }
     }
 }

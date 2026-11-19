@@ -1,0 +1,11 @@
+# Harness scene marker. Emitted by harness-scenes (eustress/crates/engine/src/bin/harness_scenes.rs); never edit by hand.
+[harness]
+scene_id = "S6"
+space_dir = "S6_domain_sim"
+seed = 42
+generator = "harness-scenes"
+title = "Simulation: copper rod heat conduction (explicit FTCS) with recorder and independent step counter"
+
+[notes]
+model = "explicit FTCS heat conduction in a 0.3 m copper rod, 16 nodes, dx 0.02 m, alpha 116.245362e-6 m2/s, dt 1.0 s per step, r 0.290613; node 0 held at 373.15 K, last node loses heat to 293.15 K"
+step_counter = "rod_step_count, advanced once per on_update by the script, independent of the engine tick"

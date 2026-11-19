@@ -1,0 +1,21 @@
+# SoulService — Manages Rune VM scripts and Soul execution
+# _service.toml marks this folder as a Service and defines all editable properties.
+
+[service]
+class_name = "SoulService"
+icon = "soulservice"
+description = "Manages Rune VM script execution with sandboxing and resource limits"
+can_have_children = true
+
+[properties]
+enable_soul_scripts = true
+max_execution_time = 10.0
+memory_limit = 67108864
+sandbox_enabled = true
+allow_file_system_access = false
+allow_network_access = false
+
+[metadata]
+id = "soulservice-service"
+created = ""
+last_modified = ""

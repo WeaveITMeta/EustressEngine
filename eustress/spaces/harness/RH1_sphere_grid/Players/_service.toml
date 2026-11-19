@@ -1,0 +1,19 @@
+# Players Service — Manages player connections and character settings
+# _service.toml marks this folder as a Service and defines all editable properties.
+
+[service]
+class_name = "Players"
+icon = "players"
+description = "Manages player spawning, respawning, and character configuration"
+can_have_children = true
+
+[properties]
+character_auto_loads = true
+respawn_time = 5.0
+max_players = 12
+preferred_players = 12
+
+[metadata]
+id = "players-service"
+created = ""
+last_modified = ""

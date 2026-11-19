@@ -1,0 +1,16 @@
+[light]
+brightness = 2.0
+color = [
+    255,
+    249,
+    253,
+]
+enabled = true
+range = 12.0
+shadows = true
+
+[metadata]
+archivable = true
+class_name = "PointLight"
+name = "Light"
+uuid = "e5908ba3afa7152d98c2b60e49426164"

@@ -200,6 +200,12 @@ impl CsgMesh {
     }
 
     fn validate(&self) -> Result<(), CsgError> {
+        // An infinite or NaN position makes the mesh's bounds, and with them
+        // every recentred vertex and the glb's POSITION min and max, not a
+        // number.
+        if self.positions.iter().flatten().any(|c| !c.is_finite()) {
+            return Err(CsgError::Malformed("non-finite vertex position".into()));
+        }
         if self.indices.len() % 3 != 0 {
             return Err(CsgError::Malformed(format!(
                 "index count {} not a multiple of 3",
@@ -364,6 +370,14 @@ fn read_mesh2(cur: &mut Cursor) -> Result<CsgMesh, CsgError> {
             "implausible vertex count {vertex_count}"
         )));
     }
+    // The count comes from the blob. A vertex is 84 bytes, so a count the
+    // bytes left cannot hold is refused before it sizes four allocations.
+    if vertex_count > cur.remaining() / 84 {
+        return Err(CsgError::Malformed(format!(
+            "vertex count {vertex_count} needs more than the {} byte(s) left",
+            cur.remaining()
+        )));
+    }
 
     let mut mesh = CsgMesh::default();
     mesh.positions.reserve(vertex_count);
@@ -396,6 +410,14 @@ fn read_mesh2(cur: &mut Cursor) -> Result<CsgMesh, CsgError> {
     if face_index_count % 3 != 0 {
         return Err(CsgError::Malformed(format!(
             "CSGMDL2 face index count {face_index_count} not a multiple of 3"
+        )));
+    }
+    // An index is 4 bytes. Reserving for a count the blob cannot hold (up to
+    // 17 GB for a 54-byte blob) aborts the process rather than failing.
+    if face_index_count > cur.remaining() / 4 {
+        return Err(CsgError::Malformed(format!(
+            "face index count {face_index_count} needs more than the {} byte(s) left",
+            cur.remaining()
         )));
     }
     mesh.indices.reserve(face_index_count);
@@ -540,7 +562,9 @@ fn read_faces5(cur: &mut Cursor) -> Result<Vec<u32>, CsgError> {
     }
 
     // State machine: accumulate signed deltas into a running index.
-    let mut indices = Vec::with_capacity(vertex_count);
+    // Every index takes at least one byte of `vertex_data`, so the count the
+    // blob claims never sizes the allocation by itself.
+    let mut indices = Vec::with_capacity(vertex_count.min(vertex_data.len()));
     let mut it = vertex_data.into_iter();
     let mut index_out: i64 = 0;
     for _ in 0..vertex_count {
@@ -1250,6 +1274,32 @@ pub(crate) fn make_csgmdl2_fixture(mesh: &CsgMesh) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A count the blob cannot hold is refused before it sizes an allocation.
+    /// The face index count here asks for 17 GB from 12 bytes.
+    #[test]
+    fn a_count_the_blob_cannot_hold_is_refused() {
+        let mut body = Vec::new();
+        body.extend_from_slice(&0u32.to_le_bytes()); // vertex count
+        body.extend_from_slice(&84u32.to_le_bytes()); // vertex stride
+        body.extend_from_slice(&u32::MAX.to_le_bytes()); // face index count, a multiple of 3
+        assert!(matches!(read_mesh2(&mut Cursor::new(&body)), Err(CsgError::Malformed(_))));
+
+        let mut body = Vec::new();
+        body.extend_from_slice(&1_000_000u32.to_le_bytes());
+        body.extend_from_slice(&84u32.to_le_bytes());
+        assert!(matches!(read_mesh2(&mut Cursor::new(&body)), Err(CsgError::Malformed(_))));
+    }
+
+    #[test]
+    fn a_non_finite_vertex_is_malformed() {
+        let mesh = CsgMesh {
+            positions: vec![[0.0, 0.0, 0.0], [f32::INFINITY, 0.0, 0.0], [0.0, 1.0, 0.0]],
+            indices: vec![0, 1, 2],
+            ..CsgMesh::default()
+        };
+        assert!(matches!(mesh.validate(), Err(CsgError::Malformed(_))));
+    }
 
     /// Modern Roblox stores a union's baked mesh in `MeshData2` (a
     /// deduplicated SharedString) and leaves the legacy `MeshData` empty.

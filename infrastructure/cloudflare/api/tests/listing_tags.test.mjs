@@ -854,10 +854,11 @@ test('the popular tags follow the viewer\'s rating limit, like the list does', a
   await seed(env, { name: 'Kids', tags: ['kid-safe', 'shared'], rating: 'all_ages' });
   await seed(env, { name: 'Teens', tags: ['teen-stuff', 'shared'], rating: 'teen_13' });
   await seed(env, { name: 'Adults', tags: ['adult-only', 'shared'], rating: 'adult_18' });
-  // Signed out sees G to PG only (src/adult_content.mjs, McKale 2026-10-16): the teen and adult listings' tags are not named.
+  // Signed out, the tags follow the Gallery's solo cap, mature_17 (src/adult_content.mjs, McKale 2026-11-19): the teen
+  // listing's tags are named, the adult listing's are not.
   const out = (await get(env, '/api/simulations/tags')).body.tags;
-  assert.deepEqual(out.map((t) => t.tag).sort(), ['kid-safe', 'shared']);
-  assert.ok(!out.some((t) => t.tag === 'adult-only' || t.tag === 'teen-stuff'));
+  assert.deepEqual(out.map((t) => t.tag).sort(), ['kid-safe', 'shared', 'teen-stuff']);
+  assert.ok(!out.some((t) => t.tag === 'adult-only'));
   // Signed in with the setting off: up to mature_17, so the teen listing counts and the adult one does not.
   const off = (await get(env, '/api/simulations/tags', { Authorization: `Bearer ${mintToken('55555555-5555-4555-8555-555555555555')}` })).body.tags;
   assert.deepEqual(off[0], { tag: 'shared', count: 2 });

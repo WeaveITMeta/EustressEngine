@@ -1,0 +1,10 @@
+# Harness scene marker. Emitted by harness-scenes (eustress/crates/engine/src/bin/harness_scenes.rs); never edit by hand.
+[harness]
+scene_id = "S3"
+space_dir = "RH3_exterior"
+seed = 42
+generator = "harness-scenes"
+title = "Material, motion and coherence: open ground, one declared directional source, occluders 0.2 m to 20 m"
+
+[notes]
+sun = "one DirectionalLight, elevation 35 deg, azimuth 150 deg clockwise from north (-Z); the Lighting sun, moon and sky environment light are off"

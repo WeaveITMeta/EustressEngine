@@ -64,7 +64,7 @@ pub struct ReviewReason {
 
 #[derive(Clone, Debug, Default, PartialEq, Deserialize)]
 pub struct ReviewAppeal {
-    /// `in_review`, `accepted` or `upheld`.
+    /// `in_review`, `accepted`, `upheld`, or `withdrawn` (the author changed the listing, which was reviewed again instead).
     #[serde(default)]
     pub status: String,
     #[serde(default)]
@@ -131,6 +131,7 @@ fn appeal_label(status: &str) -> &'static str {
         "in_review" => "Your appeal is with a reviewer.",
         "accepted" => "Your appeal was accepted.",
         "upheld" => "The decision was upheld after your appeal.",
+        "withdrawn" => "You changed this Space, so your appeal was withdrawn and the new version was reviewed instead.",
         _ => "Appeal status unknown.",
     }
 }

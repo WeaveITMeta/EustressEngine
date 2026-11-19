@@ -370,6 +370,7 @@ const WRITES: &[(&str, usize, &str)] = &[
     ("git_tools.rs", 1, "one git process (sandbox::git_command, hooks off); add, commit and branch changes only in a repository inside the Universe (git_write); names pass git_branch_name or follow --"),
     ("image_result.rs", 0, "reads the file the engine names"),
     ("import_tools.rs", 5, "the GLB copied to a resolved Space path through a temporary file beside it (create_dir_all, copy, rename, and remove_file of that temporary on failure), its source a resolved Universe path; Parts through create_instance in a resolved folder under Workspace"),
+    ("judge_tools.rs", 0, "reads the saved listing (publish.toml) and sends the verdict request over the network; writes no files"),
     ("lib.rs", 0, "no files"),
     ("memory_tools.rs", 0, "remember returns its key and value to the Workshop, which stores them; the tool writes nothing; rules are read from .md files"),
     ("mesh_tools.rs", 0, "reads only: the Part's own mesh and record; the engine writes the pieces and moves the original"),
@@ -385,7 +386,7 @@ const WRITES: &[(&str, usize, &str)] = &[
     ("simulation_tools.rs", 6, "<universe>/.eustress/datastore/<[A-Za-z0-9_-] name>.json, a resolved tag file, .eustress/experiments/<plain_name>-<time>.json, and one git process making an experiment branch only in a repository inside the Universe"),
     ("spatial_tools.rs", 0, "reads only"),
     ("universe_tools.rs", 31, "Universe and Space folders whose names pass plain_name and the reserved-name check, the files a new Space is made with, and .default_universe; a Universe named by path must be on a local drive (sandbox::local_absolute)"),
-    ("website_tools.rs", 5, "Space/Website/_service.toml and Website/<[A-Za-z0-9_] key> folders"),
+    ("website_tools.rs", 9, "Space/Website/_service.toml (the theme and image scalars, from validated values and image paths cleaned by page_spec::clean_image_path) and Website/<[A-Za-z0-9_] key> folders (References and PageLinks)"),
 ];
 
 /// What counts: the std and tokio file calls, this crate's helpers that wrap

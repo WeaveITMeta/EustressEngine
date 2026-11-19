@@ -152,6 +152,13 @@ pub struct EditorSettings {
     #[serde(default)]
     pub telemetry_notice_shown: bool,
 
+    /// Download new versions in the background and install them when Studio
+    /// quits. ON by default. `crate::updater` reads it each time it decides,
+    /// and acts on it only for a release signed by a trusted key; Settings >
+    /// General > Updates is the user-facing switch.
+    #[serde(default = "default_automatic_updates")]
+    pub automatic_updates: bool,
+
     /// Bliss node mode — "Light" or "Full". Persisted because opting into a
     /// Full node is a deliberate resource commitment (~2GB RAM, stores chain
     /// data, +10% earning bonus); silently reverting to Light on every launch
@@ -247,6 +254,10 @@ fn default_usage_telemetry_enabled() -> bool {
     true
 }
 
+fn default_automatic_updates() -> bool {
+    true
+}
+
 fn default_bliss_node_mode() -> String {
     // Light is the zero-setup default; Full is always an explicit opt-in.
     "Light".to_string()
@@ -332,6 +343,7 @@ impl Default for EditorSettings {
             pinned_panels: Vec::new(),
             usage_telemetry_enabled: default_usage_telemetry_enabled(),
             telemetry_notice_shown: false,
+            automatic_updates: default_automatic_updates(),
             bliss_node_mode: default_bliss_node_mode(),
             bliss_enabled: default_bliss_enabled(),
             ribbon_collapsed: false,
@@ -1046,3 +1058,22 @@ fn ensure_autosave_gitignore(space_path: &std::path::Path) {
     let _ = std::fs::write(&path, content);
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A settings file written before `automatic_updates` existed loads with
+    /// automatic updates on, and a saved `false` stays off.
+    #[test]
+    fn automatic_updates_defaults_on_when_missing() {
+        let mut value = serde_json::to_value(EditorSettings::default()).unwrap();
+        let fields = value.as_object_mut().unwrap();
+        assert!(fields.remove("automatic_updates").is_some());
+        let loaded: EditorSettings = serde_json::from_value(value.clone()).unwrap();
+        assert!(loaded.automatic_updates);
+
+        value.as_object_mut().unwrap().insert("automatic_updates".into(), serde_json::Value::Bool(false));
+        let loaded: EditorSettings = serde_json::from_value(value).unwrap();
+        assert!(!loaded.automatic_updates);
+    }
+}

@@ -14,8 +14,10 @@ write it, through the same place.
   **start Space's** value, the Space a join opens.
 - **What it counts:** everyone in the session, the host's own character
   included while the host plays. A host with no character (headless, or
-  hosting from Edit) counts nobody. Box Head at 4 is the host plus 3
-  joiners, and Live shows 2/4 with the host as one of the two.
+  hosting from Edit, which hosts as the server alone) counts nobody. Box
+  Head at 4 holds 4 joiners when Studio hosts from Edit; started while
+  Studio already plays with a character, it is the host plus 3 joiners, and
+  Live shows 2/4 with the host as one of the two.
 - **Range:** a whole number from 1 to 10,000. 10,000 is the gallery's own
   bound (its live heartbeat refuses more), and the only upper bound; fields
   say so. There is **no engine cap**: a Space's number is the limit as

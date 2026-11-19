@@ -180,8 +180,9 @@ the same ticket shape and length, and the same refusals. A solo link with no `ti
   is the account's viewer exactly as a session would be (`adult_content.mjs viewerFor`), so the rating gate judges
   the real account's setting and age, and the author still plays their own unlisted listing.
 - Fail closed: a pass that is missing, malformed, forged, expired, made for another listing, or issued before the
-  account's session floor is no credential at all. That viewer is signed out, so a teen-rated listing still answers
-  `sign_in_required`.
+  account's session floor is no credential at all. That viewer is signed out: since McKale's 2026-11-19 decision a
+  signed-out viewer plays solo up to `mature_17`, so a teen-rated listing is served, and an adult one answers
+  `adult_content_off`.
 
 ### The Player
 

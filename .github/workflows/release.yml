@@ -15,6 +15,10 @@ name: Release
 #   CLOUDFLARE_ACCOUNT_ID
 # Optional, and the workflow says so when absent:
 #   WINDOWS_CERT_PFX / WINDOWS_CERT_PASSWORD   Authenticode signing
+#   EUSTRESS_UPDATE_SIGNING_KEY   Ed25519 private key (PEM) that signs the
+#       release manifest for Studio's automatic updates. Without it the
+#       release is unsigned, which is refused once update_trust.rs lists a
+#       trusted key. See docs/architecture/SIGNED_UPDATES.md.
 
 on:
   push:
@@ -419,6 +423,8 @@ jobs:
     if: github.event_name == 'push' || inputs.publish
     runs-on: ubuntu-latest
     steps:
+      # update_trust.rs is read by the signing step.
+      - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with:
           path: artifacts
@@ -449,6 +455,7 @@ jobs:
           cat > latest.json <<JSON
           {
             "version": "${VERSION}",
+            "product": "studio",
             "date": "$(date -u +%Y-%m-%d)",
             "channel": "stable",
             "changelog_url": "https://github.com/WeaveITMeta/EustressEngine/releases/tag/v${VERSION}",
@@ -476,6 +483,79 @@ jobs:
             console.log("manifest complete:", Object.keys(m.platforms).join(", "));
           '
 
+      # Studio installs an update only when this release's own copy of the
+      # manifest (v<version>/latest.json) carries a signature (latest.json.sig)
+      # that verifies against a key listed in TRUSTED_KEYS in update_trust.rs.
+      # See docs/architecture/SIGNED_UPDATES.md. The key is read from the
+      # environment of this one step and written only under RUNNER_TEMP.
+      - name: Sign latest.json
+        working-directory: dist
+        env:
+          EUSTRESS_UPDATE_SIGNING_KEY: ${{ secrets.EUSTRESS_UPDATE_SIGNING_KEY }}
+        run: |
+          set -o pipefail
+          TRUST="${GITHUB_WORKSPACE}/eustress/crates/engine/src/update_trust.rs"
+          [ -f "$TRUST" ] || { echo "::error::${TRUST} is missing, so there is no way to tell whether Studio trusts a signing key."; exit 1; }
+
+          # Entries of TRUSTED_KEYS: lines after its declaration that begin
+          # with `TrustedKey {` (leading blanks allowed), up to the `];` that
+          # closes the list. `pub struct TrustedKey {` and `impl TrustedKey {`
+          # begin with other words, comments begin with `//`, and an empty
+          # list has no such line, so none of them match. The declaration line
+          # is checked only after its `=`, so a one-line list counts too.
+          LISTED=$(awk '
+            /TRUSTED_KEYS[[:space:]]*:/ {
+              rest = $0; sub(/^[^=]*=/, "", rest)
+              if (rest ~ /TrustedKey[[:space:]]*[{]/) n++
+              if ($0 ~ /\];[[:space:]]*$/) exit
+              seen = 1; next
+            }
+            seen && /^[[:space:]]*\][[:space:]]*;/ { exit }
+            seen && /^[[:space:]]*TrustedKey[[:space:]]*[{]/ { n++ }
+            END { print n + 0 }
+          ' "$TRUST")
+
+          if [ -z "$EUSTRESS_UPDATE_SIGNING_KEY" ]; then
+            if [ "$LISTED" -gt 0 ]; then
+              echo "::error::EUSTRESS_UPDATE_SIGNING_KEY is not set, but update_trust.rs lists ${LISTED} trusted key(s). Studio would refuse an unsigned release. Add the secret, see docs/architecture/SIGNED_UPDATES.md."
+              exit 1
+            fi
+            echo "::warning::EUSTRESS_UPDATE_SIGNING_KEY is not set and update_trust.rs lists no trusted key - this release is UNSIGNED and carries no latest.json.sig."
+            exit 0
+          fi
+
+          KEY="${RUNNER_TEMP}/update-signing-key.pem"
+          PUB="${RUNNER_TEMP}/update-signing-pub.pem"
+          RAW="${RUNNER_TEMP}/latest.json.raw-sig"
+          (umask 077; printf '%s\n' "$EUSTRESS_UPDATE_SIGNING_KEY" > "$KEY")
+          chmod 600 "$KEY"
+
+          # An Ed25519 public key in DER is 44 bytes: a 12-byte header, then
+          # the 32 raw key bytes. Any other key type has another length.
+          [ "$(openssl pkey -in "$KEY" -pubout -outform DER | wc -c)" = "44" ] \
+            || { echo "::error::EUSTRESS_UPDATE_SIGNING_KEY is not an Ed25519 private key in PEM form."; exit 1; }
+          openssl pkey -in "$KEY" -pubout -out "$PUB"
+          KEYID=$(openssl pkey -in "$KEY" -pubout -outform DER | tail -c 32 | sha256sum | cut -c1-16)
+
+          openssl pkeyutl -sign -rawin -inkey "$KEY" -in latest.json -out "$RAW"
+          SIG=$(od -An -tx1 -v "$RAW" | tr -d ' \n')
+          printf '%s %s\n' "$KEYID" "$SIG" > latest.json.sig
+          grep -Eq '^[0-9a-f]{16} [0-9a-f]{128}$' latest.json.sig \
+            || { echo "::error::latest.json.sig is not '<16 hex> <128 hex>'."; exit 1; }
+
+          openssl pkeyutl -verify -pubin -inkey "$PUB" -rawin -in latest.json -sigfile "$RAW" \
+            || { echo "::error::The signature just made does not verify against its own public key."; exit 1; }
+
+          if ! grep -qF "$KEYID" "$TRUST"; then
+            echo "::error::Key ${KEYID} is not listed in update_trust.rs. Studio would reject this release. Add the public key to TRUSTED_KEYS, see docs/architecture/SIGNED_UPDATES.md."
+            exit 1
+          fi
+          echo "OK: latest.json signed with key ${KEYID} and verified."
+
+      - name: Delete the signing key
+        if: always()
+        run: rm -f "${RUNNER_TEMP}/update-signing-key.pem" "${RUNNER_TEMP}/update-signing-pub.pem" "${RUNNER_TEMP}/latest.json.raw-sig"
+
       - name: Upload to R2
         working-directory: dist
         env:
@@ -493,11 +573,23 @@ jobs:
           # Cloudflare interaction in this repo, and --remote so a typo
           # cannot quietly write to local simulated storage instead.
           for f in *; do
-            [ "$f" = "latest.json" ] && continue
+            case "$f" in latest.json|latest.json.sig) continue ;; esac
             echo "uploading $f"
             npx --yes wrangler@4 r2 object put "${BUCKET}/v${VERSION}/${f}" \
               --file "$f" --remote
           done
+
+          # This version's own manifest and signature go up BEFORE the root
+          # pointer is replaced, so a Studio that reads the new pointer always
+          # finds the signed copy.
+          npx --yes wrangler@4 r2 object put "${BUCKET}/v${VERSION}/latest.json" \
+            --file latest.json --remote \
+            --content-type application/json
+          if [ -f latest.json.sig ]; then
+            npx --yes wrangler@4 r2 object put "${BUCKET}/v${VERSION}/latest.json.sig" \
+              --file latest.json.sig --remote \
+              --content-type text/plain
+          fi
 
           # The stable path the updater and the website both poll. Short
           # cache: a release must be visible in minutes, not in an hour.
@@ -513,17 +605,41 @@ jobs:
           # Uploading is not the same as being reachable. This is the step
           # that would have caught a bucket nobody had created.
           URL="${DOWNLOAD_BASE}/latest.json"
+          OK=""
           for i in 1 2 3 4 5; do
             SERVED=$(curl -fsS "$URL" | node -e 'let d="";process.stdin.on("data",c=>d+=c).on("end",()=>{try{console.log(JSON.parse(d).version)}catch{console.log("")}})' || true)
             if [ "$SERVED" = "$VERSION" ]; then
               echo "OK: ${URL} serves ${SERVED}"
-              exit 0
+              OK=1
+              break
             fi
             echo "attempt ${i}: served '${SERVED}', want '${VERSION}' - retrying"
             sleep 10
           done
-          echo "::error::${URL} is not serving ${VERSION}. The upload reported success, so check the Worker route and the bucket binding."
-          exit 1
+          if [ -z "$OK" ]; then
+            echo "::error::${URL} is not serving ${VERSION}. The upload reported success, so check the Worker route and the bucket binding."
+            exit 1
+          fi
+
+          # The version's own manifest, and its signature when one was made,
+          # must come back byte for byte as uploaded: Studio verifies the
+          # signature over exactly these bytes.
+          check() {
+            for i in 1 2 3 4 5; do
+              if curl -fsS "$1" -o "${RUNNER_TEMP}/served.bin" && cmp -s "${RUNNER_TEMP}/served.bin" "$2"; then
+                echo "OK: $1 matches $2 byte for byte"
+                return 0
+              fi
+              echo "attempt ${i}: $1 is missing or differs from $2 - retrying"
+              sleep 10
+            done
+            echo "::error::$1 is missing or differs from $2. A Studio reading the new pointer would not find the signed copy."
+            return 1
+          }
+          check "${DOWNLOAD_BASE}/v${VERSION}/latest.json" dist/latest.json
+          if [ -f dist/latest.json.sig ]; then
+            check "${DOWNLOAD_BASE}/v${VERSION}/latest.json.sig" dist/latest.json.sig
+          fi
 
       - uses: softprops/action-gh-release@v2
         with:

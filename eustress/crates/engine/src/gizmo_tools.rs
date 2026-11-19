@@ -61,7 +61,16 @@ fn diagnose_gizmos_once(
 /// Configure all gizmo groups per Bevy's official 3d_gizmos example.
 /// depth_bias = -1.0 renders gizmos on top of ALL geometry (always visible).
 /// depth_bias = 0.0 renders with normal depth testing.
+///
+/// Every group draws on the editor overlay layer, so editor viewport cameras
+/// show the lines and the AI capture camera, which renders layer 0 only,
+/// never does.
 fn configure_gizmos(mut config_store: ResMut<GizmoConfigStore>) {
+    let overlay = bevy::camera::visibility::RenderLayers::layer(
+        crate::editor_overlay::EDITOR_OVERLAY_LAYER,
+    );
+
+
     // Transform tool gizmos — ALWAYS on top (depth_bias = -1.0)
     // This matches Bevy's example: pressing 'T' toggles between 0.0 and -1.0
     {
@@ -70,6 +79,7 @@ fn configure_gizmos(mut config_store: ResMut<GizmoConfigStore>) {
         config.line.width = 4.0;
         config.line.perspective = false; // Constant screen-space width
         config.enabled = true;
+        config.render_layers = overlay.clone();
     }
 
     // Default gizmos — grid, debug lines (depth-tested normally)
@@ -78,6 +88,7 @@ fn configure_gizmos(mut config_store: ResMut<GizmoConfigStore>) {
         config.depth_bias = 0.0;
         config.line.width = 2.0;
         config.enabled = true;
+        config.render_layers = overlay.clone();
     }
 
     // Light gizmos — always on top so they're visible through geometry
@@ -86,6 +97,7 @@ fn configure_gizmos(mut config_store: ResMut<GizmoConfigStore>) {
         config.enabled = true;
         config.depth_bias = -1.0; // Always visible
         config.line.width = 1.5;
+        config.render_layers = overlay;
         // PERF: do NOT draw a gizmo for every light. Bevy's `draw_all_lights`
         // rebuilds a wireframe (sphere/cone/rect) per light EVERY frame; on a
         // large Roblox import (thousands of PointLight/SpotLight) that is ~17ms

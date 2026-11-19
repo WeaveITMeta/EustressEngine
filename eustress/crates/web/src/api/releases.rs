@@ -7,8 +7,11 @@
 // .github/workflows/release.yml writes for Eustress Engine. The staging
 // website reads /staging/player/latest.json; production does not.
 //
-//     { "version", "date", "channel", "changelog_url",
+//     { "version", "date", "channel", "changelog_url", "min_version",
 //       "platforms": { "<key>": { "file", "url", "sha256", "size_bytes", "installer" } } }
+//
+// "min_version" is optional: the oldest Player the Play links still open in. The Play chooser appends it to its links as
+// `min=X.Y.Z`, and an older Player answers that it needs a newer Eustress Player.
 //
 // Table of Contents:
 // 1. Platforms
@@ -207,6 +210,9 @@ pub struct ReleaseManifest {
     pub date: String,
     #[serde(default)]
     pub changelog_url: String,
+    /// The oldest Player version Play links open in, as the manifest wrote it. The Play chooser checks its form before using it.
+    #[serde(default)]
+    pub min_version: Option<String>,
     #[serde(default)]
     pub platforms: BTreeMap<String, ReleaseAsset>,
 }
@@ -317,7 +323,7 @@ mod tests {
     #[test]
     fn each_product_links_its_own_permanent_address_and_only_for_a_build_that_is_there() {
         use super::super::release_notify::Product;
-        let mut m = ReleaseManifest { version: "0.1.0".to_string(), date: String::new(), changelog_url: String::new(), platforms: BTreeMap::new() };
+        let mut m = ReleaseManifest { version: "0.1.0".to_string(), date: String::new(), changelog_url: String::new(), min_version: None, platforms: BTreeMap::new() };
         m.platforms.insert("windows-x64-installer".to_string(), ReleaseAsset { url: "https://downloads.eustress.dev/v0.1.0/Setup.exe".to_string(), sha256: String::new(), size_bytes: 1 });
         assert_eq!(m.download(Product::Player, DesktopPlatform::Windows).map(|d| d.url), Some("https://downloads.eustress.dev/player/latest/windows-x64-installer".to_string()));
         assert_eq!(

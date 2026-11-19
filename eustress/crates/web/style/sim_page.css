@@ -1,0 +1,218 @@
+/* A Space's themed page (src/pages/sim_page.rs, src/api/sim_page.rs; docs/design/SIM_PAGE_THEME_AND_LINKS.md).
+   Scoped to the page's own root element (.sp-root): nothing here touches another page. The root carries five custom properties
+   (--sp-primary, --sp-accent, --sp-bg, --sp-surface, --sp-text) and --sp-fade, each written by the page after it checked the value
+   (a #rrggbb colour or a number). Fonts, layouts and motion are classes from a fixed list. A Space with no theme has the bare
+   .sp-root, which has no rule below: its page is the Gallery's own. */
+
+/* ---- The themed look: the Gallery's tokens, mapped to the five colours ---- */
+.sp-themed {
+    --g-bg: var(--sp-bg);
+    --g-accent: var(--sp-primary);
+    --g-accent-bright: color-mix(in srgb, var(--sp-primary) 78%, white);
+    --g-accent-soft: color-mix(in srgb, var(--sp-primary) 16%, transparent);
+    --g-glass: var(--sp-surface);
+    --g-glass-strong: var(--sp-surface);
+    --g-text: var(--sp-text);
+    --g-text-2: color-mix(in srgb, var(--sp-text) 82%, var(--sp-bg));
+    --g-muted: color-mix(in srgb, var(--sp-text) 66%, var(--sp-bg));
+    --g-line: color-mix(in srgb, var(--sp-text) 16%, transparent);
+    --g-line-strong: color-mix(in srgb, var(--sp-text) 32%, transparent);
+    --g-sans: var(--sp-font);
+    background: var(--sp-bg);
+    color: var(--sp-text);
+    font-family: var(--g-sans);
+    min-height: calc(100vh - 76px);
+    padding-bottom: 56px;
+}
+.sp-themed .g-glass { box-shadow: 0 10px 30px color-mix(in srgb, var(--sp-text) 10%, transparent); -webkit-backdrop-filter: none; backdrop-filter: none; }
+.sp-themed .g-stats dd { color: var(--sp-text); }
+.sp-themed .g-btn { color: var(--sp-text); }
+.sp-themed .g-btn:hover { background: var(--g-accent-soft); }
+/* The primary button's text is the page's background colour: dark on a bright primary, light on a deep one. */
+.sp-themed .g-btn-primary { color: var(--sp-bg); }
+.sp-themed .g-btn-primary:hover { color: var(--sp-bg); }
+.sp-themed .g-chip { background: color-mix(in srgb, var(--sp-text) 8%, transparent); }
+.sp-themed .g-kv dd, .sp-themed .g-ltitle { color: var(--sp-text); }
+
+/* ---- Fonts: a fixed list of stacks. Inter and JetBrains Mono ship with the site; the others fall back until a deployment loads them. ---- */
+.sp-font-inter { --sp-font: "Inter", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+.sp-font-space-grotesk { --sp-font: "Space Grotesk", "Inter", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+.sp-font-ibm-plex-sans { --sp-font: "IBM Plex Sans", "Inter", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+.sp-font-jetbrains-mono { --sp-font: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+.sp-font-merriweather { --sp-font: "Merriweather", Georgia, "Times New Roman", serif; }
+
+/* ---- Layouts ---- */
+.sp-layout-wide .g-wrap { width: min(1560px, 100% - 64px); }
+.sp-layout-wide .g-lhead { grid-template-columns: minmax(0, 1.9fr) minmax(0, 1fr); }
+.sp-layout-compact .g-wrap { width: min(960px, 100% - 64px); }
+.sp-layout-compact .g-lhead { grid-template-columns: minmax(0, 1fr); grid-template-areas: "media" "side" "copy"; }
+.sp-layout-compact .g-lside { position: static; }
+
+/* ---- The banner across the top ---- */
+.sp-banner { position: relative; width: 100%; aspect-ratio: 16 / 5; max-height: 360px; overflow: hidden; background: var(--g-glass-strong); }
+.sp-banner::after { content: ""; position: absolute; inset: 0; pointer-events: none; background: linear-gradient(180deg, transparent 55%, var(--sp-bg, var(--g-bg))); }
+.sp-banner-img { display: block; width: 100%; height: 100%; object-fit: cover; }
+.sp-motion-subtle .sp-banner-img, .sp-motion-full .sp-banner-img { animation: sp-fade-in var(--sp-fade, 600ms) ease both; }
+.sp-motion-full .sp-banner-img { animation: sp-fade-in var(--sp-fade, 600ms) ease both, sp-drift 26s ease-in-out infinite alternate; }
+.sp-root .sp-gone { display: none; }
+@keyframes sp-fade-in { from { opacity: 0; } to { opacity: 1; } }
+@keyframes sp-drift { from { transform: scale(1); } to { transform: scale(1.07); } }
+
+/* ---- The logo, in the title ---- */
+.sp-logo { display: inline-block; height: 1.1em; width: auto; max-width: 3em; margin-right: 0.35em; vertical-align: -0.15em; object-fit: contain; border-radius: 8px; }
+
+/* ---- The gallery slideshow ---- */
+.sp-gallery { position: relative; }
+.sp-gal-frame { position: relative; aspect-ratio: 16 / 9; overflow: hidden; border-radius: var(--g-radius); border: 1px solid var(--g-line); background: var(--g-glass-strong); }
+.sp-slide { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; opacity: 0; transition: opacity var(--sp-fade, 400ms) ease; }
+.sp-slide.on { opacity: 1; }
+.sp-motion-full .sp-slide.on { animation: sp-drift 14s ease-out both; }
+.sp-arrow {
+    position: absolute;
+    top: calc(50% - 22px);
+    width: 44px;
+    height: 44px;
+    display: grid;
+    place-items: center;
+    padding: 0;
+    border: 1px solid var(--g-line-strong);
+    border-radius: 999px;
+    background: color-mix(in srgb, var(--sp-bg, #07090d) 72%, transparent);
+    color: var(--g-text);
+    font: 600 26px/1 var(--g-sans);
+    cursor: pointer;
+}
+.sp-arrow:hover { border-color: var(--g-accent); }
+.sp-prev { left: 10px; }
+.sp-next { right: 10px; }
+.sp-dots { display: flex; flex-wrap: wrap; justify-content: center; gap: 2px; margin-top: 8px; }
+.sp-dot { position: relative; width: 28px; height: 28px; padding: 0; border: 0; background: none; cursor: pointer; }
+.sp-dot::before { content: ""; position: absolute; left: 50%; top: 50%; width: 10px; height: 10px; margin: -5px 0 0 -5px; border-radius: 50%; border: 1px solid var(--g-line-strong); background: transparent; transition: background 0.2s, border-color 0.2s; }
+.sp-dot.on::before, .sp-dot:hover::before { background: var(--g-accent); border-color: var(--g-accent); }
+
+/* ---- The Links card ---- */
+.sp-links { display: grid; gap: 18px; padding: 18px 20px; }
+.sp-lkind { margin: 0 0 8px; font: 600 11px var(--g-mono); letter-spacing: 0.14em; text-transform: uppercase; color: var(--g-muted); }
+.sp-llist { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; }
+.sp-link { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 10px; min-width: 0; min-height: 44px; padding: 8px 12px; border: 1px solid var(--g-line); border-radius: 10px; transition: border-color 0.18s, background 0.18s; }
+.sp-link:hover { border-color: var(--g-accent); background: var(--g-accent-soft); }
+.sp-lic { flex: none; display: inline-flex; color: var(--g-text-2); }
+.sp-lic svg { display: block; width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+.sp-llabel { min-width: 0; font-weight: 600; color: var(--g-text); overflow-wrap: anywhere; }
+.sp-ldom { min-width: 0; margin-left: auto; font: 12.5px var(--g-mono); color: var(--g-muted); overflow-wrap: anywhere; text-align: right; }
+
+/* ---- The listing's columns: Details in the right one, and nothing in the left one wider than the column ---- */
+.sp-root .g-lcopy, .sp-root .g-lside { min-width: 0; }
+.sp-root .g-lside .g-ldetails h2 { margin-top: 6px; }
+.sp-root .lt-desc { margin-top: 20px; }
+
+/* ---- The tabs under the description (pages/listing.rs; docs/design/SIM_PAGE_README_AND_TABS.md, section 4) ----
+   The bar scrolls sideways inside itself when the tabs do not fit, never the page. The underline is an inset shadow, so the bar's
+   own scrolling never clips it. The selected tab is marked in the page's accent (the theme's primary on a themed page). */
+.sp-root .lt-tabs {
+    display: flex;
+    gap: 4px;
+    max-width: 100%;
+    margin: 26px 0 0;
+    overflow-x: auto;
+    overflow-y: hidden;
+    overscroll-behavior-x: contain;
+    scrollbar-width: thin;
+    box-shadow: inset 0 -1px 0 var(--g-line);
+}
+.sp-root .lt-tab {
+    flex: none;
+    min-height: 44px;
+    padding: 10px 16px;
+    border: 0;
+    border-radius: 8px 8px 0 0;
+    background: none;
+    color: var(--g-muted);
+    font: 600 14px/1.2 var(--g-sans);
+    white-space: nowrap;
+    cursor: pointer;
+    transition: color 0.18s, box-shadow 0.18s, background 0.18s;
+}
+.sp-root .lt-tab:hover { color: var(--g-text); background: var(--g-accent-soft); }
+.sp-root .lt-tab[aria-selected="true"] { color: var(--g-text); box-shadow: inset 0 -2px 0 var(--g-accent); }
+.sp-root .lt-tab:focus-visible { outline: 2px solid var(--g-accent); outline-offset: -2px; }
+.sp-root .lt-panel { padding-top: 18px; }
+.sp-root .lt-panel[hidden] { display: none; }
+.sp-root .lt-panel:focus-visible { outline: 2px solid var(--g-accent); outline-offset: 4px; border-radius: 4px; }
+/* The tab names the panel, so a heading the panel's content carries ("Live status", "Links") is kept for screen readers only. */
+.sp-root .lt-panel .g-csec > h2:first-child { position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }
+.sp-root .lt-panel .g-session + .g-session { margin-top: 8px; }
+.sp-root .lt-empty { margin: 0; }
+/* The pass store draws nothing when the Space sells nothing; the line under it shows only then. */
+.sp-root .lt-shop .pass-store { margin: 0; }
+.sp-root .lt-shop:has(.pass-store) .lt-shop-empty { display: none; }
+
+/* ---- The README under About (components/readme.rs): centered, reading width, the README look ---- */
+.sp-root .rm-body {
+    max-width: 860px;
+    margin: 0 auto;
+    padding: 24px 28px;
+    border: 1px solid var(--g-line);
+    border-radius: var(--g-radius);
+    background: var(--g-glass);
+    color: var(--g-text-2);
+    font: 15.5px/1.65 var(--g-sans);
+    overflow-wrap: anywhere;
+}
+.sp-root .rm-body > :first-child { margin-top: 0; }
+.sp-root .rm-body > :last-child { margin-bottom: 0; }
+.sp-root .rm-body h2, .sp-root .rm-body h3, .sp-root .rm-body h4, .sp-root .rm-body h5, .sp-root .rm-body h6 {
+    margin: 1.5em 0 0.6em;
+    color: var(--g-text);
+    font-family: var(--g-sans);
+    font-weight: 650;
+    line-height: 1.25;
+    letter-spacing: -0.01em;
+    text-transform: none;
+}
+.sp-root .rm-body h2 { font-size: 1.6em; padding-bottom: 0.3em; border-bottom: 1px solid var(--g-line); }
+.sp-root .rm-body h3 { font-size: 1.3em; padding-bottom: 0.25em; border-bottom: 1px solid var(--g-line); }
+.sp-root .rm-body h4 { font-size: 1.1em; }
+.sp-root .rm-body h5 { font-size: 1em; }
+.sp-root .rm-body h6 { font-size: 0.92em; color: var(--g-muted); }
+.sp-root .rm-body p, .sp-root .rm-body ul, .sp-root .rm-body ol, .sp-root .rm-body blockquote, .sp-root .rm-body .rm-pre, .sp-root .rm-body .rm-table-wrap { margin: 0 0 1em; }
+.sp-root .rm-body ul, .sp-root .rm-body ol { padding-left: 1.7em; }
+.sp-root .rm-body li + li { margin-top: 0.25em; }
+.sp-root .rm-body li > ul, .sp-root .rm-body li > ol { margin: 0.25em 0 0; }
+.sp-root .rm-body strong { color: var(--g-text); }
+.sp-root .rm-body blockquote { padding: 0 1em; border-left: 3px solid var(--g-line-strong); color: var(--g-muted); }
+.sp-root .rm-body hr { height: 1px; margin: 1.6em 0; border: 0; background: var(--g-line-strong); }
+.sp-root .rm-body code { padding: 0.15em 0.4em; border-radius: 6px; background: color-mix(in srgb, var(--g-text) 9%, transparent); color: var(--g-text); font: 0.88em var(--g-mono); }
+/* A code block scrolls sideways inside itself; its text is never wrapped or reflowed. */
+.sp-root .rm-body .rm-pre { max-width: 100%; padding: 14px 16px; overflow-x: auto; border: 1px solid var(--g-line); border-radius: 10px; background: var(--g-glass-strong); line-height: 1.5; white-space: pre; overflow-wrap: normal; }
+.sp-root .rm-body .rm-pre code { padding: 0; border-radius: 0; background: none; font-size: 13.5px; white-space: inherit; }
+/* A table scrolls sideways inside its own wrapper. */
+.sp-root .rm-body .rm-table-wrap { max-width: 100%; overflow-x: auto; }
+.sp-root .rm-body table { border-collapse: collapse; font-size: 14.5px; }
+.sp-root .rm-body th, .sp-root .rm-body td { padding: 7px 13px; border: 1px solid var(--g-line-strong); overflow-wrap: normal; text-align: left; vertical-align: top; }
+.sp-root .rm-body th { color: var(--g-text); font-weight: 600; background: color-mix(in srgb, var(--g-text) 5%, transparent); }
+.sp-root .rm-body tbody tr:nth-child(2n) td { background: color-mix(in srgb, var(--g-text) 3%, transparent); }
+.sp-root .rm-body .rm-left { text-align: left; }
+.sp-root .rm-body .rm-center { text-align: center; }
+.sp-root .rm-body .rm-right { text-align: right; }
+.sp-root .rm-body .rm-img { max-width: 100%; height: auto; border-radius: 8px; vertical-align: middle; }
+.sp-root .rm-body a.rm-link { color: var(--g-accent); text-decoration: underline; text-underline-offset: 2px; text-decoration-thickness: 1px; }
+.sp-root .rm-body a.rm-link:hover { text-decoration-thickness: 2px; }
+.sp-root .rm-body .rm-ldom { display: inline-block; margin-left: 0.4em; color: var(--g-muted); font: 12px var(--g-mono); text-decoration: none; }
+
+/* ---- Small screens: 16px gutters, nothing wider than the screen ---- */
+@media (max-width: 860px) {
+    .sp-root .rm-body { padding: 18px 16px; font-size: 15px; }
+    .sp-root .lt-tab { padding: 10px 14px; }
+    .sp-themed .g-wrap { width: calc(100% - 32px); }
+    .sp-banner { aspect-ratio: 16 / 7; }
+    .sp-themed { min-height: calc(100vh - 68px); }
+    .sp-ldom { margin-left: 0; text-align: left; flex-basis: 100%; padding-left: 28px; }
+    .sp-arrow { width: 40px; height: 40px; top: calc(50% - 20px); }
+}
+
+/* A reader who asks for less motion gets none, whatever the theme says (the page also never starts the slideshow timer). */
+@media (prefers-reduced-motion: reduce) {
+    .sp-banner-img, .sp-motion-full .sp-banner-img, .sp-motion-full .sp-slide.on { animation: none; }
+    .sp-slide, .sp-dot::before, .sp-link, .sp-root .lt-tab { transition: none; }
+}

@@ -7,7 +7,12 @@
 //!
 //! ```text
 //! eustress-forge
+//! eustress-forge host
 //! ```
+//!
+//! `eustress-forge host` runs the fleet host agent instead (one per rented
+//! machine; `eustress_forge::fleet_host`): it starts and stops simulation
+//! servers on this machine by the fleet plan and opens no port of its own.
 //!
 //! `FORGE_LOCAL_API_KEY` overrides the key `local-dev`. `EUSTRESS_ENGINE_BIN`
 //! names the game binary when it is not `eustress-engine` on `PATH`.
@@ -19,6 +24,9 @@ use eustress_forge::ForgeBuilder;
 use parking_lot::Mutex;
 
 fn main() {
+    if std::env::args().nth(1).as_deref() == Some("host") {
+        std::process::exit(eustress_forge::fleet_host::main_from_env());
+    }
     let http = std::env::var("EUSTRESS_FORGE_HTTP").unwrap_or_else(|_| CONTROL_ADDR.to_string());
     let compat = std::env::var("EUSTRESS_FORGE_COMPAT").unwrap_or_else(|_| studio_compat::COMPAT_ADDR.to_string());
     if studio_compat::loopback(&http).is_err() || studio_compat::loopback(&compat).is_err() {

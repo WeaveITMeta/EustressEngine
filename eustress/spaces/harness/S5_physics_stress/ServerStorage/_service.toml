@@ -1,0 +1,16 @@
+# ServerStorage — Server-only storage container
+# _service.toml marks this folder as a Service and defines all editable properties.
+
+[service]
+class_name = "ServerStorage"
+icon = "serverstorage"
+description = "Objects stored here are server-only and not replicated to clients"
+can_have_children = true
+
+[properties]
+# No configurable properties — ServerStorage is purely a container
+
+[metadata]
+id = "serverstorage-service"
+created = ""
+last_modified = ""

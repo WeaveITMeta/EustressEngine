@@ -15,7 +15,6 @@ toml = "0.8"
 tracing = "0.1"
 
 # Geospatial: geometry types + algorithms (area, distance, contains, buffer, simplify)
-geo = "0.29"
 
 # Geospatial: GeoJSON parsing/serialization
 geojson = "0.24"

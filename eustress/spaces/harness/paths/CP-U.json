@@ -1,0 +1,47 @@
+{
+  "schema": "eustress.camera_path/1",
+  "id": "CP-U",
+  "name": "ui_sequences",
+  "kind": "ui_sequences",
+  "scene": { "id": "S4", "dir": "S4_studio_ui" },
+  "authoring": "Event-indexed, not a camera path: full-window captures at declared interaction steps (02_CAPTURE_HARNESS.md 4.3). Targets are CONFIG DEFAULT names; the recipe binds them to the live studio.",
+  "sizes": [[1920, 1080], [2560, 1440], [3840, 2160]],
+  "sequences": [
+    {
+      "name": "panel_open",
+      "steps": [
+        { "step": 0, "action": "idle", "target": "studio at the pinned layout" },
+        { "step": 1, "action": "hover_panel_tab", "target": "Properties panel tab" },
+        { "step": 2, "action": "click_panel_tab", "target": "Properties panel tab" },
+        { "step": 3, "action": "panel_settled", "target": "Properties panel" }
+      ]
+    },
+    {
+      "name": "entity_select",
+      "steps": [
+        { "step": 0, "action": "idle", "target": "studio at the pinned layout" },
+        { "step": 1, "action": "hover_entity", "target": "Workspace/Props/PinnedSelection" },
+        { "step": 2, "action": "click_entity", "target": "Workspace/Props/PinnedSelection" },
+        { "step": 3, "action": "selection_settled_with_gizmo", "target": "Workspace/Props/PinnedSelection" }
+      ]
+    },
+    {
+      "name": "property_edit",
+      "steps": [
+        { "step": 0, "action": "select_entity", "target": "Workspace/Props/PinnedSelection" },
+        { "step": 1, "action": "focus_field", "target": "Properties panel, a numeric field" },
+        { "step": 2, "action": "type_value", "target": "Properties panel, a numeric field" },
+        { "step": 3, "action": "commit", "target": "Properties panel, a numeric field" },
+        { "step": 4, "action": "reread_after_reload", "target": "Properties panel, the same field after the Space is reloaded" }
+      ]
+    },
+    {
+      "name": "error_surface",
+      "steps": [
+        { "step": 0, "action": "trigger_known_invalid_action", "target": "a known-invalid action" },
+        { "step": 1, "action": "error_visible", "target": "the error surface" },
+        { "step": 2, "action": "error_dismissed", "target": "the error surface" }
+      ]
+    }
+  ]
+}

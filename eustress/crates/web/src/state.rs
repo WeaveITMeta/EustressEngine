@@ -79,6 +79,19 @@ pub struct User {
     pub email: Option<String>,
     pub avatar_url: Option<String>,
     pub discord_id: Option<String>,
+    /// The linked Discord account's handle, when the Worker knows it (a link made
+    /// before handles were kept has none).
+    #[serde(default)]
+    pub discord_username: Option<String>,
+    /// Whether a Slack account is linked (Worker: src/slack_link.mjs). The Worker never sends the Slack ids.
+    #[serde(default)]
+    pub slack_linked: bool,
+    /// The linked Slack account's display name, when Slack gave one.
+    #[serde(default)]
+    pub slack_name: Option<String>,
+    /// The Slack workspace the link is in, when Slack gave its name.
+    #[serde(default)]
+    pub slack_team_name: Option<String>,
     // Whole BLS, fractional. The witness ledger credits fractional BLS at
     // each daily distribution, so this is f64, not u64. Every renderer
     // (nav badge, /bliss wallet, dashboard) treats it as whole BLS.

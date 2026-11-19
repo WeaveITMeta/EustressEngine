@@ -50,7 +50,7 @@ use bevy::prelude::*;
 use eustress_common::datamodel::OutputLevel;
 use eustress_common::mlua::play::{TerrainReadFn, TerrainView};
 use eustress_common::terrain::{
-    surface_data, TerrainBaked, TerrainChunkCollider, TerrainConfig, TerrainData, TerrainMaterialSlots, TerrainRoot,
+    surface_data, TerrainBaked, TerrainConfig, TerrainData, TerrainMaterialSlots, TerrainRoot,
     TerrainVolume, TerrainVoxelWater,
 };
 
@@ -155,6 +155,11 @@ impl Plugin for PlayDataModelPlugin {
         // The HUD: the local player's ScreenGuis drawn, clicked and typed
         // into by the runtime the Player shares.
         app.add_plugins((eustress_play_runtime::hud::HudPlugin, eustress_play_runtime::hud_input::HudInputPlugin));
+        // Simulation LOD (docs/architecture/RAGE_STREAMING_SIM_LOD_JOB_GRAPH.md
+        // phase 2): Full, Reduced and Dormant bodies around the camera and
+        // every player, the same plugin the Player adds. Acts only while the
+        // session's PlayDataModel exists; gives every body back on Stop.
+        app.add_plugins(eustress_play_runtime::sim_lod::SimLodPlugin);
         app.init_resource::<npc::NpcControllers>()
             .init_resource::<pull::MouseRayState>()
             .init_resource::<pull::InjectedInput>()
@@ -269,12 +274,7 @@ impl Plugin for PlayDataModelPlugin {
 pub(crate) fn drive_mlua(
     host: Option<ResMut<PlayMluaHost>>,
     spatial: avian3d::prelude::SpatialQuery,
-    colliders: Query<(
-        Option<&eustress_common::classes::BasePart>,
-        Has<avian3d::prelude::Sensor>,
-        Has<TerrainChunkCollider>,
-        Option<&eustress_common::terrain::road_surface::RoadMaterial>,
-    )>,
+    colliders: pull::RayColliders,
     terrain: Query<
         (&TerrainConfig, &TerrainData, Option<&TerrainVolume>, Option<&TerrainBaked>, Option<&TerrainVoxelWater>),
         With<TerrainRoot>,

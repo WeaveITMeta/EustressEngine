@@ -31,6 +31,19 @@ Space.
 | G-15 | A rural road's edge is painted as a row of dirt blobs | Stage 1 roads | Open |
 | G-16 | `terrain.replace_material` refuses a material the Space defines | Stage 1 roads (terrain clean-up) | Open |
 | G-17 | An Auto road steeper than its class leaves the ground on a viaduct, with no warning | Stage 1 roads (mountain roads) | Open |
+| G-18 | A road draws no surface between a tunnel or deep cut and its end; the portal there is a blank wall | Stage 1 roads (tunnels, mountain roads) | Open |
+| G-19 | Two splines joined in line meet with a kink, and one side's surface is half covered by the ground | Stage 1 roads | Open |
+| G-20 | `create_entity` stores a 0-255 colour unscaled, so the part renders blown-out white | Stage 2 city | Open |
+| G-21 | A material first read while its textures are being written stays blank, and nothing reloads it | Stage 2 city | Open |
+| G-22 | `set_properties` refuses `Material`, and `get_properties` shows Plastic for a Space-defined material | Stage 2 city | Open |
+| G-23 | `set_properties` cannot rotate a Part that lives in the world database | Stage 2 city | Open |
+| G-24 | A road widened with `Lanes` and `Width` shows bare paint with no lane markings | Stage 2 city (road hierarchy) | Open (to verify) |
+| G-25 | A part path Studio has held is never respawned, and deleting a sub-folder does not despawn its parts | Stage 2 city | Open |
+| G-26 | A Driveway-class road builds a signed junction with crosswalks where it meets a street | Stage 2 city | Open |
+| G-27 | `import_asset` places a mesh Part that ignores the GLB's own material | Stage 2 city | Open |
+| G-28 | A water body layer did not fill a basin dug by a flatten pad | Stage 2 city (pools) | Open (to verify) |
+| G-29 | A flatten pad lowers the ground the terrain query reports while the drawn ground stays level | Stage 2 city (pools) | Open |
+| G-30 | After a full unload/load of the Space (2026-11-15 1:00 PM), file-backed parts that name a textured Space material (Brick, RoofSlate, RoofTerracotta, UnitWindowPair, Granite) draw plain white five minutes after the load; inspect_scene reports the right material name; the same materials drew after the 11:19 AM load; Output panel shows no warning. A part written after the load draws its texture, and any `set_properties` write on an affected part (same-value `CanTouch`/`Locked`) makes it draw: the material is loaded, the part resolved it too early at spawn and never re-resolved. Parts keep their colour tint, so only white-tinted parts look wrong | Stage 2 city (estate block) | Open; load-order race, workaround is a property write per part |
 
 ## Stage 1: roads and junctions
 
@@ -104,6 +117,15 @@ end-on-side tees counted from the control polylines). Classes: 9 Arterial, 13 Co
 - **Also wanted (2026-11-14):** a way to replace a road's points as a set (`Road:SetPoints`, or points
   accepted by `set_properties`). A road whose points are wrong is disabled and written again under a new
   name today, which leaves the old layer in the Space.
+- **Found 2026-11-15:** one point can be moved. `set_properties` on
+  `Workspace/Terrain/Layers/<road>/Point<n>` with `Position` re-bakes the road (verified on
+  `CF_RS_Avenue_11` and `CF_RS_Avenue_12`, which now meet North Town's avenues in a four-way). The
+  value is relative to the spline's own position, and the tool does not say so: a world position
+  sent there put the point 2.6 km off the map until it was corrected. Adding or removing points is
+  still not possible.
+- **Also wanted (2026-11-15):** `Road:Audit` should list ends of different roads that land on one
+  road between 12 m and 60 m apart. Two avenues 20 m apart on opposite sides of a collector were
+  gathered into one junction with a dogleg.
 - **Closed when:** `call_method` runs `Road:Audit` on a road in a copy of TerrainBenchmark and the
   numbers match a hand check at two junctions.
 
@@ -201,12 +223,55 @@ end-on-side tees counted from the control polylines). Classes: 9 Arterial, 13 Co
   through two tunnels (about 100 m and 310 m) with an open cut between and crosses the lake arm on a
   pier bridge; `CF_North_Tunnel` passes the range in one tunnel of about 1.2 km. Portals, lining and lane
   markings built as designed.
+- **Root cause in the Space (2026-11-15):** the first mountain's roads (`CF_Pass_Road_North`,
+  `CF_Pass_Road_Valley`, `CF_Observatory_Road`) were thinned to one control point per hairpin apex and
+  one point per 60 m or more, so the fitted curve leaves the routed line and the ground between two
+  points climbs up to 26%. The Space fix is a re-bake from the saved route with the loops kept as
+  entry, apex and exit points and heights taken from the route; it is not an engine change.
+- **After the re-bake (2026-11-15):** with the curve on the routed line and fill held to 13 m, the engine
+  still carries long stretches of the flank on piers (about 250 m below the hairpin at (1484, -1225))
+  where the Space's profile shows 6 to 13 m of fill at the centre line. The cross slope there is about
+  75%, so an embankment has no toe. It reads as an alpine half-viaduct with retaining walls. If a bench
+  cut is wanted instead, the engine needs a rule for side slopes: shift the profile into cut when the
+  downhill toe cannot land.
 - **Needed:** when an Auto profile cannot hold the ground within the class's grade, the road says so
   (`Road:Audit` and a warning naming the stations) and offers the choices: more length, a steeper
   short grade through the hairpins, or a tunnel. A viaduct longer than a set length on a hillside (no
   water or valley under it) is reported, not built silently.
 - **Closed when:** baking that alignment on a copy of TerrainBenchmark prints a warning with the
   stations and the grade it would need, and the audit lists the viaduct.
+
+### G-18 A road draws no surface between a tunnel or deep cut and its end
+
+- **Seen (2026-11-15):** `CF_North_Tunnel` (Arterial, Profile Explicit). West of the range the road has
+  its surface, markings and an arched portal. East of the range the stretch from the portal to the road's
+  end (75 m now, 145 m before the end was moved) has asphalt paint on the ground and no surface mesh, and
+  the portal is a blank headwall with no opening. Switching the layer off and on does not bring it back.
+  Capture: the Space's `Planning/network/tunnel_east_mouth_no_surface.png`.
+- **Seen also:** `CF_Pass_Road_North` (Mountain, now Profile Explicit, cut and fill within 10.1 m by the
+  Space's own profile check). At the hairpin near (1484, -1225) the uphill leg is a cut with paint and no
+  surface and a headwall slab at its foot; the downhill leg is a bridge deck on a pier.
+- **Update (2026-11-15, later):** the pass road was re-baked from the route with every hairpin as five
+  points and explicit heights (`CF_Pass_North_1`, `_2`, `CF_Summit_Road_1`, `_2`, `CF_Pass_Valley_1`,
+  `_2`; the three old roads are disabled). Its surface now draws along the cuts, and the slabs beside it
+  are retaining walls, not portals. The missing surface on the mountain went with the old sparse points;
+  the tunnel's east mouth is unchanged and is the case to reproduce.
+- **Needed:** the surface mesh runs the whole road, tunnels and cuts included, and a portal is built at
+  both mouths. `Road:Audit` lists each structure with its stations.
+- **Closed when:** a capture from inside the east cut of `CF_North_Tunnel` in a copy of TerrainBenchmark
+  shows lane markings up to an arched portal.
+
+### G-19 Two splines joined in line meet with a kink
+
+- **Seen (2026-11-15):** `CF_North_Trunk` ends and `CF_North_Tunnel` starts at (1100, -4200). The two
+  control chords there share a heading within 0.1 degree. The built roads meet at about 7 degrees: each
+  road's end tangent comes from its own curve fit, and the trunk is still turning from a 31 degree bend
+  160 m back. South-west of the joint the trunk's north half shows bare paint with the lane dashes on it,
+  the mesh covering only the south half. Capture: `Planning/network/seam_tunnel_mouth_before.png`.
+- **Needed:** an end tangent the author can set, or `Road:Join` (G-05) that makes two splines one
+  alignment. A road's mesh and its ground paint share one centre line.
+- **Closed when:** the same joint in a copy of TerrainBenchmark shows one straight yellow line across
+  it in a top-down capture.
 
 ### G-12 There is no railway
 
@@ -285,3 +350,122 @@ From `Docs/CarEvaluation.md` in the Space (the Coupe on SimChassis 4.0):
 
 Each needs a check on the current build before any work: read the mass of a known assembly and a spun
 wheel's angular velocity from Rune in Play.
+
+## Stage 2: city
+
+### G-20 `create_entity` stores a 0-255 colour unscaled
+
+- **Seen (2026-11-15):** `create_entity` with `color: [255, 255, 255]` (the tool documents "0.0-1.0 floats or
+  0-255 integers") on a Part routed to the world database. `get_properties` then reads `Color` as
+  `255, 255, 255, 1` and the part renders as a glowing white block. `color: [1.0, 1.0, 1.0]` is stored
+  and drawn correctly.
+- **Closed when:** the same call stores `1, 1, 1, 1`.
+
+### G-21 A material first read while its textures are being written stays blank
+
+- **Seen (2026-11-15):** `MaterialService/FacadeCurtain.mat.toml` and its three PNGs were written, then the
+  PNGs were rewritten a few seconds later while the engine was loading them. Every part using the material
+  drew blank white from then on. Rewriting the `.mat.toml` did not reload it. The same definition saved
+  under a new name (`FacadeGlass`) with the PNGs at rest drew correctly at once.
+- **Needed:** a material whose map fails to decode retries when the file changes, and a changed PNG or
+  `.mat.toml` reloads the material live. The Output panel names a map that failed.
+- **Closed when:** overwriting a material's base colour PNG in a running Studio changes the parts that
+  use it within a few seconds.
+
+### G-22 `set_properties` refuses `Material`
+
+- **Seen (2026-11-15):** `set_properties {Material: "FacadeCurtain"}` answers "Unknown property: Material"
+  although `get_properties` lists `Material` as editable. `update_entity {material}` does set a
+  Space-defined material (it writes the part's `material_name`), and `get_properties` still reports
+  `Plastic` afterwards. `create_entity`'s `material` documents the built-in presets only, yet a
+  Space-defined name works there.
+- **Closed when:** `set_properties` sets a built-in or Space-defined material and `get_properties` reads
+  the same name back.
+
+### Stage 2 notes that are not gaps (2026-11-15)
+
+- See-through glass works today: a material whose base colour PNG carries alpha, with
+  `alpha_mode = "blend"` in its `.mat.toml`, draws the wall opaque and the panes transparent on a block
+  Part. The pilot's `FacadeClear*` materials use it over a core block inside each building.
+- To verify in Play: `ServerScriptService/CityLights` (Rune) sets each `*_Core` part to Neon at night by
+  `set_string(part, "Material", "Neon")` and `set_color`. Not run yet; an MCP caller cannot start Play.
+
+### G-23 `set_properties` cannot rotate a Part that lives in the world database
+
+- **Seen (2026-11-15):** `set_properties {Rotation: [0, 180, 0]}` on a Part made by `create_entity` (routed
+  "binary", path `Workspace/__bin_Part_<uuid>/_instance.toml`) fails with "schema heal ... The system cannot
+  find the path specified". `Color` and `Reflectance` on the same Part succeed. `create_entity` takes no
+  rotation, so a database Part cannot be turned over MCP at all.
+- **Closed when:** the same call turns the Part, and `create_entity` accepts a rotation.
+
+### G-24 A road widened with `Lanes` and `Width` shows bare paint (to verify)
+
+- **Seen (2026-11-15):** `CF_RS_Street_08` (Collector, Edge Sidewalk) set to `Lanes: 2, Width: 14,
+  Parking: true`. The bed, kerbs, sidewalks and the junction with the crossing avenue rebuilt at the new
+  width. In two captures a minute apart the carriageway is smooth dark paint with only a short centre
+  line by the junction: no lane lines, no parking stalls, no asphalt texture. Capture: the Space's
+  `Planning/city/main_street_4_lanes.png`. Not yet checked after a Space reload.
+- **Closed when:** the same road shows four lanes and striped stalls after the property change, without
+  a reload.
+
+### G-25 A part path Studio has held is never respawned
+
+- **Seen (2026-11-15):** a block of 290 instance folders under `Workspace/SuburbNorthTown/Block_6_2` was
+  loaded live, then its folder was deleted and written again with 793 parts. Deleting `Block_6_2` alone
+  left every old part drawn; they went only when the parent `SuburbNorthTown` folder was deleted too.
+  Of the 793 new records, 662 spawned. `inspect_scene` found none of the parts whose path matched a
+  path of the first build (every `*_Roof*`, `Driveway`, `Pool_Water`, `*_Canopy`; 11 of 12 `Front_Walk`),
+  and `get_properties` answers "no instance" for them although the files are on disk. One house's
+  walls were missing as well, cause unknown. No line in the Output panel reports a skipped file. The
+  same block written under new folder names loaded in full.
+- **Also:** after that rebuild `inspect_scene` counts 1,211 Parts in the block's box where the disk holds
+  761, so parts of the deleted build are still live.
+- **Confirmed again (2026-11-15, later):** the block was rebuilt a third time under new lot folder names
+  (`L01A_d` ...) after deleting the top-level `SuburbNorthTown` folder. `inspect_scene` then listed both
+  builds live: every `Main_Roof_*` of the deleted `L..._c` lots with its old material beside the new
+  `L..._d` ones at the same positions. So a top-level delete does not always despawn either. Editing a
+  live part's record in place (12 `Pool_Water` records: material, colour, transparency) changed nothing
+  on screen. The Space session cannot show a clean result until Studio reopens the Space.
+- **Needed:** deleting a folder despawns everything under it; a file created at a path that was deleted
+  spawns; a record the watcher skips is named in the Output panel.
+- **Closed when:** delete and rewrite of one block folder in a running Studio leaves `inspect_scene`'s
+  count equal to the files on disk.
+
+### G-26 A Driveway-class road builds a signed junction where it meets a street
+
+- **Seen (2026-11-15):** a two-point spline, `RoadClass: Driveway`, Width 6, from a garage to the centre
+  line of a Local street. The drive itself graded well down to the road. The street got a full junction
+  box: two crosswalks, stop bars and a stop sign.
+- **Workaround in the Space:** driveways and walks are `Mode: Path` splines (BedMaterial Concrete), which
+  lie on the ground, cut through the bank beside the road and build nothing on the street.
+- **Needed:** a Driveway meeting a street builds a dropped kerb and an apron across the sidewalk, with
+  no markings on the street.
+
+### G-27 `import_asset` places a mesh Part that ignores the GLB's own material
+
+- **Seen (2026-11-15):** `import_asset` with `place` wrote a Part with `material = "Plastic"`, colour
+  `[163, 162, 165]` (0-255, see G-20) and no `respect_gltf_materials`. The quad drew as a flat grey
+  rectangle. Adding the flag to the record afterwards changed nothing. The same GLB placed by an
+  instance record that has `respect_gltf_materials = true` from the start drew its picture, alpha
+  blended, correctly.
+- **Needed:** a placed mesh draws the GLB's material by default, and editing the flag reloads the part.
+
+### G-28 A water body layer did not fill a basin dug by a flatten pad (to verify)
+
+- **Seen (2026-11-15):** a `TerrainFlattenPad` 1.5 m below the ground made a basin (terrain query confirms
+  23.9 m against 25.4 m around). A `TerrainWaterBody` with Level 25.15 placed at its centre showed no
+  water. Not investigated further; pools are built as lined tubs of parts with see-through water.
+- **Note:** `terrain_carve` is refused to MCP callers by design, so a pool basin cannot be cut with
+  vertical sides; the pad's sides slope at the 2.5 m cell size and a deck hides them.
+
+### G-29 A flatten pad lowers the queried ground while the drawn ground stays level
+
+- **Seen (2026-11-15, after the Space was reopened):** twelve `TerrainFlattenPad` layers dig pool basins in
+  `Block_6_2`. For nine the drawn ground is dug. For three (`CF_NT_Pool_6_2_01`, `CF_NT_Pool_Lot_02_B`,
+  `CF_NT_Pool_Lot_04_A`) `terrain_query` returns the pad's height (25.51 m at (-1029, -3157), under a pool
+  floor at 25.70 m) while the capture shows Limestone ground filling the tub to its rim, about 1.6 m
+  higher. Changing the pad's size, or switching it off and on, repaints the Limestone footprint but
+  leaves the drawn height. Capture: the Space's `Planning/city/estate_v4_pool_ground_inside.png`.
+- **Also:** `set_properties` on a pad's `Position` changed what `terrain_query` returned (24.9 m), and
+  switching the layer off and on put it back to the height in the file (25.51 m): the move was not kept.
+- **Closed when:** the drawn ground and `terrain_query` agree inside every pad after a reopen.

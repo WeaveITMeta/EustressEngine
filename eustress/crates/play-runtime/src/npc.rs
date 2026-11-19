@@ -28,6 +28,7 @@ use eustress_common::datamodel::{DataModel, DmEvent, DmValue, HumanoidCommand, I
 use eustress_common::scripting::Vector3;
 
 use eustress_common::play_session::PlayDataModel;
+use eustress_common::world_sim::SimTier;
 
 /// How long `MoveTo` walks before giving up, like Roblox.
 const MOVE_TO_TIMEOUT_S: f64 = 8.0;
@@ -61,7 +62,7 @@ pub fn drive_npc_humanoids(
     mut commands: Commands,
     dm: Option<Res<PlayDataModel>>,
     mut ctl: ResMut<NpcControllers>,
-    mut bodies: Query<(&mut LinearVelocity, &mut Transform), Without<AvatarBody>>,
+    mut bodies: Query<(&mut LinearVelocity, &mut Transform, Option<&SimTier>), Without<AvatarBody>>,
     gravity: Option<Res<Gravity>>,
 ) {
     let Some(dm) = dm else { return };
@@ -116,7 +117,14 @@ pub fn drive_npc_humanoids(
             0.0
         };
         let auto_rotate = g.get_prop(*humanoid, "AutoRotate").and_then(|v| v.as_bool()).unwrap_or(true);
-        let Ok((mut vel, mut tf)) = bodies.get_mut(entity) else { continue };
+        let Ok((mut vel, mut tf, tier)) = bodies.get_mut(entity) else { continue };
+        // A Dormant NPC with nothing to do sleeps (simulation LOD): no write
+        // reaches its body, so nothing wakes it. A command wakes it, since
+        // the write below then changes its velocity.
+        let idle = state.direction == Vec3::ZERO && state.target.is_none() && !state.jump;
+        if idle && tier == Some(&SimTier::Dormant) {
+            continue;
+        }
 
         if !state.locked {
             commands.entity(entity).insert(LockedAxes::ROTATION_LOCKED);
@@ -140,8 +148,14 @@ pub fn drive_npc_humanoids(
             }
         }
 
-        vel.0.x = dir.x * speed;
-        vel.0.z = dir.z * speed;
+        // Written only when it changes: Avian wakes a sleeping body on any
+        // velocity write, so rewriting an idle NPC's zero every frame kept
+        // it (and its island) awake forever.
+        let (vx, vz) = (dir.x * speed, dir.z * speed);
+        if vel.0.x != vx || vel.0.z != vz {
+            vel.0.x = vx;
+            vel.0.z = vz;
+        }
         if state.jump {
             vel.0.y = jump_speed(&g, *humanoid, downward_gravity(gravity.as_deref()));
             state.jump = false;
@@ -245,6 +259,50 @@ mod tests {
         g.set_prop(h, "UseJumpPower", DmValue::Bool(true)).unwrap();
         motion.jump_speed_mps = Some(11.0);
         assert_eq!(jump_speed(&g, h, STANDARD_GRAVITY_F32), motion.jump_velocity());
+    }
+
+    /// An idle NPC's velocity is not rewritten every frame, so Avian can
+    /// let it sleep; a Dormant idle NPC is not driven at all.
+    #[test]
+    fn rage_idle_npc_leaves_its_velocity_alone() {
+        use eustress_common::datamodel::new_shared;
+        #[derive(Resource, Default)]
+        struct Writes(u32);
+        fn count(q: Query<(), Changed<LinearVelocity>>, mut n: ResMut<Writes>) {
+            n.0 += q.iter().count() as u32;
+        }
+        for dormant in [false, true] {
+            let mut app = App::new();
+            app.init_resource::<NpcControllers>()
+                .init_resource::<Writes>()
+                .add_systems(Update, (drive_npc_humanoids, count).chain());
+            let body = app.world_mut().spawn((Transform::default(), LinearVelocity::ZERO)).id();
+            if dormant {
+                app.world_mut().entity_mut(body).insert(SimTier::Dormant);
+            }
+            let tree = new_shared();
+            let h = {
+                let mut g = tree.lock();
+                let ws = g.get_service("Workspace").unwrap();
+                let model = g.create_virtual("Model", "Npc", Some(ws));
+                g.create_bound("Part", "HumanoidRootPart", body.to_bits(), Some(model), Vec::new());
+                let h = g.create_virtual("Humanoid", "Humanoid", Some(model));
+                // A Move of nothing: the NPC is known and standing still.
+                g.humanoid_commands.push(HumanoidCommand::Move { humanoid: h, direction: Vector3::new(0.0, 0.0, 0.0) });
+                h
+            };
+            app.insert_resource(PlayDataModel { dm: tree.clone() });
+            app.update();
+            let after_spawn = app.world().resource::<Writes>().0;
+            for _ in 0..5 {
+                app.update();
+            }
+            assert_eq!(app.world().resource::<Writes>().0, after_spawn, "dormant={dormant}: no velocity write while idle");
+            // A command still reaches a Dormant NPC.
+            tree.lock().humanoid_commands.push(HumanoidCommand::Move { humanoid: h, direction: Vector3::new(1.0, 0.0, 0.0) });
+            app.update();
+            assert!(app.world().get::<LinearVelocity>(body).unwrap().0.x > 0.0, "dormant={dormant}: walks on command");
+        }
     }
 
     #[test]

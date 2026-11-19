@@ -1,0 +1,10 @@
+# Harness scene marker. Emitted by harness-scenes (eustress/crates/engine/src/bin/harness_scenes.rs); never edit by hand.
+[harness]
+scene_id = "S1"
+space_dir = "RH1_sphere_grid"
+seed = 42
+generator = "harness-scenes"
+title = "Material and lighting: 8x5 roughness x metallic sphere grid, three fixed lights, 18% grey ground, calibration chart"
+
+[notes]
+lights = "three PointLights only (key, fill, rim); sun, moon and sky light off"

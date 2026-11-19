@@ -11,11 +11,9 @@ license = "PolyForm-Shield-1.0.0"
 bevy = { workspace = true }
 
 # Shared types
-eustress-common = { path = "../common" }
 
 # Async runtime
 tokio = { workspace = true }
-futures = { workspace = true }
 
 # Serialization
 serde = { workspace = true }
@@ -47,8 +45,6 @@ candle-nn = { git = "https://github.com/huggingface/candle.git", branch = "main"
 candle-transformers = { git = "https://github.com/huggingface/candle.git", branch = "main", optional = true }
 
 # Vector operations
-nalgebra = "0.32"
-glam = "0.25"
 
 [features]
 default = ["remote"]

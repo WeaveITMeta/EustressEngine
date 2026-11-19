@@ -1,0 +1,14 @@
+[material]
+name = "H_ThinShell"
+description = "Harness: zero-thickness transmissive shell"
+
+[pbr]
+base_color = [1.0, 1.0, 1.0, 1.0]
+metallic = 0.0
+roughness = 0.05
+reflectance = 0.5
+alpha_mode = "blend"
+double_sided = true
+ior = 1.5
+specular_transmission = 0.9
+thickness = 0.0

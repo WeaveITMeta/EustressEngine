@@ -113,7 +113,7 @@ an edit to a file that has an owner is governed by that file's row regardless of
 
 ### 3.1 Why each owner
 
-**`eustress/crates/engine/src/bin/headless.rs`** — `G7.03`. G7.03 replaces the 291-line MinimalPlugins shell with a render tier; every other claimant reads or extends what G7.03 leaves behind. T4's pack header already splits this file between G7.03 (render tier) and G7.14 (a narrow `--tick-rate` licence); that intra-pack split stands.
+**`eustress/crates/engine/src/bin/headless.rs`** — `G7.03`. G7.03 replaces the 291-line MinimalPlugins shell with a render tier; every other claimant reads or extends what G7.03 leaves behind. T4's pack header already splits this file between G7.03 (render tier) and G7.14 (a narrow `--tick-rate` licence); that intra-pack split stands. `G1.07` holds the same kind of narrow licence for three optional flags (`--time-scale`, `--max-ticks-per-frame`, `--export-stepcount`): its exit command runs this binary with them, and a run without them behaves exactly as before.
 
 **`eustress/crates/common/src/simulation/clock.rs`** — `G1.07`. G1.07 adds the independent physics-step counter that G2.04's compression instrumentation and G7.15's dropped-tick accounting both read. The counter must exist before either can be honest about a dropped tick.
 

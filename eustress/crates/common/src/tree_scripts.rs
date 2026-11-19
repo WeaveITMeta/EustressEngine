@@ -339,6 +339,8 @@ fn cast_ray(
         distance: hit.distance as f64,
         terrain: colliders.get(hit.entity).map_or(false, |(_, _, terrain)| terrain),
         material: None,
+        owner: None,
+        surface: None,
     })
 }
 

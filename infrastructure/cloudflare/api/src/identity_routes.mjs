@@ -26,6 +26,7 @@ import { accountTimeZone } from './account_time_zone.mjs';
 import { renderKeyNotice, renderAdminActionNotice, noticeRecipients, sendNotice } from './account_notices.mjs';
 import { identityFileRequired } from './passkeys.mjs';
 import { currentDiscordLink, revokeStoredDiscordToken } from './discord_link.mjs';
+import { currentSlackLink } from './slack_link.mjs';
 
 const MAX_REVOKE = 50;
 const RECORD_ID = /^[A-Za-z0-9_]{1,80}$/;
@@ -61,10 +62,11 @@ export async function accountHoldsValue(env, userId, user) {
 }
 
 /// What this key's owner has that acts as the account and does not end with the
-/// session floor: API keys, webhook endpoints, the Discord link, the payout
-/// connection. Listed so the owner can revoke them in the same step.
-export async function listCredentials(env, userId, user, discordUnlinkedAt = null) {
+/// session floor: API keys, webhook endpoints, the Discord and Slack links, the
+/// payout connection. Listed so the owner can revoke them in the same step.
+export async function listCredentials(env, userId, user, discordUnlinkedAt = null, slackUnlinkedAt = null) {
   const out = { api_keys: [], webhooks: [], discord_linked: !!(await currentDiscordLink(env, user, discordUnlinkedAt)), payout_connected: !!user?.stripe_connect_id, complete: true };
+  out.slack_linked = !!(await currentSlackLink(env, user, slackUnlinkedAt).catch(() => null));
   if (!env.COMMERCE_HUBS) return out;
   try {
     const hub = hubStub(env, userId);
@@ -92,7 +94,7 @@ export async function listCredentials(env, userId, user, discordUnlinkedAt = nul
 /// The part of a request that names credentials to revoke, or null when it is
 /// not the shape we take. Ids only, bounded.
 function revokeRequest(value) {
-  if (value === undefined || value === null) return { api_keys: [], webhooks: [], discord: false, passkeys: [] };
+  if (value === undefined || value === null) return { api_keys: [], webhooks: [], discord: false, slack: false, passkeys: [] };
   if (typeof value !== 'object' || Array.isArray(value)) return null;
   const list = (v, shape = RECORD_ID) => (v === undefined ? [] : Array.isArray(v) && v.length <= MAX_REVOKE && v.every((id) => typeof id === 'string' && shape.test(id)) ? v : null);
   const api_keys = list(value.api_keys);
@@ -100,7 +102,8 @@ function revokeRequest(value) {
   const passkeys = list(value.passkeys, PASSKEY_ID);
   if (api_keys === null || webhooks === null || passkeys === null) return null;
   if (value.discord !== undefined && typeof value.discord !== 'boolean') return null;
-  return { api_keys, webhooks, discord: value.discord === true, passkeys: [...new Set(passkeys)] };
+  if (value.slack !== undefined && typeof value.slack !== 'boolean') return null;
+  return { api_keys, webhooks, discord: value.discord === true, slack: value.slack === true, passkeys: [...new Set(passkeys)] };
 }
 
 async function revokeCredentials(env, userId, revoke) {
@@ -122,6 +125,11 @@ async function revokeCredentials(env, userId, revoke) {
     if (r.ok) done.discord = true; else done.failed.push('discord');
     // The Discord token kept for Linked Roles goes with the link: revoked at Discord (best effort) and deleted.
     if (r.ok) await revokeStoredDiscordToken(env, userId).catch(() => {});
+  }
+  if (revoke.slack) {
+    // Recorded in the account's object, as Discord's is. Slack holds no token of ours to revoke.
+    const r = await accountCall(env, userId, 'unlink_slack');
+    if (r.ok) done.slack = true; else done.failed.push('slack');
   }
   return done;
 }
@@ -182,7 +190,7 @@ export async function handleKeyRotationRoute(request, url, env, deps) {
   if (path === '/api/identity/rotate/begin') {
     const begun = await accountCall(env, userId, 'begin_rotation');
     if (!begun.ok) return objectFailure(begun, json, cors);
-    const credentials = await listCredentials(env, userId, user, state.discord_unlinked_at);
+    const credentials = await listCredentials(env, userId, user, state.discord_unlinked_at, state.slack_unlinked_at);
     // The passkeys, so the owner can remove them in the same step (the site ticks every one).
     const passkeys = await accountCall(env, userId, 'passkey_list');
     credentials.passkeys = passkeys.ok ? passkeys.passkeys : [];
@@ -410,8 +418,8 @@ export async function handleAdminReplaceKeyRoute(request, url, env, deps) {
   if (!held.ok) return objectFailure(held, json, cors);
   const holdsValue = await accountHoldsValue(env, userId, user);
   // Everything that acts as the account is owed a revocation, in the same write as the key.
-  const creds = await listCredentials(env, userId, user, held.discord_unlinked_at);
-  const revoke = { api_keys: creds.api_keys.map((k) => k.id), webhooks: creds.webhooks.map((w) => w.id), discord: creds.discord_linked };
+  const creds = await listCredentials(env, userId, user, held.discord_unlinked_at, held.slack_unlinked_at);
+  const revoke = { api_keys: creds.api_keys.map((k) => k.id), webhooks: creds.webhooks.map((w) => w.id), discord: creds.discord_linked, slack: creds.slack_linked };
   const request_ = {
     admin_id: adminId, case_ref: body.case_ref, reason: body.reason, new_public_key: body.new_public_key,
     new_key_signature: body.new_key_signature, origin, holds_value: holdsValue, username: user.username, revoke,
@@ -452,8 +460,8 @@ export async function handleAdminReplaceKeyRoute(request, url, env, deps) {
     api_keys: revoke.api_keys.filter((id) => !failed.has(id)), webhooks: revoke.webhooks.filter((id) => !failed.has(id)),
   });
   // A key made between the list and the change.
-  const late = await listCredentials(env, userId, user, true);
-  const stragglers = { api_keys: late.api_keys.map((k) => k.id), webhooks: late.webhooks.map((w) => w.id), discord: false };
+  const late = await listCredentials(env, userId, user, true, true);
+  const stragglers = { api_keys: late.api_keys.map((k) => k.id), webhooks: late.webhooks.map((w) => w.id), discord: false, slack: false };
   if (stragglers.api_keys.length || stragglers.webhooks.length) {
     const more = await revokeCredentials(env, userId, stragglers);
     revoked.api_keys += more.api_keys;

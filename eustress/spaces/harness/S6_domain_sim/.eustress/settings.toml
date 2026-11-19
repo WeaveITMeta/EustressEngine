@@ -1,0 +1,22 @@
+[editor]
+show_grid = true
+grid_size = 1.0
+snap_enabled = true
+snap_size = 1.0
+theme = "dark"
+
+[camera]
+fov = 70.0
+near = 0.1
+far = 10000.0
+move_speed = 10.0
+
+[rendering]
+shadows = true
+ambient_occlusion = false
+
+[sync]
+mode = "local_first"
+auto_sync = false
+prewarm_packages = true
+prewarm_assets = true

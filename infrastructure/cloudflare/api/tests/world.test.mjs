@@ -354,7 +354,7 @@ test('Share Source travels with the listing and counts as a listing change', asy
   assert.equal(listing(env).open_source, true, 'only a boolean sets it');
 });
 
-test('the source world adds server-only chunks, and only an open-source listing shares it', async () => {
+test('the source world adds server-only chunks; it is committed either way, and only an open-source listing shares it', async () => {
   const env = environment();
   const m = await committed(env);
   const H4 = 'd'.repeat(64);
@@ -368,9 +368,13 @@ test('the source world adds server-only chunks, and only an open-source listing 
   });
   const commitSource = () => call(env, 'POST', 'commit', { who: 'author', body: publish(source, { kind: 'source' }) });
 
+  // Share Source off: the source is committed as a private one, which only the author reads.
   let res = await commitSource();
-  assert.equal(res.status, 409, 'no source without Share Source');
-  assert.equal((await res.json()).code, 'not_open_source');
+  assert.equal(res.status, 200, 'a private source');
+  approve(env);
+  assert.equal((await call(env, 'GET', 'source')).status, 404);
+  assert.equal((await call(env, 'GET', `chunks/${H4}`)).status, 404);
+  assert.equal((await call(env, 'GET', 'source', { who: 'author' })).status, 200);
 
   await call(env, 'POST', 'commit', { who: 'author', body: publish(m, { listing: { open_source: true } }) });
   assert.equal((await commitSource()).status, 200);
@@ -386,12 +390,13 @@ test('the source world adds server-only chunks, and only an open-source listing 
   // A chunk only the source names cannot be replaced either.
   assert.equal((await call(env, 'PUT', `chunks/${H4}`, { who: 'author', bytes: C2 })).status, 409);
 
-  // Share Source off: the source is dropped, and its chunk is private again.
+  // Share Source off: the source stays as a private one, and its chunk is private again.
   await call(env, 'POST', 'commit', { who: 'author', body: publish(m, { listing: { open_source: false } }) });
   approve(env);
   assert.equal((await call(env, 'GET', 'source')).status, 404);
   assert.equal((await call(env, 'GET', `chunks/${H4}`)).status, 404);
-  assert.equal((await commitSource()).status, 409);
+  assert.equal((await call(env, 'GET', 'source', { who: 'author' })).status, 200);
+  assert.equal((await commitSource()).status, 200);
 });
 
 test('a source left behind on a listing that no longer shares it stays private', async () => {

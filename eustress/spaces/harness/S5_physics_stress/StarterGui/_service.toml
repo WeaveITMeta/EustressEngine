@@ -1,0 +1,19 @@
+# StarterGui Service — Container for GUI elements shown to players
+# _service.toml marks this folder as a Service and defines all editable properties.
+
+[service]
+class_name = "StarterGui"
+icon = "startergui"
+description = "ScreenGui objects in StarterGui are cloned to each player's PlayerGui"
+can_have_children = true
+
+[properties]
+reset_player_gui_on_spawn = true
+screen_orientation = "LandscapeSensor"
+show_development_gui = true
+topbar_enabled = true
+
+[metadata]
+id = "startergui-service"
+created = ""
+last_modified = ""

@@ -16,9 +16,14 @@
 //
 // Two worlds per listing. The manifest is what every player receives, with
 // no server-only service in it (ServerScriptService, ServerStorage). The
-// source world adds those services, and exists only when the author turned on
-// Share Source: Studio commits it with `kind: "source"`, and only open-source
-// listings (or their author, or an admin) can read it or its chunks.
+// source world adds those services: Studio commits it with `kind: "source"`
+// on every publish. Share Source decides who reads it. On, it is public: anyone
+// the listing's gate lets through reads it and its chunks. Off, it is private:
+// only the author (their session, their `esrv_` server credential, or an
+// `eshs_` session credential the fleet minted for this listing) and an admin
+// read it, and never while the listing is deleted or under a legal lock
+// (an admin still does). A private source and its server-only chunks are
+// never cacheable. docs/architecture/PRIVATE_SOURCE_SECURITY_REVIEW.md.
 //
 // R2 layout: universes/{id}/chunks/{hash}.echk and
 // universes/{id}/manifests/{sha256}.json. Chunks are stored per listing, so
@@ -257,12 +262,39 @@ async function sha256Hex(bytes) {
 import { contentLockedFor, inReview, simForServing, sourceApproved, readApproval, legalLockOf, REVIEW_SCHEMA } from './moderation.mjs';
 import { checkTags, listingTags, genreTag, setAuthorTags, withTagsWrittenBack, listingTagFields } from './tags.mjs';
 import { staleText, staleTags } from './listing_guard.mjs';
-import { refuseAdult, isAdultListing, withinSignedOutCap } from './adult_content.mjs';
+import { refuseAdult, isAdultListing, withinSignedOutCap, SOLO } from './adult_content.mjs';
 import { deletionMarkOf } from './space_delete_mark.mjs';
-import { mintPlayToken, readPlayToken, PLAY_TOKEN_HEADER, PLAY_TOKEN_EXPIRES_HEADER } from './world_play_token.mjs';
+import { mintPlayToken, readPlayToken, playTokenFloor, mintedAfterFloor, PLAY_TOKEN_HEADER, PLAY_TOKEN_EXPIRES_HEADER } from './world_play_token.mjs';
 import { authorFromServerCredential, bearerOf } from './live.mjs';
+import { SESSION_CREDENTIAL, sessionServerOf } from './fleet_credentials.mjs';
 import { accountFromPlayPass } from './play_pass.mjs';
 import { refuseBlockedUpload } from './takedown.mjs';
+
+/// Whether a listing has a source world for the world it plays now: what a hosted session needs to run its server scripts.
+/// The fleet starts no session for a listing without one (src/fleet.mjs handleAllocate).
+export function hasSourceWorld(sim) {
+  return worldIsCurrent(sim) && typeof sim.world.source_manifest_key === 'string' && sim.world.source_manifest_key !== '';
+}
+
+/// Whether the listing is deleted (its R2 mark) or under a legal lock. `sim` has been through simWithLegalLock or
+/// simForServing, which put the deletion mark on it as `deletion`; the lock is read fresh from R2.
+async function closedListing(env, sim, simId) {
+  return !!sim?.deletion || !!(await legalLockOf(env, simId));
+}
+
+/// The author a server-side credential stands for on this listing, or null. `esrv_`: the author's own server credential
+/// for this listing (src/live.mjs). `eshs_`: a session credential the fleet minted for this listing, alive and unrevoked
+/// (src/fleet_credentials.mjs; the listing binding is checked by the Fleet object against the hash it stored at mint), and
+/// never for a listing that is deleted or under a legal lock, so a hosted session cannot download one. Anything else is
+/// null and is never passed to verifyAuth as a user id by this function.
+export async function credentialAuthor(env, token, simId, sim) {
+  if (typeof token !== 'string' || !sim) return null;
+  if (token.startsWith('esrv_')) return authorFromServerCredential(env, token, simId, sim.author_id);
+  if (!SESSION_CREDENTIAL.test(token)) return null;
+  if (!(await sessionServerOf(env, token, simId, { now: Date.now() }))) return null;
+  if (await closedListing(env, sim, simId)) return null;
+  return typeof sim.author_id === 'string' && sim.author_id ? sim.author_id : null;
+}
 
 /// A listing its author may publish into.
 async function ownedListing(request, simId, env, cors, deps) {
@@ -288,9 +320,9 @@ async function servableListing(request, simId, env, cors, deps, kind = 'content'
   if (!raw) return { error: deps.json({ error: 'Simulation not found' }, 404, cors) };
   // Through the legal lock and the approval binding (see simForServing).
   const sim = await simForServing(env, JSON.parse(raw), kind);
-  // A dedicated server's credential stands for the author on this listing
-  // (src/live.mjs). It is not a session, so it is resolved before verifyAuth.
-  const serverAuthor = await authorFromServerCredential(env, bearerOf(request), simId, sim.author_id);
+  // A dedicated server's credential (`esrv_`, src/live.mjs) or a hosted session's (`eshs_`, minted by the fleet for this
+  // listing) stands for the author on this listing. Neither is a session, so each is resolved before verifyAuth.
+  const serverAuthor = await credentialAuthor(env, bearerOf(request), simId, sim);
   // A Player opened from the website's Play button shows a play pass for this listing (`Authorization: PlayPass`,
   // src/play_pass.mjs) and stands for the account the website is signed in to. Also resolved before verifyAuth, which
   // reads only `Bearer `. A pass for another listing, expired or forged, is no credential at all.
@@ -300,7 +332,8 @@ async function servableListing(request, simId, env, cors, deps, kind = 'content'
     // Adult content goes to a viewer who turned it on, and to its author (src/adult_content.mjs). The manifest, every
     // chunk and the source world all pass here; the Player sends its session or its play pass with each (crates/client
     // space_fetch.rs).
-    const refused = await refuseAdult(request, env, sim, { authenticate, json: deps.json, cors });
+    // A world is fetched to be played solo, so a visitor with no session reaches up to mature_17 here (SOLO).
+    const refused = await refuseAdult(request, env, sim, { authenticate, json: deps.json, cors, surface: SOLO });
     if (refused) return { error: refused };
     return { sim, listable: true, passAccount };
   }
@@ -457,10 +490,9 @@ async function handleCommit(request, simId, env, cors, deps) {
 
   const sim = owned.sim;
   const source = read.body.kind === 'source';
+  // A source is committed whether or not Share Source is on: off, it is private (see the top of this file).
   if (source && !worldIsCurrent(sim))
     return deps.json({ error: 'Commit the world before its source', code: 'no_world' }, 409, cors);
-  if (source && sim.open_source !== true)
-    return deps.json({ error: 'Share Source is off for this listing', code: 'not_open_source' }, 409, cors);
 
   const sha = await sha256Hex(read.bytes);
   // A world (or source world) manifest on the takedown blocklist is refused before anything is stored (src/takedown.mjs).
@@ -512,9 +544,10 @@ async function handleCommit(request, simId, env, cors, deps) {
     committed_at: now,
   };
   // A source belongs to the world it was committed with: kept when the same
-  // world is committed again with Share Source still on, dropped otherwise.
-  // Studio commits the fresh source right after a new world.
-  if (sameWorld && sim.open_source === true && prior?.source_manifest_key) {
+  // world is committed again, dropped with a new world. Studio commits the
+  // fresh source right after a new world. Share Source switched off keeps it
+  // as a private source; switched on, the source already committed is public.
+  if (sameWorld && prior?.source_manifest_key) {
     sim.world.source_manifest_key = prior.source_manifest_key;
     sim.world.source_manifest_sha256 = prior.source_manifest_sha256;
     sim.world.source_committed_at = prior.source_committed_at;
@@ -594,24 +627,26 @@ async function handleGetManifest(request, simId, env, cors, deps) {
 
 /// A play token for the chunk GETs after this manifest (src/world_play_token.mjs), or null. Only where the manifest was
 /// served to anyone signed out: a listable listing that refuseAdult passes with no viewer at all (not adult content, within
-/// the signed-out cap), under an approval binding that stands. Anything else (an author's or admin's view of an unlisted
-/// listing, a play pass on a private one, adult content) gets no token, and its chunk GETs keep the full gate.
+/// the solo signed-out cap, mature_17), under an approval binding that stands. Anything else (an author's or admin's view
+/// of an unlisted listing, a play pass on a private one, adult content) gets no token, and its chunk GETs keep the full gate.
 async function playTokenFor(env, simId, sim, gate) {
-  if (!gate.listable || isAdultListing(sim) || !withinSignedOutCap(sim)) return null;
+  if (!gate.listable || isAdultListing(sim) || !withinSignedOutCap(sim, SOLO)) return null;
   const binding = await readApproval(env, simId);
   if (!binding || binding.revoked || typeof binding.content !== 'string' || !binding.content) return null;
   return mintPlayToken(env, { simId, manifestSha: sim.world.manifest_sha256, ident: binding.content });
 }
 
 /// A chunk served on a play token, or null to run the full gate. The token fixes the listing, the manifest and the approval
-/// it was minted under; the legal lock, the deletion mark and the approval binding are read fresh from R2 (strongly
-/// consistent), and any of them moving since the mint sends the request to the full gate, which refuses it. The chunk must
+/// it was minted under; the legal lock, the deletion mark, the approval binding and the play-token floor (a rating written
+/// since the mint) are read fresh from R2 (strongly consistent), and any of them moving since the mint sends the request to
+/// the full gate, which refuses it. The chunk must
 /// be one the token's own manifest names: a chunk only the source world names always takes the full gate.
 async function chunkByPlayToken(request, simId, hash, env, cors) {
   const claims = await readPlayToken(env, request.headers.get(PLAY_TOKEN_HEADER), simId);
   if (!claims) return null;
-  const [lock, deletion, binding] = await Promise.all([legalLockOf(env, simId), deletionMarkOf(env, simId), readApproval(env, simId)]);
-  if (lock || deletion || !binding || binding.revoked || binding.content !== claims.ident) return null;
+  // The play-token floor too: a rating written since the mint (a re-rate to adult_18, say) retires the token.
+  const [lock, deletion, binding, floor] = await Promise.all([legalLockOf(env, simId), deletionMarkOf(env, simId), readApproval(env, simId), playTokenFloor(env, simId)]);
+  if (lock || deletion || !binding || binding.revoked || binding.content !== claims.ident || !mintedAfterFloor(claims, floor)) return null;
   if (!(await committedHashes(env, manifestKey(simId, claims.sha)))?.has(hash)) return null;
   const obj = await env.SCENES.get(chunkKey(simId, hash));
   if (!obj) return null;
@@ -628,14 +663,22 @@ async function chunkByPlayToken(request, simId, hash, env, cors) {
   });
 }
 
-/// Whether this viewer may read a listing's source world: anyone when its
-/// author shares the source, otherwise its author or an admin.
-async function mayReadSource(request, sim, simId, env, deps) {
-  if (sim.open_source === true) return true;
-  if (await authorFromServerCredential(env, bearerOf(request), simId, sim.author_id)) return true;
-  const auth = await deps.verifyAuth(request, env);
-  if (!auth) return false;
-  return auth === sim.author_id || !!(await deps.requireAdmin(request, env));
+/// How this viewer may read a listing's source world:
+///   'author'  the author (their session, their `esrv_`, or an `eshs_` the fleet minted for this listing) or an admin.
+///             Reads the source whether or not it is shared, and whether or not its review has bound it.
+///   'public'  anyone else, when the author shares the source (Share Source on).
+///   null      may not read it.
+/// A deleted listing, or one under a legal lock, is read by an admin only, shared or not. `sim` is the listing as
+/// servableListing returned it (deletion mark applied). A credential is never passed to verifyAuth.
+async function sourceReader(request, sim, simId, env, deps) {
+  const token = bearerOf(request);
+  const credential = token.startsWith('esrv_') || token.startsWith('eshs_');
+  const viewer = credential ? await credentialAuthor(env, token, simId, sim) : await deps.verifyAuth(request, env);
+  const admin = async () => !credential && !!viewer && !!(await deps.requireAdmin(request, env));
+  if (await closedListing(env, sim, simId)) return (await admin()) ? 'author' : null;
+  if (viewer && viewer === sim.author_id) return 'author';
+  if (sim.open_source === true) return 'public';
+  return (await admin()) ? 'author' : null;
 }
 
 async function handleGetSource(request, simId, env, cors, deps) {
@@ -643,7 +686,7 @@ async function handleGetSource(request, simId, env, cors, deps) {
   if (gate.error) return gate.error;
   const sim = gate.sim;
   // Not found either way, so a private source is indistinguishable from none.
-  if (!worldIsCurrent(sim) || !sim.world?.source_manifest_key || !(await mayReadSource(request, sim, simId, env, deps)))
+  if (!worldIsCurrent(sim) || !sim.world?.source_manifest_key || !(await sourceReader(request, sim, simId, env, deps)))
     return deps.json({ error: 'This listing shares no source' }, 404, cors);
   const obj = await env.SCENES.get(sim.world.source_manifest_key);
   if (!obj) return deps.json({ error: 'The source manifest is missing from storage' }, 404, cors);
@@ -667,13 +710,23 @@ async function handleGetChunk(request, simId, hash, env, cors, deps) {
   const sim = gate.sim;
   if (!worldIsCurrent(sim)) return deps.json({ error: 'Chunk not found' }, 404, cors);
   // A chunk the world names, or one only the source world names (a
-  // server-only service) for a viewer who may read the source.
+  // server-only service) for a viewer who may read the source: the author's
+  // side always, anyone else only a shared source its review bound.
   let named = (await committedHashes(env, sim.world.manifest_key))?.has(hash);
-  if (!named && sim.world.source_manifest_key && (await mayReadSource(request, sim, simId, env, deps)) && (!gate.listable || (await sourceApproved(env, sim))))
-    named = (await committedHashes(env, sim.world.source_manifest_key))?.has(hash);
+  let sourceOnly = false;
+  if (!named && sim.world.source_manifest_key) {
+    const reader = await sourceReader(request, sim, simId, env, deps);
+    if (reader === 'author' || (reader === 'public' && (!gate.listable || (await sourceApproved(env, sim))))) {
+      named = (await committedHashes(env, sim.world.source_manifest_key))?.has(hash);
+      sourceOnly = !!named;
+    }
+  }
   if (!named) return deps.json({ error: 'Chunk not found' }, 404, cors);
   const obj = await env.SCENES.get(chunkKey(simId, hash));
   if (!obj) return deps.json({ error: 'Chunk not found' }, 404, cors);
+  // A server-only chunk of a private source is never kept by any cache, the
+  // browser's included: Share Source can be off, the listing deleted or held.
+  const privateSource = sourceOnly && sim.open_source !== true;
   return new Response(obj.body, {
     headers: {
       ...cors,
@@ -681,7 +734,7 @@ async function handleGetChunk(request, simId, hash, env, cors, deps) {
       'Content-Length': String(obj.size),
       // A chunk's bytes never change under its name. Private either way: a
       // listing can be withdrawn, and shared caches would not notice.
-      'Cache-Control': gate.listable ? 'private, max-age=86400, immutable' : 'private, no-store',
+      'Cache-Control': gate.listable && !privateSource ? 'private, max-age=86400, immutable' : 'private, no-store',
       ETag: `"${hash}"`,
     },
   });

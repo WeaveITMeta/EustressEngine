@@ -213,6 +213,20 @@ pub fn DocsCadPage() -> impl IntoView {
 
                 <main class="docs-content">
                     <header class="docs-hero">
+                        // The hero picture: the page's largest paint, so it loads at
+                        // once (no lazy loading, no entrance animation).
+                        <div class="docs-hero-art">
+                            <img
+                                src="/assets/learn/cad-hero-1600.webp"
+                                srcset="/assets/learn/cad-hero-800.webp 800w, /assets/learn/cad-hero-1600.webp 1600w"
+                                sizes="(max-width: 1024px) 100vw, 840px"
+                                alt="A glowing 2D outline on a sketch plane is extruded upward into a solid bracket with a round hole and a rounded edge, beside an ordered column of five thin slabs."
+                                width="1600"
+                                height="900"
+                                fetchpriority="high"
+                                decoding="async"
+                            />
+                        </div>
                         <div class="docs-breadcrumb">
                             <a href="/learn">"Learn"</a>
                             <span class="separator">"/"</span>
@@ -734,6 +748,19 @@ cols = "4"
 
                         <div id="assemblies-mates" class="subsection">
                             <h3>"Mates"</h3>
+                            <figure class="learn-figure">
+                                <img
+                                    src="/assets/learn/cad-fig-1-1200.webp"
+                                    srcset="/assets/learn/cad-fig-1-600.webp 600w, /assets/learn/cad-fig-1-1200.webp 1200w"
+                                    sizes="(max-width: 660px) 92vw, (max-width: 1099px) 600px, 500px"
+                                    alt="Three pairs of joined solids: a door slab on a post with one arc, a cube on a rail with one straight line, and a sphere seated on a cube with arcs in several directions."
+                                    width="1200"
+                                    height="900"
+                                    loading="lazy"
+                                    decoding="async"
+                                />
+                                <figcaption>"A mate joins two parts with an Avian physics joint. A Hinge rotates about one axis, a Slide travels along one axis, and a Ball rotates freely about the anchors."</figcaption>
+                            </figure>
                             <p>
                                 "A mate joins two parts with an Avian physics joint, so an assembly moves the way the
                                 mechanism would. Mates work on any two parts, CAD or not."
@@ -891,6 +918,19 @@ cols = "4"
 
                         <div id="limits-booleans" class="subsection">
                             <h3>"Booleans Need Overlap"</h3>
+                            <figure class="learn-figure">
+                                <img
+                                    src="/assets/learn/cad-fig-2-1200.webp"
+                                    srcset="/assets/learn/cad-fig-2-600.webp 600w, /assets/learn/cad-fig-2-1200.webp 1200w"
+                                    sizes="(max-width: 660px) 92vw, (max-width: 1099px) 600px, 500px"
+                                    alt="Two thick slabs with cylinder cutters: on the left the cylinder ends level with the top face, on the right it passes all the way through and sticks out past both faces."
+                                    width="1200"
+                                    height="900"
+                                    loading="lazy"
+                                    decoding="async"
+                                />
+                                <figcaption>"Booleans fail when two bodies share a face exactly. A cut you author should protrude through the surface rather than stop flush with it."</figcaption>
+                            </figure>
                             <p>
                                 "Every subtract, union, intersect, hole, split and shell goes through the boolean
                                 operations of truck-shapeops. They fail when two bodies share a face exactly or do not

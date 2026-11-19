@@ -1,0 +1,18 @@
+[material]
+name = "Bronze"
+preset = "Bronze"
+description = "Polished bronze with buffing swirls and patches of darker patina"
+
+# The maps carry colour, roughness, metalness and occlusion; these factors multiply them.
+[pbr]
+base_color = [1.0, 1.0, 1.0, 1.0]
+metallic = 1.0
+roughness = 1.0
+reflectance = 0.5
+
+# metallic_roughness is packed glTF-style: R = occlusion, G = roughness, B = metallic.
+[textures]
+base_color = "materials/textures/bronze_base_color.png"
+normal = "materials/textures/bronze_normal.png"
+metallic_roughness = "materials/textures/bronze_metallic_roughness.png"
+occlusion = "materials/textures/bronze_metallic_roughness.png"

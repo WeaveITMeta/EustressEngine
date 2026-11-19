@@ -1,0 +1,50 @@
+{
+  "schema_version": 1,
+  "about": "Curated inputs for eustress-agent-census (G7.01). A tool listed here uses this valid_input instead of the one synthesized from its schema. The missing-parameter probe removes `missing_param` (default: the first required parameter) from the valid input. A curated `effect` replaces the default rule (payload for read-only tools, world digest otherwise) and must say why; it is copied into the artifact. setup and teardown steps run around every repetition and are never timed or classified. Placeholders: {universe} {universe_b} {workspace} {space} {space_name} {space2_name} {run} {probe} {rep} {uuid:<EntityName>}. File-tool paths are relative to the Universe root.",
+  "tools": {
+    "set_active_universe": {
+      "valid_input": { "universe": "{universe_b}" },
+      "effect": {
+        "kind": "payload_pointer_equals",
+        "pointer": "/changed",
+        "value": true,
+        "why": "It changes only the MCP session's active Universe, which no world digest can see; its reply reports whether the session changed."
+      },
+      "teardown": [
+        { "mcp_tool": "set_active_universe", "arguments": { "universe": "{universe}" } }
+      ]
+    },
+    "read_file": {
+      "valid_input": { "path": "Spaces/{space_name}/census_fixture.txt" }
+    },
+    "write_file": {
+      "valid_input": { "path": "Spaces/{space_name}/census_probe_{run}_{probe}{rep}.txt", "content": "census probe" }
+    },
+    "list_directory": {
+      "valid_input": { "path": "Spaces/{space_name}" }
+    },
+    "create_entity": {
+      "valid_input": { "name": "CensusProbe_{run}_{probe}{rep}", "class": "Part" },
+      "missing_param": "name"
+    },
+    "update_entity": {
+      "valid_input": { "name": "WelcomeCube", "position": [0, 5, 0] },
+      "missing_param": "name",
+      "note": "A required-only input would ask for no change at all; the position makes the effect observable."
+    },
+    "open_space": {
+      "valid_input": { "name": "{space2_name}" },
+      "teardown": [
+        { "mcp_tool": "open_space", "arguments": { "name": "{space_name}" } }
+      ]
+    },
+    "stop_simulation": {
+      "setup": [ { "bridge": "sim.run", "params": {} } ],
+      "note": "Started first, so stopping has something to stop."
+    },
+    "pause_simulation": {
+      "setup": [ { "bridge": "sim.run", "params": {} } ],
+      "note": "Started first, so pausing has something to pause."
+    }
+  }
+}

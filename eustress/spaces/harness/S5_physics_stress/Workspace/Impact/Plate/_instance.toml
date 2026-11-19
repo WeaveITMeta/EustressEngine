@@ -1,0 +1,48 @@
+[asset]
+mesh = "parts/block.glb"
+scene = "Scene0"
+
+[metadata]
+archivable = true
+class_name = "Part"
+created = "2026-11-16T00:00:00Z"
+last_modified = "2026-11-16T00:00:00Z"
+name = "Plate"
+unit = "m"
+uuid = "008b075923dd2f689480ba4bdb4b34a8"
+
+[properties]
+anchored = true
+can_collide = true
+cast_shadow = true
+color = [
+    70,
+    70,
+    70,
+]
+destructible = false
+locked = false
+material = "Metal"
+reflectance = 0.0
+transparency = 0.0
+
+[properties.physics]
+restitution = 0.95
+
+[transform]
+position = [
+    6.0,
+    0.05,
+    -5.0,
+]
+rotation = [
+    0.0,
+    0.0,
+    0.0,
+    1.0,
+]
+scale = [
+    2.0,
+    0.1,
+    2.0,
+]

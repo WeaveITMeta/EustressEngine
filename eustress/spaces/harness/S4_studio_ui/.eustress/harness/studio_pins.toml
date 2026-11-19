@@ -1,0 +1,15 @@
+# S4 studio pins. Restoring these on load is the studio's job; see the G1.03 report.
+[selection]
+path = "Workspace/Props/PinnedSelection"
+uuid = "62616faf08348f5c2a645b60b91dab7f"
+
+[layout]
+file = "layout.json"
+
+[window]
+width = 1920
+height = 1080
+
+[camera]
+position = [8.0, 6.0, 8.0]
+look_at = [0.0, 0.5, -1.0]

@@ -19,10 +19,17 @@
 //!
 //! | function | orthographic behaviour |
 //! |---|---|
-//! | `uv_to_ray_direction` (atmosphere) | the camera's forward axis, for every pixel |
+//! | `uv_to_ray_direction` (atmosphere) | the camera's forward axis, for every pixel, kept at least half a degree off straight up or down |
 //! | `ndc_to_camera_dist` (atmosphere) | zero, so geometry gets no aerial haze |
 //! | `sample_sun_radiance` (atmosphere) | no sun disk: a parallel view of a half-degree disk is nothing or the whole screen |
 //! | `coords_to_ray_direction` (skybox) | the camera's forward axis, through the skybox rotation |
+//!
+//! A ray straight up or down has no azimuth: the atmosphere's sky lookups
+//! take `atan2(0, 0)` and normalise a zero vector, which is NaN on some GPUs
+//! (WebGPU in Chrome, 2026-11-14). In an orthographic view every pixel has
+//! the same ray, so a camera looking straight down (Pong's table) turned the
+//! whole frame black, the lighting the atmosphere feeds included. Half a
+//! degree off vertical draws normally and its sky colour is the same.
 //!
 //! Haze needs a viewer position to measure from, and a parallel view has
 //! none. Measuring from the camera would haze an orthographic view more the
@@ -65,7 +72,11 @@ const SKY_SHADERS: &[SkyShader] = &[
             EarlyReturn {
                 function: "uv_to_ray_direction",
                 code: "if view.clip_from_view[3].w == 1.0 {
-        return normalize((view.world_from_view * vec4(0.0, 0.0, -1.0, 0.0)).xyz);
+        let forward = normalize((view.world_from_view * vec4(0.0, 0.0, -1.0, 0.0)).xyz);
+        if length(forward.xz) < 0.01 {
+            return normalize(vec3(forward.x + 0.01, forward.y, forward.z));
+        }
+        return forward;
     }",
             },
             EarlyReturn {
